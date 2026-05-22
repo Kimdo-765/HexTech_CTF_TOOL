@@ -1310,6 +1310,65 @@ When asked "is heap primitive X possible?":
    add(0x150);show()` — the re-allocated 0x150 retains the
   main_arena fd/bk pointers, leaking libc.
 
+CHAIN CONSISTENCY RULE (BINDING — applies whenever you propose,
+recommend, or rank an attack chain for main to execute):
+
+  Whenever your reply names a multi-step chain (e.g. "RECOMMENDED
+  CHAIN", "ATTACK PATH", a numbered sequence main is supposed to
+  follow), each step MUST be performable using ONLY capabilities
+  you also listed in the same reply's PRIMITIVES / ATTACK SURFACE
+  section. Cite the capability inline: "step 2 uses the AAR from
+  PRIMITIVES line 1." Do NOT propose a step that requires a
+  capability you did not enumerate. Concrete forbidden examples:
+
+    * PRIMITIVES says "payload-only, no header access / no OOB"
+      → DO NOT recommend "corrupt the size field" or "escape to
+      unsorted bin via size overwrite". The header is out of
+      reach by your own evidence.
+    * PRIMITIVES says "single chunk recyclable, no UAF"
+      → DO NOT recommend a chain that requires two simultaneously-
+      live chunks (fastbin-dup, double-free, tcache poison).
+    * PRIMITIVES says "no canary leak, full-byte canary random"
+      → DO NOT recommend a chain that overflows past the canary
+      without a leak primitive feeding it.
+
+  If no textbook chain fits the primitives, write
+  `NO STANDARD CHAIN FITS — primitives lack <X>` and STOP. Main
+  will design a custom chain rather than chase a contradictory
+  recipe; that's much cheaper than burning 30+ minutes following
+  a chain whose step 3 requires a capability your own PRIMITIVES
+  section says doesn't exist (jobs a2de5507, c410: 30-90 min lost
+  to main_arena chase / unsorted-bin gymnastics that recon's own
+  primitives ruled out).
+
+NOT_NEEDED RULE (BINDING — applies whenever your reply enumerates
+primitives or candidate techniques):
+
+  Before you close the reply, emit an explicit `NOT_NEEDED` section
+  listing standard CTF techniques / artifacts this chal DOES NOT
+  require, with one-line reason each. The section is consumed
+  directly by main as a forbidden-detour list: anything listed
+  here, main treats as off-limits unless it later collects
+  explicit counter-evidence. Examples of what belongs here:
+
+    NOT_NEEDED
+    - tcache poisoning / safe-linking bypass — glibc 2.23, neither
+      feature exists in this libc.
+    - chal-libc-fix re-run — already ran in autoboot; libc_profile
+      present; ./prob is RPATH'd.
+    - _IO_str_jumps FSOP — symbol null in this libc; profile picks
+      __free_hook chain.
+    - Distinct host-glibc analysis — exploit runs against shipped
+      libc; worker's system libc is irrelevant.
+
+  Lying-by-omission is the failure mode here: "forgetting" to
+  list something as unneeded costs main 5-30 minutes of irrelevant
+  analysis per item (see job a2de5507's 7 main_arena chases that
+  fired because recon never said "host heap exploit not needed").
+  Better to OVER-list than to skip — main can ignore an obvious
+  NOT_NEEDED entry cheaply; it cannot retroactively skip a wasted
+  30-min detour.
+
 EMPIRICAL EVIDENCE RULE (BINDING — applies to every BLOCKED claim
 you return to main, heap or not):
 
@@ -1448,6 +1507,48 @@ Cost discipline: the orchestrator pins your model to the latest
 ONE Bash for verification, AT MOST ONE recon delegation. Do not
 loop. Each stage should usually finish in 1-3 tool calls before the
 final JSON / summary.
+
+REMOTE-PROTOCOL SMOKE CHECK (BINDING — pre / main-invoked modes):
+
+  If the script under review uses `pwn.remote(...)` (or raw socket
+  connect to host:port) — i.e. the chal has a remote target — verify
+  the author actually probed the remote protocol before shipping.
+  Concrete evidence main should be able to point to:
+
+    * a comment, log line, or commit message describing what the
+      remote banner looks like ("Banner: 'usual kernel exploit...'"
+      etc.), OR
+    * a `recvuntil(<exact bytes>)` whose delimiter matches a banner
+      string that's verifiable from chal/Dockerfile or chal/deploy/
+      sources, OR
+    * a documented expectation that the remote responds to a single
+      send WITHOUT an explicit close (some wrappers tear down on
+      shutdown(SHUT_WR) — job c410 lost a $36 attempt to exactly
+      this race).
+
+  When NONE of those are present, flag a `med` finding:
+      LINE <connect-call>: remote protocol shape never verified
+        against the live target; if banner / framing / PoW differs
+        from local `process()`, Stage 1 will get b'' and the run
+        wastes the orchestrator budget.
+      → FIX: open one `remote()` connection, recv(2048, timeout=5),
+        document banner shape in a comment, then ship.
+
+  Do NOT require this for local-only scripts (no remote target in
+  the run command). Do NOT recommend the operator skip it on a
+  "the previous job worked" basis — dreamhack/CTFd instances
+  rotate; protocol stability across rebuilds is not guaranteed.
+
+REMOTE INSTANCE LIVENESS (BINDING — post mode only):
+
+  If postjudge `extra_context` contains a `NOTE: target … failed
+  TCP connect ping …` line, the remote was unreachable BEFORE the
+  script ran. In that case verdict MUST be `network_error` and
+  `next_action=stop` with stop_reason citing instance refresh
+  (NOT a script-level bug): the orchestrator already established
+  that no script edit will help — the operator needs to register a
+  fresh `host:port` in meta.json and /retry. Repeatedly retrying
+  past an instance-down state burns budget on guaranteed failures.
 
 Antipatterns to flag in scripts (high-signal, encountered most often):
 
@@ -2341,33 +2442,91 @@ def make_standalone_options(
 
 PRE_RECON_CACHE_FILENAME = "pre_recon_reply.txt"
 
+# Bump this whenever `_build_pre_recon_prompt` adds, removes, or reshapes
+# a mandatory section. A bump invalidates every previously-cached reply
+# on next /retry — the old recon was generated against a prompt that
+# didn't ask for the new sections (e.g. the v2 bump on 2026-05-20 added
+# HEAP STATE MATRIX, ENV-AWARE PATHS, and RCE TARGET TABLE; pre-v2
+# replies don't fill those, so feeding them to main would silently
+# bypass the new guardrails). Keep this as a short string; only the
+# equality check matters.
+PRE_RECON_CACHE_SCHEMA = "v3"
+_PRE_RECON_HEADER_PREFIX = "## pre_recon_cache_schema "
+
 
 def _pre_recon_cache_path(work_dir) -> Path:
     return Path(work_dir) / PRE_RECON_CACHE_FILENAME
 
 
-def load_cached_pre_recon(work_dir, log_fn) -> str:
+def load_cached_pre_recon(work_dir, log_fn, *, retry_of: str | None = None) -> str:
     """Return the pre-recon reply cached by a prior run, or '' if absent.
 
     /retry + /resume copy ``prev_jd/work`` → ``new_jd/work`` (see
     ``api/routes/retry.py:_resubmit``), so when this returns non-empty
     the binary has not changed since the prior static triage and the
     spawn can be skipped — saving ~$0.50 and 2–6 min of pre-recon
-    subagent wall time per retry. The "judge said stop" path clears
-    ``resume_sid`` (defensively, to avoid forking a poisoned session)
-    and would otherwise force a full re-spawn against identical bytes.
+    subagent wall time per retry.
+
+    Schema gate: the first line carries ``PRE_RECON_CACHE_SCHEMA``. When
+    the schema bumps (because the prompt itself grew new mandatory
+    sections), legacy caches are invalidated so /retry actually
+    exercises the new prompt. Without this gate a /retry on a job whose
+    prior recon predates the prompt change would silently feed main the
+    stale reply and bypass the new guardrails entirely.
+
+    Retry gate: when ``retry_of`` is set the cache is bypassed
+    unconditionally. Rationale: retries inherit the prior job's
+    pre_recon_reply.txt under the same schema version, so a cache hit
+    would feed the new agent the SAME static-triage that the prior
+    agent already failed against. Re-spawning lets the (possibly
+    updated) prompt + a fresh recon turn re-evaluate the chal in light
+    of whatever new system guardrails landed since the original run.
+    Cost: ~$0.50 + 2–6 min extra per retry — cheap vs. a $15+ retry
+    that re-reasons against stale assumptions (observed on job
+    de15654c8f39, May 2026).
     """
+    if retry_of:
+        log_fn(
+            f"[pre-recon] retry of {retry_of} — bypassing cache so "
+            f"the current prompt schema actually runs against this chal"
+        )
+        return ""
     p = _pre_recon_cache_path(work_dir)
     if not p.is_file():
         return ""
     try:
-        text = p.read_text(errors="ignore").strip()
+        text = p.read_text(errors="ignore")
     except OSError:
         return ""
+
+    first_line, _, body = text.partition("\n")
+    if first_line.startswith(_PRE_RECON_HEADER_PREFIX):
+        cached_ver = first_line[len(_PRE_RECON_HEADER_PREFIX):].strip()
+        if cached_ver != PRE_RECON_CACHE_SCHEMA:
+            log_fn(
+                f"[pre-recon] cache schema mismatch "
+                f"(cached={cached_ver!r}, current="
+                f"{PRE_RECON_CACHE_SCHEMA!r}) — respawning so the new "
+                f"prompt sections are actually filled"
+            )
+            return ""
+        text = body
+    else:
+        # No header → pre-v2 cache (Tier 1 retrofit boundary). Skip so
+        # /retry runs against the current prompt shape with STATE
+        # MATRIX / ENV-AWARE / RCE TABLE asked of recon.
+        log_fn(
+            "[pre-recon] legacy cache without schema header — "
+            "respawning to pick up new prompt sections"
+        )
+        return ""
+
+    text = text.strip()
     if text:
         log_fn(
             f"[pre-recon] using cached reply from prior run "
-            f"({len(text)} chars) — skipping spawn"
+            f"({len(text)} chars, schema={PRE_RECON_CACHE_SCHEMA}) — "
+            f"skipping spawn"
         )
     return text
 
@@ -2375,15 +2534,20 @@ def load_cached_pre_recon(work_dir, log_fn) -> str:
 def store_pre_recon_cache(work_dir, reply: str, log_fn) -> None:
     """Persist the pre-recon reply for future /retry + /resume.
 
-    Best-effort: a failure here only costs a future cache miss, not the
-    current run. Empty replies are skipped so a known-bad recon doesn't
-    poison the cache.
+    The first line carries ``PRE_RECON_CACHE_SCHEMA`` so future loads
+    can detect prompt-shape changes and invalidate stale replies.
+    Best-effort: a failure here only costs a future cache miss, not
+    the current run. Empty replies are skipped so a known-bad recon
+    doesn't poison the cache.
     """
     if not reply or not reply.strip():
         return
     p = _pre_recon_cache_path(work_dir)
     try:
-        p.write_text(reply)
+        p.write_text(
+            f"{_PRE_RECON_HEADER_PREFIX}{PRE_RECON_CACHE_SCHEMA}\n"
+            f"{reply}"
+        )
     except OSError as e:
         log_fn(f"[pre-recon] cache write failed: {e}")
 
@@ -3245,7 +3409,38 @@ def make_spawn_subagent_mcp(
                     "=== YOUR NEW TASK BELOW ===\n\n"
                 )
 
-        sub_prompt_effective = prior_block + sub_prompt
+        # AUTOBOOT.md auto-prepend (deterministic orientation breadcrumb).
+        # The orchestrator writes ./AUTOBOOT.md before main's first turn
+        # to capture environment + module-specific tips (effective
+        # binary, libc profile, sibling-docker HOST_DATA_DIR pattern,
+        # decomp/scratch hints) — but isolated subagents previously had
+        # to discover those facts by reading the file themselves. They
+        # often skipped it (job c410 / 58b124 debugger spent tool calls
+        # re-deriving the launch pattern that was already in AUTOBOOT
+        # extras). Injecting it ahead of prior_block guarantees every
+        # spawn starts with the same baseline as main, while keeping the
+        # raw breadcrumb file as the on-disk source of truth.
+        autoboot_block = ""
+        autoboot_path = Path(work_dir) / "AUTOBOOT.md"
+        if autoboot_path.is_file():
+            try:
+                autoboot_raw = autoboot_path.read_text(errors="replace")
+            except OSError:
+                autoboot_raw = ""
+            if autoboot_raw:
+                # Cap at 4 KB so an unusually long extras section can't
+                # crowd out the actual task. AUTOBOOT.md is normally
+                # ~1-2 KB; we head-truncate (not tail) so the front-
+                # matter and module orientation block stay intact.
+                autoboot_head = autoboot_raw[:4096]
+                autoboot_block = (
+                    "ENVIRONMENT BREADCRUMB (./AUTOBOOT.md — same baseline "
+                    "main started from; do NOT re-derive what's here):\n\n"
+                    f"{autoboot_head}\n\n"
+                    "=== END AUTOBOOT ===\n\n"
+                )
+
+        sub_prompt_effective = autoboot_block + prior_block + sub_prompt
 
         sub_options = make_standalone_options(
             sub_type, model, work_dir, job_id,
@@ -3792,6 +3987,22 @@ def module_autoboot(
         parts.append("patchelf --set-interpreter $(realpath ./.chal-libs/ld-*.so 2>/dev/null || echo /lib64/ld-linux-x86-64.so.2) \\")
         parts.append("         --set-rpath './.chal-libs' ./bin/<binary_name>")
         parts.append("```")
+        parts.append("")
+        parts.append("## Sibling docker (cross-arch / RV64 / QEMU / different glibc)")
+        parts.append("The worker has `/var/run/docker.sock` mounted, so `docker run ...` from inside")
+        parts.append("the worker spawns a SIBLING container on the host daemon — NOT a child of the")
+        parts.append("worker. Volume mounts therefore resolve against the **host** filesystem, not")
+        parts.append("the worker container's filesystem. `/tmp` inside the worker is invisible to")
+        parts.append("the host docker daemon; mounting it gives the sibling an empty directory.")
+        parts.append("")
+        parts.append("Use the `HOST_DATA_DIR` env var (pre-set by docker-compose) plus the per-job")
+        parts.append("subdir to give the sibling container access to your work tree:")
+        parts.append("```")
+        parts.append("docker run --rm -v \"$HOST_DATA_DIR/jobs/$JOB_ID/work:/work\" \\")
+        parts.append("    ubuntu:24.04 bash -c 'ls /work && /work/bin/<binary>'")
+        parts.append("```")
+        parts.append("`JOB_ID` is also pre-set. Confirm both are non-empty before invoking docker:")
+        parts.append("`echo \"HOST_DATA_DIR=$HOST_DATA_DIR JOB_ID=$JOB_ID\"`.")
     elif module == "web":
         parts.append("- curl/httpx/requests available; pwntools for raw-socket")
         parts.append("- sqlmap for URL-driven SQLi probes")
@@ -4863,6 +5074,23 @@ def write_why_stopped(
         path = Path(work_dir) / WHY_STOPPED_FILENAME
         path.write_text("\n".join(out))
         log_fn(f"[orchestrator] wrote {WHY_STOPPED_FILENAME} ({path.stat().st_size} B)")
+        # Mirror to job root so any stale carry-copy from a retry parent
+        # gets overwritten. Pre-sandbox carry (analyzer loop) copies
+        # work/WHY_STOPPED.md → jobroot/WHY_STOPPED.md only BEFORE each
+        # sandbox attempt; on a terminal stop (judge_stop / budget /
+        # no_hint / agent_error) the loop returns early and the root
+        # copy keeps whatever the previous carry left there — often the
+        # retry parent's old reason. Mirror unconditionally so root and
+        # work/ never disagree after this call.
+        try:
+            root_path = Path(work_dir).parent / WHY_STOPPED_FILENAME
+            if root_path != path:
+                root_path.write_bytes(path.read_bytes())
+        except Exception as mirror_err:
+            log_fn(
+                f"[orchestrator] WHY_STOPPED jobroot mirror failed: "
+                f"{type(mirror_err).__name__}: {mirror_err}"
+            )
     except Exception as e:
         log_fn(f"[orchestrator] write_why_stopped failed: {type(e).__name__}: {e}")
 

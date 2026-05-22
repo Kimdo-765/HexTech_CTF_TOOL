@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -54,6 +55,7 @@ from claude_agent_sdk import (
 )
 
 from modules._common import LATEST_JUDGE_MODEL, build_judge_agents
+from modules.pwn import chain_schema
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +168,20 @@ costs the operator ~$5-15 in a 50-turn main retry, so be ruthless:
              (d) the artifact's own docstring / comments admit it's
                  a probe / partial / give-up shim with no real exploit
                  chain (main itself has concluded — don't override),
+                 EXCEPT when main rejected a prior retry-hint based
+                 on EMPIRICAL DISPROOF — disasm citation with file
+                 + offset, OR a dynamic probe script (e.g.
+                 tmp/probe_*.py) whose output contradicts a hint
+                 assertion. In that case treat the hint as WRONG,
+                 NOT main as defeated: classify as 'partial', set
+                 retry_hint to acknowledge the disproof and propose
+                 a path that AVOIDS the disproven assertion, and
+                 only stop if no alternative remains. Operator
+                 hints are best-effort guesses, not ground truth;
+                 disasm + dynamic probe IS ground truth. Marking
+                 evidence-based hint refusal as self-defeat
+                 (observed on job de15654c8f39) silently penalizes
+                 the correct behavior we want main to do,
              (e) main has already done ≥2 sandbox runs in this job
                  with the same broad outcome (empty leaks, same
                  SIGSEGV, same parse_error). Diminishing returns.
@@ -415,6 +431,101 @@ def _truncate_tail(text: str, *, max_bytes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Self-defeat detection (Phase 9 ship gate)
+# ---------------------------------------------------------------------------
+#
+# Static regex check on the exploit script and report.md. Even when the
+# LLM-driven prejudge ranks the run as `ok severity=low` because the
+# script merely executes without crashing, we block ship when the
+# artifacts themselves admit the chain has no working RCE path. Without
+# this gate the runner spends $0.50–$2 on a sandbox + postjudge cycle
+# that we already know cannot end in a flag (observed on job
+# 4a6bd25a0d1d: report.md said "fundamental missing piece is the
+# libc-leak primitive" and exploit docstring said "No write primitive
+# identified; we can't reach hooks. Exit gracefully." — yet sandbox
+# was still spun up).
+#
+# Patterns are case-insensitive and word-boundary anchored to minimise
+# false positives. Generic encouragement like "we never give up" does
+# NOT match because the trigger phrases are specific admissions ("no
+# write primitive identified", "exit gracefully", etc.).
+
+_SELF_DEFEAT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\bno\s+(?:write|leak|rce|hook|chain|primitive)s?\s+"
+        r"(?:identified|available|found|reachable|present)\b",
+        r"\bcan'?t\s+reach\s+(?:the\s+)?(?:hook|libc|chain|rce|flag)s?\b",
+        r"\bexit(?:ing)?\s+gracefully\b",
+        r"\bunable\s+to\s+(?:leak|achieve|reach|exploit|capture)\b",
+        r"\bbest[- ]case\s+only\s+logs?\b",
+        r"\bfundamental(?:ly)?\s+(?:missing|blocked|impossible|unreachable)\b",
+        r"\bno\s+(?:viable|working|known)\s+(?:chain|path|exploit)\b",
+        r"\bchain\s+(?:incomplete|unfinished|partial)\b",
+        # Patterns added 2026-05-22 after jobs 42845856644b /
+        # 59ab9dfe2d2a / de15654c8f39 shipped with these admissions
+        # but the existing set missed every one.
+        r"\bchain\s+(?:blocked|halted|terminated|stops?)\s+at\b",
+        r"\bintentionally\s+(?:halted|stopped|terminated|aborted)\b",
+        r"\bgive[- ]up\s+(?:shim|probe|exploit|script|run)\b",
+        r"\b(?:partial|leak)[- ]only\s+(?:result|chain|exploit|probe|shim)\b",
+        r"\bcannot\s+pivot\s+to\b",
+        r"\bstructurally\s+(?:blocked|impossible|unreachable|dead)\b",
+        r"\b(?:SEGV|crash|abort)\s+(?:is\s+)?expected\b",
+        r"\bflag\s+capture\s+(?:is\s+)?unlikely\b",
+    )
+)
+
+
+def _resolve_work_dir(jd: Path) -> Path:
+    """Resolve to the agent's actual work tree.
+
+    `_runner.py:430` sets ``work_dir = Path("/data/jobs/<id>")`` (the job
+    ROOT, not the work tree) and passes it straight to
+    ``prejudge_script`` as ``jd``. The agent's artifacts live under
+    ``{jd}/work/`` (chain.json, report.md, exploit.py, decomp/, …). Code
+    here that previously looked at ``jd / "chain.json"`` or
+    ``jd / "report.md"`` always missed (the files exist, just one
+    directory deeper). This helper picks the work subdir when present
+    so Phase 8 chain validation and Phase 9 self-defeat scan actually
+    see the real artifacts. Verified across jobs 59ab9dfe2d2a,
+    de15654c8f39, 42845856644b: ROOT/chain.json never exists,
+    ROOT/work/chain.json always does.
+    """
+    wt = jd / "work"
+    return wt if wt.is_dir() else jd
+
+
+def _scan_self_defeat_sources(
+    jd: Path, script: Path
+) -> list[tuple[str, str]]:
+    """Scan exploit + report.md for self-defeat admissions.
+
+    Returns list of (source_name, matched_snippet). Snippets are
+    trimmed so the operator can see which phrase tripped each pattern.
+    """
+    sources: list[tuple[str, Path]] = []
+    if script.is_file():
+        sources.append(("exploit", script))
+    report_md = _resolve_work_dir(jd) / "report.md"
+    if report_md.is_file():
+        sources.append(("report", report_md))
+
+    hits: list[tuple[str, str]] = []
+    for src_name, src_path in sources:
+        try:
+            text = src_path.read_text(errors="ignore")
+        except Exception:
+            continue
+        for pat in _SELF_DEFEAT_PATTERNS:
+            for m in pat.finditer(text):
+                snippet = m.group(0).strip()
+                if len(snippet) > 80:
+                    snippet = snippet[:77] + "..."
+                hits.append((src_name, snippet))
+    return hits
+
+
+# ---------------------------------------------------------------------------
 # Stage 1 — prejudge (NEW session)
 # ---------------------------------------------------------------------------
 
@@ -467,6 +578,60 @@ def prejudge_script(
     if not isinstance(raw_issues, list):
         raw_issues = [str(raw_issues)]
     issues = [str(x)[:200] for x in raw_issues][:6]
+
+    # Phase 9 — self-defeat ship gate. Static regex pass on exploit +
+    # report.md catches cases where the agent admits the chain has no
+    # working RCE path. LLM judge sometimes ranks such runs "ok low"
+    # because the script merely runs — but it cannot produce a flag,
+    # so ship is blocked here regardless of the LLM verdict.
+    sd_hits = _scan_self_defeat_sources(jd, script)
+    if sd_hits:
+        for src_name, snippet in sd_hits:
+            issues.append(
+                f"self-defeat in {src_name}: \"{snippet}\" — "
+                f"agent admits no working chain"
+            )
+        # Raise cap from 6 → 10 so original LLM issues survive when
+        # self-defeat appends; still bounded so log lines stay readable.
+        issues = issues[:10]
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge SELF-DEFEAT: escalated severity=high "
+            f"({len(sd_hits)} pattern match(es) — exploit/report "
+            f"admit chain incomplete)"
+        )
+
+    # Phase 8 — chain.json structural validation. The ship-gate that
+    # catches "chain step depends on an empirically-blocked primitive"
+    # without paying a sandbox cycle to confirm. chain.json is optional
+    # (advisory `med` if missing); when present, `critical` issues
+    # force severity=high + ok=False, `high` issues are recorded but
+    # don't auto-escalate (LLM's own severity stands).
+    _chain_data, chain_issues = chain_schema.load_chain(_resolve_work_dir(jd))
+    crit = [m for s, m in chain_issues if s == "critical"]
+    hi = [m for s, m in chain_issues if s == "high"]
+    med = [m for s, m in chain_issues if s == "med"]
+    if crit:
+        for m in crit:
+            issues.append(f"chain.critical: {m}")
+        # cap 10 → 12 so chain issues land without dropping LLM/self-defeat
+        issues = issues[:12]
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge CHAIN-INVALID: escalated severity=high "
+            f"({len(crit)} critical chain issue(s) — step depends on "
+            f"empirically-blocked primitive or broken DAG)"
+        )
+    if hi:
+        for m in hi:
+            issues.append(f"chain.high: {m}")
+        issues = issues[:12]
+    if med:
+        for m in med[:2]:
+            issues.append(f"chain.note: {m}")
+        issues = issues[:12]
 
     log_fn(f"[judge] prejudge ok={ok} severity={sev} issues={len(issues)}")
     for it in issues:

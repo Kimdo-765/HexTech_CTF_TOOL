@@ -85,6 +85,7 @@ async def _run_agent(
         # web/crypto/rev share the same retry plumbing.
         recon_reply = load_cached_pre_recon(
             work_dir, lambda s: log_line(job_id, s),
+            retry_of=read_meta(job_id).get("retry_of"),
         )
         if not recon_reply:
             recon_question = (

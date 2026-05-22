@@ -29,6 +29,7 @@ from modules._common import (
     write_meta,
 )
 from modules._runner import attempt_sandbox_run
+from modules.pwn.libc_targets import render_rce_table
 from modules.pwn.prompts import SYSTEM_PROMPT, build_user_prompt, looks_heap_advanced
 from modules.settings_io import apply_to_env, get_setting
 
@@ -58,6 +59,24 @@ _STANDARD_LIB_PREFIXES = (
 def _is_standard_libname(name: str) -> bool:
     n = name.lower()
     return any(n.startswith(p) for p in _STANDARD_LIB_PREFIXES)
+
+
+def _read_libc_version(work_dir: Path) -> str | None:
+    """Pull glibc major.minor from libc_profile.json (chal-libc-fix output).
+
+    Returns None if the profile is missing or unparseable; caller should
+    treat that as "version-unknown" and skip version-specific prompt
+    injection rather than guessing.
+    """
+    profile = work_dir / ".chal-libs" / "libc_profile.json"
+    if not profile.is_file():
+        return None
+    try:
+        data = json.loads(profile.read_text())
+    except Exception:
+        return None
+    v = data.get("version")
+    return str(v) if v else None
 
 
 def _detect_custom_libs(work_dir: Path) -> list[str]:
@@ -107,6 +126,7 @@ def _build_pre_recon_prompt(
     heap_advanced: bool,
     chal_unpacked: bool,
     custom_libs: list[str] | None = None,
+    libc_version: str | None = None,
 ) -> str:
     """Build the prompt for the orchestrator-driven recon subagent that
     runs BEFORE main's first turn. Recon's job: static-map the binary
@@ -141,6 +161,15 @@ def _build_pre_recon_prompt(
         "without unsetting the dangling ptr` (be specific)\n"
         "  PRIMITIVES   — for each HIGH: what the attacker writes / reads / "
         "controls (8 bytes at canary? full chunk? size field?)\n"
+        "  NOT_NEEDED   — explicit list of standard techniques / artifacts "
+        "this chal does NOT require, with one-line reason each. Examples: "
+        "\"host glibc heap exploit — chal is RISC-V emulator, host heap "
+        "irrelevant\", \"libc.so.6 leak — flag is plaintext on filesystem, "
+        "no RCE needed\", \"chal-libc-fix — chal ships static binary\". "
+        "The main agent treats these as forbidden detours unless you "
+        "later supply explicit counter-evidence. Lying-by-omission here "
+        "(silently \"forgetting\" to mention something is unneeded) costs "
+        "main 5–30 min of irrelevant analysis per item.\n"
     )
     if heap_advanced:
         parts.append(
@@ -150,8 +179,163 @@ def _build_pre_recon_prompt(
             "  HOOKS_ALIVE   — confirm libc_profile.json's `hooks_alive` "
             "matches the actual libc (cross-check on __free_hook offset).\n"
             "  RECOMMENDED CHAIN — pick ONE from libc_profile.json's "
-            "recommended_techniques given the primitives above."
+            "recommended_techniques given the primitives above. "
+            "HARD CONSTRAINT: every step of the chain MUST be performable "
+            "using ONLY the capabilities you listed in PRIMITIVES. Before "
+            "you write each step, check the PRIMITIVES section and quote "
+            "the specific capability that enables it (e.g. \"step 2 uses "
+            "the AAR from PRIMITIVES line 1\"). Do NOT propose a step that "
+            "requires a capability you did not enumerate — e.g. if "
+            "PRIMITIVES says \"payload-only, no header access / no OOB\", "
+            "you MUST NOT recommend \"corrupt the size field\" or "
+            "\"escape to unsorted bin via size overwrite\". If no standard "
+            "chain fits the primitives, write \"NO STANDARD CHAIN FITS — "
+            "primitives lack X\" and stop; the main agent will design a "
+            "custom chain rather than chase a contradictory recipe."
         )
+        # Phase 2 + 3 lite — heap state-evolution matrix. The single
+        # most common pre-recon failure mode is concluding "no leak
+        # primitive" after testing only R0 (fresh process) — primitives
+        # often unlock in later heap states (sbrk extension, post-
+        # consolidate). This forces recon to mark untested cells as ?
+        # instead of ✗, preserving them as open hypotheses for main.
+        # Job 4a6bd25a0d1d was a textbook miss: R0 leak test produced
+        # 0 bytes for sizes 0x10..0x400, concluded "blocked", but the
+        # real path required R5 (post-consolidate after huge sbrk
+        # extension) to make secure_malloc(-8) safe.
+        parts.append(
+            "HEAP STATE MATRIX (mandatory before any 'blocked' "
+            "conclusion):\n"
+            "  States to enumerate:\n"
+            "    R0  fresh process, no allocations yet\n"
+            "    R1  fastbin populated (alloc+free cycle, sizes "
+            "≤ 0x80 for glibc 2.23, ≤ 0x408 for 2.27+ tcache)\n"
+            "    R2  R1 + unsorted-range alloc/free (size 0x90..0x420)\n"
+            "    R3  R2 + large-bin alloc (size ≥ 0x420 on 2.23)\n"
+            "    R4  sbrk-extended heap (many small allocs forcing "
+            "brk growth — verify by allocating N small chunks until "
+            "sbrk advances ≥ 0x100000)\n"
+            "    R5  R4 + huge alloc + free (triggers "
+            "malloc_consolidate; usually REQUIRES "
+            "vm.overcommit_memory=1 on the target)\n"
+            "    R6  mmap region (alloc ≥ mmap_threshold ~0x20000); "
+            "usually DEAD-END for fake-chunk attacks — note then "
+            "skip\n"
+            "\n  Primitives to probe in each non-skip state:\n"
+            "    read-OOB | write-OOB | fd/bk leak (free→show) | "
+            "UAF | integer-edge (size in {-1, INT_MIN, INT_MAX, 0, "
+            "0x80000000})\n"
+            "\n  Fill a 6×5 grid in your reply (R0..R5 × 5 prims). "
+            "Each cell:\n"
+            "    ✓  empirically verified working in this state\n"
+            "    ✗  empirically verified blocked in this state\n"
+            "    ?  not yet tested (open hypothesis for main)\n"
+            "\n  HARD RULE: 'No leak primitive' / 'No write "
+            "primitive' conclusion requires every cell in that "
+            "column to be ✗ (NOT ?). Untested cells (?) block the "
+            "negative conclusion at TWO levels:\n"
+            "    (a) pre-recon (you): cannot conclude 'blocked' "
+            "while ? cells remain in the relevant column.\n"
+            "    (b) MAIN AGENT: when it receives this matrix it "
+            "MUST sandbox-probe at least one ? cell in the critical "
+            "columns (esp. int-edge × R4/R5) before declaring the "
+            "chain unreachable. A probe is a small pwntools script "
+            "that either flips the cell to ✓ (chain unlock found) "
+            "or ✗ (confirmed dead).\n"
+            "  PRIORITY HINT: if the chal env declares "
+            "vm.overcommit_memory=1 (see ENV-AWARE PATHS below) the "
+            "int-edge × R5 cell (wrap-size primitive AFTER "
+            "sbrk-extended heap + malloc_consolidate trigger) is the "
+            "single most common unlock for libsalloc-style wrappers. "
+            "Job 7ad50a878e91 marked it ? and concluded 'blocked' "
+            "without probing — main must NOT repeat that mistake."
+        )
+        # ENV-AWARE PATHS — chal-description kernel knobs reopen
+        # branches that local-default-kernel testing would mark
+        # blocked. Job 4a6bd25a0d1d had vm.overcommit_memory=1 in
+        # the description; pre-recon ignored it and concluded
+        # "big-positive secure_malloc(n) → OOM → __abort" which is
+        # FALSE on overcommit=1 (mmap succeeds, no OOM). Worker
+        # container has overcommit=1 too, but the test was never
+        # run — the conclusion was inferred from default-kernel
+        # assumptions. This block forces such inferences to be
+        # named so main can challenge them.
+        parts.append(
+            "ENV-AWARE PATHS — START by scanning the chal "
+            "description text FIRST (it may be Korean / Japanese / "
+            "etc., but sysctl phrases like 'vm.overcommit_memory' "
+            "are universal across languages). THEN scan "
+            "./chal/Dockerfile and deploy scripts. Watch for: "
+            "vm.overcommit_memory, mmap_min_addr, "
+            "transparent_hugepage, ulimit -v, sysctl, "
+            "kernel.randomize_va_space.\n"
+            "  PRECEDENCE RULE: description sysctl > Dockerfile "
+            "sysctl. If description says 'sysctl "
+            "vm.overcommit_memory=1' but the Dockerfile doesn't "
+            "bake it in, the DESCRIPTION wins — operator deploys "
+            "the live server with that knob set regardless of what "
+            "the Dockerfile contains. 'No knobs in the Dockerfile' "
+            "is NOT sufficient evidence of default-kernel env. "
+            "Job 7ad50a878e91 made exactly this mistake: pre-recon "
+            "scanned only the Dockerfile, concluded 'no overcommit "
+            "knobs', and downstream int-edge × R5 was abandoned.\n"
+            "  For each knob mentioned, name explicitly which "
+            "alloc/free branches it reopens vs default kernel — "
+            "e.g. 'overcommit=1 → malloc(>1GB) succeeds via "
+            "anonymous mmap (would return NULL on default "
+            "kernel)'. If you marked any primitive ✗ in the matrix "
+            "WITHOUT testing on the target env knob, downgrade the "
+            "cell to ENV-UNTESTED rather than ✗. Do NOT conclude "
+            "'blocked' based on default-kernel inference when the "
+            "target runs under non-default knobs."
+        )
+        # Tier 1.5 E — int-overflow / wrap analysis correctness.
+        # Recurring failure: pre-recon sees `malloc(uintN(size + K))`
+        # in a custom allocator, mentally simulates `size=-N` on a
+        # default kernel, observes the canary-write address would
+        # land at p+~4GB (unmapped) and concludes "SEGV / UNUSABLE".
+        # That conclusion is FALSE when the target has
+        # vm.overcommit_memory=1 AND the chain has staged enough
+        # heap growth (R4-R5) to bring the canary-write address
+        # inside a mapped region. Both jobs 4a6bd25a0d1d and
+        # 7ad50a878e91 hit this exact trap.
+        parts.append(
+            "INT-OVERFLOW / WRAP ANALYSIS — When a custom "
+            "allocator does `malloc(uintN(user_size + K))` with a "
+            "narrower type than user_size:\n"
+            "  - Do NOT conclude 'SEGV', 'OOM', 'unusable' or "
+            "'DoS-only' from default-kernel reasoning alone. The "
+            "wrap branch routinely succeeds via anonymous mmap "
+            "when vm.overcommit_memory=1.\n"
+            "  - The wrap primitive typically pairs with "
+            "sbrk-extension (R4) and malloc_consolidate trigger "
+            "(R5) to become safe: many small allocs first → heap "
+            "grows past 0x100000000 → huge alloc + free triggers "
+            "malloc_consolidate → THEN a wrap-size alloc's "
+            "canary-write address lands inside the now-mapped "
+            "multi-GB region → no fault. Mechanically this is "
+            "int-overflow + fastbin dup + FSOP — some chal authors "
+            "call it 'house of pumpkin' colloquially, but that "
+            "phrase is NOT a recognized technique in the heap "
+            "exploit catalog (do not search for it as if it were).\n"
+            "  - If the target env knob state is unknown OR "
+            "matches the wrap-success premise (overcommit=1), "
+            "mark int-edge × R4/R5 cells as ENV-UNTESTED (NOT "
+            "✗), AND add an explicit int-overflow path entry to "
+            "CANDIDATES so main pursues it.\n"
+            "  - The claim 'wrap-size canary write goes to p+~4GB "
+            "→ SEGV' is a default-env claim. Either validate it "
+            "by testing under the target's actual env, or mark it "
+            "ENV-UNTESTED and let main probe."
+        )
+        # Phase 6 — libc-version-keyed RCE catalog. Without this main
+        # re-derives version-specific FSOP facts from scratch every
+        # job. The table also names the canonical 2.23 path
+        # (_IO_2_1_stdout_ vtable hijack — no vtable check on this
+        # version) that main missed on job 4a6bd25a0d1d.
+        rce_table = render_rce_table(libc_version)
+        if rce_table:
+            parts.append(rce_table)
     if custom_libs:
         # Chal author shipped non-standard .so files. THIS IS THE FIRST
         # PLACE TO LOOK for primitives — wrapper functions almost always
@@ -565,6 +749,7 @@ async def _run_agent(
         # short-circuits the spawn inside the case we'd already run.
         recon_reply = load_cached_pre_recon(
             work_dir, lambda s: log_line(job_id, s),
+            retry_of=read_meta(job_id).get("retry_of"),
         )
         if not recon_reply:
             recon_question = _build_pre_recon_prompt(
@@ -573,6 +758,7 @@ async def _run_agent(
                 heap_advanced=heap_kw,
                 chal_unpacked=chal_unpacked,
                 custom_libs=custom_libs,
+                libc_version=_read_libc_version(work_dir),
             )
             log_line(job_id, "[pre-recon] spawning static-triage recon subagent")
             recon_reply = await run_pre_recon(

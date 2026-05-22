@@ -1,0 +1,38 @@
+# Runtime job data — large, root-owned (worker spawns containers as
+# root), and never referenced by any COPY/ADD. Including it in the
+# build context wastes bandwidth and trips "permission denied" on
+# Ghidra project files written by the decompiler container.
+data/
+logs/
+
+# VCS + IDE state
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Python caches and virtualenvs
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / web-ui caches
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local-only secrets and overrides (image must not bake these in)
+.env
+.env.local
+.env.*.local
+
+# Claude project metadata
+.claude/

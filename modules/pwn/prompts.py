@@ -172,10 +172,35 @@ WORKFLOW
    - `sys.argv[1]` → `host:port` for `remote()`; fall back to
      `process('./prob')` (or whatever path you patchelf'd) for
      local — the patched binary already loads ./.chal-libs/.
+   - **REMOTE SMOKE CHECK before ship** — if `target_url` is set,
+     run ONE pwntools `remote()` connection BEFORE you call the
+     judge gate. Just `io = remote(host, port, timeout=5); banner
+     = io.recv(2048, timeout=5); print(banner[:200])`. Compare
+     to the local `process()` banner. Different banner shape, an
+     empty response, or an unexpected PoW prompt means your
+     parser is brittle — fix it (handle PoW, adjust marker,
+     widen recv) BEFORE the orchestrator sandbox run, not after.
+     Job c410ab14ec7b shipped without this and the remote
+     returned 0 bytes despite local working end-to-end — a 5 s
+     check would have caught it. Skipping this is a deferred
+     bug you pay for at orchestrator-run time when retries are
+     halted by postjudge.
    - Bind libc once: `libc = ELF('./.chal-libs/libc.so.6')` (skip
      only if chal-libc-fix exited 1).
    - Use `context.timeout = N` and explicit `timeout=` on every
      `recvuntil`/`recv` (judge will flag unbounded reads).
+   - **LONG-RUNTIME EXPLOITS — declare timeout up front.** Sandbox runner
+     default is 300s wall time. If your exploit uses N reconnect-attempts
+     × est_seconds_per_attempt and N × est > 240s (e.g. 18 ASLR-retry
+     attempts at ~25s/attempt ≈ 7.5 min, or any heap chain doing brk
+     extension that costs ≥30s/attempt), write a per-job override into
+     meta.json BEFORE you ship. Use the runtime helper:
+       python3 -c "import json,os; p=os.environ.get('META_JSON','/data/jobs/'+os.environ['JOB_ID']+'/meta.json'); d=json.load(open(p)); d['exploit_timeout_seconds']=900; json.dump(d,open(p,'w'),indent=2)"
+     Cap is 1800s (runner clamps higher values). Default 300s is fine
+     for one-shot exploits. Skipping this when your retry budget exceeds
+     5 min means the runner cuts you mid-loop and postjudge sees a
+     truncated EOF — the chain may be correct but you'll never know.
+     Job aa86e561c88f burned a full retry cycle on this exact failure.
    - Print the captured flag (or final response if pattern unknown).
 8. Write `./report.md`: mitigations / vuln (bug class + file:line) /
    strategy (offsets, gadgets) / glibc version used for offsets /
@@ -184,7 +209,43 @@ WORKFLOW
    REPORT phase auto-generates from your report.md + exploit.py) reads
    THIS document. DO NOT write findings.json yourself; it is produced
    from your prose by a dedicated post-run transformation.
-9. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
+9. Write `./chain.json` (Phase 8 ship-gate input — structured companion
+   to report.md). prejudge mechanically checks that no step depends on
+   an empirically-blocked primitive. Schema (every field has a sane
+   fallback — be honest, not creative):
+   ```json
+   {
+     "schema_version": 1,
+     "chain_name": "<one-line label, e.g. fastbin dup + int-overflow canary bypass>",
+     "rce_target": "<final goal — '__free_hook = system' / 'vtable hijack → one_gadget'>",
+     "primitives": [
+       {"id": "P1", "name": "<short>", "verified": true,
+        "verify_method": "<how empirical check was done>"},
+       {"id": "P2", "name": "<short>", "verified": false,
+        "verify_method": "<the probe you ran>",
+        "reason_failed": "<why probing said no>"}
+     ],
+     "steps": [
+       {"n": 1, "action": "<what this step does>",
+        "uses_primitives": ["P1"], "prereq": "none",
+        "verify": "<empirical check, e.g. 'leak & 0xfff == 0'>"},
+       {"n": 2, "action": "...", "uses_primitives": ["P1"],
+        "prereq": "step 1", "verify": "..."}
+     ]
+   }
+   ```
+   prejudge BLOCKS ship when:
+   - any step's `uses_primitives` references a primitive with
+     `verified: false` (chain depends on something probing said no to)
+   - any step's `prereq` references an undefined or later step
+   - primitives or steps list empty
+   If you're shipping a leak-only / partial chain, that's fine — mark
+   the blocked primitives `verified: false` and DO NOT reference them
+   in any step's `uses_primitives`. prejudge passes; postjudge will
+   correctly classify as 'partial' / no_flag. Lying with verified=true
+   makes operators chase your false trail on /retry — `verify_method`
+   is documentation that downstream reviewers READ.
+10. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
 
 DELEGATE TO DEBUGGER (dynamic facts you cannot derive from disasm)
 ------------------------------------------------------------------
