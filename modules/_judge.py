@@ -74,11 +74,32 @@ verify a binary's actual prompt, libc symbol, or other heavy fact.
 
 After you finish investigating, reply with EXACTLY ONE compact JSON
 object on the FIRST line, no markdown, no commentary:
-{{"ok": true|false, "severity": "low"|"med"|"high", "issues": ["...", "..."]}}
+{{"ok": true|false, "severity": "low"|"med"|"high",
+ "flag_likelihood": 0.0-1.0,
+ "issues": ["...", "..."]}}
 
 * ok=true means the script is safe to run as-is.
 * severity=high blocks the run (orchestrator aborts before container
   start). low / med are advisory; the run still proceeds.
+* flag_likelihood is YOUR honest estimate that THIS script (as
+  written, no further edits) will capture the chal flag on the
+  declared target. Float in [0.0, 1.0]. Calibrate aggressively:
+    1.0  — guaranteed: read-only flag print, no exploit needed
+    0.7  — solid exploit, all primitives verified, target matches,
+           no parse risk
+    0.4  — plausible exploit but at least one unverified primitive
+           or noticeable parse / timing risk
+    0.2  — script self-describes as partial / leak-only / probe /
+           best-effort, OR depends on an explicitly missing prereq
+           (e.g. "no libc leak", "no canary leak"), OR docstring
+           hedges with "appears genuinely hard / could not discover
+           / unlikely to capture"
+    0.0  — script admits no working chain (e.g. rce_target is
+           "not achieved", chain.json all-primitives-verified-false)
+  Threshold 0.2: when flag_likelihood < 0.2 the orchestrator escalates
+  to severity=high regardless of your `severity` field — running a
+  guaranteed-fail sandbox cycle is pure waste. Be honest; the
+  operator reads your number to decide /retry strategy.
 * issues is a short list (≤6) of one-line findings.
 
 Inputs:
@@ -574,6 +595,24 @@ def prejudge_script(
     if sev not in ("low", "med", "high"):
         sev = "med"
 
+    # Numeric flag-likelihood gate (Tier 1.7). LLM evaluates the same
+    # signal the regex set tries to chase, but as a calibrated number
+    # — so a new phrasing of "appears genuinely hard" doesn't slip
+    # through the way regex patterns kept doing on jobs 4a6bd25a0d1d
+    # → 96cd1092b992. Threshold 0.2: anything ≤ 0.2 means LLM itself
+    # called the flag unreachable from this script as written, so a
+    # sandbox cycle is guaranteed waste.
+    fl_raw = parsed.get("flag_likelihood")
+    flag_likelihood: float | None
+    try:
+        flag_likelihood = (
+            None if fl_raw is None else float(fl_raw)
+        )
+    except (TypeError, ValueError):
+        flag_likelihood = None
+    if flag_likelihood is not None:
+        flag_likelihood = max(0.0, min(1.0, flag_likelihood))
+
     raw_issues = parsed.get("issues") or []
     if not isinstance(raw_issues, list):
         raw_issues = [str(raw_issues)]
@@ -633,11 +672,38 @@ def prejudge_script(
             issues.append(f"chain.note: {m}")
         issues = issues[:12]
 
-    log_fn(f"[judge] prejudge ok={ok} severity={sev} issues={len(issues)}")
+    # Tier 1.7 #1 — flag_likelihood threshold gate. Runs LAST so the
+    # regex / chain.json checks above can also raise severity; this
+    # is the final escalation pass before logging the verdict.
+    if flag_likelihood is not None and flag_likelihood < 0.2:
+        issues.append(
+            f"flag_likelihood={flag_likelihood:.2f} < 0.2 — LLM itself "
+            f"evaluates this script as unable to capture the flag; ship "
+            f"blocked to avoid sandbox-cost on a guaranteed-fail run"
+        )
+        issues = issues[:12]
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge LOW-LIKELIHOOD: escalated severity=high "
+            f"(flag_likelihood={flag_likelihood:.2f})"
+        )
+
+    fl_str = (
+        f" flag_likelihood={flag_likelihood:.2f}"
+        if flag_likelihood is not None else ""
+    )
+    log_fn(
+        f"[judge] prejudge ok={ok} severity={sev}{fl_str} "
+        f"issues={len(issues)}"
+    )
     for it in issues:
         log_fn(f"[judge] prejudge issue: {it}")
 
-    return {"ok": ok, "severity": sev, "issues": issues, "raw": raw}
+    return {
+        "ok": ok, "severity": sev, "issues": issues,
+        "flag_likelihood": flag_likelihood, "raw": raw,
+    }
 
 
 # ---------------------------------------------------------------------------

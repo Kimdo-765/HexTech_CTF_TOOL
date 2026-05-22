@@ -81,11 +81,24 @@ _RCE_TARGET_NEGATIVE = re.compile(
     r"\b(?:"
     r"no\s+(?:working|viable|known)\s+(?:chain|path|exploit)|"
     r"no\s+(?:arbitrary[- ]write|leak|rce|hook|write)\s+primitive|"
-    r"not\s+(?:reachable|achievable|available)|"
+    r"not\s+(?:reachable|achievable|available|achieved|reached|yet)|"
+    # Job 96cd1092b992: rce_target was
+    # "__free_hook = system (not achieved — info leak missing)"
+    # The "not achieved" portion is caught above; this clause covers
+    # the parenthetical "info leak missing" / "X missing" tail that
+    # main agents seem to favor.
+    r"(?:leak|primitive|chain|target|prereq)\s+missing|"
+    r"missing\s+(?:leak|primitive|chain|prereq)|"
     r"structurally\s+(?:blocked|impossible|unreachable|dead)|"
     r"give[- ]up|"
     r"partial[- ]only|"
-    r"chain\s+(?:blocked|halted|terminated|dead)"
+    r"chain\s+(?:blocked|halted|terminated|dead)|"
+    # Hedged admissions seen on 96cd1092b992 in non-rce_target fields
+    # but legal here too: "could not discover", "appears genuinely
+    # hard", "best-effort intended path".
+    r"could\s+not\s+(?:discover|reproduce|achieve)|"
+    r"genuinely\s+hard|"
+    r"best[- ]effort"
     r")\b",
     re.IGNORECASE,
 )

@@ -377,6 +377,43 @@ def _build_pre_recon_prompt(
         "DO NOT propose exploit code. DO NOT speculate. Facts only. "
         "Cite file:line / file:addr for every claim."
     )
+    if heap_advanced:
+        # Tier 1.7 #3 — mandatory section gate. pre-recon often
+        # receives Tier 1.5 prompt blocks but silently omits whole
+        # sections from the reply when the agent decides the section
+        # is "not relevant". Job 96cd1092b992: pre_recon got the
+        # INT-OVERFLOW block but reply contained 0 occurrences of
+        # the phrase, so main never saw the int-edge × R5 unlock
+        # framing the operator memory specifically warned about.
+        # Require explicit section headers so omission becomes
+        # detectable in the reply.
+        parts.append(
+            "MANDATORY SECTION HEADERS — your reply MUST contain "
+            "EVERY one of these section titles as a literal string, "
+            "EVEN IF the body is just 'N/A — <one-line reason>'. "
+            "Silent omission is the most common pre-recon failure "
+            "mode: main never gets the framing and re-derives "
+            "(or skips) the analysis from scratch.\n"
+            "  Required headers (verbatim, case-sensitive):\n"
+            "    ARCH\n"
+            "    PROTECTIONS\n"
+            "    LIBC\n"
+            "    FUNCTIONS\n"
+            "    CANDIDATES\n"
+            "    PRIMITIVES\n"
+            "    NOT_NEEDED\n"
+            "    ALLOC/FREE SIG\n"
+            "    HOOKS_ALIVE\n"
+            "    RECOMMENDED CHAIN\n"
+            "    HEAP STATE MATRIX\n"
+            "    ENV-AWARE PATHS\n"
+            "    INT-OVERFLOW ANALYSIS\n"
+            "    RCE TARGET TABLE\n"
+            "  For headers where you genuinely have nothing to add "
+            "(e.g. no integer arithmetic anywhere in the wrappers), "
+            "the body MUST start with 'N/A — ' so reviewers can tell "
+            "you considered it vs. forgot it."
+        )
     return "\n\n".join(parts)
 
 
