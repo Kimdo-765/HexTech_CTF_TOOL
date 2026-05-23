@@ -97,6 +97,77 @@ def _missing_pre_recon_sections(reply: str, mandatory: tuple[str, ...]) -> list[
     return [s for s in mandatory if s not in reply]
 
 
+# Work-tree signals that promote a chal to heap_advanced even when the
+# operator's description is empty. Job 583e3dd12421 (glibc 2.39 +
+# vector<string> OOB chal) shipped with description="" so the
+# description-only `_looks_heap_advanced` returned False, which disabled
+# both the mandatory HEAP STATE MATRIX / INT-OVERFLOW / ENV-AWARE / RCE
+# TABLE sections in pre-recon AND the auto-respawn safety net for them.
+# The chal was unambiguously heap-pwn (libstdc++ on heap + FSOP target
+# + verified=true OOB write primitive in chain.json) — the heuristic
+# just couldn't see it because it only looked at the description string.
+_HEAP_SOURCE_KEYWORDS = (
+    # C heap APIs
+    "malloc", "calloc", "realloc", "free(",
+    # C++ heap APIs and STL types whose backing storage hits the heap
+    "operator new", "new ", "delete ", "delete[]",
+    "std::vector", "std::string", "std::map", "std::deque",
+    "std::list", "std::unordered_map", "basic_string",
+    # heap-pwn keywords directly in source / comments
+    "fastbin", "tcache", "unsorted", "_IO_FILE", "_IO_2_1",
+    "__free_hook", "__malloc_hook", "vtable",
+)
+
+
+def _heap_signals_present(work_dir: Path, custom_libs: list[str]) -> bool:
+    """Multi-signal heap-advanced detection for chals with empty/sparse
+    descriptions. Any one of the following promotes heap_kw to True:
+
+      1. Custom chal libraries detected (libsalloc.so etc.) — wrappers
+         around malloc/free are nearly always the chal's attack surface.
+      2. C++ heap stdlib shipped in .chal-libs (libstdc++.so.6 present)
+         AND libc_profile.json was generated — strong hint the chal
+         binary links against C++ heap-aware containers.
+      3. chal source directory (./chal/) contains files with heap
+         keywords: malloc/free/operator new/vector/string/tcache/FSOP
+         markers. Detected via lightweight grep on .c/.cc/.cpp/.h/.hpp
+         files (limited to chal/ tree to avoid scanning the world).
+
+    Read-only, ~50ms worst case; results cached only on the caller side.
+    """
+    if custom_libs:
+        return True
+
+    chal_libs = work_dir / ".chal-libs"
+    libstdcxx_present = any(
+        (chal_libs / n).is_file()
+        for n in ("libstdc++.so.6", "libstdc++.so")
+    )
+    profile_present = (chal_libs / "libc_profile.json").is_file()
+    if libstdcxx_present and profile_present:
+        return True
+
+    chal_dir = work_dir / "chal"
+    if chal_dir.is_dir():
+        src_exts = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".S"}
+        try:
+            for p in chal_dir.rglob("*"):
+                if not p.is_file() or p.suffix not in src_exts:
+                    continue
+                # Files in chal/ are small (chal source); read fully.
+                try:
+                    text = p.read_text(errors="ignore")
+                except OSError:
+                    continue
+                low = text.lower()
+                if any(kw.lower() in low for kw in _HEAP_SOURCE_KEYWORDS):
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def _read_libc_version(work_dir: Path) -> str | None:
     """Pull glibc major.minor from libc_profile.json (chal-libc-fix output).
 
@@ -944,12 +1015,27 @@ async def _run_agent(
     # Heap detection up-front so the orchestrator's scaffold-missing
     # trip-wire (SCAFFOLD_NUDGE in run_main_agent_session) can fire
     # only when relevant.
-    heap_kw = looks_heap_advanced(description or "")
+    desc_match = looks_heap_advanced(description or "")
+    work_match = _heap_signals_present(work_dir, custom_libs)
+    heap_kw = desc_match or work_match
     summary: dict = {
         "messages": 0, "tool_calls": 0, "model": model,
         "heap_chal": True,                       # pwn module default
         "heap_chal_keyword_match": heap_kw,
+        "heap_chal_signal_source": (
+            "description+work" if (desc_match and work_match)
+            else "description" if desc_match
+            else "work-tree" if work_match
+            else "none"
+        ),
     }
+    if work_match and not desc_match:
+        log_line(
+            job_id,
+            f"[autoboot] heap_advanced=True via WORK-TREE signal "
+            f"(description empty/no-keyword; custom_libs / libstdc++ / "
+            f"chal source heap keywords promoted classification)"
+        )
     options = make_main_session_options(
         job_id=job_id,
         work_dir=work_dir,
