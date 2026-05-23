@@ -13,6 +13,15 @@ const CLAUDE_MODELS = [
   "claude-sonnet-4",
   "claude-haiku-4-5",
   "claude-haiku-4",
+  // 1M context variants. The SDK accepts the `[1m]` suffix and
+  // claude-code auto-enables the long-context beta. Verified
+  // working under the worker's current authenticated plan: Opus 4.7
+  // and Opus 4.1. Sonnet/Haiku [1m] variants respond with "Usage
+  // credits are required for long context requests" under the same
+  // plan and are intentionally NOT listed here — add them once the
+  // billing tier upgrades.
+  "claude-opus-4-7[1m]",
+  "claude-opus-4-1[1m]",
   // Dated snapshots (most stable for reproducible runs)
   "claude-opus-4-7-20251205",
   "claude-opus-4-1-20250805",
@@ -2080,14 +2089,38 @@ async function openFileModal(name, sourceUrl) {
   }
 
   // Wire one-shot Copy that pulls from the cached raw.
+  // navigator.clipboard is only defined in secure contexts (HTTPS / localhost);
+  // over HTTP via a LAN IP it's undefined and `.writeText` throws TypeError.
+  // Fall back to a transient textarea + document.execCommand("copy"), which
+  // works on plain HTTP too.
   copyBtn.onclick = async () => {
+    const text = modal.dataset.raw || "";
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(modal.dataset.raw || "");
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch (_) { /* fall through to legacy path */ }
+    if (!ok) {
+      try {
+        const tmp = document.createElement("textarea");
+        tmp.value = text;
+        tmp.setAttribute("readonly", "");
+        tmp.style.position = "fixed";
+        tmp.style.left = "-9999px";
+        document.body.appendChild(tmp);
+        tmp.select();
+        ok = document.execCommand("copy");
+        tmp.remove();
+      } catch (_) { ok = false; }
+    }
+    if (ok) {
       const orig = copyBtn.textContent;
       copyBtn.textContent = "✓ Copied";
       setTimeout(() => (copyBtn.textContent = orig), 1200);
-    } catch (e) {
-      alert("clipboard error: " + e);
+    } else {
+      alert("Copy failed. Select the text manually and use Ctrl+C.");
     }
   };
 }
