@@ -189,18 +189,30 @@ WORKFLOW
      only if chal-libc-fix exited 1).
    - Use `context.timeout = N` and explicit `timeout=` on every
      `recvuntil`/`recv` (judge will flag unbounded reads).
-   - **LONG-RUNTIME EXPLOITS — declare timeout up front.** Sandbox runner
-     default is 300s wall time. If your exploit uses N reconnect-attempts
-     × est_seconds_per_attempt and N × est > 240s (e.g. 18 ASLR-retry
-     attempts at ~25s/attempt ≈ 7.5 min, or any heap chain doing brk
-     extension that costs ≥30s/attempt), write a per-job override into
-     meta.json BEFORE you ship. Use the runtime helper:
-       python3 -c "import json,os; p=os.environ.get('META_JSON','/data/jobs/'+os.environ['JOB_ID']+'/meta.json'); d=json.load(open(p)); d['exploit_timeout_seconds']=900; json.dump(d,open(p,'w'),indent=2)"
+   - **LONG-RUNTIME EXPLOITS — declare timeout up front, NOT from
+     inside exploit.py.** Sandbox runner default is 300s wall time.
+     If your exploit uses N reconnect-attempts × est_seconds_per_attempt
+     and N × est > 240s (e.g. 18 ASLR-retry attempts at ~25s/attempt
+     ≈ 7.5 min, or any heap chain doing brk extension that costs
+     ≥30s/attempt), write a per-job override into meta.json BEFORE
+     you write exploit.py — via a SEPARATE Bash tool call:
+       Bash(command="python3 -c \"import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=900; json.dump(d,open(p,'w'),indent=2)\"",
+            description="raise exploit timeout to 900s for long heap chain")
      Cap is 1800s (runner clamps higher values). Default 300s is fine
-     for one-shot exploits. Skipping this when your retry budget exceeds
-     5 min means the runner cuts you mid-loop and postjudge sees a
-     truncated EOF — the chain may be correct but you'll never know.
-     Job aa86e561c88f burned a full retry cycle on this exact failure.
+     for one-shot exploits.
+     ABSOLUTELY DO NOT do this from inside exploit.py at runtime —
+     the runner reads meta.json ONCE at sandbox launch (before your
+     script starts), so a Python `json.dump(...)` call within
+     exploit.py changes the file too late to affect the runner's
+     own timeout. Worse, the prejudge subagent flags self-modifying
+     meta.json as fragile (job 0b73d2463d64 prejudge issue 4: "Script
+     mutates /data/jobs/$JOB_ID/meta.json mid-run ... tampering with
+     job metadata is fragile/may be rejected"). The Bash call above
+     must complete BEFORE the Write(exploit.py) tool call.
+     Skipping this when your retry budget exceeds 5 min means the
+     runner cuts you mid-loop and postjudge sees a truncated EOF —
+     the chain may be correct but you'll never know. Job aa86e561c88f
+     burned a full retry cycle on this exact failure.
    - Print the captured flag (or final response if pattern unknown).
 8. Write `./report.md`: mitigations / vuln (bug class + file:line) /
    strategy (offsets, gadgets) / glibc version used for offsets /
