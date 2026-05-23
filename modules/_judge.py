@@ -493,6 +493,26 @@ _SELF_DEFEAT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bstructurally\s+(?:blocked|impossible|unreachable|dead)\b",
         r"\b(?:SEGV|crash|abort)\s+(?:is\s+)?expected\b",
         r"\bflag\s+capture\s+(?:is\s+)?unlikely\b",
+        # Patterns added 2026-05-23 after job 7f903a8e152b shipped
+        # with these new wordings that the prior 16 missed:
+        #   docstring  : "does NOT achieve full RCE"
+        #   rce_target : "PARTIAL — libc leak only; no arb-write ..."
+        #   chain_name : "libsalloc int-overflow + ... (partial)"
+        r"\bdoes\s+not\s+achieve\b",
+        # "(partial)" parenthetical anywhere in artifact (common when
+        # main labels a chain partial in its title)
+        r"\(\s*partial(?:\s*[-—:]\s*[a-z ]+)?\s*\)",
+        # "PARTIAL — libc leak only" / "PARTIAL: leak only" — em-dash
+        # not covered by ASCII-only \bpartial[- ]only\b above
+        r"\bpartial\b\s*[—–-]\s*\w+\s+(?:leak|only)",
+        # "leak only" / "libc leak only" as a phrase (no dash). The
+        # earlier `\b(?:partial|leak)[- ]only\s+(?:result|chain|...)\b`
+        # required a trailing noun; this catches the bare phrase.
+        r"\b(?:libc\s+leak|leak)\s+only\b(?!\s*\w)",
+        # "no arb-write" / "no arbitrary write" — main's common shorthand
+        r"\bno\s+(?:arb|arbitrary)[- ]?write\b",
+        # "infeasible in (sandbox|timeout|budget)"
+        r"\binfeasible\s+in\s+(?:sandbox|timeout|budget|the\s+\w+)\b",
     )
 )
 

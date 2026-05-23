@@ -81,6 +81,7 @@ _RCE_TARGET_NEGATIVE = re.compile(
     r"\b(?:"
     r"no\s+(?:working|viable|known)\s+(?:chain|path|exploit)|"
     r"no\s+(?:arbitrary[- ]write|leak|rce|hook|write)\s+primitive|"
+    r"no\s+(?:arb|arbitrary)[- ]?write|"
     r"not\s+(?:reachable|achievable|available|achieved|reached|yet)|"
     # Job 96cd1092b992: rce_target was
     # "__free_hook = system (not achieved — info leak missing)"
@@ -98,8 +99,25 @@ _RCE_TARGET_NEGATIVE = re.compile(
     # hard", "best-effort intended path".
     r"could\s+not\s+(?:discover|reproduce|achieve)|"
     r"genuinely\s+hard|"
-    r"best[- ]effort"
+    r"best[- ]effort|"
+    # Job 7f903a8e152b: rce_target = "PARTIAL — libc leak only; ..."
+    # The "leak only" phrase is the actual admission; "PARTIAL" as a
+    # standalone word at the start is also a clear signal.
+    r"does\s+not\s+achieve|"
+    r"(?:libc\s+leak|leak)\s+only\b"
     r")\b",
+    re.IGNORECASE,
+)
+
+# Job 7f903a8e152b's rce_target started with "PARTIAL — ". We treat
+# a bare "PARTIAL" only when followed by an em-dash / colon / "only"
+# / ellipsis at the very START of rce_target — that disambiguates
+# self-classification ("PARTIAL — leak only") from legitimate uses
+# like "partial RELRO bypass via GOT overwrite". The narrower lookahead
+# avoids false-positives on benign mitigation descriptions.
+_RCE_TARGET_PARTIAL_PREFIX = re.compile(
+    r"^\s*partial\s*[—–\-:]\s*\w|"     # PARTIAL — / PARTIAL : / PARTIAL - x
+    r"^\s*partial\s+(?:only|chain|deliverable|result)\b",
     re.IGNORECASE,
 )
 
@@ -281,6 +299,20 @@ def validate_chain(data: Any) -> list[tuple[str, str]]:
             f"{rce[:160]!r} — chain.json itself declares the "
             f"deliverable is partial/leak-only with no RCE; "
             f"sandbox would only confirm what main already concluded. "
+            f"Ship blocked.",
+        ))
+    elif _RCE_TARGET_PARTIAL_PREFIX.match(rce):
+        # Bare "PARTIAL ..." prefix — main classifying the chain as
+        # incomplete in the field whose purpose is to name the
+        # end-of-chain RCE goal. Same ship-block rationale as above
+        # but caught separately so the operator sees the distinct
+        # pattern (and so we don't grow the main regex with a clause
+        # that would false-positive on benign uses of "partial").
+        issues.append((
+            "critical",
+            f"rce_target starts with 'PARTIAL' — chain.json is "
+            f"self-classifying as leak-only deliverable: {rce[:160]!r}. "
+            f"Sandbox would only confirm what main already concluded. "
             f"Ship blocked.",
         ))
 

@@ -26,6 +26,7 @@ Disabling `enable_judge` reverts to plain blocking wait + return.
 from __future__ import annotations
 
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Optional
@@ -328,6 +329,82 @@ def run_in_sandbox(
     return payload
 
 
+def _ping_target(target: str, *, timeout: float = 3.0) -> tuple[bool, str]:
+    """Pre-run TCP reachability probe for `host:port` targets.
+
+    Returns (ok, detail). `ok=True` means a TCP connect succeeded inside
+    `timeout` seconds. `detail` is a short human-readable note that goes
+    into the log on failure (e.g. "ConnectionRefusedError",
+    "timed out", "Name or service not known") — empty on success.
+
+    A successful TCP connect doesn't guarantee the wrapper protocol
+    speaks the language we expect, but it cleanly distinguishes the
+    "remote instance expired / never up" failure mode (job c410, 753cb832)
+    from a genuine script bug. The cost is ≤ `timeout` seconds added
+    to prejudge; on remote-only chals this also pre-warms DNS.
+    """
+    if not target or ":" not in target:
+        return True, ""
+    host, _, port_s = target.rpartition(":")
+    try:
+        port = int(port_s)
+    except ValueError:
+        return True, ""
+    if not host or port <= 0 or port > 65535:
+        return True, ""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+    except socket.gaierror as e:
+        return False, f"DNS: {e}"
+    except (socket.timeout, TimeoutError):
+        return False, f"connect timed out after {timeout}s"
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+    return True, ""
+
+
+def _refresh_target_from_meta(
+    job_id: str, prev_target: Optional[str], log_fn,
+) -> tuple[Optional[str], bool]:
+    """Re-read meta.json and return its current `target_url`.
+
+    Used after `_ping_target` fails: dreamhack instances expire fast,
+    and the operator may have already pushed a new `host:port` into
+    the job metadata between the agent's analysis and the orchestrator
+    sandbox run. Returns (new_target, changed). `changed=True` means
+    the value differs from `prev_target` and the caller should re-ping
+    with the refreshed value before deciding to STOP.
+    """
+    try:
+        # Local import to avoid a top-level cycle (_common imports
+        # nothing from _runner, but it does import the SDK which is
+        # heavier than this helper needs at module-load time).
+        from modules._common import read_meta
+    except Exception as e:  # pragma: no cover — defensive
+        log_fn(f"[runner] meta reload failed (import): {e}")
+        return prev_target, False
+    try:
+        meta = read_meta(job_id) or {}
+    except Exception as e:
+        log_fn(f"[runner] meta reload failed (read): {e}")
+        return prev_target, False
+    new_target = meta.get("target_url") or None
+    if new_target == prev_target:
+        return new_target, False
+    log_fn(
+        f"[runner] meta.json target_url refreshed: "
+        f"{prev_target!r} -> {new_target!r}"
+    )
+    return new_target, True
+
+
 def attempt_sandbox_run(
     job_id: str,
     script_filename: str,
@@ -385,6 +462,91 @@ def attempt_sandbox_run(
 
     enable_judge = _judge_enabled()
 
+    # ---------- Stage 0: target reachability probe ----------
+    # If the chal is remote-targeted, do a single TCP connect ping
+    # BEFORE the runner spawns. dreamhack-style chal instances expire
+    # while the agent is still doing static analysis (jobs 753cb832 +
+    # c410 spent 1h+ analyzing and the instance was gone by the time
+    # the sandbox tried to connect). On ping failure we reload meta.json
+    # and try the refreshed value once — the operator may have already
+    # registered a new `host:port` for this job. If both pings fail,
+    # we let the run proceed but stash a note into the prejudge log
+    # and postjudge `extra_context` so the verdict can cite "remote
+    # was down at run start" instead of mis-blaming the script.
+    target_note = ""
+    # Proactively prefer live meta.json target_url over the argv-captured
+    # value. Retry route reads meta target_url at /retry time and pins it
+    # into the queued job's argv (api/routes/retry.py:473). If the
+    # operator updates the target between /retry and the sandbox-run
+    # (e.g. dreamhack instance rotated), the argv has the stale value
+    # but meta has been refreshed externally. Reading meta first means
+    # we don't burn an unconditional ping on the known-stale address.
+    if target and ":" in target:
+        try:
+            live_target, changed_at_start = _refresh_target_from_meta(
+                job_id, target, log_fn,
+            )
+        except Exception as e:
+            log_fn(f"[runner] proactive meta target reload failed: {e}")
+            live_target, changed_at_start = target, False
+        if changed_at_start and live_target and ":" in live_target:
+            target = live_target
+    if target and ":" in target:
+        ok, detail = _ping_target(target)
+        if not ok:
+            log_fn(
+                f"[runner] target {target} unreachable before run "
+                f"({detail}); reloading meta.json"
+            )
+            new_target, changed = _refresh_target_from_meta(
+                job_id, target, log_fn,
+            )
+            if changed and new_target and ":" in new_target:
+                ok2, detail2 = _ping_target(new_target)
+                if ok2:
+                    log_fn(
+                        f"[runner] refreshed target {new_target} reachable "
+                        f"— using it for this run"
+                    )
+                    target = new_target
+                    target_note = (
+                        f"NOTE: meta.json target_url was refreshed mid-run "
+                        f"from a now-unreachable value to {new_target!r}. "
+                        f"The script is being invoked with the refreshed "
+                        f"value."
+                    )
+                else:
+                    log_fn(
+                        f"[runner] refreshed target {new_target} also "
+                        f"unreachable ({detail2}) — proceeding with "
+                        f"{new_target} so postjudge sees a real exit_code"
+                    )
+                    target = new_target
+                    target_note = (
+                        f"NOTE: both the original ({detail}) and the "
+                        f"meta-refreshed target ({new_target!r}, {detail2}) "
+                        f"failed a TCP connect ping before the run. If "
+                        f"the script reports network_error / EOF, the "
+                        f"remote instance is likely expired — operator "
+                        f"should re-register a live `host:port` in "
+                        f"meta.json and /retry, not push main onto a new "
+                        f"vuln class."
+                    )
+            else:
+                log_fn(
+                    f"[runner] meta.json target unchanged ({target}) and "
+                    f"still unreachable — running anyway so the script's "
+                    f"own EOF/timeout handler surfaces to postjudge"
+                )
+                target_note = (
+                    f"NOTE: target {target!r} failed TCP connect ping "
+                    f"({detail}) before the run started and meta.json "
+                    f"has no fresher value. If postjudge sees "
+                    f"network_error / EOF, the remote is genuinely down "
+                    f"— operator must refresh the instance, no script "
+                    f"fix will help."
+                )
+
     # The judge stages share one Claude session via session_id resume.
     # `prejudge_script` writes a sid into _judge._session_ids; postjudge
     # clears it on its happy path. If anything between the two raises
@@ -392,15 +554,19 @@ def attempt_sandbox_run(
     # module-level dict for the worker process's lifetime. Wrap in
     # try/finally so cleanup is unconditional.
     try:
-        # ---------- Stage 1: prejudge (advisory) ----------
-        # Decision power lives with the main agent — main is expected to
-        # have called the judge subagent itself before finalizing (see the
-        # JUDGE GATE block in mission_block). The orchestrator's prejudge
-        # here is a paper-trail backstop: findings get recorded into
-        # result.json so the retry reviewer can reference them, but the
-        # severity of those findings does NOT block the runner. Hangs /
-        # parse-error scripts are still caught by the supervise stall
-        # watchdog and surfaced by postjudge.
+        # ---------- Stage 1: prejudge (ship gate) ----------
+        # Decision power was previously advisory ("main owns the gate"),
+        # but the gate stack added between 2026-05-20 and 2026-05-23
+        # (Phase 9 self-defeat regex, Phase 8 chain.json critical,
+        # Tier 1.7 flag_likelihood<0.2) all converge on severity=high
+        # for cases the LLM judge itself rates as guaranteed-fail. On
+        # job 7f903a8e152b prejudge correctly emitted flag_likelihood=
+        # 0.02 + severity=high but the "running anyway" branch let the
+        # sandbox run, wasting one cycle on an exploit the LLM said
+        # cannot capture the flag. Severity=high now blocks ship; main
+        # already has its own internal JUDGE GATE turn before this
+        # point, and postjudge still backstops anything that slips
+        # through with severity≤med.
         prejudge: dict | None = None
         if enable_judge:
             try:
@@ -418,22 +584,53 @@ def attempt_sandbox_run(
                 }
             if prejudge and not prejudge.get("ok") and prejudge.get("severity") == "high":
                 log_fn(
-                    f"[runner] prejudge advisory: severity=high, "
+                    f"[runner] prejudge BLOCKED ship: severity=high, "
                     f"{len(prejudge.get('issues') or [])} issues — "
-                    f"running anyway (main owns the gate; supervise + "
-                    f"postjudge will backstop)"
+                    f"sandbox NOT spawned (operator should /retry "
+                    f"onto a different chain). Top issues: "
+                    f"{(prejudge.get('issues') or [])[:2]}"
                 )
+                return {
+                    "error": "prejudge_blocked",
+                    "prejudge": prejudge,
+                    "judge_aborted": True,
+                }
 
         # ---------- Stage 2: actual run ----------
         args = [target] if target else []
+        # Per-job exploit timeout override via meta.json
+        # `exploit_timeout_seconds`. Default 300s; capped at 1800s to
+        # protect the worker from a runaway. Retry-driven heap exploits
+        # (job aa86e561: 24 attempts × ~25s each ≈ 10 min) get cut at
+        # 5 min and never reach the favorable ASLR roll.
+        per_job_timeout = DEFAULT_TIMEOUT_S
+        try:
+            from modules._common import read_meta as _read_meta
+            override = (_read_meta(job_id) or {}).get(
+                "exploit_timeout_seconds"
+            )
+            if override is not None:
+                ov_int = int(override)
+                if ov_int > 0:
+                    per_job_timeout = min(ov_int, 1800)
+                    if per_job_timeout != DEFAULT_TIMEOUT_S:
+                        log_fn(
+                            f"[runner] exploit_timeout override: "
+                            f"{per_job_timeout}s (raw={ov_int}, "
+                            f"capped at 1800s)"
+                        )
+        except Exception as e:
+            log_fn(f"[runner] exploit_timeout read failed: {e}")
         log_fn(
             f"[runner] executing {script_filename} "
-            f"(target={target}, sage={use_sage}, judge={enable_judge}) ..."
+            f"(target={target}, sage={use_sage}, judge={enable_judge}, "
+            f"timeout={per_job_timeout}s) ..."
         )
         try:
             res = run_in_sandbox(
                 job_id, script_filename, args=args, use_sage=use_sage,
                 log_fn=log_fn, enable_judge=enable_judge,
+                timeout_s=per_job_timeout,
             )
         except Exception as e:
             log_fn(f"[runner] failed to spawn sandbox: {e}")
@@ -451,10 +648,16 @@ def attempt_sandbox_run(
         # ---------- Stage 3: postjudge ----------
         if enable_judge:
             extra = ""
+            if target_note:
+                # Surface pre-run target reachability notes to postjudge
+                # FIRST so its verdict can distinguish "remote was down"
+                # (network_error, operator must refresh instance) from
+                # "script's own bug" (parse_error, retry will help).
+                extra = target_note + "\n"
             if res.get("timeout"):
-                extra = "(runner timeout fired before container exit)\n"
+                extra += "(runner timeout fired before container exit)\n"
             elif res.get("killed_by_supervise"):
-                extra = (
+                extra += (
                     "(supervise judge killed the container due to stalled "
                     "output)\n"
                 )
