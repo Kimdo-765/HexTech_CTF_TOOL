@@ -4,25 +4,30 @@ const API = "/api";
 // snapshot/alias names here to expose them. Empty value = "use the
 // global Settings model".
 const CLAUDE_MODELS = [
-  // Aliases (Anthropic recommends pinning to dated snapshots in production)
+  // Aliases (Anthropic recommends pinning to dated snapshots in
+  // production). Sorted by family (Opus → Sonnet → Haiku) then by
+  // version (newest first). 1M-context variants follow their
+  // alias immediately so the dropdown groups the same model's
+  // 200K / 1M choices together.
+  //
+  // The SDK accepts the `[1m]` suffix; claude-code auto-enables
+  // the long-context beta. Verified 2026-05-24 under the worker's
+  // current authenticated plan: Opus 4.7[1m] and Opus 4.1[1m] both
+  // work. Sonnet/Haiku [1m] respond with "Usage credits are
+  // required for long context requests" — billing-tier limited and
+  // intentionally not listed here.
   "claude-opus-4-7",
+  "claude-opus-4-7[1m]",
   "claude-opus-4-1",
+  "claude-opus-4-1[1m]",
   "claude-opus-4",
   "claude-sonnet-4-6",
   "claude-sonnet-4-5",
   "claude-sonnet-4",
   "claude-haiku-4-5",
   "claude-haiku-4",
-  // 1M context variants. The SDK accepts the `[1m]` suffix and
-  // claude-code auto-enables the long-context beta. Verified
-  // working under the worker's current authenticated plan: Opus 4.7
-  // and Opus 4.1. Sonnet/Haiku [1m] variants respond with "Usage
-  // credits are required for long context requests" under the same
-  // plan and are intentionally NOT listed here — add them once the
-  // billing tier upgrades.
-  "claude-opus-4-7[1m]",
-  "claude-opus-4-1[1m]",
-  // Dated snapshots (most stable for reproducible runs)
+  // Dated snapshots (most stable for reproducible runs). Same sort
+  // order — Opus / Sonnet / Haiku, newest first.
   "claude-opus-4-7-20251205",
   "claude-opus-4-1-20250805",
   "claude-sonnet-4-6-20251119",
