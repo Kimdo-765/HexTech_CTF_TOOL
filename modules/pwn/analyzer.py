@@ -343,6 +343,10 @@ def _build_pre_recon_prompt(
         # off-by-one, missing length cap, side-effect at unexpected offset).
         # Treating them as "just wrappers" is a known way to miss the chal.
         lib_list = ", ".join(custom_libs)
+        decomp_dir_list = ", ".join(
+            f"./decomp_{Path(l).stem.replace('.', '_')}/"
+            for l in custom_libs
+        )
         parts.append(
             f"CUSTOM CHAL LIBRARY DETECTED: ./.chal-libs/{{{lib_list}}}\n"
             "These are NOT standard glibc/ld/libgcc/libstdc++ — the chal "
@@ -372,6 +376,58 @@ def _build_pre_recon_prompt(
             "DO NOT skip this section. Even when the binary's own "
             "code looks straightforward, the bug is usually inside one "
             "of these wrappers."
+        )
+        # Tier 1.8 — MANDATORY decomp cite for custom libs. nm + objdump
+        # give the wrapper's SURFACE (symbols, branch addresses); they
+        # do NOT show post-condition refresh logic, hidden integer
+        # promotions, struct layouts, or implicit invariants. Job
+        # 64f02a22106a SIGBUS'd because libsalloc's secure_edit has a
+        # post-write canary refresh that re-reads size_lo/size_hi from
+        # user_ptr[0..7]; a long edit payload trashes those fields and
+        # the next op faults inside the refresh path. The debugger
+        # subagent eventually found this by tracing 40 asm instructions
+        # across two functions. The decompiled C says it in 3 lines.
+        # autoboot now auto-runs `ghiant` on every custom .so so the
+        # decomp is on disk before pre-recon starts.
+        parts.append(
+            f"CUSTOM LIB DECOMPILATION (autoboot-prefetched at "
+            f"{decomp_dir_list}):\n"
+            "  ALL claims about wrapper internals (DIVERGENCES, "
+            "PRIMITIVES_IN_LIB, ALLOC/FREE SIG, integer arithmetic, "
+            "post-op refresh, struct layouts) MUST be backed by a "
+            "QUOTED line from the decompiled C in the autoboot decomp "
+            "dir above. nm/objdump/strings are evidence of SURFACE; "
+            "decompiled C is evidence of BEHAVIOR.\n"
+            "  PROCESS for each wrapper export:\n"
+            "    1. Read the corresponding ./decomp_<lib>/<FUN_*>.c "
+            "(filename matches the function offset; use Bash `grep -l "
+            "<symbol_name> ./decomp_<lib>/*.c` if you can't tell which).\n"
+            "    2. Map the C to the export name via nm -D or its "
+            "ghiant default name (FUN_<offset>).\n"
+            "    3. Quote the EXACT lines that establish the primitive "
+            "(integer math, branch predicate, refresh write address, "
+            "etc.) in your DIVERGENCES / PRIMITIVES_IN_LIB section.\n"
+            "    4. If decomp omits a critical detail (Ghidra sometimes "
+            "loses signed/unsigned annotations), supplement with the "
+            "corresponding asm — but always START from decomp.\n"
+            "  HIDDEN-CONSTRAINT TRAPS to look for (the things disasm "
+            "shows after 40 lines of trace and decomp shows in 3):\n"
+            "    · post-write refresh that re-reads chunk metadata "
+            "from the same buffer the wrapper just wrote into "
+            "(libsalloc.secure_edit + secure_free __heap_chk_fail call "
+            "— observed on job 64f02a22106a: long edit payload trashes "
+            "size_lo/hi, next op faults)\n"
+            "    · pre-free memset whose count derives from a user-"
+            "writable size field (allows 0-byte memset bypass when "
+            "size wraps to 0)\n"
+            "    · integrity check predicates that silently return on "
+            "mismatch vs abort vs return-NULL (different bypass shapes)\n"
+            "    · canary refresh that uses size from header (so a "
+            "header-corrupting overflow KILLS the slot for future ops)\n"
+            "  FAILURE MODE this prevents: 'wrapper(-8) → SEGV / OOM' "
+            "single-line dismissals based on assumed surface behavior. "
+            "If decomp shows the actual control flow, the assumed "
+            "failure usually has a survival path."
         )
     parts.append(
         "DO NOT propose exploit code. DO NOT speculate. Facts only. "
@@ -415,6 +471,92 @@ def _build_pre_recon_prompt(
             "you considered it vs. forgot it."
         )
     return "\n\n".join(parts)
+
+
+def _autodecomp_custom_libs(
+    custom_libs: list[str], work_dir: Path, job_id: str
+) -> dict[str, Path]:
+    """Run ghiant once per chal-author-supplied .so so the decompiled C
+    is on disk before pre-recon starts.
+
+    Without this, pre-recon analyzes wrappers via nm -D + objdump
+    (surface API only) and silently misses internal mechanics. Job
+    64f02a22106a hit SIGBUS because libsalloc.so's secure_edit
+    performs a POST-WRITE canary refresh that reads size_lo/size_hi
+    from user_ptr[0..7] — a long edit payload trashes those bytes
+    and the NEXT op faults. The behavior is 3 lines of decompiled C
+    but requires tracing 40 instructions across two functions in
+    disasm to see.
+
+    Returns a {libname: decomp_dir_path} map (for AUTOBOOT.md). One
+    decomp dir per custom .so, sibling to ./decomp/ which holds the
+    main binary's decomp.
+    """
+    if not custom_libs:
+        return {}
+    chal_libs = work_dir / ".chal-libs"
+    out_map: dict[str, Path] = {}
+    for libname in custom_libs:
+        src = chal_libs / libname
+        if not src.is_file():
+            continue
+        stem = src.name.replace(".so", "").replace(".", "_")
+        out_dir = work_dir / f"decomp_{stem}"
+        if out_dir.is_dir() and any(out_dir.glob("*.c")):
+            log_line(
+                job_id,
+                f"[autoboot] custom-lib decomp cache hit: "
+                f"./{out_dir.name}/ ({sum(1 for _ in out_dir.glob('*.c'))} .c)"
+            )
+            out_map[libname] = out_dir
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log_line(
+            job_id,
+            f"[autoboot] decompiling {libname} → ./{out_dir.name}/ "
+            f"(1–3 min cold; pre-recon + main get decompiled C "
+            f"instead of disasm-only)"
+        )
+        env = os.environ.copy()
+        env["JOB_ID"] = job_id
+        try:
+            res = subprocess.run(
+                ["ghiant", str(src), str(out_dir)],
+                cwd=str(work_dir),
+                env=env,
+                capture_output=True, text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            log_line(
+                job_id,
+                f"[autoboot] {libname} decomp TIMEOUT (300s) — "
+                f"pre-recon will fall back to disasm"
+            )
+            continue
+        except Exception as e:
+            log_line(
+                job_id,
+                f"[autoboot] {libname} decomp ERROR: {e} — "
+                f"pre-recon will fall back to disasm"
+            )
+            continue
+        if res.returncode == 0:
+            count = sum(1 for _ in out_dir.glob("*.c"))
+            log_line(
+                job_id,
+                f"[autoboot] {libname}: {count} functions decompiled "
+                f"to ./{out_dir.name}/"
+            )
+            out_map[libname] = out_dir
+        else:
+            tail = (res.stderr or "")[-200:].replace("\n", " | ")
+            log_line(
+                job_id,
+                f"[autoboot] {libname} decomp FAILED rc={res.returncode}: "
+                f"{tail}"
+            )
+    return out_map
 
 
 def _is_shared_lib(p: Path) -> bool:
@@ -728,6 +870,7 @@ async def _run_agent(
     # so the static-triage prompt explicitly asks recon to enumerate
     # each export and identify divergences from standard libc semantics.
     custom_libs = _detect_custom_libs(work_dir)
+    custom_lib_decomps: dict[str, Path] = {}
     if custom_libs:
         log_line(
             job_id,
@@ -735,18 +878,26 @@ async def _run_agent(
             f"{', '.join(custom_libs)} — pre-recon will require "
             f"export-by-export divergence analysis"
         )
+        custom_lib_decomps = _autodecomp_custom_libs(
+            custom_libs, work_dir, job_id
+        )
 
     # Item 5 — light autoboot summary breadcrumb. Captures heavy
     # autoboot outputs (effective binary name, custom libs, libc
     # profile presence) into ./AUTOBOOT.md so subagents read the same
     # baseline orientation regardless of which spawn they are.
     libc_profile = work_dir / ".chal-libs" / "libc_profile.json"
+    custom_decomp_paths = (
+        ", ".join(f"./{p.name}/" for p in custom_lib_decomps.values())
+        if custom_lib_decomps else "(none)"
+    )
     module_autoboot(
         "pwn", work_dir, lambda s: log_line(job_id, s),
         extras={
             "effective_binary": effective_binary_name or "(none)",
             "chal_unpacked": str(chal_unpacked),
             "custom_libs": ", ".join(custom_libs) if custom_libs else "(none)",
+            "custom_lib_decomp_paths": custom_decomp_paths,
             "libc_profile_present": libc_profile.is_file(),
             "decomp_pre_baked": (work_dir / "decomp").is_dir(),
         },
