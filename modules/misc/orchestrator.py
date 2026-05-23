@@ -28,6 +28,7 @@ from modules._common import (
     format_tool_result,
     log_thinking,
     read_meta,
+    resolve_effort,
     scan_job_for_flags,
     soft_timeout_watchdog,
     write_meta,
@@ -133,6 +134,7 @@ async def _claude_summary(
             "TMP":    _tmp_str,
             "TEMP":   _tmp_str,
         },
+        effort=resolve_effort(read_meta(job_id).get("effort")),
     )
     prompt = build_user_prompt(filename, description)
     from modules._common import build_exploit_library_hint

@@ -19,6 +19,7 @@ from modules._common import (
     module_autoboot,
     prior_work_dirs,
     read_meta,
+    resolve_effort,
     run_main_agent_session,
     run_pre_recon,
     run_report_phase,
@@ -73,6 +74,7 @@ async def _run_agent(
         base_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         summary=summary,
         resume_sid=resume_sid,
+        effort=resolve_effort(read_meta(job_id).get("effort")),
     )
     user_prompt = build_user_prompt(binary_name, description, auto_run)
 

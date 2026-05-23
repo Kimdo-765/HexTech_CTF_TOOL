@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from api.queue import get_queue, hard_timeout_for, resolve_timeout
+from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
 from api.storage import job_dir, new_job_id, write_job_meta
 
 router = APIRouter()
@@ -17,6 +17,7 @@ async def analyze_pwn(
     auto_run: bool = Form(False),
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
+    effort: Optional[str] = Form(None),
 ):
     target = (target or "").strip() or None
     has_file = bool(file and file.filename)
@@ -42,6 +43,7 @@ async def analyze_pwn(
 
     timeout = resolve_timeout(job_timeout)
     chosen_model = (model or "").strip() or None
+    chosen_effort = normalize_effort(effort)
     meta = {
         "id": job_id,
         "module": "pwn",
@@ -52,6 +54,7 @@ async def analyze_pwn(
         "auto_run": auto_run,
         "job_timeout": timeout,
         "model": chosen_model,
+        "effort": chosen_effort,
         "remote_only": not has_file,
     }
     write_job_meta(job_id, meta)

@@ -51,6 +51,27 @@ def hard_timeout_for(soft: int) -> int:
     return min(max(int(soft) * 4, 86400), _HARD_TIMEOUT_CEILING_S)
 
 
+_VALID_EFFORTS = frozenset(("low", "medium", "high", "max"))
+
+
+def normalize_effort(raw: str | None) -> str | None:
+    """Validate the operator-supplied effort value.
+
+    Empty / None → return None (caller will fall back to the global
+    setting or the SDK default). A non-empty value not in the
+    SDK's accepted set is silently coerced to None as well; this
+    keeps a typo from blocking the job submit and instead pushes
+    the run onto the safe default. Accepted values mirror
+    ``ClaudeAgentOptions(effort=...)``: low / medium / high / max.
+    """
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if not s:
+        return None
+    return s if s in _VALID_EFFORTS else None
+
+
 def get_queue() -> Queue:
     return Queue(
         "hextech_ctf_tool",

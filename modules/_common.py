@@ -3022,6 +3022,33 @@ async def run_pre_recon(
     return out
 
 
+_VALID_EFFORTS_BACKEND = frozenset(("low", "medium", "high", "max"))
+
+
+def resolve_effort(meta_effort: str | None) -> str | None:
+    """Resolve the per-job effort with the global Settings fallback.
+
+    Per-job effort (saved in meta.json by api/routes/*_module.py)
+    wins when set; otherwise fall back to the `claude_effort`
+    Settings value; otherwise return None and let the SDK pick its
+    own default (model-dependent).
+    """
+    from modules.settings_io import get_setting
+
+    def _norm(v: object) -> str | None:
+        if v is None:
+            return None
+        s = str(v).strip().lower()
+        if not s:
+            return None
+        return s if s in _VALID_EFFORTS_BACKEND else None
+
+    per_job = _norm(meta_effort)
+    if per_job is not None:
+        return per_job
+    return _norm(get_setting("claude_effort"))
+
+
 def make_main_session_options(
     *,
     job_id: str,
@@ -3033,6 +3060,7 @@ def make_main_session_options(
     add_dirs: list | None = None,
     resume_sid: str | None = None,
     extra_env: dict | None = None,
+    effort: str | None = None,
 ):
     """Build ``ClaudeAgentOptions`` for a main agent session. Selects
     isolated-subagent (MCP) vs legacy in-process (``agents=``) path
@@ -3138,6 +3166,7 @@ def make_main_session_options(
             resume=resume_sid,
             fork_session=bool(resume_sid),
             mcp_servers={"team": mcp_server},
+            effort=effort,
         )
         log_fn_local(
             "[orchestrator] subagent isolation: ON "
@@ -3157,6 +3186,7 @@ def make_main_session_options(
             resume=resume_sid,
             fork_session=bool(resume_sid),
             agents=build_recon_agents(model),
+            effort=effort,
         )
         log_fn_local(
             "[orchestrator] subagent isolation: OFF (legacy in-process)"

@@ -39,6 +39,13 @@ const CLAUDE_MODELS = [
   "claude-3-5-haiku-20241022",
 ];
 
+// Reasoning effort levels accepted by ClaudeAgentOptions(effort=...).
+// SDK translates these to a `--effort <value>` CLI arg; empty = SDK
+// default (model-dependent). Higher effort means longer per-turn
+// thinking budget and (typically) higher per-call cost — pick "max"
+// for high-stakes synthesis turns and "low" for cheap probes.
+const CLAUDE_EFFORTS = ["low", "medium", "high", "max"];
+
 function fillModelSelects() {
   // Per-job selects: empty = "default from Settings"
   document.querySelectorAll('[data-role="model-select"]').forEach((sel) => {
@@ -52,6 +59,21 @@ function fillModelSelects() {
     sel.innerHTML = "";
     sel.appendChild(new Option("(use env / default)", ""));
     for (const m of CLAUDE_MODELS) sel.appendChild(new Option(m, m));
+  });
+}
+
+function fillEffortSelects() {
+  // Per-job: empty = Settings value (falls through to SDK default if
+  // Settings is also empty). Same UX as fillModelSelects.
+  document.querySelectorAll('[data-role="effort-select"]').forEach((sel) => {
+    sel.innerHTML = "";
+    sel.appendChild(new Option("(default — Settings value)", ""));
+    for (const e of CLAUDE_EFFORTS) sel.appendChild(new Option(e, e));
+  });
+  document.querySelectorAll('[data-role="effort-select-settings"]').forEach((sel) => {
+    sel.innerHTML = "";
+    sel.appendChild(new Option("(use SDK default)", ""));
+    for (const e of CLAUDE_EFFORTS) sel.appendChild(new Option(e, e));
   });
 }
 
@@ -370,6 +392,8 @@ async function submitJob(form, endpoint) {
   if (to === "" || to == null) fd.delete("job_timeout");
   const model = fd.get("model");
   if (model === "" || model == null) fd.delete("model");
+  const effort = fd.get("effort");
+  if (effort === "" || effort == null) fd.delete("effort");
 
   const res = await fetch(`${API}${endpoint}`, { method: "POST", body: fd });
   if (!res.ok) {
@@ -414,6 +438,15 @@ async function loadSettings() {
     modelSel.value = cur; modelCustom.value = "";
   } else {
     modelSel.value = ""; modelCustom.value = cur;
+  }
+  // Claude effort (mirrors model: empty = SDK default; otherwise one
+  // of low/medium/high/max). Stored under `claude_effort` in the
+  // settings blob; per-job submissions inherit it when their own
+  // effort dropdown is left blank.
+  const effortSel = f.querySelector("[name=claude_effort]");
+  if (effortSel) {
+    const curEffort = s.claude_effort || "";
+    effortSel.value = CLAUDE_EFFORTS.includes(curEffort) ? curEffort : "";
   }
   f.querySelector("[name=job_ttl_days]").value =
     s.job_ttl_days != null ? s.job_ttl_days : "";
@@ -2177,5 +2210,6 @@ document.addEventListener("keydown", (e) => {
 });
 
 fillModelSelects();
+fillEffortSelects();
 refreshJobs();
 refreshStats();
