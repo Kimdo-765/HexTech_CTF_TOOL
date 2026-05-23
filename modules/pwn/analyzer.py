@@ -53,12 +53,48 @@ _STANDARD_LIB_PREFIXES = (
     "libnss_",                     # NSS plugins
     "libgcc_s.so",
     "libstdc++.so",
+    # OpenSSL (libcrypto / libssl). Job 44dd25365173 shipped
+    # libcrypto.so.3 in ./.chal-libs/; the prior heuristic
+    # misclassified it as a chal-author wrapper, autoboot's custom-lib
+    # Ghidra decomp burned 2m40s and wrote 9706 .c files (500KB+ on
+    # disk) for a stock OpenSSL build. OpenSSL is part of the chal's
+    # runtime, not its attack surface. If a chal's bug really IS inside
+    # a custom OpenSSL fork the operator can rebuild with the
+    # offending name (e.g. `libcrypto_patched.so.3`) and recon will
+    # still flag it as non-standard.
+    "libcrypto.so", "libcrypto-",
+    "libssl.so", "libssl-",
 )
 
 
 def _is_standard_libname(name: str) -> bool:
     n = name.lower()
     return any(n.startswith(p) for p in _STANDARD_LIB_PREFIXES)
+
+
+# Section titles the heap_advanced pre-recon prompt mandates. Pre-recon
+# agents have a tendency to silently drop sections they decide are "not
+# relevant" — observed across 4 consecutive jobs (96cd1092b992 →
+# 636e5084da2b → 44dd25365173 → 7220cb10b2db) where the prompt asked for
+# MANDATORY SECTION HEADERS but reply contained 0 of the 4 new sections.
+# When any are absent we respawn the recon ONCE with an explicit reminder.
+_HEAP_MANDATORY_SECTIONS = (
+    "INT-OVERFLOW ANALYSIS",
+    "HEAP STATE MATRIX",
+    "ENV-AWARE PATHS",
+    "RCE TARGET TABLE",
+)
+
+
+def _missing_pre_recon_sections(reply: str, mandatory: tuple[str, ...]) -> list[str]:
+    """Return mandatory section titles absent from the recon reply.
+
+    Substring match — pre-recon may quote a title inside a code block or
+    Markdown header, so we don't require a specific format. Order is
+    preserved (matches `mandatory`) so the respawn message hints at the
+    sections the recon should add first.
+    """
+    return [s for s in mandatory if s not in reply]
 
 
 def _read_libc_version(work_dir: Path) -> str | None:
@@ -956,6 +992,62 @@ async def _run_agent(
                 prompt=recon_question,
                 log_fn=lambda s: log_line(job_id, s),
             )
+            # Verify mandatory heap sections actually landed. Across
+            # jobs 96cd1092b992 → 7220cb10b2db pre-recon kept silently
+            # dropping INT-OVERFLOW ANALYSIS / HEAP STATE MATRIX /
+            # ENV-AWARE PATHS / RCE TARGET TABLE despite the prompt
+            # marking them mandatory. One automated respawn with an
+            # explicit "you missed these" message is cheaper than a
+            # downstream main session re-deriving the same facts.
+            if heap_kw and recon_reply:
+                missing = _missing_pre_recon_sections(
+                    recon_reply, _HEAP_MANDATORY_SECTIONS,
+                )
+                if missing:
+                    log_line(
+                        job_id,
+                        f"[pre-recon] reply missing mandatory sections: "
+                        f"{missing} — respawning ONCE with explicit "
+                        f"reminder (4 jobs in a row had this gap)"
+                    )
+                    respawn_prompt = (
+                        recon_question
+                        + "\n\n=== RESPAWN — PRIOR REPLY OMITTED REQUIRED "
+                        "SECTIONS ===\n"
+                        "Your previous reply did NOT contain the following "
+                        "section titles, which are MANDATORY for "
+                        "heap-advanced chals:\n"
+                        + "\n".join(f"  - {s}" for s in missing) + "\n"
+                        "Include each section as a literal heading; "
+                        "body may be 'N/A — <one-line reason>' when "
+                        "genuinely not applicable, but the title MUST "
+                        "appear so the main agent's downstream logic can "
+                        "detect it. Re-emit the FULL recon report (not "
+                        "just the missing sections)."
+                    )
+                    recon_reply = await run_pre_recon(
+                        job_id=job_id,
+                        work_dir=work_dir,
+                        model=model,
+                        prompt=respawn_prompt,
+                        log_fn=lambda s: log_line(job_id, s),
+                    )
+                    still_missing = _missing_pre_recon_sections(
+                        recon_reply, _HEAP_MANDATORY_SECTIONS,
+                    )
+                    if still_missing:
+                        log_line(
+                            job_id,
+                            f"[pre-recon] respawn STILL missing "
+                            f"{still_missing} — accepting partial reply "
+                            f"(operator may need to /retry with hint)"
+                        )
+                    else:
+                        log_line(
+                            job_id,
+                            "[pre-recon] respawn succeeded — all "
+                            "mandatory sections present"
+                        )
             store_pre_recon_cache(
                 work_dir, recon_reply, lambda s: log_line(job_id, s),
             )
@@ -1137,7 +1229,7 @@ def run_job(
         # the helper stashed the LAST sandbox_result on the summary.
         sandbox_result = agent_summary.pop("sandbox", None)
 
-        flags = scan_job_for_flags(job_id)
+        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
         agent_err = agent_summary.get("agent_error")
         agent_err_kind = agent_summary.get("agent_error_kind")
         if agent_err and not agent_summary.get("exploit_present"):

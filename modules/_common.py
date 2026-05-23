@@ -250,7 +250,12 @@ _NARRATIVE_FLAG_SOURCES = (
 )
 
 
-def scan_job_for_flags(job_id: str, extra_files: list[str] | None = None) -> list[str]:
+def scan_job_for_flags(
+    job_id: str,
+    extra_files: list[str] | None = None,
+    *,
+    sandbox_result: dict | None = None,
+) -> list[str]:
     """Return real captured flags for a job.
 
     Two-tier scan to keep test/placeholder flags out of `meta.flags`:
@@ -268,6 +273,19 @@ def scan_job_for_flags(job_id: str, extra_files: list[str] | None = None) -> lis
 
     `extra_files` are treated as TRUSTED — callers who add them are
     asserting the file is runner output.
+
+    `sandbox_result`, when provided, gates the NARRATIVE fallback.
+    If the sandbox was NEVER spawned (prejudge ship-block / agent
+    aborted before runner), no flag can be REAL — every match must
+    come from prose the agent wrote, which is exactly the case the
+    NARRATIVE tier is meant to be a last-resort fallback for. Job
+    44dd25365173 (2026-05-23) shipped 4 fake `DH{<sha256>}` /
+    `DH{3cbdaf...}` entries to meta.flags because prejudge blocked
+    ship (no sandbox stdout existed) yet narrative scan still
+    surfaced agent-authored hashes from report.md + run.log. With
+    sandbox_result['judge_aborted']=True or
+    sandbox_result['error']='prejudge_blocked', the narrative tier
+    is skipped entirely.
     """
     jd = job_dir(job_id)
 
@@ -291,6 +309,19 @@ def scan_job_for_flags(job_id: str, extra_files: list[str] | None = None) -> lis
     trusted = {f for f in _scan(trusted_set) if not _is_placeholder_flag(f)}
     if trusted:
         return sorted(trusted)
+
+    # Skip narrative fallback when the sandbox never ran. Without a
+    # sandbox cycle, every flag-like string in run.log / report.md /
+    # findings.json is necessarily agent-authored (recon notes, chal
+    # source quotes, FSOP analysis examples) — never a real capture.
+    sandbox_skipped = bool(
+        sandbox_result and (
+            sandbox_result.get("judge_aborted")
+            or sandbox_result.get("error") == "prejudge_blocked"
+        )
+    )
+    if sandbox_skipped:
+        return []
 
     narrative = {f for f in _scan(_NARRATIVE_FLAG_SOURCES) if not _is_placeholder_flag(f)}
     return sorted(narrative)
@@ -394,6 +425,16 @@ _PLACEHOLDER_INNERS = {
     "here_is_the_flag", "here_is_a_flag", "here_is_flag",
     "insert_flag_here", "insert_flag", "fake_flag", "dummy_flag",
     "local_test_flag", "test_flag", "default_flag",
+    # Job 44dd25365173 (2026-05-23): narrative scan extracted
+    # agent-authored hashes from report.md / run.log. The chal printed
+    # "Flag is: DH{<sha256>}" and the agent quoted the printf format,
+    # also computed sha256("") = e3b0c... as an illustrative example.
+    "<sha256>", "<md5>", "<hash>", "<value>", "<address>", "<libc>",
+    # Empty-input hashes — agents frequently reference these as
+    # baseline examples when discussing crypto chals.
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # sha256("")
+    "d41d8cd98f00b204e9800998ecf8427e",                                  # md5("")
+    "da39a3ee5e6b4b0d3255bfef95601890afd80709",                          # sha1("")
 }
 
 
@@ -405,7 +446,8 @@ def _is_placeholder_flag(flag: str) -> bool:
     i = flag.find("{")
     if i < 0 or not flag.endswith("}"):
         return False
-    inner = flag[i + 1 : -1].strip().lower()
+    inner_raw = flag[i + 1 : -1].strip()
+    inner = inner_raw.lower()
     if not inner:
         return True
     if inner in _PLACEHOLDER_INNERS:
@@ -416,6 +458,29 @@ def _is_placeholder_flag(flag: str) -> bool:
     # Only filler characters (dots, underscores, dashes, spaces)
     import re as _re
     if _re.fullmatch(r"[._\-\s…]+", inner):
+        return True
+    # printf format / metavariable markers
+    # Job 44dd25365173: chal's printf("Flag is: DH{%s}\n", ...) leaked
+    # into report.md verbatim → `DH{%s}` scanned as a flag. Any inner
+    # containing `%` (format) or `<...>` (metavariable) is template.
+    if "%" in inner_raw:
+        return True
+    if "<" in inner_raw and ">" in inner_raw:
+        return True
+    # Raw hex with hash-typical lengths. Real CTF flags almost never
+    # take the form DH{<64 raw hex chars>} — chal authors include words
+    # / phrases / a leading prefix. Bare hex of canonical hash widths
+    # (sha256=64, sha1=40, md5=32) is almost always a chal-internal
+    # representation quoted from source / decomp / the agent's
+    # crypto analysis, not a captured flag. Job 44dd25365173 leaked
+    # `DH{3cbdaf66...}` as the sha256 of an unknown input that the
+    # agent imagined while reading `sha256_hexdigest`. The bound is
+    # narrow on purpose: 64-char hex IDs (UUIDs aren't hex-only) are
+    # rare enough as legit flags that the false-negative risk is low,
+    # and operators can override via `extra_files` if a chal really
+    # ships a raw-hex flag.
+    import re as _re
+    if _re.fullmatch(r"[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", inner):
         return True
     return False
 
@@ -5714,8 +5779,12 @@ async def run_main_agent_session(
                 log_fn(f"[orchestrator] sandbox runner crashed: {e}")
                 return last_sandbox
 
-            # Did we capture a flag this turn?
-            flags_now = scan_job_for_flags(job_id)
+            # Did we capture a flag this turn? `last_sandbox` is the
+            # judge_aborted-aware sentinel; pass it so the orchestrator
+            # loop applies the same NARRATIVE-skip gate as the final
+            # analyzer scan (see scan_job_for_flags docstring + job
+            # 44dd25365173 incident).
+            flags_now = scan_job_for_flags(job_id, sandbox_result=last_sandbox)
             judge_out = ((last_sandbox or {}).get("judge") or {})
             verdict = judge_out.get("verdict")
             # Accumulate the just-emitted retry_hint so the NEXT

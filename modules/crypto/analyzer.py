@@ -238,7 +238,7 @@ def run_job(
 
         sandbox_result = agent_summary.pop("sandbox", None)
 
-        flags = scan_job_for_flags(job_id)
+        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
         agent_err = agent_summary.get("agent_error")
         agent_err_kind = agent_summary.get("agent_error_kind")
         if agent_err and not agent_summary.get("solver_present"):
