@@ -1488,6 +1488,60 @@ Bash gotchas:
     * For interactive binaries: pipe `</dev/null` and confirm the
       program EXITS instead of looping on its prompt; if it loops,
       send an explicit quit token in the input first.
+
+WebSearch / WebFetch — chal-specific knowledge lookup
+-----------------------------------------------------
+You DO have `WebSearch` and `WebFetch` (main does NOT — main delegates
+to you for web research). Use them ACTIVELY when the user prompt
+hints at a domain that benefits from public writeups:
+
+  WHEN to search (don't skip these — main can't recover from your
+  omission, it has no web access):
+    * Chal-specific FSOP / IO_FILE magic values for the detected
+      libc version (e.g. `_IO_2_1_stdout_._flags = 0xfbad1800` for
+      _IONBF bypass on glibc 2.27+, the specific layout for
+      _IO_wfile_jumps + __doallocate on 2.34+, House of Apple 2
+      variants for 2.34/2.37/2.39). The pre-recon prompt block
+      "FSOP-AS-LEAK TABLE" lists canonical magic — IF the table
+      doesn't cover the detected version, search.
+    * libc-version-specific tricks: tcache_key handling per version,
+      safe_linking xor, mp_.mmap_threshold adaptive policy edge
+      cases, malloc internal asserts that block specific attacks.
+    * Custom allocator wrappers (e.g. libsalloc, secure_malloc) —
+      ANY published writeup naming the exact wrapper symbols.
+    * Non-glibc malloc (musl, jemalloc, ptmalloc forks).
+    * Niche bug classes recognised by CVE / paper:
+      "Use after free in libxml2 xmlAddID", "OpenSSL CVE-…", etc.
+
+  HOW to search:
+    * One sharp query per call. Avoid generic broad searches like
+      "heap exploit glibc" — 90% noise.
+    * Format: `<libc-version> <bug-pattern> <chal-author-symbol>
+      writeup`. Examples:
+        "glibc 2.39 FSOP _IO_wfile_jumps writeup"
+        "house of apple 2 _IO_2_1_stdout_ _IONBF leak"
+        "libsalloc secure_malloc nextsize bypass CTF"
+        "main_arena bins[0] stdout corruption libc leak"
+    * Search ≤ 3 times per recon call. If 3 queries yield nothing
+      actionable, stop and summarize what you tried.
+
+  WHAT to report back to main (in your ≤2 KB reply):
+    * The exact magic / offset / sequence from the writeup, NOT a
+      summary of the writeup's reasoning. Main can derive reasoning;
+      it cannot derive a 0x-prefixed magic value.
+    * Cite the source URL (1 line) so main can /retry with manual
+      hint pointing at it if needed.
+    * If the writeup describes a step you THINK doesn't apply to the
+      target's exact glibc minor version (e.g. writeup is for 2.34
+      but target is 2.39), say so EXPLICITLY rather than copy-paste.
+
+  COST DISCIPLINE: each WebSearch costs the operator. Skip if:
+    * The pre-recon prompt's catalog (FSOP-AS-LEAK TABLE, RCE TARGET
+      TABLE) already has the answer for the detected libc version.
+    * The chal is a vanilla bug class with no version-specific
+      mitigations (plain BoF, ret2libc on 2.27, fmt-string).
+    * Main asked a binary-internals question (offsets, symbol names)
+      not a libc-trick question — those are local.
 """
 
 
@@ -2515,7 +2569,7 @@ PRE_RECON_CACHE_FILENAME = "pre_recon_reply.txt"
 # replies don't fill those, so feeding them to main would silently
 # bypass the new guardrails). Keep this as a short string; only the
 # equality check matters.
-PRE_RECON_CACHE_SCHEMA = "v6"
+PRE_RECON_CACHE_SCHEMA = "v7"
 _PRE_RECON_HEADER_PREFIX = "## pre_recon_cache_schema "
 
 
