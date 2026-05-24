@@ -232,7 +232,17 @@ WORKFLOW
      "rce_target": "<final goal — '__free_hook = system' / 'vtable hijack → one_gadget'>",
      "primitives": [
        {"id": "P1", "name": "<short>", "verified": true,
-        "verify_method": "<how empirical check was done>"},
+        "verify_method": "<how empirical check was done>",
+        "write_length_bytes": "<int or expression: max bytes a single
+                                triggering call writes. Default 8.
+                                Critical for AAW/AAR primitives — a
+                                cin>>name memcpy can write thousands
+                                of bytes per call, enabling a SINGLE
+                                OOB write to span main_arena→stdout
+                                (~0xa00-0xb00 on modern libc). NEVER
+                                write 8 by default when the source-
+                                level call accepts a length argument
+                                or reads an unbounded buffer.>"},
        {"id": "P2", "name": "<short>", "verified": false,
         "verify_method": "<the probe you ran>",
         "reason_failed": "<why probing said no>"}
@@ -246,6 +256,19 @@ WORKFLOW
      ]
    }
    ```
+   `write_length_bytes` HARD RULE: for any AAW primitive backed by a
+   call that takes a user-controllable length (memcpy, strcpy with
+   sized src, fread, read, cin>>name on basic_string, std::copy,
+   user-controlled custom allocators), state the MAX bytes per
+   trigger explicitly. Job 37b33d2a741b shipped with chain saying
+   "8-byte AAW to libc" → assumed 8-byte write, ignored that cin>>name
+   memcpy can write up to RSS-of-process bytes per call. Official
+   solver used a SINGLE 0xb00-byte write spanning main_arena to
+   _IO_2_1_stdout_ for a one-shot FSOP-leak. If you mark a length and
+   it turns out smaller than reality on retry, downgrade is cheap;
+   the costly mistake is the OTHER direction (default 8 hiding a
+   thousand-byte primitive).
+
    prejudge BLOCKS ship when:
    - any step's `uses_primitives` references a primitive with
      `verified: false` (chain depends on something probing said no to)

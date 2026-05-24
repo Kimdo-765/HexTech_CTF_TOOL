@@ -30,7 +30,7 @@ from modules._common import (
     write_meta,
 )
 from modules._runner import attempt_sandbox_run
-from modules.pwn.libc_targets import render_rce_table
+from modules.pwn.libc_targets import render_fsop_leak_table, render_rce_table
 from modules.pwn.prompts import SYSTEM_PROMPT, build_user_prompt, looks_heap_advanced
 from modules.settings_io import apply_to_env, get_setting
 
@@ -444,6 +444,90 @@ def _build_pre_recon_prompt(
         rce_table = render_rce_table(libc_version)
         if rce_table:
             parts.append(rce_table)
+        # Tier 2 fix (job 37b33d2a741b) — official solver used a
+        # crafted `_IO_2_1_stdout_._flags = 0xfbad1800` magic to leak
+        # libc EVEN under setvbuf(stdout, _IONBF). judge#1 incorrectly
+        # ruled this out as "_IONBF ⇒ no write_base trick". The
+        # FSOP-AS-LEAK catalog surfaces the magic + main_arena→stdout
+        # distance up front so pre-recon doesn't repeat the conservative
+        # ruling. Companion to RCE TARGET TABLE — this is the LEAK
+        # half of the FSOP toolchain.
+        fsop_leak_table = render_fsop_leak_table(libc_version)
+        if fsop_leak_table:
+            parts.append(fsop_leak_table)
+        # MMAP_THRESHOLD dynamic-adjustment trick. Job 37b33d2a741b's
+        # nextsize-NULL trap (large unsorted-bin chunk's fd_nextsize /
+        # bk_nextsize zeroed by free → reinterpreted std::string sees
+        # capacity=0 → operator= takes realloc path → free(libc) →
+        # abort) IS bypassable: glibc updates mp_.mmap_threshold on
+        # free of an mmap'd chunk, so allocating + freeing two large
+        # chunks (>= 0x20000) raises the threshold past the chunk
+        # size you actually want in unsorted bin. The next alloc of
+        # that "huge but now below threshold" size goes to brk and
+        # lands in unsorted bin WITHOUT the large-bin-sort path that
+        # zeroes nextsize. main on 37b33d2a741b mentioned smallbin
+        # tcache-fill workaround in passing but never tried this
+        # mmap_threshold trick; official solver uses it as the first
+        # 6 lines of the exploit.
+        parts.append(
+            "MMAP_THRESHOLD DYNAMIC-ADJUSTMENT TRICK (heap-pwn:\n"
+            "  nextsize-NULL trap bypass; glibc 2.27+)\n"
+            "  When a chunk in unsorted bin has size >= "
+            "MIN_LARGE_SIZE (= 0x420 on x86_64), free() zeroes "
+            "`fd_nextsize` / `bk_nextsize` at user_offsets 0x10..0x20.\n"
+            "  Any later reinterpretation of that chunk as a struct "
+            "with fields at those offsets (notably std::string's "
+            "`_M_capacity` at offset 0x10) reads 0 — capacity=0 then "
+            "triggers a realloc path on assignment, often free()-ing\n"
+            "  a libc-address pointer that was forged as `_M_p`. The\n"
+            "  resulting abort kills the chain.\n"
+            "\n"
+            "  BYPASS: glibc keeps `mp_.mmap_threshold` adaptive — on\n"
+            "  free of an mmap'd chunk, the policy may increase the\n"
+            "  threshold up to `DEFAULT_MMAP_THRESHOLD_MAX` (default "
+            "0x2000000 on 64-bit). After this bump, subsequent allocs\n"
+            "  of size N below the new threshold go to brk instead of\n"
+            "  mmap → they land in unsorted bin (when size >= "
+            "MIN_LARGE_SIZE) WITHOUT first being sorted into a large\n"
+            "  bin (no nextsize zeroing path on that branch).\n"
+            "\n"
+            "  Recipe (verified by official solver on glibc 2.39):\n"
+            "    1. alloc(0x20000); free  ← mmap chunk, then freed\n"
+            "    2. alloc(0x10);   free  ← unrelated, keeps state\n"
+            "    3. alloc(0x20000); free  ← raises mp_.mmap_threshold\n"
+            "    4. alloc(0x30000); free  ← bumps threshold further\n"
+            "    5. now allocate the target-size chunk (e.g. 0x790) —\n"
+            "       it goes to brk, lands in unsorted bin with "
+            "fd_nextsize/bk_nextsize NOT zeroed.\n"
+            "\n"
+            "  Try this BEFORE concluding 'capacity-NULL trap blocks\n"
+            "  AAW'. The smallbin-via-tcache-fill workaround is also\n"
+            "  viable but mmap_threshold trick is shorter and more\n"
+            "  reliable across libc versions."
+        )
+        # FSOP magic / leak-via-buffered-output writeup search hint
+        # for the recon subagent. Main is isolated from WebSearch
+        # (USE_ISOLATED_SUBAGENTS=1 by default) but recon is not. If
+        # the chal has stdout setvbuf-unbuffered + an OOB write that
+        # could reach _IO_2_1_stdout_, instruct recon to surface
+        # `0xfbad1800`-style magic from public writeups instead of
+        # forcing main to re-derive it from glibc source.
+        parts.append(
+            "RECON SEARCH HINT (for the recon subagent, not for main):\n"
+            "  If chal source calls `setvbuf(stdout, NULL, _IONBF, 0)`\n"
+            "  AND an OOB primitive can reach `_IO_2_1_stdout_`\n"
+            "  (typically via an unsorted-bin chunk's fd/bk = "
+            "main_arena.bins[0] = main_arena + 0x60), search for\n"
+            "  public FSOP-leak writeups using these terms:\n"
+            "    'FSOP leak _IONBF 0xfbad1800',\n"
+            "    'house of apple stdout leak unbuffered',\n"
+            "    'main_arena bins[0] stdout corruption libc leak'.\n"
+            "  Surface concrete `_flags` magic values + the\n"
+            "  per-version main_arena→stdout offset in the recon\n"
+            "  reply. Main agent cannot WebSearch directly\n"
+            "  (subagent isolation policy), so this offloading is the\n"
+            "  intended path for chal-specific FSOP knowledge."
+        )
     if custom_libs:
         # Chal author shipped non-standard .so files. THIS IS THE FIRST
         # PLACE TO LOOK for primitives — wrapper functions almost always

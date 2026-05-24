@@ -2515,7 +2515,7 @@ PRE_RECON_CACHE_FILENAME = "pre_recon_reply.txt"
 # replies don't fill those, so feeding them to main would silently
 # bypass the new guardrails). Keep this as a short string; only the
 # equality check matters.
-PRE_RECON_CACHE_SCHEMA = "v5"
+PRE_RECON_CACHE_SCHEMA = "v6"
 _PRE_RECON_HEADER_PREFIX = "## pre_recon_cache_schema "
 
 
