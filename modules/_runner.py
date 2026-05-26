@@ -34,6 +34,7 @@ from typing import Optional
 import docker
 
 from modules import _judge
+from modules._events import emit_event
 from modules.settings_io import get_setting
 
 RUNNER_IMAGE = "hextech_ctf_tool-runner"
@@ -582,6 +583,12 @@ def attempt_sandbox_run(
                     "raw": "",
                     "error": str(e),
                 }
+            emit_event(
+                job_id, "prejudge", "result",
+                ok=bool(prejudge.get("ok")) if prejudge else None,
+                severity=(prejudge or {}).get("severity"),
+                issues=len((prejudge or {}).get("issues") or []),
+            )
             if prejudge and not prejudge.get("ok") and prejudge.get("severity") == "high":
                 log_fn(
                     f"[runner] prejudge BLOCKED ship: severity=high, "
@@ -589,6 +596,11 @@ def attempt_sandbox_run(
                     f"sandbox NOT spawned (operator should /retry "
                     f"onto a different chain). Top issues: "
                     f"{(prejudge.get('issues') or [])[:2]}"
+                )
+                emit_event(
+                    job_id, "prejudge", "blocked",
+                    severity="high",
+                    issues=len(prejudge.get("issues") or []),
                 )
                 return {
                     "error": "prejudge_blocked",
@@ -626,6 +638,11 @@ def attempt_sandbox_run(
             f"(target={target}, sage={use_sage}, judge={enable_judge}, "
             f"timeout={per_job_timeout}s) ..."
         )
+        emit_event(
+            job_id, "run", "start",
+            script=script_filename, target=target,
+            timeout_s=per_job_timeout,
+        )
         try:
             res = run_in_sandbox(
                 job_id, script_filename, args=args, use_sage=use_sage,
@@ -634,11 +651,20 @@ def attempt_sandbox_run(
             )
         except Exception as e:
             log_fn(f"[runner] failed to spawn sandbox: {e}")
+            emit_event(job_id, "run", "spawn_failed", error=str(e))
             return {"error": str(e), "prejudge": prejudge}
 
         log_fn(
             f"[runner] exit_code={res['exit_code']}; "
             f"stdout {len(res['stdout'])}B / stderr {len(res['stderr'])}B"
+        )
+        emit_event(
+            job_id, "run", "exit",
+            exit_code=res.get("exit_code"),
+            stdout_bytes=len(res.get("stdout") or ""),
+            stderr_bytes=len(res.get("stderr") or ""),
+            timeout=bool(res.get("timeout")),
+            killed_by_supervise=bool(res.get("killed_by_supervise")),
         )
 
         # Write logs to job dir (unchanged contract for downstream tools).
@@ -695,6 +721,12 @@ def attempt_sandbox_run(
                     "error": str(e),
                 }
             res["judge"] = post
+            emit_event(
+                job_id, "postjudge", "verdict",
+                verdict=post.get("verdict"),
+                next_action=post.get("next_action"),
+                failure_code=post.get("failure_code"),
+            )
         if prejudge is not None:
             res["prejudge"] = prejudge
         return res

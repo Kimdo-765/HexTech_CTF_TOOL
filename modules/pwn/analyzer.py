@@ -29,6 +29,7 @@ from modules._common import (
     soft_timeout_watchdog,
     write_meta,
 )
+from modules._events import emit_event
 from modules._runner import attempt_sandbox_run
 from modules.pwn.libc_targets import render_fsop_leak_table, render_rce_table
 from modules.pwn.prompts import SYSTEM_PROMPT, build_user_prompt, looks_heap_advanced
@@ -1493,8 +1494,11 @@ def run_job(
                    error_kind=agent_err_kind,
                    exploit_present=agent_summary.get("exploit_present", False),
                    decomp_used=agent_summary.get("decomp_used", False))
+        emit_event(job_id, "terminal", "status", status=final_status,
+                   flags=len(flags), cost_usd=cost)
         return result
     except Exception as e:
         log_line(job_id, f"ERROR: {e}\n{traceback.format_exc()}")
         write_meta(job_id, status="failed", error=str(e))
+        emit_event(job_id, "terminal", "status", status="failed", error=str(e))
         raise
