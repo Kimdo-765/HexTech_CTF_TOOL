@@ -200,6 +200,7 @@ async def _run_agent(
                 ["solver.py", "solver.sage", "report.md",
                  "findings.json", "WHY_STOPPED.md"],
                 fallback_dirs=fallback_dirs,
+                log_fn=lambda s: log_line(job_id, s),
             )
             for name in ("solver.py", "solver.sage", "report.md"):
                 if name not in found and (jd / name).is_file():

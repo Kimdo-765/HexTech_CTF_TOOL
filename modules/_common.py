@@ -171,11 +171,24 @@ def read_meta(job_id: str) -> dict[str, Any]:
         return {}
 
 
+# Subdirectory names that `collect_outputs(..., deep_search=True)` will
+# NOT descend into during its recovery scan. These are autoboot- or
+# chal-author-owned trees; finding `report.md` inside them is almost
+# always the chal's own README, not the main agent's analysis. Keep this
+# narrow on purpose — over-skipping makes the recovery scan useless.
+_COLLECT_DEEP_SEARCH_SKIP = frozenset({
+    "chal", "bin", "tmp", ".chal-libs", ".scratch", ".claude",
+    "__pycache__", "decomp", "src",
+})
+
+
 def collect_outputs(
     work_dir: Path,
     names: list[str],
     *,
     fallback_dirs: list[Path] | None = None,
+    deep_search: bool = True,
+    log_fn=None,
 ) -> dict[str, Path]:
     """Find each requested filename. Looks in work_dir first, then falls
     back to /root/ (the agent's HOME — sometimes the agent ignores cwd
@@ -191,6 +204,17 @@ def collect_outputs(
     the most-recent mtime wins (carry-copy preserves the original
     mtime via copy2/copytree, so any post-carry rewrite in the prior
     dir naturally registers as newer).
+
+    `deep_search=True` (default) adds a final recovery scan across
+    `work_dir`'s subtree for any name that the direct + fallback
+    lookup couldn't find. The scan skips autoboot-owned dirs (see
+    `_COLLECT_DEEP_SEARCH_SKIP`) so we don't pick up the chal
+    author's own README.md as the agent's analysis. Concrete
+    incident 2026-05-25 (job bfce7f3e0c11): `report.md` +
+    `chain.json` were written but landed somewhere other than
+    work_dir root (cwd-confusion via a `cd ./chal/deploy/app && cat
+    > ./report.md` heredoc); orchestrator collected only
+    exploit.py, ship phase had nothing to summarize from.
 
     Returns a dict {name: actual_path} for files that were located.
     """
@@ -213,7 +237,64 @@ def collect_outputs(
                 best_mtime = mt
         if best is not None:
             found[name] = best
+
+    if deep_search:
+        missing = [n for n in names if n not in found]
+        if missing and work_dir.is_dir():
+            for name in missing:
+                hit = _deep_search_for(work_dir, name)
+                if hit is not None:
+                    found[name] = hit
+                    if log_fn is not None:
+                        try:
+                            log_fn(
+                                f"[collect] recovered {name!r} from "
+                                f"unexpected path "
+                                f"{hit.relative_to(work_dir)} — main "
+                                f"wrote to a cwd-shifted subdir; "
+                                f"orchestrator using this copy"
+                            )
+                        except Exception:
+                            pass
     return found
+
+
+def _deep_search_for(work_dir: Path, name: str) -> Path | None:
+    """Return the newest `name` under `work_dir`'s subtree, skipping
+    `_COLLECT_DEEP_SEARCH_SKIP` directories. Returns None when none
+    exist.
+    """
+    best: Path | None = None
+    best_mtime: float = -1.0
+    try:
+        for entry in work_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            if entry.name in _COLLECT_DEEP_SEARCH_SKIP:
+                continue
+            try:
+                matches = list(entry.rglob(name))
+            except OSError:
+                continue
+            for m in matches:
+                # Re-filter rglob results — they descend past our
+                # top-level skip set (a `chal/inner/decomp/report.md`
+                # is still excluded because `chal` is the entry, but
+                # if the agent created `weird_dir/chal/report.md`
+                # we'd hit it. Filter by checking ancestors.)
+                rel_parts = m.relative_to(work_dir).parts
+                if any(p in _COLLECT_DEEP_SEARCH_SKIP for p in rel_parts[:-1]):
+                    continue
+                try:
+                    mt = m.stat().st_mtime
+                except OSError:
+                    continue
+                if mt > best_mtime:
+                    best = m
+                    best_mtime = mt
+    except OSError:
+        return None
+    return best
 
 
 def extract_flags_from_text(text: str, liberal: bool = False) -> list[str]:
@@ -822,6 +903,24 @@ your cwd). Write every temporary file there or under cwd directly.
 NEVER write to /tmp/<filename> with a hardcoded absolute path, never
 pass dir='/tmp' to tempfile.*, and never `cd /tmp`. Concurrent jobs
 share the worker's /tmp; only $TMPDIR keeps them apart.
+
+PATH DISCIPLINE — your cwd starts at /data/jobs/$JOB_ID/work/, but
+the Bash tool's cwd PERSISTS across calls. After ANY `cd <subdir>`
+in one Bash call, every subsequent Bash call inherits that subdir
+as cwd. Long sessions (50+ tool calls) routinely lose track of this.
+TWO RULES that eliminate the entire class of bug:
+  1. Chain in one call: `cd /data/jobs/$JOB_ID/work/chal/deploy/app
+     && python3 server.py &` — the `cd` only affects THIS call's
+     subshell, the next Bash starts wherever you last `cd`-d to.
+     If you don't chain, the next call still runs in that subdir.
+  2. For files YOU produce (exploit.py / report.md / chain.json /
+     findings.json / THREAT_MODEL.md): always use the Write tool
+     with bare names like `exploit.py`, NEVER a Bash heredoc
+     (`cat > ./report.md << EOF ... EOF`). The Write tool ignores
+     Bash-cd state and always writes relative to the SDK's starting
+     cwd (the work tree root); Bash heredocs follow bash cwd and
+     will silently land your output in a `cd`-shifted subdir where
+     the orchestrator's `collect_outputs` won't find it.
 
 """
 
@@ -4848,6 +4947,19 @@ def _format_postjudge_user_turn(
     return (
         f"🔁 AUTO-RETRY {attempt_idx}/{cap_str} — postjudge feedback\n"
         f"\n"
+        f"⚠️ THE SANDBOX RUN HAS ALREADY COMPLETED. This message IS the "
+        f"postjudge verdict — do NOT respond with 'awaiting sandbox' "
+        f"or 'I'll stop the loop here / reschedule'. The orchestrator "
+        f"is in the auto-retry loop NOW. Either (a) modify "
+        f"./{script_filename} per the retry hint and end your turn so "
+        f"the orchestrator can re-execute it, or (b) explicitly "
+        f"`Bash(rm -f ./{script_filename})` if you're giving up. "
+        f"Doing neither — returning without an edit — makes the "
+        f"orchestrator re-run the SAME unchanged script for a "
+        f"guaranteed-fail second sandbox spin (wasted ~$2-5 of "
+        f"cache_creation). The detection added 2026-05-25 will "
+        f"actually halt that case mid-flight, so just respond and edit.\n"
+        f"\n"
         f"The orchestrator just executed `{script_filename}` in the runner "
         f"sandbox. Result:\n"
         f"  · exit_code: {exit_code}\n"
@@ -4996,6 +5108,9 @@ _STOP_KIND_HEADERS = {
     "budget_exhausted": "Auto-retry budget exhausted",
     "no_hint": "Postjudge produced no actionable retry hint",
     "agent_error": "Main agent session error",
+    "retry_hint_ignored": (
+        "Main ignored postjudge retry_hint — script unchanged"
+    ),
 }
 
 
@@ -5502,6 +5617,71 @@ def validate_findings(work_dir: Path) -> list[str]:
     return issues
 
 
+# Heap-allocation needles used by `_chal_source_has_heap_ops` to gate
+# SCAFFOLD_NUDGE. Kept narrow on purpose — TOCTOU race / format-string /
+# syscall-only pwn chals routinely score `heap_advanced=True` via the
+# work-tree classifier (custom .so + glibc 2.31) yet have zero heap
+# operations in source, in which case the heap scaffolds don't apply
+# and the nudge is pure noise. Adding more keywords (e.g. `chunk`,
+# `bin`) would over-trigger on disassembly artifacts.
+_HEAP_OP_NEEDLES = (
+    b"malloc(", b"calloc(", b"realloc(", b"free(",
+    b"tcache", b"fastbin", b"smallbin", b"largebin",
+    b"unsorted_chunks", b"main_arena",
+    b"_int_malloc", b"_int_free",
+)
+
+
+def _chal_source_has_heap_ops(
+    work_dir: Path,
+    *,
+    max_files: int = 40,
+    max_bytes: int = 50_000,
+) -> bool:
+    """Quick grep across `chal/` + `decomp*/` for heap-allocation
+    operations. Returns True when in doubt — caller treats False as a
+    strong signal to suppress SCAFFOLD_NUDGE.
+
+    Looks at .c / .cpp / .cc / .h / .hpp / .py in `chal/` (operator-
+    supplied source) and .c in any `decomp*/` directory (Ghidra
+    output). Reads the first `max_bytes` of each file and gives up
+    after `max_files` candidates. The cap exists because a glibc
+    source mirror would otherwise hit every needle trivially —
+    we want the OPERATOR's chal source, not transitive deps.
+
+    Concrete incident 2026-05-25 (job bfce7f3e0c11): uniqdb chal is
+    a TOCTOU race on plain .bss globals (no malloc/free anywhere).
+    SCAFFOLD_NUDGE fired anyway because `heap_advanced=True` came
+    from the custom-libuniqdb-detection branch of the classifier,
+    not from actual heap usage. Main had to spend ~30 seconds
+    writing a "Why no /opt/scaffold/ used" section to dispel it.
+    """
+    candidates: list[Path] = []
+    chal_dir = work_dir / "chal"
+    if chal_dir.is_dir():
+        for ext in ("*.c", "*.cpp", "*.cc", "*.h", "*.hpp", "*.py"):
+            try:
+                candidates.extend(chal_dir.rglob(ext))
+            except OSError:
+                pass
+    for d in work_dir.glob("decomp*"):
+        if d.is_dir():
+            try:
+                candidates.extend(d.rglob("*.c"))
+            except OSError:
+                pass
+    if not candidates:
+        return True  # no chal source visible -> don't suppress
+    for p in candidates[:max_files]:
+        try:
+            data = p.read_bytes()[:max_bytes]
+        except OSError:
+            continue
+        if any(n in data for n in _HEAP_OP_NEEDLES):
+            return True
+    return False
+
+
 async def run_main_agent_session(
     job_id: str,
     *,
@@ -5643,6 +5823,24 @@ async def run_main_agent_session(
         if scaffold_in_use:
             scaffold_nudge_fired["value"] = True  # never nudge if already in use
             return
+        # Chal-aware gate: heap_advanced=True can flag a chal as heap
+        # just because it has a custom .so + glibc 2.31 — that branch
+        # of the classifier fires even on TOCTOU races / format
+        # strings / syscall-only pwn where /opt/scaffold/ heap
+        # templates don't apply. Confirmed regression 2026-05-25
+        # (job bfce7f3e0c11): uniqdb's `arr[0x800000]` aliases the
+        # `top` int via .bss, no allocator anywhere. Suppress the
+        # nudge when chal source has no heap-op needles. See
+        # `_chal_source_has_heap_ops` for what counts.
+        if not _chal_source_has_heap_ops(work_dir):
+            scaffold_nudge_fired["value"] = True  # one-shot suppress
+            log_fn(
+                f"SCAFFOLD_NUDGE: SKIPPED at {tool_calls} tool calls — "
+                f"heap_advanced=True but chal source has no "
+                f"malloc/free/tcache/fastbin patterns (likely non-menu "
+                f"pwn: TOCTOU race / FSOP-only / format-string)."
+            )
+            return
         scaffold_nudge_fired["value"] = True
         scaffold_nudge_pending["value"] = True
         log_fn(
@@ -5658,6 +5856,33 @@ async def run_main_agent_session(
     # session — the second failure is hard.
     final_draft_pending = {"value": False}
     final_draft_used = {"value": False}
+
+    # SHA of the script we last fed into a sandbox run. After injecting
+    # postjudge retry feedback we capture the script's SHA; on the next
+    # auto-run iteration we compare against the CURRENT SHA — if main
+    # returned a ResultMessage without modifying the script, the next
+    # sandbox would re-execute identical bytes and prejudge would
+    # ship-block (or postjudge would emit the same retry_hint) at the
+    # cost of another $2-5 of cache_creation. Halt instead.
+    # Concrete incident 2026-05-25 (job bfce7f3e0c11): main responded
+    # "I'll stop the loop here rather than reschedule" to the retry
+    # inject WITHOUT editing exploit.py; orchestrator re-ran the
+    # unchanged script → flag_likelihood=0.12 ship-block → job ended
+    # ~2 minutes later than it should have.
+    script_sha_at_last_inject: dict = {"sha": None, "script": None}
+    # judge_out gets populated in the post-sandbox block (line ~6054).
+    # Pre-initialize so the SHA-unchanged ship gate can reference it
+    # safely when it fires before the first sandbox run completes
+    # (attempt > 0 guards against that path anyway, but the static
+    # analyzer doesn't know that).
+    judge_out: dict = {}
+
+    def _script_sha(p: Path) -> str | None:
+        try:
+            import hashlib
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            return None
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(initial_prompt)
@@ -5834,6 +6059,48 @@ async def run_main_agent_session(
                 # Main produced nothing this round — no script to run.
                 return last_sandbox
 
+            # SHA-unchanged ship gate: if we're on a post-retry iteration
+            # and main returned without modifying the script we just fed
+            # back retry_hint about, the re-run is a guaranteed-fail
+            # repeat. Halt instead of burning another sandbox cycle.
+            if (
+                attempt > 0
+                and script_sha_at_last_inject["sha"] is not None
+                and script_sha_at_last_inject["script"] == picked
+            ):
+                current_sha = _script_sha(work_dir / picked)
+                if (
+                    current_sha is not None
+                    and current_sha == script_sha_at_last_inject["sha"]
+                ):
+                    log_fn(
+                        f"[orchestrator] {picked} unchanged after "
+                        f"retry_hint inject (attempt {attempt}/"
+                        f"{cap_str}) — main returned without applying "
+                        f"the fix. Skipping guaranteed-fail re-run; "
+                        f"halting auto-retry loop."
+                    )
+                    summary["judge_stop_reason"] = (
+                        f"main ignored retry_hint — {picked} unchanged "
+                        f"after postjudge feedback"
+                    )
+                    write_meta(
+                        job_id,
+                        judge_next_action="stop",
+                        judge_stop_reason=summary["judge_stop_reason"],
+                    )
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="retry_hint_ignored",
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out=judge_out,
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
+                    return last_sandbox
+
             # `attempt_sandbox_run` looks at <jobdir>/<artifact>, but the
             # analyzer's full carry block doesn't run until its `finally`
             # (i.e. AFTER this helper returns). Before sandbox_runner gets
@@ -5998,6 +6265,11 @@ async def run_main_agent_session(
                 f"turn (attempt {attempt}/{max_retries}, verdict={verdict})"
             )
             await client.query(feedback)
+            # Capture script SHA so the next iteration can detect
+            # "main returned without applying the fix" and skip the
+            # guaranteed-fail re-run (see SHA-unchanged ship gate above).
+            script_sha_at_last_inject["sha"] = _script_sha(work_dir / picked)
+            script_sha_at_last_inject["script"] = picked
             # loop continues; receive_response on next iteration
 
     # unreachable; kept for type-checkers

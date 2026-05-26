@@ -207,6 +207,7 @@ async def _run_agent(
                 work_dir,
                 ["exploit.py", "report.md", "findings.json", "WHY_STOPPED.md"],
                 fallback_dirs=fallback_dirs,
+                log_fn=lambda s: log_line(job_id, s),
             )
             if "exploit.py" not in found and (jd / "exploit.py").is_file():
                 found["exploit.py"] = jd / "exploit.py"

@@ -1171,54 +1171,120 @@ async def _run_agent(
             # marking them mandatory. One automated respawn with an
             # explicit "you missed these" message is cheaper than a
             # downstream main session re-deriving the same facts.
-            if heap_kw and recon_reply:
+            if heap_kw and recon_reply is not None:
                 missing = _missing_pre_recon_sections(
                     recon_reply, _HEAP_MANDATORY_SECTIONS,
                 )
-                if missing:
-                    log_line(
-                        job_id,
-                        f"[pre-recon] reply missing mandatory sections: "
-                        f"{missing} — respawning ONCE with explicit "
-                        f"reminder (4 jobs in a row had this gap)"
-                    )
+                # Degraded-reply detector. Two distinct failure modes get
+                # collapsed here:
+                #   (a) text exists but mandatory section titles absent
+                #       (= model truncation / forgot prompt structure)
+                #   (b) reply suspiciously short (< 300 chars) — usually
+                #       means the recon SDK call hit a transient API
+                #       error (529 Overloaded / rate-limit) BEFORE
+                #       producing useful output. run_pre_recon swallows
+                #       these and returns the partial.
+                # Either is enough to trigger a retry; we don't gate the
+                # backoff on (a) vs (b).
+                _MIN_USEFUL_LEN = 300
+                degraded = (
+                    bool(missing)
+                    or len((recon_reply or "").strip()) < _MIN_USEFUL_LEN
+                )
+                if degraded:
+                    # Robust respawn — up to 4 attempts with exponential
+                    # backoff. Concrete incident 2026-05-25 (job
+                    # bfce7f3e0c11): respawn-ONCE hit 529 Overloaded
+                    # immediately ($0.0048, 0 useful text), and the
+                    # downstream main session got only 139 chars of
+                    # recon → burned ~30 turns on self-grounding. 529s
+                    # typically clear within 30-60s, so a short backoff
+                    # ladder recovers most of them. The bracket
+                    # (5/15/30/60s) keeps total worst-case spend under
+                    # ~2 minutes of wall time.
+                    MAX_RESPAWN = 4
+                    BACKOFF_S = (5, 15, 30, 60)
                     respawn_prompt = (
                         recon_question
-                        + "\n\n=== RESPAWN — PRIOR REPLY OMITTED REQUIRED "
-                        "SECTIONS ===\n"
-                        "Your previous reply did NOT contain the following "
-                        "section titles, which are MANDATORY for "
-                        "heap-advanced chals:\n"
-                        + "\n".join(f"  - {s}" for s in missing) + "\n"
-                        "Include each section as a literal heading; "
+                        + "\n\n=== RESPAWN — PRIOR REPLY DEGRADED ===\n"
+                        + (
+                            "Your previous reply did NOT contain the "
+                            "following MANDATORY section titles:\n"
+                            + "\n".join(f"  - {s}" for s in missing) + "\n"
+                            if missing else
+                            "Your previous reply was too short to be "
+                            "useful (likely a transient API error). "
+                            "Re-emit the full recon report.\n"
+                        )
+                        + "Include each section as a literal heading; "
                         "body may be 'N/A — <one-line reason>' when "
                         "genuinely not applicable, but the title MUST "
                         "appear so the main agent's downstream logic can "
                         "detect it. Re-emit the FULL recon report (not "
                         "just the missing sections)."
                     )
-                    recon_reply = await run_pre_recon(
-                        job_id=job_id,
-                        work_dir=work_dir,
-                        model=model,
-                        prompt=respawn_prompt,
-                        log_fn=lambda s: log_line(job_id, s),
-                    )
-                    still_missing = _missing_pre_recon_sections(
-                        recon_reply, _HEAP_MANDATORY_SECTIONS,
-                    )
-                    if still_missing:
+                    succeeded = False
+                    for attempt in range(MAX_RESPAWN):
+                        if attempt > 0:
+                            delay = BACKOFF_S[min(attempt - 1, len(BACKOFF_S) - 1)]
+                            log_line(
+                                job_id,
+                                f"[pre-recon] backoff {delay}s before "
+                                f"respawn attempt {attempt + 1}/"
+                                f"{MAX_RESPAWN}"
+                            )
+                            await asyncio.sleep(delay)
                         log_line(
                             job_id,
-                            f"[pre-recon] respawn STILL missing "
-                            f"{still_missing} — accepting partial reply "
-                            f"(operator may need to /retry with hint)"
+                            f"[pre-recon] respawn attempt "
+                            f"{attempt + 1}/{MAX_RESPAWN} "
+                            f"(missing={missing or 'N/A'}, "
+                            f"len={len((recon_reply or '').strip())})"
                         )
-                    else:
+                        candidate = await run_pre_recon(
+                            job_id=job_id,
+                            work_dir=work_dir,
+                            model=model,
+                            prompt=respawn_prompt,
+                            log_fn=lambda s: log_line(job_id, s),
+                        )
+                        cand_missing = _missing_pre_recon_sections(
+                            candidate, _HEAP_MANDATORY_SECTIONS,
+                        )
+                        cand_len = len((candidate or "").strip())
+                        cand_degraded = (
+                            bool(cand_missing) or cand_len < _MIN_USEFUL_LEN
+                        )
+                        if not cand_degraded:
+                            recon_reply = candidate
+                            log_line(
+                                job_id,
+                                f"[pre-recon] respawn {attempt + 1} "
+                                f"succeeded ({cand_len} chars, all "
+                                f"mandatory sections present)"
+                            )
+                            succeeded = True
+                            break
+                        # Keep the longest non-empty candidate as a
+                        # fallback — sometimes attempt 3 is shorter
+                        # than attempt 1 because of throttling.
+                        if cand_len > len((recon_reply or "").strip()):
+                            recon_reply = candidate
+                            missing = cand_missing
                         log_line(
                             job_id,
-                            "[pre-recon] respawn succeeded — all "
-                            "mandatory sections present"
+                            f"[pre-recon] respawn {attempt + 1} still "
+                            f"degraded (missing={cand_missing}, "
+                            f"len={cand_len}) — retrying"
+                        )
+                    if not succeeded:
+                        log_line(
+                            job_id,
+                            f"[pre-recon] respawn EXHAUSTED after "
+                            f"{MAX_RESPAWN} attempts — accepting best "
+                            f"partial reply ({len((recon_reply or '').strip())} "
+                            f"chars). Main starts with degraded recon "
+                            f"— operator may need to /retry with hint."
                         )
             store_pre_recon_cache(
                 work_dir, recon_reply, lambda s: log_line(job_id, s),
@@ -1351,6 +1417,7 @@ async def _run_agent(
                 ["exploit.py", "report.md", "findings.json",
                  "THREAT_MODEL.md", "WHY_STOPPED.md"],
                 fallback_dirs=fallback_dirs,
+                log_fn=lambda s: log_line(job_id, s),
             )
             summary["exploit_present"] = "exploit.py" in found
             summary["report_present"] = "report.md" in found

@@ -202,6 +202,7 @@ async def _run_agent(
                 work_dir,
                 ["solver.py", "report.md", "findings.json", "WHY_STOPPED.md"],
                 fallback_dirs=fallback_dirs,
+                log_fn=lambda s: log_line(job_id, s),
             )
             summary["solver_present"] = "solver.py" in found
             summary["report_present"] = "report.md" in found

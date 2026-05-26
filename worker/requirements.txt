@@ -33,6 +33,19 @@ libheap==0.5
 requests==2.32.3
 beautifulsoup4==4.12.3
 lxml==5.3.0
+# Async HTTP for race-condition exploits. Concrete incident
+# 2026-05-25 (job bfce7f3e0c11): main agent burned ~4s on
+# `pip install aiohttp` mid-run because race-push TOCTOU chals
+# routinely need many concurrent in-flight requests with
+# barrier-synchronized sendall(); requests + threading isn't
+# tight enough. Pin matches the SDK transport.
+aiohttp==3.10.10
+# Local chal-server bring-up for "web-via-ctypes" mix chals
+# (Flask + custom .so). Saves another mid-run `pip install`
+# round-trip (~3s) every time the agent decides to reproduce
+# the server locally to test exploit timing.
+flask==2.2.2
+werkzeug==2.2.2
 # misc / forensic — image + binary inspection from Python
 Pillow==11.0.0
 python-magic==0.4.27
