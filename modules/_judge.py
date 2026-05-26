@@ -798,6 +798,101 @@ _VALID_HEAP_FAILURE_CODES = {
 }
 
 
+def _normalize_verdict(parsed: dict) -> dict:
+    """Single source of truth for the postjudge state machine.
+
+    Maps a raw (model-authored, possibly malformed) judgment JSON to the
+    normalized fields the orchestrator + retry pipeline rely on, enforcing
+    every invariant in ONE place (previously these were scattered across
+    three success-collapse sites in postjudge_run). See
+    docs/judge_state_machine.md for the transition table.
+
+    Invariants:
+      verdict      — model value if ∈ _VALID_VERDICTS, else 'unknown'.
+      next_action  — 'stop' iff verdict==success or model said 'stop';
+                     else 'continue' (the default when omitted).
+      stop_reason  — '' unless next_action=='stop'; auto 'flag captured'
+                     when success and model left it empty.
+      failure_code — model value if ∈ _VALID_HEAP_FAILURE_CODES, else None.
+      success-collapse — verdict==success forces the failure-side fields
+                     empty (retry_hint, failure_code, what_failed,
+                     alternative_paths, specific_diagnosis).
+    """
+    def _coerce_list(key: str, max_items: int, item_cap: int) -> list[str]:
+        raw_v = parsed.get(key)
+        if not isinstance(raw_v, list):
+            return []
+        out: list[str] = []
+        for item in raw_v[:max_items]:
+            if isinstance(item, str):
+                trimmed = item.strip()
+                if trimmed:
+                    out.append(trimmed[:item_cap])
+        return out
+
+    verdict = str(parsed.get("verdict") or "unknown").lower()
+    if verdict not in _VALID_VERDICTS:
+        verdict = "unknown"
+    is_success = verdict == "success"
+
+    summary = str(parsed.get("summary") or "")[:400]
+    retry_hint = "" if is_success else str(parsed.get("retry_hint") or "")[:1200]
+
+    # next_action — continue is the default when omitted (legacy / parse
+    # failure), so existing behavior is preserved. success auto-implies stop.
+    raw_next = parsed.get("next_action")
+    candidate_next = raw_next.strip().lower() if isinstance(raw_next, str) else ""
+    if is_success:
+        next_action = "stop"
+    elif candidate_next in ("continue", "stop"):
+        next_action = candidate_next
+    else:
+        next_action = "continue"
+
+    stop_reason = str(parsed.get("stop_reason") or "")[:400]
+    if next_action != "stop":
+        stop_reason = ""
+    elif is_success and not stop_reason:
+        stop_reason = "flag captured"
+
+    # Heap failure code is optional. Reject anything outside the known set
+    # so a model-typoed code can't leak into the prescriptive-hint lookup.
+    raw_code = parsed.get("failure_code")
+    failure_code: str | None = None
+    if isinstance(raw_code, str):
+        candidate = raw_code.strip().lower()
+        if candidate in _VALID_HEAP_FAILURE_CODES:
+            failure_code = candidate
+    if is_success:
+        failure_code = None
+
+    what_worked = _coerce_list("what_worked", max_items=3, item_cap=120)
+    what_failed = _coerce_list("what_failed", max_items=3, item_cap=120)
+    alternative_paths = _coerce_list("alternative_paths", max_items=3, item_cap=200)
+    raw_diag = parsed.get("specific_diagnosis")
+    specific_diagnosis = (
+        str(raw_diag).strip()[:400] if isinstance(raw_diag, str) else ""
+    )
+    if is_success:
+        # Success collapses these — nothing failed, nothing alternative.
+        what_failed = []
+        alternative_paths = []
+        specific_diagnosis = ""
+
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "retry_hint": retry_hint,
+        "next_action": next_action,
+        "stop_reason": stop_reason,
+        "failure_code": failure_code,
+        "what_worked": what_worked,
+        "what_failed": what_failed,
+        "specific_diagnosis": specific_diagnosis,
+        "alternative_paths": alternative_paths,
+    }
+
+
 def postjudge_run(
     jd: Path,
     script_rel: str,
@@ -832,77 +927,19 @@ def postjudge_run(
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
-    verdict = str(parsed.get("verdict") or "unknown").lower()
-    if verdict not in _VALID_VERDICTS:
-        verdict = "unknown"
-    summary = str(parsed.get("summary") or "")[:400]
-    retry_hint = str(parsed.get("retry_hint") or "")[:1200]
-    if verdict == "success":
-        retry_hint = ""
-
-    # next_action — judge's continue/stop decision. Defaults to
-    # continue when the model omitted it (legacy / parse failure)
-    # so existing behavior is preserved. success auto-implies stop.
-    raw_next = parsed.get("next_action")
-    if isinstance(raw_next, str):
-        candidate_next = raw_next.strip().lower()
-    else:
-        candidate_next = ""
-    if verdict == "success":
-        next_action = "stop"
-    elif candidate_next in ("continue", "stop"):
-        next_action = candidate_next
-    else:
-        next_action = "continue"
-
-    stop_reason = str(parsed.get("stop_reason") or "")[:400]
-    if next_action != "stop":
-        stop_reason = ""
-    elif verdict == "success" and not stop_reason:
-        stop_reason = "flag captured"
-    # On stop, the retry_hint is informational (operator-visible);
-    # the orchestrator won't feed it back to main but does surface
-    # it in run.log so a human /retry can read what judge thought.
-
-    # Heap failure code is optional. Reject anything outside the known
-    # set so a model-typoed code doesn't leak into the retry pipeline
-    # and confuse the prescriptive-hint lookup.
-    raw_code = parsed.get("failure_code")
-    failure_code: str | None = None
-    if isinstance(raw_code, str):
-        candidate = raw_code.strip().lower()
-        if candidate in _VALID_HEAP_FAILURE_CODES:
-            failure_code = candidate
-    if verdict == "success":
-        failure_code = None
-
-    # Structured fields (new — backwards compatible). Coerce to list of
-    # short strings; drop anything that doesn't fit so a malformed
-    # value can't leak into the retry-feedback formatter and crash it.
-    def _coerce_list(key: str, max_items: int, item_cap: int) -> list[str]:
-        raw_v = parsed.get(key)
-        if not isinstance(raw_v, list):
-            return []
-        out: list[str] = []
-        for item in raw_v[:max_items]:
-            if isinstance(item, str):
-                trimmed = item.strip()
-                if trimmed:
-                    out.append(trimmed[:item_cap])
-        return out
-
-    what_worked: list[str] = _coerce_list("what_worked", max_items=3, item_cap=120)
-    what_failed: list[str] = _coerce_list("what_failed", max_items=3, item_cap=120)
-    alternative_paths: list[str] = _coerce_list("alternative_paths", max_items=3, item_cap=200)
-    raw_diag = parsed.get("specific_diagnosis")
-    specific_diagnosis = (
-        str(raw_diag).strip()[:400] if isinstance(raw_diag, str) else ""
-    )
-    if verdict == "success":
-        # Success collapses these — nothing failed, nothing alternative.
-        what_failed = []
-        alternative_paths = []
-        specific_diagnosis = ""
+    # All verdict/next_action/stop_reason/failure_code + success-collapse
+    # invariants live in one place now. See docs/judge_state_machine.md.
+    norm = _normalize_verdict(parsed)
+    verdict = norm["verdict"]
+    summary = norm["summary"]
+    retry_hint = norm["retry_hint"]
+    next_action = norm["next_action"]
+    stop_reason = norm["stop_reason"]
+    failure_code = norm["failure_code"]
+    what_worked = norm["what_worked"]
+    what_failed = norm["what_failed"]
+    alternative_paths = norm["alternative_paths"]
+    specific_diagnosis = norm["specific_diagnosis"]
 
     log_fn(
         f"[judge] postjudge verdict={verdict} next_action={next_action} "
