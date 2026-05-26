@@ -4211,6 +4211,37 @@ async def run_main_agent_session(
                             # sandbox / postjudge / auto-retry path
                             # downstream pick up the fallback artifact.
                             break
+                        # SDK returned a ResultMessage with is_error=True
+                        # (e.g. transport "Request timed out" on a very long
+                        # single turn) and main produced no artifact. Same
+                        # end-state as the killed/timeout EXCEPTION path below,
+                        # but it arrives as a clean message — that handler
+                        # never sees it, so without this branch the job ends
+                        # no_flag with error=null and ZERO artifacts. Job
+                        # cbccac4e85fc (2026-05-26) lost ~100 min / $7.60 this
+                        # exact way (a 57-min turn timed out mid-synthesis).
+                        # Converge on the same salvage: make the failure
+                        # visible (error_kind) and keep a probe runnable.
+                        if (msg.is_error
+                                and not summary.get("agent_error")
+                                and not summary.get("fallback_artifact_used")):
+                            summary["agent_error"] = (
+                                "SDK ResultMessage is_error (transport "
+                                "failure / request timeout); no artifact"
+                            )
+                            summary["agent_error_kind"] = "agent_error"
+                            _snapshot_cost(summary, "RESULT_IS_ERROR")
+                            if not _pick_present_artifact(
+                                    work_dir, artifact_names):
+                                write_fallback_artifacts(work_dir, log_fn)
+                                summary["fallback_artifact_used"] = True
+                                log_fn(
+                                    "[orchestrator] ResultMessage is_error "
+                                    "with no artifact — wrote fallback so "
+                                    "sandbox still runs (job ends no_flag "
+                                    "with error_kind set, not a silent "
+                                    "zero-artifact run)"
+                                )
             except Exception as e:
                 msg_text = str(e)
                 kind = classify_agent_error(msg_text)
