@@ -715,7 +715,17 @@ def already_patched(binary: Path, staged_ld: Path, stage_dir: Path) -> bool:
 
 def patch_binary(binary: Path, staged_ld: Path, stage_dir: Path) -> None:
     _run(["patchelf", "--set-interpreter", str(staged_ld), str(binary)])
-    _run(["patchelf", "--set-rpath", str(stage_dir), str(binary)])
+    # --force-rpath writes DT_RPATH (searched for the binary's TRANSITIVE
+    # deps), not DT_RUNPATH (direct-NEEDED only). A C++ chal NEEDs libstdc++,
+    # which itself NEEDs libm/libgcc_s; under DT_RUNPATH those transitive deps
+    # resolve against the worker's SYSTEM libs (wrong glibc) → load crash
+    # ("libc.so.6: version GLIBC_2.36 not found, required by .../libm.so.6";
+    # jobs cbccac4e85fc + 1da4ac550c9f, deterministic). DT_RPATH makes
+    # stage_dir authoritative transitively. Falling back to system for libs
+    # genuinely absent from stage_dir is unchanged, so this can't regress.
+    # (Staging the full transitive .so closure is a separate fix — see memory
+    # long_turn_timeout_zero_artifact finding C.)
+    _run(["patchelf", "--force-rpath", "--set-rpath", str(stage_dir), str(binary)])
 
 
 def main() -> int:

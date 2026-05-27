@@ -1279,6 +1279,21 @@ async def run_report_phase(
         return False
     except Exception as e:
         log_fn(f"[report] phase crashed: {type(e).__name__}: {e}")
+        # Surface infra failures (e.g. bundled claude CLI dies exit 127 from a
+        # polluted worker glibc) so the job isn't a silent no_flag with
+        # error=null. Stamp a DISTINCT meta field (write_meta merges, so this
+        # survives run_job's final write which only touches error_kind/status).
+        kind = classify_agent_error(f"{type(e).__name__}: {e}")
+        if kind == "cli_infra_error":
+            log_fn(
+                "[report] INFRA: claude CLI spawn failed (likely worker glibc "
+                "pollution from in-run lib/ld manipulation) — this no_flag is "
+                "an infrastructure cascade, not a clean miss"
+            )
+            try:
+                write_meta(job_id, report_phase_error=f"{kind}: {str(e)[:200]}")
+            except Exception:
+                pass
         return False
 
     raw = accumulated.strip()
@@ -2608,6 +2623,17 @@ def classify_agent_error(message: str) -> str | None:
         return "auth"
     if "exit code -9" in low or "sigkill" in low or "killed by signal 9" in low:
         return "killed"
+    # Bundled `claude` CLI failed to start / died on spawn. exit 127 +
+    # "symbol lookup error" is the signature of the worker's glibc being
+    # polluted (e.g. the agent patchelf'd / ldconfig'd global libs while
+    # reproducing a remote env), so the CLI loads the wrong libc. This is
+    # an INFRA failure, not a chal failure — job 1da4ac550c9f cascaded
+    # judge/prejudge/postjudge/report this way while ending status=no_flag
+    # with error=null. (See memory agent_libpollution_breaks_worker_cli.)
+    if ("exit code 127" in low or "symbol lookup error" in low
+            or "cliconnectionerror" in low
+            or "cannot write to terminated process" in low):
+        return "cli_infra_error"
     return "unknown"
 
 
