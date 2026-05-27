@@ -283,6 +283,26 @@ def extract_from_image(image: str, binary: Path, stage_dir: Path) -> bool:
         "    echo \"[image] WARN: $libname not found in image\" 1>&2\n"
         "  fi\n"
         "done\n"
+        # Transitively close the dependency set: ldd each copied lib and pull
+        # any NEEDED not yet in /out. This is what grabs libstdc++'s OWN deps
+        # (libm.so.6, libgcc_s.so.1) that the direct-NEEDED list above misses —
+        # the gap that crashed C++ chals at load ("libc.so.6: version GLIBC_2.36
+        # not found, required by .../libm.so.6"; jobs cbccac4e85fc + 1da4ac550c9f
+        # + a03fab7a39c3). Resolved IN the chal image, against its own loader, so
+        # we get exactly what the remote runtime links. Fixed-point, small pass
+        # cap. ldd ships in any glibc image (libc-bin); on musl/distroless it
+        # no-ops and the direct-only behaviour is kept.
+        "for _pass in 1 2 3 4 5; do\n"
+        "  for f in /out/*.so /out/*.so.*; do\n"
+        "    [ -e \"$f\" ] || continue\n"
+        "    ldd \"$f\" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i==\"=>\" && substr($(i+1),1,1)==\"/\") print $(i+1)}' | while read dep; do\n"
+        "      bn=$(basename \"$dep\")\n"
+        "      if [ -e \"$dep\" ] && [ ! -e \"/out/$bn\" ]; then\n"
+        "        cp -L \"$dep\" \"/out/$bn\" 2>/dev/null && echo \"[image] transitive copied $bn  <-  $dep\" || true\n"
+        "      fi\n"
+        "    done\n"
+        "  done\n"
+        "done\n"
         f"for ld in {interp_csv}; do\n"
         "  if [ -e \"$ld\" ]; then\n"
         "    bn=$(basename \"$ld\")\n"
