@@ -4529,8 +4529,59 @@ async def run_main_agent_session(
                     )
                 return last_sandbox
 
-            # No retry hint? Nothing actionable to feed back.
+            # No retry hint? Nothing actionable to feed back — UNLESS prejudge
+            # BLOCKED ship (sandbox never ran → no postjudge verdict/hint, so
+            # this would dead-end). prejudge's own issues ARE the concrete fix
+            # ("use BL/CL not AL", "untestable — remote is the only test",
+            # "convert to leak-first"). Redirect them into a fix-and-retry turn
+            # so main gets one more shot to fix + re-ship, instead of stopping
+            # on a fixable near-miss. (Jobs bc2138675967 / 6b8b78b702b1 / 8244…
+            # 12f1ada49: prejudge/postjudge gave concrete fixes that became
+            # STOP signals.) Bounded by a hard cap, an anti-repeat signature
+            # (same block twice → stop), and the existing SHA-unchanged gate.
             retry_hint = (judge_out.get("retry_hint") or "").strip()
+            if not retry_hint and (last_sandbox or {}).get("error") == "prejudge_blocked":
+                _pj = (last_sandbox or {}).get("prejudge") or {}
+                _pj_issues = [
+                    str(i).strip() for i in (_pj.get("issues") or [])
+                    if str(i).strip()
+                ]
+                _pj_sig = " | ".join(sorted(_pj_issues))[:600]
+                _seen = summary.setdefault("prejudge_block_sigs", [])
+                _n = summary.setdefault("prejudge_block_redirects", 0)
+                if _pj_issues and _pj_sig and _pj_sig not in _seen and _n < 3:
+                    _seen.append(_pj_sig)
+                    summary["prejudge_block_redirects"] = _n + 1
+                    retry_hint = (
+                        "prejudge BLOCKED ship — the sandbox never ran. Fix "
+                        "THESE concrete issues and re-ship the SAME script "
+                        "(do NOT start over):\n- " + "\n- ".join(_pj_issues[:6])
+                        + "\n\nIf an issue says a primitive is 'untestable "
+                        "locally' (vsyscall / CET / kernel — the worker "
+                        "physically cannot test it), do NOT abandon it: the run "
+                        "is now allowed to probe the remote. Either keep it AND "
+                        "add a fallback that does not depend on the unverifiable "
+                        "feature, or convert to a leak-first design that reads "
+                        "ground truth from the target."
+                    )
+                    # Synthesize a judge dict so the existing inject path
+                    # (_format_postjudge_user_turn) carries this hint verbatim.
+                    last_sandbox["judge"] = {
+                        "verdict": "prejudge_blocked",
+                        "next_action": "continue",
+                        "retry_hint": retry_hint,
+                        "summary": "prejudge ship-block — fix the issues, re-ship",
+                    }
+                    log_fn(
+                        f"[orchestrator] prejudge BLOCKED — redirecting its "
+                        f"{len(_pj_issues)} issue(s) into a fix-and-retry turn "
+                        f"(redirect {_n + 1}/3) instead of dead-ending"
+                    )
+                else:
+                    log_fn(
+                        "[orchestrator] prejudge BLOCKED with no new actionable "
+                        "issues (repeat / cap reached) — stopping auto-retry"
+                    )
             if not retry_hint:
                 log_fn(
                     f"[orchestrator] postjudge produced no retry_hint "
