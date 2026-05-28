@@ -77,6 +77,33 @@ _STEP_REF_RE = re.compile(r"\bstep\s*(\d+)\b|\b(\d+)\b", re.IGNORECASE)
 # cycle. Observed on jobs 59ab9dfe2d2a / de15654c8f39 (rce_target:
 # "intended __free_hook = system overwrite, but no arbitrary-write
 # primitive is reachable…").
+# A primitive carries verified=false for two very different reasons:
+#   (a) TESTED-AND-FAILED — local probing said NO (known-broken). Ship-blocking.
+#   (b) UNTESTABLE-LOCALLY — the worker physically cannot test it (env limit:
+#       no vsyscall page, CET/SHSTK enforced by the WSL2 host kernel, no
+#       matching-kernel VM, no /dev/kvm). The REMOTE is then the ONLY test.
+# Blocking (b) dead-ends a chain that's only verifiable on the target AND
+# penalizes the agent's honesty in marking it unverified (had it lied
+# verified=true, the run would have proceeded). So (b) downgrades to a `med`
+# probe-allowed finding, not a `critical` ship-block. Detected from the
+# primitive's reason_failed / verify_method text. (Job bc2138675967, 2026-05-28:
+# vsyscall primitive marked "Untestable on worker ... confirmed by sandbox" got
+# CHAIN-INVALID-blocked, wasting the only available test — the remote.)
+_UNTESTABLE_LOCALLY_RE = re.compile(
+    r"untestable"
+    r"|cannot (?:be )?(?:test|verif)\w*\s+local|can.?t (?:be )?(?:test|verif)\w*\s+local"
+    r"|not (?:testable|verifiable) local"
+    r"|vsyscall\s*=?\s*none|no vsyscall|vsyscall (?:unmapped|not (?:present|mapped))"
+    r"|wsl2|host kernel|worker kernel|no /dev/kvm"
+    r"|(?:will (?:be|only)|to be|can only be) (?:confirmed|verified|tested)"
+    r"[\w\s]{0,20}?(?:by|on|via|against)\s+(?:the )?(?:sandbox|remote|deploy|target)"
+    r"|only (?:testable|verifiable|confirmable)\s+(?:on|against|at)\s+"
+    r"(?:the )?(?:remote|deploy|target|sandbox)"
+    r"|remote(?:[- ]only| is the only)",
+    re.IGNORECASE,
+)
+
+
 _RCE_TARGET_NEGATIVE = re.compile(
     r"\b(?:"
     r"no\s+(?:working|viable|known)\s+(?:chain|path|exploit)|"
@@ -260,15 +287,32 @@ def validate_chain(data: Any) -> list[tuple[str, str]]:
                     f"defined in primitives table",
                 ))
                 continue
-            # CRITICAL: step uses a primitive that probing said NO to
+            # step uses a primitive marked verified=false. Distinguish
+            # TESTED-AND-FAILED (ship-block) from UNTESTABLE-LOCALLY (env
+            # limit — the remote is the only test → allow as a probe).
             if p_by_id[pid].get("verified") is False:
-                issues.append((
-                    "critical",
-                    f"step {n} uses primitive {pid!r} but "
-                    f"primitive.verified=false — chain depends on "
-                    f"an empirically-blocked primitive; cannot fire "
-                    f"as written",
-                ))
+                _prim = p_by_id[pid]
+                _why = (
+                    f"{_prim.get('reason_failed') or ''} "
+                    f"{_prim.get('verify_method') or ''}"
+                )
+                if _UNTESTABLE_LOCALLY_RE.search(_why):
+                    issues.append((
+                        "med",
+                        f"step {n} uses primitive {pid!r} with "
+                        f"verified=false for an UNTESTABLE-LOCALLY reason "
+                        f"(worker env limit — no vsyscall/CET/kernel match; "
+                        f"the remote is the only test). Allowing the run as "
+                        f"a remote probe rather than ship-blocking.",
+                    ))
+                else:
+                    issues.append((
+                        "critical",
+                        f"step {n} uses primitive {pid!r} but "
+                        f"primitive.verified=false — chain depends on "
+                        f"an empirically-blocked primitive; cannot fire "
+                        f"as written",
+                    ))
         # every step needs an empirical verify
         if not (s.get("verify") or "").strip():
             issues.append((

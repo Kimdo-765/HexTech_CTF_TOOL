@@ -309,6 +309,21 @@ kernel behaviour either.
     gamble a full chain on a locally-derived offset. (Hardcoded offsets
     are acceptable ONLY when you can show the local env byte-matches the
     target: non-PIE / no-ASLR / verified-identical libc+ld+kernel.)
+  → USERSPACE fidelity: to derive/verify userspace addresses (libc base,
+    TLS slots, heap layout) faithfully, build + run the chal's OWN docker
+    (`docker build` its Dockerfile, `docker run`, connect over the socket)
+    — it gives the native ubuntu image's real ld/TLS/DSO layout, unlike
+    the patchelf'd ./prob. (docker.sock is mounted; HOST_DATA_DIR is set.)
+  → KERNEL fidelity is IMPOSSIBLE locally: a container shares the WSL2
+    host kernel (vsyscall absent, CET/SHSTK enforced), and there is no
+    /dev/kvm for a matching-kernel VM. So a vsyscall/CET-dependent step
+    CANNOT be validated here — the remote is the only test. In that case:
+    (a) record the primitive as verified=false with reason "untestable
+    locally — <why>; confirmed by sandbox/remote" (this is now ALLOWED to
+    ship as a remote probe, not blocked), AND (b) build a FALLBACK path
+    that does NOT depend on the unverifiable feature (e.g. a leak-first
+    libc-gadget syscall) so one of the two lands. Do not ship a single
+    unverifiable kernel assumption with no fallback.
 
 INVOCATION — the team uses an isolated subagent pattern. main calls
 the MCP tool `mcp__team__spawn_subagent(subagent_type, prompt)` which
