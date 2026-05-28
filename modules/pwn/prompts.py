@@ -291,6 +291,25 @@ constraints match the remote — gdb on the worker's system libc
 (currently glibc 2.41) would lie. Use the debugger when the answer
 depends on actual runtime state.
 
+ADDRESS TRANSFER (leak-first) — staging the chal libc fixes the
+VERSION, not the full runtime layout. The patchelf'd ./prob loads a
+different interpreter + RPATH than the native deploy container, and the
+worker's host kernel (WSL2, CET/SHSTK enforced) differs from the
+target's stock kernel — so any address that depends on RUNTIME LAYOUT
+(TLS slots like `fs:[X]`, libc-base-via-TLS, load-order deltas)
+frequently does NOT transfer to the remote EVEN on the same glibc, and a
+ROP chain the worker's CET blocks may run fine remotely. LOCAL SUCCESS
+DOES NOT PREDICT REMOTE SUCCESS for these — and note a docker sibling
+shares the worker's host kernel, so it can't reproduce the target's
+kernel behaviour either.
+  → So when your exploit needs a runtime address, design it LEAK-FIRST:
+    make your FIRST remote interaction exfiltrate the REAL value (e.g. a
+    stage-1 shellcode `write(1, &target, len)`), parse it, THEN send the
+    real chain in stage 2. The remote is your only ground truth — do not
+    gamble a full chain on a locally-derived offset. (Hardcoded offsets
+    are acceptable ONLY when you can show the local env byte-matches the
+    target: non-PIE / no-ASLR / verified-identical libc+ld+kernel.)
+
 INVOCATION — the team uses an isolated subagent pattern. main calls
 the MCP tool `mcp__team__spawn_subagent(subagent_type, prompt)` which
 launches the debugger in its OWN claude CLI subprocess. The subagent
