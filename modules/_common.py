@@ -3458,6 +3458,10 @@ _STOP_KIND_HEADERS = {
     "retry_hint_ignored": (
         "Main ignored postjudge retry_hint — script unchanged"
     ),
+    "unsolvable_by_analysis": (
+        "Conceded unsolvable — artifacts self-admit no working chain and "
+        "prejudge flag_likelihood≈0 (true-negative, not a fixable near-miss)"
+    ),
 }
 
 
@@ -3641,6 +3645,24 @@ def write_why_stopped(
                 "the runner sandbox sometimes differs from a local "
                 "shell (proxy, DNS, MTU).",
                 "3. **Check the target is alive**: `nc -vz <host> <port>`.",
+            ]
+        elif stop_kind == "unsolvable_by_analysis":
+            out += [
+                "The script's OWN artifacts (exploit / report.md) admit no "
+                "working RCE chain, and prejudge's calibrated "
+                "`flag_likelihood` was ≈0 — a confident TRUE-NEGATIVE, not a "
+                "fixable near-miss. The loop conceded instead of redirecting "
+                "an unsatisfiable \"fix the no-chain defect\" hint (which would "
+                "just re-derive the same dead end at full cost). Options:",
+                "",
+                "1. **Read `report.md` + `chain.json`** — any primitive marked "
+                "`verified=true` (e.g. a libc-base leak) is a REAL, reusable "
+                "result; the chal may be leak-only by construction.",
+                "2. **`/retry` with a manual hint ONLY** if you know a "
+                "primitive the agent demonstrably missed — a bare re-run will "
+                "reach the same true-negative.",
+                "3. **Confirm the remote is alive** (`nc -vz <host> <port>`) in "
+                "case the low likelihood was secondary to a dead target.",
             ]
         elif stop_kind == "agent_error":
             out += [
@@ -4629,6 +4651,69 @@ async def run_main_agent_session(
                 _pj_sig = " | ".join(sorted(_pj_issues))[:600]
                 _seen = summary.setdefault("prejudge_block_sigs", [])
                 _n = summary.setdefault("prejudge_block_redirects", 0)
+                # CONCEDE-UNSOLVABLE gate. A prejudge block is normally a
+                # FIXABLE near-miss worth a redirect. But when the script's OWN
+                # artifacts self-admit no working chain (Phase-9 self-defeat hit
+                # → "self-defeat in …" issue, emitted from a regex match on the
+                # real exploit/report — not LLM prose) AND prejudge's calibrated
+                # flag_likelihood is ≈0 (≤0.05), this is a confident
+                # TRUE-NEGATIVE: "fix the no-chain defect" is unsatisfiable, and
+                # redirecting just burns cost before the agent gives up anyway
+                # (job 520f593c4590: flag_likelihood=0.02 + "leak-only chain"
+                # self-defeat → 2 redirects + ~$30/3h → manual abort that
+                # destroyed a VERIFIED libc leak). Concede + stop with a
+                # structured verdict.
+                #
+                # Require _n >= 1 — i.e. concede only on the SECOND qualifying
+                # block, AFTER at least one redirect has already been spent.
+                # The first redirect is the safety net for a PREMATURE give-up
+                # (agent wrote "leak-only" but a fix the redirect surfaces does
+                # exist); historical redirect-saved jobs 6b8b78b702b1 /
+                # 824412f1ada49 relied on it. If the agent ships ANOTHER
+                # self-defeating fl≈0 script after being told to fix it, the
+                # true-negative is corroborated. This caps 520f at 1 redirect
+                # (down from 2 + manual abort) without the early-dead-end risk.
+                #
+                # EXCLUDE untestable-locally (vsyscall / CET / kernel): there
+                # the low likelihood is an ENV limit, not a dead chain, and
+                # remote-probe is legitimate — do NOT regress job bc2138675967.
+                _pj_fl = _pj.get("flag_likelihood")
+                try:
+                    _pj_fl = None if _pj_fl is None else float(_pj_fl)
+                except (TypeError, ValueError):
+                    _pj_fl = None
+                _self_defeat = any(
+                    s.lower().startswith("self-defeat in ") for s in _pj_issues
+                )
+                try:
+                    from modules.pwn import chain_schema as _cs
+                    _untestable = any(
+                        _cs._UNTESTABLE_LOCALLY_RE.search(s) for s in _pj_issues
+                    )
+                except Exception:
+                    # Safe fallback: if we can't classify, do NOT concede
+                    # (preserve the existing redirect behavior).
+                    _untestable = True
+                if (_pj_fl is not None and _pj_fl <= 0.05
+                        and _self_defeat and not _untestable and _n >= 1):
+                    summary["conceded_unsolvable"] = True
+                    log_fn(
+                        "[orchestrator] prejudge BLOCKED + flag_likelihood="
+                        f"{_pj_fl:.2f}≤0.05 + self-defeat after {_n} redirect(s) "
+                        "(artifacts still admit no working chain) — conceding "
+                        "unsolvable_by_analysis; stopping auto-retry"
+                    )
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="unsolvable_by_analysis",
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out=judge_out,
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
+                    return last_sandbox
                 if _pj_issues and _pj_sig and _pj_sig not in _seen and _n < 3:
                     _seen.append(_pj_sig)
                     summary["prejudge_block_redirects"] = _n + 1
