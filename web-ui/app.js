@@ -13,9 +13,14 @@ const CLAUDE_MODELS = [
   // The SDK accepts the `[1m]` suffix; claude-code auto-enables
   // the long-context beta. Verified 2026-05-24 under the worker's
   // current authenticated plan: Opus 4.7[1m] and Opus 4.1[1m] both
-  // work. Sonnet/Haiku [1m] respond with "Usage credits are
-  // required for long context requests" — billing-tier limited and
-  // intentionally not listed here.
+  // work. Opus 4.8[1m] added 2026-05-29 — confirmed available on
+  // the current plan (the Claude Code session driving this tool runs
+  // on claude-opus-4-8[1m]).
+  // Sonnet/Haiku [1m] respond with "Usage credits are required for
+  // long context requests" — billing-tier limited and intentionally
+  // not listed here.
+  "claude-opus-4-8",
+  "claude-opus-4-8[1m]",
   "claude-opus-4-7",
   "claude-opus-4-7[1m]",
   "claude-opus-4-1",
