@@ -37,6 +37,19 @@ FLAG_RE = re.compile(
 )
 LIBERAL_FLAG_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{1,16}\{[!-~]{2,200}\}")
 
+# Explicit flag declaration emitted by the exploit/solver itself.
+# The agent is instructed (CTF_PREAMBLE) to print `FLAG_CANDIDATE: <flag>`
+# on its own line to stdout once it has captured the flag from a genuine
+# run. This is the AUTHORITATIVE flag source: it carries no flag-format
+# assumption (works for DH{...}, FLAG{...}, raw-hex, or any prefix-less
+# format), so it sidesteps the FLAG_RE prefix list and the placeholder
+# heuristics entirely. MULTILINE so each printed line matches on its own;
+# the capture runs to end-of-line and is trimmed by the caller.
+_FLAG_MARKER_RE = re.compile(
+    r"FLAG[_-]?CANDIDATE\s*[:=]\s*([^\r\n]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 JOBS_DIR = DATA_DIR / "jobs"
 # Operator-curated exploit library; mounted into worker via the
@@ -401,9 +414,42 @@ def scan_job_for_flags(
             out.update(FLAG_RE.findall(text))
         return out
 
+    def _scan_markers(names) -> set[str]:
+        out: set[str] = set()
+        for name in names:
+            p = jd / name
+            if not p.is_file():
+                continue
+            try:
+                text = p.read_text(errors="replace")
+            except Exception:
+                continue
+            for raw in _FLAG_MARKER_RE.findall(text):
+                cand = raw.strip().strip("\"'`").strip()
+                if cand:
+                    out.add(cand)
+        return out
+
     trusted_set = list(_TRUSTED_FLAG_SOURCES)
     if extra_files:
         trusted_set.extend(extra_files)
+
+    # AUTHORITATIVE tier — an explicit `FLAG_CANDIDATE: <flag>` marker the
+    # exploit/solver printed on a genuine run (CTF_PREAMBLE instructs it).
+    # The agent is declaring "this exact string is the flag I captured", so
+    # we honor it verbatim regardless of flag format — no FLAG_RE prefix and
+    # no hash-width heuristic. Only the minimal placeholder guard applies
+    # (trusted=True): it drops `<...>` template echoes / your_flag_here while
+    # keeping real DH{<64 hex>} and bare prefix-less flags. Markers are read
+    # ONLY from the TRUSTED tier (actual run stdout/stderr), never narrative
+    # prose, so an agent quoting the marker convention in report.md can't
+    # forge a capture.
+    marker = {
+        c for c in _scan_markers(trusted_set)
+        if not _is_placeholder_flag(c, trusted=True)
+    }
+    if marker:
+        return sorted(marker)
 
     trusted = {
         f for f in _scan(trusted_set)
@@ -555,9 +601,16 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     still apply to trusted captures too.
     """
     i = flag.find("{")
-    if i < 0 or not flag.endswith("}"):
-        return False
-    inner_raw = flag[i + 1 : -1].strip()
+    if i >= 0 and flag.endswith("}"):
+        inner_raw = flag[i + 1 : -1].strip()
+    else:
+        # No CTF-style braces. Reached only via the FLAG_CANDIDATE marker
+        # path, where the declared flag may be raw-hex or prefix-less. Treat
+        # the whole string as the inner so the metavariable / placeholder-word
+        # guards below still catch a brace-less template echo (e.g. the agent
+        # printing `FLAG_CANDIDATE: <the flag>` without ever capturing). The
+        # FLAG_RE / narrative path never produces a brace-less match.
+        inner_raw = flag.strip()
     inner = inner_raw.lower()
     if not inner:
         return True

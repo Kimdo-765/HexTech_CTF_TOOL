@@ -367,6 +367,16 @@ TWO RULES that eliminate the entire class of bug:
      will silently land your output in a `cd`-shifted subdir where
      the orchestrator's `collect_outputs` won't find it.
 
+FLAG REPORTING — the moment your exploit/solver captures the flag from a
+genuine run, print it on its own dedicated stdout line in exactly this
+form: `FLAG_CANDIDATE: <the flag>`. This is how the framework records the
+flag, so it must come from the REAL run output (not a comment, not prose
+in report.md). It is format-agnostic — emit whatever you captured verbatim
+(DH{...}, FLAG{...}, raw hex, or any prefix-less string); do NOT reshape it
+to a flag template. If you never actually capture a flag, do NOT print the
+marker. For multi-stage chals, mark ONLY the final flag this way — keep
+intermediate subflags as ordinary prose.
+
 """
 
 _TOOLS_BASE = """\

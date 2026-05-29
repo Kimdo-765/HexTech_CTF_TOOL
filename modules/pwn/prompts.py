@@ -213,7 +213,10 @@ WORKFLOW
      runner cuts you mid-loop and postjudge sees a truncated EOF —
      the chain may be correct but you'll never know. Job aa86e561c88f
      burned a full retry cycle on this exact failure.
-   - Print the captured flag (or final response if pattern unknown).
+   - On capture, print the flag on its own line as
+     `FLAG_CANDIDATE: <flag>` (verbatim — this is how the framework
+     records it). Print the raw final response too if the pattern is
+     unknown.
 8. Write `./report.md`: mitigations / vuln (bug class + file:line) /
    strategy (offsets, gadgets) / glibc version used for offsets /
    one-line run command. Be specific — every downstream stage
@@ -822,7 +825,9 @@ per-stage timeouts (~10s):
      c. compute offset/gadget programmatically (NOT a hardcoded const)
      d. send payload, recv subflag
      e. loop until the final flag (e.g. DH{...}) appears
-4. Print every subflag + the final flag. The framework runs inside
+4. Print every subflag as ordinary prose, but emit ONLY the final
+   flag as `FLAG_CANDIDATE: <flag>` on its own line — the marker must
+   not be attached to intermediate subflags. The framework runs inside
    the runner sandbox; Claude does NOT participate per-stage.
 
 Constraints
