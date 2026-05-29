@@ -49,6 +49,14 @@ _FLAG_MARKER_RE = re.compile(
     r"FLAG[_-]?CANDIDATE\s*[:=]\s*([^\r\n]+)",
     re.IGNORECASE | re.MULTILINE,
 )
+# Some trusted sources (result.json from api/jobs.py:_manual_run, callbacks.jsonl)
+# embed the run's stdout as a JSON string, so the marker line's terminating
+# newline becomes a literal `\n` (two chars) and the rest of the JSON (`",`
+# the next key, ...) rides on the same PHYSICAL line. `[^\r\n]+` then over-
+# captures `DH{...}\n",` (real job a3d4d4484233). Cut the candidate at the
+# first literal escape sequence so we keep only the declared flag; raw
+# stdout (real newlines) has no such sequence, so this is a no-op there.
+_MARKER_ESCAPE_RE = re.compile(r"\\[nrtu\"\\]")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 JOBS_DIR = DATA_DIR / "jobs"
@@ -425,7 +433,8 @@ def scan_job_for_flags(
             except Exception:
                 continue
             for raw in _FLAG_MARKER_RE.findall(text):
-                cand = raw.strip().strip("\"'`").strip()
+                cand = _MARKER_ESCAPE_RE.split(raw.strip(), 1)[0]
+                cand = cand.strip().strip("\"'`").strip()
                 if cand:
                     out.add(cand)
         return out
