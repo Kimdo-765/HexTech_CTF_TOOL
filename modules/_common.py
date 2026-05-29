@@ -405,7 +405,10 @@ def scan_job_for_flags(
     if extra_files:
         trusted_set.extend(extra_files)
 
-    trusted = {f for f in _scan(trusted_set) if not _is_placeholder_flag(f)}
+    trusted = {
+        f for f in _scan(trusted_set)
+        if not _is_placeholder_flag(f, trusted=True)
+    }
     if trusted:
         return sorted(trusted)
 
@@ -537,10 +540,19 @@ _PLACEHOLDER_INNERS = {
 }
 
 
-def _is_placeholder_flag(flag: str) -> bool:
+def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     """True if `flag` is an obvious placeholder like FLAG{...} / DH{xxx} /
     CTF{your_flag_here} that just happened to match the FLAG_RE — it
     appears in reports and prompt templates but is not a real captured flag.
+
+    `trusted=True` marks the flag as coming from a genuine RUN artifact
+    (sandbox stdout/stderr / collector) rather than agent prose. For those
+    the over-broad hash-WIDTH heuristic (any `DH{<32|40|64 hex>}`) is
+    suppressed — a hex flag printed by a real run is a real flag, and
+    Dreamhack flags ARE literally `DH{<64 hex>}` (job a3d4d4484233 solved the
+    chal but was recorded no_flag because the real flag matched that rule).
+    The specific decoy markers (empty-input hashes, %s, <...>, your_flag…)
+    still apply to trusted captures too.
     """
     i = flag.find("{")
     if i < 0 or not flag.endswith("}"):
@@ -578,8 +590,14 @@ def _is_placeholder_flag(flag: str) -> bool:
     # rare enough as legit flags that the false-negative risk is low,
     # and operators can override via `extra_files` if a chal really
     # ships a raw-hex flag.
+    # Skip the hash-WIDTH heuristic for genuine run captures (trusted): a
+    # real run that prints DH{<64 hex>} captured the real flag, and Dreamhack
+    # flags take exactly that shape. The rule only guards NARRATIVE prose,
+    # where an agent-imagined sha256 (job 44dd25365173) can appear.
     import re as _re
-    if _re.fullmatch(r"[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", inner):
+    if not trusted and _re.fullmatch(
+        r"[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", inner
+    ):
         return True
     return False
 
