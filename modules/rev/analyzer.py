@@ -174,6 +174,7 @@ async def _run_agent(
             await run_report_phase(
                 job_id=job_id,
                 work_dir=work_dir,
+                model=model,  # report follows main's model (per-job)
                 log_fn=lambda s: log_line(job_id, s),
                 chal_name_hint=(binary_name or ""),
                 schema_text=REPORT_SCHEMA_REV,

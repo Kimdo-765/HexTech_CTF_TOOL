@@ -54,7 +54,11 @@ from claude_agent_sdk import (
     query,
 )
 
-from modules._common import LATEST_JUDGE_MODEL, build_judge_agents
+from modules._common import (
+    LATEST_JUDGE_MODEL,
+    build_judge_agents,
+    resolve_judge_model,
+)
 from modules.pwn import chain_schema
 
 
@@ -324,19 +328,26 @@ async def _run_judge_turn(
     *,
     cwd: Path,
     resume_sid: str | None,
+    model: str | None = None,
 ) -> tuple[str, str | None]:
     """Run a single judge turn (which may internally do multiple tool
     calls). Returns (final_text, captured_session_id).
 
+    `model` makes the judge (and its spawned recon) FOLLOW the job's main
+    model; when None it falls back to LATEST_JUDGE_MODEL. The same model is
+    used for the judge session AND build_judge_agents (judge-spawned recon),
+    so judge-recon tracks main too.
+
     Empty string + None on failure — judge errors are NEVER fatal.
     """
+    _jm = model or LATEST_JUDGE_MODEL
     options = ClaudeAgentOptions(
         system_prompt=None,  # judge AgentDefinition prompt is loaded by SDK
-        model=LATEST_JUDGE_MODEL,
+        model=_jm,
         cwd=str(cwd),
         allowed_tools=["Read", "Bash", "Glob", "Grep", "Agent"],
         permission_mode="bypassPermissions",
-        agents=build_judge_agents(LATEST_JUDGE_MODEL),
+        agents=build_judge_agents(_jm),
         resume=resume_sid,
         fork_session=False if resume_sid else None,
     )
@@ -598,7 +609,10 @@ def prejudge_script(
         script_path=script,
     )
     raw, sid = _run_async(
-        _run_judge_turn(user_prompt, cwd=jd, resume_sid=None)
+        _run_judge_turn(
+            user_prompt, cwd=jd, resume_sid=None,
+            model=resolve_judge_model(job_id),
+        )
     )
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
@@ -753,7 +767,10 @@ def supervise_run_once(
         stderr_tail=_truncate_tail(stderr_tail, max_bytes=4096) or "(empty)",
     )
     raw, sid = _run_async(
-        _run_judge_turn(user_prompt, cwd=jd, resume_sid=_recall_sid(job_id))
+        _run_judge_turn(
+            user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
+            model=resolve_judge_model(job_id),
+        )
     )
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
@@ -922,7 +939,10 @@ def postjudge_run(
         stderr_tail=err_t or "(empty)",
     )
     raw, sid = _run_async(
-        _run_judge_turn(user_prompt, cwd=jd, resume_sid=_recall_sid(job_id))
+        _run_judge_turn(
+            user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
+            model=resolve_judge_model(job_id),
+        )
     )
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)

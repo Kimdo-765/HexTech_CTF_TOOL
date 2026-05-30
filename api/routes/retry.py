@@ -35,7 +35,11 @@ from fastapi.responses import StreamingResponse
 
 from api.queue import get_queue, hard_timeout_for, resolve_timeout
 from api.storage import JOBS_DIR, job_dir, new_job_id, read_job_meta, write_job_meta
-from modules._common import LATEST_JUDGE_MODEL, classify_agent_error
+from modules._common import (
+    LATEST_JUDGE_MODEL,
+    classify_agent_error,
+    resolve_judge_model,
+)
 from modules.settings_io import apply_to_env, get_setting
 
 
@@ -210,12 +214,12 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     return "\n\n".join(parts)
 
 
-async def _ask_reviewer(context: str) -> str:
+async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
     when this raises.
     """
-    model = LATEST_REVIEWER_MODEL
+    model = model or LATEST_REVIEWER_MODEL
     work_dir = Path("/tmp")
     options = ClaudeAgentOptions(
         system_prompt=_REVIEWER_PROMPT,
@@ -258,7 +262,9 @@ async def _ask_reviewer(context: str) -> str:
     return hint
 
 
-async def _ask_reviewer_streaming(context: str) -> AsyncIterator[tuple[str, dict]]:
+async def _ask_reviewer_streaming(
+    context: str, *, model: str | None = None
+) -> AsyncIterator[tuple[str, dict]]:
     """Yield ('event_kind', payload) tuples while the reviewer runs.
 
     event_kind one of:
@@ -268,7 +274,7 @@ async def _ask_reviewer_streaming(context: str) -> AsyncIterator[tuple[str, dict
 
     On 'error' the caller MUST stop and NOT enqueue a new job.
     """
-    model = LATEST_REVIEWER_MODEL
+    model = model or LATEST_REVIEWER_MODEL
     work_dir = Path("/tmp")
     options = ClaudeAgentOptions(
         system_prompt=_REVIEWER_PROMPT,
@@ -738,7 +744,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
 
             yield sse("stage", {"name": "asking"})
             try:
-                async for kind, payload in _ask_reviewer_streaming(context):
+                async for kind, payload in _ask_reviewer_streaming(context, model=resolve_judge_model(job_id)):
                     if kind == "token":
                         yield sse("token", payload)
                     elif kind == "done":
@@ -815,7 +821,7 @@ async def retry_with_hint(job_id: str, request: Request):
         if not context.strip():
             raise HTTPException(status_code=400, detail="no context to review")
         try:
-            hint = await _ask_reviewer(context)
+            hint = await _ask_reviewer(context, model=resolve_judge_model(job_id))
         except ReviewerError as e:
             # 502 = upstream (Claude API) failure. The retry never reached
             # the queue, so the client knows nothing new was scheduled.
@@ -1164,7 +1170,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
 
             yield sse("stage", {"name": "asking"})
             try:
-                async for kind, payload in _ask_reviewer_streaming(context):
+                async for kind, payload in _ask_reviewer_streaming(context, model=resolve_judge_model(job_id)):
                     if kind == "token":
                         yield sse("token", payload)
                     elif kind == "done":

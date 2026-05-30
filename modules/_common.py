@@ -1234,7 +1234,7 @@ async def run_report_phase(
     log_fn,
     chal_name_hint: str = "",
     schema_text: str | None = None,
-    timeout_s: int = 90,
+    timeout_s: int = 300,
 ) -> bool:
     """Run the terminal REPORT phase: convert ./report.md + ./exploit.py +
     ./THREAT_MODEL.md (whichever exist) into a strict-schema findings.json.
@@ -1536,6 +1536,31 @@ def resolve_effort(meta_effort: str | None) -> str | None:
     if per_job is not None:
         return per_job
     return _norm(get_setting("claude_effort"))
+
+
+def resolve_judge_model(job_id: str | None) -> str:
+    """Resolve the model a NON-main phase (prejudge / supervise / postjudge /
+    judge-spawned recon / report / reviewer) should run on so it FOLLOWS the
+    job's main-agent model.
+
+    Mirrors the analyzers' resolution EXACTLY
+    (``model_override or get_setting("claude_model") or "claude-opus-4-7"``):
+    per-job ``meta.model`` wins, else the global ``claude_model`` Setting,
+    else the opus-4-7 default. Same order/literal as main, so these phases
+    track main for BOTH override jobs and default-model jobs — never diverging
+    (e.g. main on opus-4-8[1m] → judge on opus-4-8[1m] too). The legacy
+    LATEST_JUDGE_MODEL constant is kept only as an import-time fallback elsewhere.
+    """
+    from modules.settings_io import get_setting
+
+    if job_id:
+        m = (read_meta(job_id) or {}).get("model")
+        if m and str(m).strip():
+            return str(m).strip()
+    s = get_setting("claude_model")
+    if s and str(s).strip():
+        return str(s).strip()
+    return "claude-opus-4-7"
 
 
 def make_main_session_options(

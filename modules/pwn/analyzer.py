@@ -1383,6 +1383,7 @@ async def _run_agent(
             await run_report_phase(
                 job_id=job_id,
                 work_dir=work_dir,
+                model=model,  # report follows main's model (per-job)
                 log_fn=lambda s: log_line(job_id, s),
                 chal_name_hint=(effective_binary_name or binary_name or ""),
             )
