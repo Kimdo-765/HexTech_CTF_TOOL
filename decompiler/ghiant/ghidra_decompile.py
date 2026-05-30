@@ -26,7 +26,6 @@ Layout (binary at /job/bin/foo, project cache at /job/.ghidra_proj):
 """
 
 import argparse
-import shutil
 import subprocess
 import sys
 import tempfile

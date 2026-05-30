@@ -5,7 +5,6 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
 from api.storage import (
     extract_if_archive,
-    job_dir,
     new_job_id,
     save_upload,
     write_job_meta,

@@ -25,7 +25,6 @@
 #     "function_addr": "0x..." | null }
 
 import json
-import os
 
 
 def parse_address(text):

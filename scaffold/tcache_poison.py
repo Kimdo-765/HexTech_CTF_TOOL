@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 
 _DEFAULT_PROFILE_PATH = Path("./.chal-libs/libc_profile.json")

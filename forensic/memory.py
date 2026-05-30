@@ -5,7 +5,6 @@ Runs a curated plugin set per detected OS and writes per-plugin JSON.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable

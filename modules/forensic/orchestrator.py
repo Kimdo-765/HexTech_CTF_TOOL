@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import shutil
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +10,6 @@ import anyio
 import docker
 from claude_agent_sdk import (
     AssistantMessage,
-    SystemMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,

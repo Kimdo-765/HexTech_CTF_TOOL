@@ -41,7 +41,6 @@ def detect_kind(image: Path) -> str:
     """Return one of: qcow2, vmdk, vhd, vhdx, e01, raw_disk, memory, log."""
     out = subprocess.run(["file", "-b", str(image)], capture_output=True, text=True).stdout.lower()
     suffix = image.suffix.lower()
-    name_low = image.name.lower()
     if "qcow" in out:
         return "qcow2"
     if "vmware" in out or "vmdk" in out:

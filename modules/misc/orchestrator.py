@@ -10,7 +10,6 @@ import anyio
 import docker
 from claude_agent_sdk import (
     AssistantMessage,
-    SystemMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,

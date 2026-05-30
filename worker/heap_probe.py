@@ -41,7 +41,6 @@ GEF via /etc/gdb/gdbinit (autoloaded in the worker image).
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
