@@ -3555,6 +3555,7 @@ def write_why_stopped(
             f"**Reason class**: `{stop_kind}` — {header}",
             f"**Postjudge verdict**: `{verdict}`"
             + (f" (failure_code: `{failure_code}`)" if failure_code else ""),
+            f"**Judge next_action**: `{next_action}`",
             f"**Attempt**: {attempt_idx} / {cap_str}",
             f"**When**: {when}",
             "",
