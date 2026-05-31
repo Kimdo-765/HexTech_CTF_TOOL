@@ -112,6 +112,74 @@ def find_pair(root: Path) -> tuple[Path, Path] | None:
     return chal_libs_hit
 
 
+def _section_md5(elf: Path, section: str = ".text") -> str | None:
+    """md5 of a single ELF section (default `.text` = code). Two glibc builds
+    with identical data layout but different code have the same size/data
+    offsets yet a different `.text` — and thus different function / one_gadget
+    offsets. Returns None if objcopy is unavailable or the section is empty.
+    """
+    import hashlib
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile() as tf:
+            _run(["objcopy", "-O", "binary", f"--only-section={section}",
+                  str(elf), tf.name], check=True)
+            data = Path(tf.name).read_bytes()
+            return hashlib.md5(data).hexdigest() if data else None
+    except Exception:
+        return None
+
+
+def _prefer_deploy_libc(chosen: Path, root: Path) -> tuple[Path | None, str]:
+    """If a libc under a `deploy/` directory has a DIFFERENT build than the
+    `chosen` (staged) libc, return (deploy_libc, reason). The deploy libc is
+    what the remote actually runs, so its offsets are authoritative.
+
+    Bundles occasionally ship two glibc builds — e.g. `.chal-libs/libc.so.6`
+    (a generic copy) and `chal/deploy/libc-2.23.so` (the real deploy target)
+    — with the SAME version and size but a different `.text`. The pre-stage /
+    `find_pair` path can pick the wrong one, so leaks (data offsets) work but
+    one_gadget / function offsets are off and the REMOTE chain SIGSEGVs (job
+    8806b284d740: turn-1 partial `heap.libc_version_mismatch`). Prefer the
+    deploy build when its code diverges. Compares `.text` md5 when objcopy is
+    available, else falls back to whole-file md5. Returns (None, "") when no
+    divergent deploy libc exists.
+    """
+    import hashlib
+    chosen = Path(chosen)
+    chosen_text = _section_md5(chosen)
+    try:
+        chosen_file = hashlib.md5(chosen.read_bytes()).hexdigest()
+    except Exception:
+        chosen_file = None
+    for d, dirs, files in os.walk(root):
+        if "deploy" not in Path(d).name.lower():
+            continue
+        for n in sorted(files):
+            if not (n == "libc.so.6" or re.fullmatch(r"libc-[\d.]+\.so", n)):
+                continue
+            cand = Path(d) / n
+            try:
+                if cand.resolve() == chosen.resolve():
+                    continue
+            except Exception:
+                continue
+            cand_text = _section_md5(cand)
+            if chosen_text and cand_text:
+                if cand_text != chosen_text:
+                    return cand, (f".text {cand_text[:8]} (deploy {n}) != "
+                                  f"{chosen_text[:8]} (staged)")
+                continue  # same code — no divergence, keep looking
+            # objcopy unavailable for one side — fall back to whole-file md5
+            try:
+                if chosen_file and hashlib.md5(cand.read_bytes()).hexdigest() != chosen_file:
+                    return cand, (f"deploy {n} differs from staged libc.so.6 "
+                                  "(.text compare unavailable)")
+            except Exception:
+                continue
+    return None, ""
+
+
 def parse_dockerfile_from(root: Path) -> str | None:
     """Return the first non-`scratch` FROM image found in any Dockerfile
     under root (e.g. 'ubuntu:18.04', 'python:3.10-slim',
@@ -869,6 +937,43 @@ def main() -> int:
     else:
         stage, staged_libc, staged_ld = stage_libs(libc, ld, jobdir)
         print(f"[chal-libc-fix] staged at: {stage}", flush=True)
+
+    # PREFER-DEPLOY: if a `deploy/` libc is a different build than the one we
+    # staged, the binary loads `libc.so.6` by SONAME at runtime AND the profile
+    # below is built from `staged_libc` — so offsets would track the wrong
+    # build. Overwrite the staged SONAME with the deploy libc (same version)
+    # so runtime + libc_profile.json offsets match what the remote runs.
+    deploy_libc, why = _prefer_deploy_libc(staged_libc, search_root)
+    if deploy_libc is not None:
+        dver = detect_libc_version(deploy_libc)
+        if version and dver and dver != version:
+            print(
+                f"[chal-libc-fix] WARNING: deploy libc {deploy_libc} is glibc "
+                f"{dver} but the staged libc is {version} — NOT auto-switching "
+                f"(version mismatch needs review; verify which the remote runs). "
+                f"[{why}]",
+                flush=True,
+            )
+        else:
+            soname = stage / "libc.so.6"
+            try:
+                shutil.copy2(deploy_libc, soname)
+                staged_libc = soname
+                version = dver or version
+                print(
+                    f"[chal-libc-fix] WARNING: divergent glibc builds (same "
+                    f"version) — preferred the DEPLOY libc {deploy_libc} and "
+                    f"overwrote {soname}; runtime + libc_profile offsets now "
+                    f"match the remote. [{why}]",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[chal-libc-fix] WARNING: deploy-libc divergence detected "
+                    f"({why}) but re-staging failed: {e}. Compute one_gadget / "
+                    f"function offsets against {deploy_libc} manually.",
+                    flush=True,
+                )
 
     if already_patched(binary, staged_ld, stage):
         print(f"[chal-libc-fix] {binary} already patched; nothing to do", flush=True)
