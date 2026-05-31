@@ -49,7 +49,7 @@ const CLAUDE_MODELS = [
 // default (model-dependent). Higher effort means longer per-turn
 // thinking budget and (typically) higher per-call cost — pick "max"
 // for high-stakes synthesis turns and "low" for cheap probes.
-const CLAUDE_EFFORTS = ["low", "medium", "high", "max"];
+const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function fillModelSelects() {
   // Per-job selects: empty = "default from Settings"
@@ -445,7 +445,7 @@ async function loadSettings() {
     modelSel.value = ""; modelCustom.value = cur;
   }
   // Claude effort (mirrors model: empty = SDK default; otherwise one
-  // of low/medium/high/max). Stored under `claude_effort` in the
+  // of low/medium/high/xhigh/max). Stored under `claude_effort` in the
   // settings blob; per-job submissions inherit it when their own
   // effort dropdown is left blank.
   const effortSel = f.querySelector("[name=claude_effort]");

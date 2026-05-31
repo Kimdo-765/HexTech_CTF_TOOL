@@ -1511,7 +1511,7 @@ async def run_pre_recon(
     return out
 
 
-_VALID_EFFORTS_BACKEND = frozenset(("low", "medium", "high", "max"))
+_VALID_EFFORTS_BACKEND = frozenset(("low", "medium", "high", "xhigh", "max"))
 
 
 def resolve_effort(meta_effort: str | None) -> str | None:

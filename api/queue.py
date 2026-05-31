@@ -51,7 +51,7 @@ def hard_timeout_for(soft: int) -> int:
     return min(max(int(soft) * 4, 86400), _HARD_TIMEOUT_CEILING_S)
 
 
-_VALID_EFFORTS = frozenset(("low", "medium", "high", "max"))
+_VALID_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
 
 
 def normalize_effort(raw: str | None) -> str | None:
@@ -62,7 +62,7 @@ def normalize_effort(raw: str | None) -> str | None:
     SDK's accepted set is silently coerced to None as well; this
     keeps a typo from blocking the job submit and instead pushes
     the run onto the safe default. Accepted values mirror
-    ``ClaudeAgentOptions(effort=...)``: low / medium / high / max.
+    ``ClaudeAgentOptions(effort=...)``: low / medium / high / xhigh / max.
     """
     if raw is None:
         return None
