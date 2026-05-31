@@ -21,6 +21,11 @@ services:
       # whatever its model supports rather than getting truncated
       # at the SDK default. Override in .env if you want it lower.
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-999999}
+      # SDK 0.2.x connects MCP servers in the background by default (slow ones
+      # report status=pending until ready). Our in-process `team` spawn_subagent
+      # server must be live before turn 1, so restore the pre-0.2.82 synchronous
+      # connect. memory: sdk_bundled_cli_thinking_400.
+      MCP_CONNECTION_NONBLOCKING: "0"
     volumes:
       - ./data:/data
       - ./modules:/app/modules:ro
@@ -70,6 +75,10 @@ services:
       # (Sonnet/Opus ~64k) becomes the effective limit. Override in
       # .env to throttle if needed.
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-999999}
+      # Restore pre-0.2.82 synchronous MCP connect so the in-process `team`
+      # spawn_subagent server is ready before main's turn 1 (SDK 0.2.x defaults
+      # to background connect). memory: sdk_bundled_cli_thinking_400.
+      MCP_CONNECTION_NONBLOCKING: "0"
       # Trip-wire: at this many tool calls without an artifact, the
       # orchestrator FALLS BACK to a probe-only skeleton at exploit.py
       # so the sandbox + postjudge path still runs (job ends as

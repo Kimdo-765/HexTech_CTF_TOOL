@@ -44,11 +44,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     yara \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js (required by claude-agent-sdk to run the bundled `claude` CLI)
+# Node.js + the Claude Code CLI. PINNED to >=2.1.156 — the version that fixes
+# the deterministic opus-4-8 thinking-block API 400 (see the bundle-removal step
+# after pip install below, and memory sdk_bundled_cli_thinking_400). The SDK is
+# made to use THIS system CLI, not its own stale bundled copy.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g @anthropic-ai/claude-code
+ && npm install -g @anthropic-ai/claude-code@2.1.158
 
 # Docker CLI (so worker can spawn sibling containers via the mounted socket)
 RUN install -m 0755 -d /etc/apt/keyrings \
@@ -63,6 +66,17 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 
 COPY worker/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# claude-agent-sdk ships a BUNDLED `claude` CLI (claude_agent_sdk/_bundled/
+# claude) and its subprocess transport prefers it over $PATH. That bundle LAGS
+# the npm release — SDK 0.2.87 bundles CLI 2.1.150, which STILL hits the
+# deterministic API 400 "thinking/redacted_thinking blocks ... cannot be
+# modified" on opus-4-8 + extended thinking (fixed in CLI 2.1.156; proven via
+# resume A/B: 2.1.150->400, 2.1.158->ok). Delete the stale bundle so the SDK
+# falls through to the npm-installed system CLI pinned above (>=2.1.156).
+# Drop this once a published SDK bundles >=2.1.156. memory: sdk_bundled_cli_thinking_400.
+RUN find /usr -type f -path "*/claude_agent_sdk/_bundled/claude" -delete 2>/dev/null; \
+    echo "SDK bundled CLI removed; system CLI = $(command -v claude) / $(claude --version 2>&1)"
 
 # angr — installed in an isolated layer, no-deps from system pip so the
 # core requirements.txt resolver can't be blocked by angr's pinned
