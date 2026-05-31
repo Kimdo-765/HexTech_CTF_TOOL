@@ -1529,11 +1529,17 @@ async function renderJob(id, opts = {}) {
 
   let flagBlock = "";
   if (job.flags && job.flags.length) {
+    const multiFlags = job.flags.length > 1;
     const rows = job.flags.map((f, i) =>
       `<div class="flag-row">
          <code id="flag-${id}-${i}">${escapeHtml(f)}</code>
          <button class="copy-btn" data-flag="${escapeHtml(f)}">Copy</button>
+         <button class="flag-del-btn" data-job-id="${id}" data-flag-index="${i}" title="Delete this flag entry">🗑️ delete</button>
+         ${multiFlags ? `<button class="flag-keep-btn" data-job-id="${id}" data-flag-index="${i}" title="Delete every OTHER flag, keep only this one">📌 keep only this</button>` : ""}
        </div>`).join("");
+    const dummyHint = multiFlags
+      ? `<small class="flag-hint">여러 flag가 캡처됨 — dummy는 🗑️로 지우거나, 진짜 flag에서 📌 keep only this 를 누르세요.</small>`
+      : "";
     // Save-to-exploit-DB button. Only shown for terminal-success jobs
     // (the API also rejects no-flag jobs with 400). The button calls
     // POST /api/exploits/save with operator-supplied tags + notes.
@@ -1542,6 +1548,7 @@ async function renderJob(id, opts = {}) {
       : "";
     flagBlock = `<div class="flag-banner">
         <h4>🚩 Flag${job.flags.length > 1 ? "s" : ""} found ${saveBtn}</h4>
+        ${dummyHint}
         ${rows}
       </div>`;
   }
@@ -1809,6 +1816,52 @@ async function renderJob(id, opts = {}) {
       const orig = btn.textContent;
       btn.textContent = "✓ Copied"; btn.classList.add("copied");
       setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1500);
+    });
+  }
+
+  // Manual flag pruning. Challenges that pad stdout with flag-shaped noise
+  // leave meta.flags full of dummies — let the operator delete them (or keep
+  // only the real one). After the server prunes, re-render from fresh meta.
+  const _pruneFlags = async (jid, indices, btn, confirmMsg) => {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const res = await fetch(`${API}/jobs/${jid}/flags/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ indices }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(`flag delete failed: ${res.status} — ${data.detail || ""}`);
+        btn.disabled = false; btn.textContent = orig;
+        return;
+      }
+      await renderJob(jid);   // re-fetch + re-render with the pruned list
+    } catch (e) {
+      alert(`flag delete failed: ${e}`);
+      btn.disabled = false; btn.textContent = orig;
+    }
+  };
+
+  for (const btn of detail.querySelectorAll(".flag-del-btn")) {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.flagIndex, 10);
+      if (Number.isNaN(idx)) return;
+      _pruneFlags(btn.dataset.jobId, [idx], btn, null);
+    });
+  }
+
+  for (const btn of detail.querySelectorAll(".flag-keep-btn")) {
+    btn.addEventListener("click", () => {
+      const keep = parseInt(btn.dataset.flagIndex, 10);
+      const total = (job.flags || []).length;
+      if (Number.isNaN(keep) || total <= 1) return;
+      const others = [];
+      for (let i = 0; i < total; i++) if (i !== keep) others.push(i);
+      _pruneFlags(btn.dataset.jobId, others, btn,
+        `Delete the other ${others.length} flag(s) and keep only this one?`);
     });
   }
 

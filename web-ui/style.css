@@ -340,6 +340,18 @@ textarea, select {
 }
 .copy-btn:hover { background: #2ea043; }
 .copy-btn.copied { background: #0969da; }
+.flag-del-btn, .flag-keep-btn {
+  border: 0; padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer;
+  font-size: 0.8rem; white-space: nowrap; color: #fff;
+}
+.flag-del-btn { background: #6e2230; }
+.flag-del-btn:hover { background: #a4303f; }
+.flag-keep-btn { background: #1f3a5f; }
+.flag-keep-btn:hover { background: #2b5288; }
+.flag-del-btn:disabled, .flag-keep-btn:disabled { opacity: 0.5; cursor: default; }
+.flag-hint {
+  display: block; color: #8b949e; margin: 0.1rem 0 0.5rem; font-size: 0.8rem;
+}
 .refusal-banner {
   background: #3b1d12;
   border: 1px solid #b9491b;

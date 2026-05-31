@@ -289,6 +289,59 @@ def delete_job(job_id: str):
     return {"deleted": safe, "halt": halt_info}
 
 
+@router.post("/{job_id}/flags/delete")
+async def delete_job_flags(job_id: str, request: Request):
+    """Prune operator-selected entries from a job's captured ``flags``.
+
+    Some challenges pad stdout with flag-shaped noise (ASCII-art banners,
+    decoys) so the scanner stuffs ``meta.flags`` with dozens of dummies
+    around the one real flag (see job 8806b284d740). This lets the operator
+    delete the junk by index. Body::
+
+        {"indices": [<int>, ...]}   # positions in the CURRENT meta.flags
+
+    Returns the surviving flags. ``status`` is left untouched — the operator
+    is curating the captured list, not re-adjudicating success. Out-of-range
+    indices are ignored so a stale UI can't 500 the call.
+    """
+    safe = _validate_job_id(job_id)
+    meta = read_job_meta(safe)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    indices = body.get("indices")
+    if not isinstance(indices, list) or not all(isinstance(i, int) for i in indices):
+        raise HTTPException(status_code=400, detail="`indices` must be a list of integers")
+
+    flags = list(meta.get("flags") or [])
+    remove = {i for i in indices if 0 <= i < len(flags)}
+    new_flags = [f for j, f in enumerate(flags) if j not in remove]
+
+    if len(new_flags) != len(flags):
+        from modules._common import write_meta
+        write_meta(safe, flags=new_flags)
+        # Keep result.json in sync so a later download / result view does
+        # not resurrect the pruned entries.
+        try:
+            rp = JOBS_DIR / safe / "result.json"
+            if rp.exists():
+                rj = json.loads(rp.read_text())
+                if isinstance(rj, dict) and "flags" in rj:
+                    rj["flags"] = new_flags
+                    rp.write_text(json.dumps(rj, indent=2))
+        except Exception:
+            pass
+
+    return {
+        "flags": new_flags,
+        "removed": len(flags) - len(new_flags),
+        "status": meta.get("status"),
+    }
+
+
 @router.get("/{job_id}/log", response_class=PlainTextResponse)
 def get_job_log(job_id: str, tail: int | None = None):
     """Return run.log. With ?tail=N (bytes), returns at most the last N
