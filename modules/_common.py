@@ -58,6 +58,84 @@ _FLAG_MARKER_RE = re.compile(
 # stdout (real newlines) has no such sequence, so this is a no-op there.
 _MARKER_ESCAPE_RE = re.compile(r"\\[nrtu\"\\]")
 
+
+# ---------------------------------------------------------------------------
+# Bash kill-guard (PreToolUse hook)
+# ---------------------------------------------------------------------------
+# An agent cleaning up its own background test scripts with a broad process
+# kill can SIGTERM the job's own processes and abort the run:
+#   * `pkill -f <pat>` matches the FULL /proc/<pid>/cmdline. The SDK passes the
+#     system_prompt as `--system-prompt <prompt>`, so the agent's claude CLI
+#     cmdline contains the prompt text — `pkill -f "exploit.py"` is a fratricide
+#     (job fcc2e85c6a78 self-killed exactly this way → exit 143/SIGTERM mid-run).
+#   * `pkill`/`killall` of python/python3/node/claude/sh/... kills the RQ worker
+#     running THIS job (python), the agent's claude CLI, or the wrapping shell.
+# The prompt already warns against this (modules/_prompts.py PROCESS HYGIENE) but
+# the agent ignored it (fcc2), so this hook HARD-BLOCKS the dangerous forms while
+# leaving precise termination (kill <PID>, kill -- -<PGID>, `timeout`,
+# `pkill -9 -x <basename>`) free.
+_KILL_PROTECTED = ("python3", "python", "node", "claude", "rqworker", "rq",
+                   "bash", "zsh", "dash", "sh")
+_PKILL_FULL_RE = re.compile(r"\bpkill\b[^\n;&|]*?(?:\s-[a-zA-Z]*f|\s--full)\b", re.I)
+_PROTECTED_KILL_RE = re.compile(
+    r"\b(?:pkill|killall)\b[^\n;&|]*?\b(?:" + "|".join(_KILL_PROTECTED) + r")\b", re.I)
+_PGREP_FULL_RE = re.compile(r"\bpgrep\b[^\n;&|]*?(?:\s-[a-zA-Z]*f|\s--full)\b", re.I)
+
+_KILL_GUARD_MSG = (
+    "BLOCKED: this would kill the job's own processes and abort the run. "
+    "`pkill -f <pat>` matches the claude CLI / tool-shell /proc cmdline (the SDK "
+    "puts your system_prompt there), and killing python3/node/claude/sh kills the "
+    "RQ worker running THIS job — job fcc2e85c6a78 self-killed via "
+    "`pkill -f \"exploit.py\"` (exit 143). To stop YOUR OWN background script, "
+    "target it precisely instead:\n"
+    "  - by PID:           python3 driver.py & PID=$!; ... ; kill $PID\n"
+    "  - self-terminating: timeout 5 python3 driver.py\n"
+    "  - process group:    setsid python3 driver.py & kill -- -$!\n"
+    "  - COMM-exact (a COMPILED inferior, never python/node): pkill -9 -x <basename>"
+)
+
+
+def dangerous_kill_reason(command: str) -> str | None:
+    """Deny reason if `command` issues a process-kill broad enough to hit the
+    job's own claude CLI / RQ worker / shell; else None. Precise kills
+    (kill PID, kill -- -PGID, pkill -9 -x <non-protected comm>) return None."""
+    if not command:
+        return None
+    if _PKILL_FULL_RE.search(command) or _PROTECTED_KILL_RE.search(command):
+        return _KILL_GUARD_MSG
+    # `kill $(pgrep -f ...)` / `pgrep -f ... | xargs kill` — indirect self-kill.
+    if _PGREP_FULL_RE.search(command) and re.search(r"\b(?:kill|xargs)\b", command):
+        return _KILL_GUARD_MSG
+    return None
+
+
+async def _bash_kill_guard(input_data, tool_use_id, context):
+    """PreToolUse hook: deny self-killing Bash commands (see dangerous_kill_reason)."""
+    try:
+        if (input_data or {}).get("tool_name") != "Bash":
+            return {}
+        cmd = ((input_data.get("tool_input") or {}).get("command")) or ""
+        reason = dangerous_kill_reason(cmd)
+    except Exception:
+        return {}
+    if not reason:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def kill_guard_hooks():
+    """Hooks dict for ClaudeAgentOptions(hooks=...) that blocks self-killing
+    Bash commands on the agent owning the session (main + isolated subagents)."""
+    from claude_agent_sdk import HookMatcher
+    return {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bash_kill_guard])]}
+
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 JOBS_DIR = DATA_DIR / "jobs"
 # Operator-curated exploit library; mounted into worker via the
@@ -976,6 +1054,7 @@ def make_standalone_options(
         allowed_tools=tools,
         permission_mode="bypassPermissions",
         env=env,
+        hooks=kill_guard_hooks(),
     )
 
 
@@ -1681,6 +1760,7 @@ def make_main_session_options(
             fork_session=bool(resume_sid),
             mcp_servers={"team": mcp_server},
             effort=effort,
+            hooks=kill_guard_hooks(),
         )
         log_fn_local(
             "[orchestrator] subagent isolation: ON "
@@ -1701,6 +1781,7 @@ def make_main_session_options(
             fork_session=bool(resume_sid),
             agents=build_recon_agents(model),
             effort=effort,
+            hooks=kill_guard_hooks(),
         )
         log_fn_local(
             "[orchestrator] subagent isolation: OFF (legacy in-process)"
