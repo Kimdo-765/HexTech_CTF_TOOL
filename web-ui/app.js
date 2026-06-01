@@ -1084,9 +1084,10 @@ async function refreshJobs() {
     li.innerHTML = `<strong>${job.module}</strong> · ${escapeHtml(job.filename || "")}
       <span class="status ${job.status}">${job.status}</span>${flagPill}
       <button class="delete-btn">×</button>
-      <div style="font-size:0.75rem;color:#8b949e;">${job.id} ${cost}</div>`;
+      <div style="font-size:0.75rem;color:#8b949e;"><span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button> ${cost}</div>`;
     li.addEventListener("click", () => selectJob(job.id));
     li.querySelector(".delete-btn").addEventListener("click", (e) => deleteJob(job.id, e));
+    li.querySelector(".copy-jobid-btn").addEventListener("click", (e) => copyJobId(job.id, e));
     if (job.id === selectedJob) li.classList.add("selected");
     ul.appendChild(li);
   }
@@ -1554,7 +1555,7 @@ async function renderJob(id, opts = {}) {
   }
 
   detail.innerHTML = `
-    <h3>Job ${job.id}
+    <h3>Job <span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button>
       <span class="status ${job.status}">${job.status}</span>
       ${timingPill}
     </h3>
@@ -1802,6 +1803,10 @@ async function renderJob(id, opts = {}) {
     }
   }
 
+  for (const btn of detail.querySelectorAll(".copy-jobid-btn")) {
+    btn.addEventListener("click", (e) => copyJobId(btn.dataset.jobid, e));
+  }
+
   for (const btn of detail.querySelectorAll(".copy-btn")) {
     btn.addEventListener("click", async () => {
       const flag = btn.dataset.flag;
@@ -1917,6 +1922,30 @@ async function renderJob(id, opts = {}) {
     });
   }
   return job;
+}
+
+// Copy a job id to the clipboard. Used by the ⧉ button in both the job
+// list cards and the detail header. stopPropagation so clicking it inside a
+// list card does NOT also trigger the card's selectJob().
+async function copyJobId(id, ev) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  let ok = true;
+  try {
+    await navigator.clipboard.writeText(id);
+  } catch (_) {
+    try {
+      const tmp = document.createElement("textarea");
+      tmp.value = id; document.body.appendChild(tmp);
+      tmp.select(); document.execCommand("copy"); tmp.remove();
+    } catch (_) { ok = false; }
+  }
+  const btn = ev && ev.currentTarget;
+  if (btn) {
+    const orig = btn.textContent;
+    btn.textContent = ok ? "✓" : "✗";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1200);
+  }
 }
 
 function escapeHtml(s) {

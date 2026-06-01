@@ -340,6 +340,16 @@ textarea, select {
 }
 .copy-btn:hover { background: #2ea043; }
 .copy-btn.copied { background: #0969da; }
+/* Small inline "copy job id" button (⧉) next to a job id in list cards
+   and the detail header. Subtle until hovered. */
+.copy-jobid-btn {
+  background: transparent; border: 0; cursor: pointer; color: #8b949e;
+  font-size: 0.85em; padding: 0 0.25rem; margin-left: 0.15rem;
+  line-height: 1; vertical-align: baseline; border-radius: 3px;
+}
+.copy-jobid-btn:hover { color: #c9d1d9; background: #30363d; }
+.copy-jobid-btn.copied { color: #3fb950; }
+.jobid-text { user-select: all; }
 .flag-del-btn, .flag-keep-btn {
   border: 0; padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer;
   font-size: 0.8rem; white-space: nowrap; color: #fff;
