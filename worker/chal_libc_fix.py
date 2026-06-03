@@ -975,7 +975,27 @@ def main() -> int:
                     flush=True,
                 )
 
-    if already_patched(binary, staged_ld, stage):
+    # A shared object (.so) or statically-linked binary has no PT_INTERP, so
+    # `patchelf --set-interpreter` aborts with "cannot find section '.interp'".
+    # This is the NORMAL shape for Python/ctypes chals where the chal "binary"
+    # is the .so itself (e.g. libuniqdb.so), loaded by python via ctypes — not
+    # an exec'd ELF. Previously patch_binary()'s _run() would `sys.exit(2)`
+    # here, killing the run BEFORE emit_profile() and leaving no
+    # libc_profile.json — which autoboot then misreported as "musl/distroless
+    # → worker libc", even though the deploy libc had been staged fine (job
+    # 7b6b510a2183). Detect the no-interp case and skip ONLY the interpreter
+    # patch; the libc is staged and emit_profile() below still runs.
+    has_interp = bool(
+        _run(["patchelf", "--print-interpreter", str(binary)], check=False).strip()
+    )
+    if not has_interp:
+        print(
+            f"[chal-libc-fix] {binary.name} has no PT_INTERP (shared object or "
+            f"static) — skipping interpreter patch; staged libc + "
+            f"libc_profile.json still emitted.",
+            flush=True,
+        )
+    elif already_patched(binary, staged_ld, stage):
         print(f"[chal-libc-fix] {binary} already patched; nothing to do", flush=True)
     else:
         if args.keep_original:
