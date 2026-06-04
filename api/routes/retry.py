@@ -895,7 +895,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 return
 
         yield sse("stage", {"name": "submitting"})
-        augmented = _retry_preamble(safe, hint)
+        augmented = _retry_preamble(safe, hint, fresh=fresh_session)
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,
@@ -971,7 +971,7 @@ async def retry_with_hint(job_id: str, request: Request):
                 },
             ) from e
 
-    augmented = _retry_preamble(safe, hint)
+    augmented = _retry_preamble(safe, hint, fresh=fresh_session)
     new_id = _resubmit(
         prev_meta, augmented, jd,
         carry_work=True,
@@ -1015,7 +1015,7 @@ async def stop_and_resume(job_id: str, request: Request):
 
     prev_status = prev_meta.get("status")
     halt_info = _halt_source_job(safe, prev_meta) if prev_status in ("queued", "running") else None
-    augmented_hint = _resume_preamble(safe, manual_hint)
+    augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session)
 
     new_id = _resubmit(
         prev_meta, augmented_hint, jd,
@@ -1191,7 +1191,7 @@ _STALE_PATH_WARNING_TMPL = (
 )
 
 
-def _retry_preamble(prev_id: str, hint: str) -> str:
+def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
     """Preamble for the standard retry path (failed / no_flag /
     finished). The new agent is launched with `resume=<prev_session>` +
     `fork_session=True`, so its conversation already holds the prior
@@ -1203,7 +1203,39 @@ def _retry_preamble(prev_id: str, hint: str) -> str:
     history (`/data/jobs/<prev_id>/work/...`), edits the OLD job dir,
     and our `collect_outputs(work_dir, ...)` step picks up the
     untouched carry-copy in the NEW job dir.
+
+    `fresh=True` (operator picked "fresh context"): the conversation was
+    NOT forked, so there is NO prior reasoning/tool-history in context.
+    The preamble must say so explicitly — telling a context-less agent to
+    "continue from your conversation" (the forked wording) is a lie that
+    wastes turns hunting for history it doesn't have. Instead, frame the
+    carried ./work/ files + the hint as the sole starting point. The
+    stale-path warning still applies: the carried files were authored
+    under the OLD job's absolute paths, so the bare/relative-path rule
+    matters regardless of whether a transcript was forked.
     """
+    if fresh:
+        return (
+            _CTF_CONTEXT_HEADER
+            + f"\n[retry of job {prev_id} — FRESH CONTEXT, conversation NOT "
+            "forked]\n"
+            "You are starting with a CLEAN context. There is NO prior "
+            "conversation, reasoning, or tool history available to you — do "
+            "NOT look for it or assume you remember earlier turns. Everything "
+            "you have is: (1) the carried work tree in your cwd, and (2) the "
+            "hint below.\n"
+            + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
+            + "\n\nYour current working directory IS the new job's work tree. "
+            "The previous attempt's artifacts — exploit.py / solver.py / "
+            "report.md / findings.json / THREAT_MODEL.md / decomp/ / bin/ / "
+            "its scratch files — have been COPIED into your cwd at `./`. "
+            "START by reading the relevant ones (`ls -la`, then read "
+            "report.md / exploit.py / findings.json) so you reconstruct where "
+            "the prior attempt got to, THEN apply the hint below. Every "
+            "Write/Edit MUST use bare or `./`-relative paths per the rules "
+            "above.\n\n"
+            f"{_sanitize_hint(hint)}"
+        )
     return (
         _CTF_CONTEXT_HEADER
         + f"\n[retry of job {prev_id} — same Claude session forked]\n"
@@ -1223,7 +1255,7 @@ def _retry_preamble(prev_id: str, hint: str) -> str:
     )
 
 
-def _resume_preamble(prev_id: str, hint: str) -> str:
+def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
     """Preamble for stop-and-resume. Same fork semantics as retry, but
     the prior session was halted MID-RUN by the user — so the agent
     should treat the work as in-flight ("pick up where you left off")
@@ -1233,7 +1265,30 @@ def _resume_preamble(prev_id: str, hint: str) -> str:
     references `/data/jobs/<prev_id>/work/...`, but the new cwd is
     `/data/jobs/<new_id>/work/`. Without the explicit warning the
     agent edits the dead directory.
+
+    `fresh=True`: conversation NOT forked — see _retry_preamble. There is
+    no prior transcript to "continue from", so reconstruct state from the
+    carried ./work/ files + hint instead.
     """
+    if fresh:
+        return (
+            _CTF_CONTEXT_HEADER
+            + f"\n[resume of job {prev_id} — FRESH CONTEXT, conversation NOT "
+            "forked]\n"
+            "You are starting with a CLEAN context. There is NO prior "
+            "conversation, reasoning, or tool history available — do NOT look "
+            "for it. The prior run was halted mid-work; everything it had "
+            "written has been COPIED into your cwd at `./`.\n"
+            + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
+            + "\n\nYour current working directory IS the NEW job's work tree. "
+            "START by reading the in-progress artifacts (`ls -la`, then "
+            "report.md / exploit.py / solver.py / findings.json / "
+            "THREAT_MODEL.md) to reconstruct where the work stood, THEN "
+            "continue it in light of the guidance below — do not restart the "
+            "analysis from scratch. Every Write/Edit MUST use bare or "
+            "`./`-relative paths per the rules above.\n\n"
+            f"{_sanitize_hint(hint)}"
+        )
     return (
         _CTF_CONTEXT_HEADER
         + f"\n[resume of job {prev_id} — interrupted, same session forked]\n"
@@ -1332,7 +1387,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
         # 3) submit the new job with the same [RESUMING] preamble used
         #    by /resume + carry_work=True.
         yield sse("stage", {"name": "submitting"})
-        augmented = _resume_preamble(safe, hint)
+        augmented = _resume_preamble(safe, hint, fresh=fresh_session)
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,
