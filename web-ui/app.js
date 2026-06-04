@@ -812,6 +812,10 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   const body = {};
   if (isManual) body.hint = manualHint;
   if (targetOverride) body.target = targetOverride;
+  // fresh = start the retry WITHOUT forking the prior SDK conversation
+  // (carried files + hint only). Defends against retry-fork-chain context
+  // overflow ("Prompt is too long") on deep chains. Operator-selected.
+  if (opts.fresh) body.fresh = true;
   const fetchOpts = { method: "POST" };
   if (Object.keys(body).length) {
     fetchOpts.headers = { "Content-Type": "application/json" };
@@ -977,6 +981,8 @@ function openStopResumeForm(jobId, anchorBtn) {
       const reqBody = { hint };
       const t = targetIn.value.trim();
       if (t) reqBody.target = t;
+      const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
+      if (freshCb && freshCb.checked) reqBody.fresh = true;
       const res = await fetch(`${API}/jobs/${jobId}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1054,7 +1060,11 @@ function openManualHintForm(jobId, anchorBtn) {
       setTimeout(() => ta.classList.remove("invalid"), 600);
       return;
     }
-    streamRetry(jobId, submit, hint, { target: targetIn.value });
+    const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
+    streamRetry(jobId, submit, hint, {
+      target: targetIn.value,
+      fresh: !!(freshCb && freshCb.checked),
+    });
   });
   // Ctrl/Cmd+Enter shortcut
   for (const el of [ta, targetIn]) {
@@ -1475,8 +1485,18 @@ async function renderJob(id, opts = {}) {
     if (retryHtml) helperBits.push("reviewer hint = Claude diagnoses the failure · my hint = you write the hint yourself");
     if (stopResumeHtml) helperBits.push("stop & resume = halt this job, carry over ./work/, and start fresh with a reviewer-written or hand-written hint");
     if (targetHtml) helperBits.push("change target = update only meta.target_url; no retry, no resume");
+    // "Fresh context" toggle — applies to any retry/resume launched from this
+    // panel. When checked, the new job carries ./work/ + the hint but does NOT
+    // fork the prior SDK conversation, so a deep retry chain can't accumulate
+    // context until "Prompt is too long". id is job-scoped so each card is
+    // independent.
+    const freshToggleHtml = (showRetry || showStopResume)
+      ? `<label class="fresh-toggle" title="Start the retry with a clean Claude context (carry ./work/ + hint, but do NOT fork the prior conversation). Use on deep retry chains that hit 'Prompt is too long'.">
+           <input type="checkbox" class="fresh-ctx-cb" id="fresh-ctx-${job.id}"> fresh context (no conversation fork)
+         </label>` : "";
     runBlock = `<div class="retry-row" style="margin:0.5rem 0">
       ${runHtml} ${targetHtml} ${retryHtml} ${stopResumeHtml}
+      ${freshToggleHtml}
       <small style="color:#8b949e">${helperBits.join(" · ")}</small>
     </div>`;
   }
@@ -1638,6 +1658,11 @@ async function renderJob(id, opts = {}) {
     detail.scrollTop = prevModalScrollTop;
   }
 
+  // Read the per-card "fresh context (no conversation fork)" checkbox.
+  const _freshCtx = () => {
+    const cb = detail.querySelector(`#fresh-ctx-${id}`);
+    return !!(cb && cb.checked);
+  };
   const retryBtn = detail.querySelector('.retry-btn[data-action="retry"]');
   if (retryBtn) {
     retryBtn.addEventListener("click", () => {
@@ -1650,7 +1675,7 @@ async function renderJob(id, opts = {}) {
         cur,
       );
       if (t === null) return; // user cancelled
-      streamRetry(id, retryBtn, null, { target: t });
+      streamRetry(id, retryBtn, null, { target: t, fresh: _freshCtx() });
     });
   }
   const retryManualBtn = detail.querySelector('.retry-btn[data-action="retry-manual"]');
@@ -1679,6 +1704,7 @@ async function renderJob(id, opts = {}) {
         endpoint: `${API}/jobs/${id}/resume/stream`,
         flow: "resume",
         target: t,
+        fresh: _freshCtx(),
       });
     });
   }

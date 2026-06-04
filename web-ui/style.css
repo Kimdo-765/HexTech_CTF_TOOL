@@ -79,6 +79,12 @@ textarea, select {
 }
 .retry-btn:hover { background: #8957e5; }
 .retry-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.fresh-toggle {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.8rem; color: #c9d1d9; cursor: pointer;
+  margin-right: 0.5rem; user-select: none;
+}
+.fresh-toggle input { cursor: pointer; margin: 0; }
 
 .retry-panel {
   background: #161b22;
