@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import stat
 from contextlib import suppress
 from pathlib import Path
 from typing import AsyncIterator
@@ -498,17 +500,49 @@ def _carry_session_jsonl(sid: str, prev_work: Path, new_work: Path) -> None:
 _CARRY_WORK_IGNORE_NAMES = frozenset({"tmp", "__pycache__"})
 
 
-def _carry_work_ignore(_src: str, names: list[str]) -> list[str]:
-    """`shutil.copytree(..., ignore=...)` callback. We only skip these
-    names at the TOP LEVEL of work/ — deeper occurrences (e.g. a
-    library named tmp/ inside the agent's own decomp output) stay.
-    The simplest way to do "top-level only" is to only return matches
-    when `_src` itself is the work_dir, which the caller doesn't pass
-    directly — so instead we skip wherever the names appear. This is
-    safe in practice: agents never produce their own ./tmp or
-    __pycache__ that they care about preserving across a retry.
+# Special-file types that shutil.copytree would try to open(.., 'rb') and
+# hang on FOREVER: character + block device nodes, FIFOs, and unix sockets.
+# (symlinks=True copies symlinks AS links, so a dev/stdout->/proc/... symlink
+# is harmless — lstat reports S_ISLNK, not the device type, and we keep it.)
+_COPYTREE_BLOCKING_MODES = (stat.S_IFCHR, stat.S_IFBLK, stat.S_IFIFO, stat.S_IFSOCK)
+
+
+def _carry_work_ignore(src: str, names: list[str]) -> list[str]:
+    """`shutil.copytree(..., ignore=...)` callback for /retry + /resume.
+
+    Skips two classes of entries so the carry-copy can neither HANG nor bloat:
+
+    1. By NAME (any level): ``tmp`` and ``__pycache__`` — transient scratch /
+       bytecode, recreated lazily; agents never keep their own copies.
+
+    2. SPECIAL FILES (any level): character/block device nodes, FIFOs, and
+       sockets. ``shutil.copytree(dirs_exist_ok=False)`` opens regular-looking
+       entries with ``open(.., 'rb')``; a device node — e.g. an extracted
+       rootfs's ``dev/console`` — blocks that ``open()`` INDEFINITELY. Because
+       ``_resubmit`` runs SYNCHRONOUSLY inside the async ``/retry/stream``
+       handler, that one blocked syscall freezes uvicorn's entire event loop
+       (every route → 000) until a manual ``docker compose restart api`` — no
+       asyncio timeout can fire on a thread blocked in a syscall. The tmp/
+       name-skip used to be enough because rootfs extractions lived under
+       ``tmp/``, but job 21314c04d74d unpacked one to ``./rootfs_x/`` (top
+       level), dodging the name filter and wedging the api three times on
+       2026-06-04. Detect the node type via ``lstat`` and drop it — these are
+       rootfs artifacts with zero value in a retry tree. (Generalises the
+       2026-05-17 job-9f93bc8dcd0d fix from "skip tmp/" to "skip the actual
+       blocker wherever it lives".)
     """
-    return [n for n in names if n in _CARRY_WORK_IGNORE_NAMES]
+    skip = []
+    for n in names:
+        if n in _CARRY_WORK_IGNORE_NAMES:
+            skip.append(n)
+            continue
+        try:
+            mode = os.lstat(os.path.join(src, n)).st_mode
+        except OSError:
+            continue
+        if stat.S_IFMT(mode) in _COPYTREE_BLOCKING_MODES:
+            skip.append(n)
+    return skip
 
 
 def _resubmit(
