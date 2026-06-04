@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from contextlib import suppress
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -215,6 +216,52 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     return "\n\n".join(parts)
 
 
+# Wall-clock ceiling for a SINGLE reviewer call. The reviewer runs with max
+# extended-thinking (31999 tokens), so a real call can legitimately take a
+# couple of minutes on a 22 KB context; 240 s is generous headroom. The REAL
+# purpose is to bound a HANG: if the SDK `query()` async generator never
+# yields and never completes — OAuth token expired mid-call, a transport
+# stall, or a usage-policy block that doesn't surface as a clean ResultMessage
+# — an un-bounded `async for` pins uvicorn's SINGLE event loop forever and the
+# entire web service goes dark (every route 000/timeout) until a manual
+# `docker compose restart api`. Observed 2026-06-03: repeated
+# POST /retry/stream of job 21314c04d74d wedged the api twice in a row.
+_REVIEWER_WALL_CLOCK_S = 240.0
+
+
+async def _iter_reviewer_messages(framed_context: str, options, deadline_s: float):
+    """Drive `query()` under a wall-clock deadline, GUARANTEEING the underlying
+    SDK CLI subprocess is closed even on timeout/cancellation.
+
+    Yields SDK messages just like `async for msg in query(...)`. Raises
+    `asyncio.TimeoutError` if the overall deadline is exceeded. The `finally`
+    always `aclose()`s the generator (itself bounded by a short timeout) so a
+    wedged subprocess can never outlive this call and keep holding the loop.
+    """
+    loop = asyncio.get_event_loop()
+    end = loop.time() + deadline_s
+    agen = query(prompt=framed_context, options=options).__aiter__()
+    try:
+        while True:
+            remaining = end - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                msg = await asyncio.wait_for(agen.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                return
+            yield msg
+    finally:
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            # Bound aclose too — if the subprocess is truly wedged its aclose
+            # could also hang; freeing the event loop takes priority over a
+            # clean teardown (a lingering subprocess is reaped later, a pinned
+            # loop is not).
+            with suppress(Exception):
+                await asyncio.wait_for(aclose(), timeout=10)
+
+
 async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
@@ -233,7 +280,9 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     hint_parts: list[str] = []
     framed_context = _frame_reviewer_context(context)
     try:
-        async for msg in query(prompt=framed_context, options=options):
+        async for msg in _iter_reviewer_messages(
+            framed_context, options, _REVIEWER_WALL_CLOCK_S
+        ):
             if isinstance(msg, AssistantMessage):
                 for blk in msg.content:
                     if isinstance(blk, TextBlock):
@@ -251,6 +300,13 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
                 break
     except ReviewerError:
         raise
+    except asyncio.TimeoutError:
+        raise ReviewerError(
+            f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with no "
+            "completion (possible transport stall or expired auth); not "
+            "enqueuing a retry",
+            "timeout",
+        )
     except Exception as e:
         raw = str(e)
         raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
@@ -289,7 +345,9 @@ async def _ask_reviewer_streaming(
     last_emitted = 0
     framed_context = _frame_reviewer_context(context)
     try:
-        async for msg in query(prompt=framed_context, options=options):
+        async for msg in _iter_reviewer_messages(
+            framed_context, options, _REVIEWER_WALL_CLOCK_S
+        ):
             if isinstance(msg, AssistantMessage):
                 for blk in msg.content:
                     if isinstance(blk, TextBlock):
@@ -312,6 +370,15 @@ async def _ask_reviewer_streaming(
                     }
                     return
                 break
+    except asyncio.TimeoutError:
+        yield "error", {
+            "message": (
+                f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with "
+                "no completion (possible transport stall or expired auth)"
+            ),
+            "kind": "timeout",
+        }
+        return
     except Exception as e:
         raw = str(e)
         yield "error", {
