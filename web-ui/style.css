@@ -79,12 +79,51 @@ textarea, select {
 }
 .retry-btn:hover { background: #8957e5; }
 .retry-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+/* "fresh context" toggle — a pill chip that mirrors the purple retry tone.
+   Native checkbox is visually hidden; .fresh-box is the custom check. */
 .fresh-toggle {
-  display: inline-flex; align-items: center; gap: 0.3rem;
-  font-size: 0.8rem; color: #c9d1d9; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-size: 0.8rem; color: #b083f0; cursor: pointer;
   margin-right: 0.5rem; user-select: none;
+  padding: 0.32rem 0.7rem; border-radius: 999px;
+  border: 1px solid #6e3eaa; background: #6e3eaa1a;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+  vertical-align: middle;
 }
-.fresh-toggle input { cursor: pointer; margin: 0; }
+.fresh-toggle:hover { background: #6e3eaa33; border-color: #8957e5; }
+/* visually-hidden but still focusable/clickable native input */
+.fresh-toggle .fresh-ctx-cb {
+  position: absolute; opacity: 0; width: 0; height: 0; margin: 0; pointer-events: none;
+}
+.fresh-box {
+  width: 15px; height: 15px; border-radius: 4px;
+  border: 1.5px solid #8957e5; background: transparent;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; transition: background .15s, border-color .15s;
+}
+.fresh-box::after {
+  content: "✓"; font-size: 11px; line-height: 1; font-weight: 700;
+  color: #fff; opacity: 0; transform: scale(0.5); transition: opacity .15s, transform .15s;
+}
+.fresh-label { white-space: nowrap; }
+/* checked state — :has() for modern engines, .checked class as JS fallback */
+.fresh-toggle:has(.fresh-ctx-cb:checked),
+.fresh-toggle.checked {
+  background: #6e3eaa; border-color: #8957e5; color: #fff;
+  box-shadow: 0 0 0 2px #8957e533, 0 0 8px #6e3eaa66;
+}
+.fresh-toggle:has(.fresh-ctx-cb:checked) .fresh-box,
+.fresh-toggle.checked .fresh-box {
+  background: #2ea043; border-color: #2ea043;
+}
+.fresh-toggle:has(.fresh-ctx-cb:checked) .fresh-box::after,
+.fresh-toggle.checked .fresh-box::after {
+  opacity: 1; transform: scale(1);
+}
+/* keyboard focus ring */
+.fresh-toggle:has(.fresh-ctx-cb:focus-visible) {
+  box-shadow: 0 0 0 2px #8957e5;
+}
 
 .retry-panel {
   background: #161b22;

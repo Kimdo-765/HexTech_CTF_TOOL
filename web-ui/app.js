@@ -1492,7 +1492,9 @@ async function renderJob(id, opts = {}) {
     // independent.
     const freshToggleHtml = (showRetry || showStopResume)
       ? `<label class="fresh-toggle" title="Start the retry with a clean Claude context (carry ./work/ + hint, but do NOT fork the prior conversation). Use on deep retry chains that hit 'Prompt is too long'.">
-           <input type="checkbox" class="fresh-ctx-cb" id="fresh-ctx-${job.id}"> fresh context (no conversation fork)
+           <input type="checkbox" class="fresh-ctx-cb" id="fresh-ctx-${job.id}">
+           <span class="fresh-box" aria-hidden="true"></span>
+           <span class="fresh-label">✨ fresh context</span>
          </label>` : "";
     runBlock = `<div class="retry-row" style="margin:0.5rem 0">
       ${runHtml} ${targetHtml} ${retryHtml} ${stopResumeHtml}
@@ -1663,6 +1665,15 @@ async function renderJob(id, opts = {}) {
     const cb = detail.querySelector(`#fresh-ctx-${id}`);
     return !!(cb && cb.checked);
   };
+  // Mirror checked state onto the label as a class, so the chip styles work
+  // even on engines without :has() support (older WebKit/Firefox).
+  const _freshCb = detail.querySelector(`#fresh-ctx-${id}`);
+  if (_freshCb) {
+    const _lbl = _freshCb.closest(".fresh-toggle");
+    const _sync = () => _lbl && _lbl.classList.toggle("checked", _freshCb.checked);
+    _freshCb.addEventListener("change", _sync);
+    _sync();
+  }
   const retryBtn = detail.querySelector('.retry-btn[data-action="retry"]');
   if (retryBtn) {
     retryBtn.addEventListener("click", () => {
