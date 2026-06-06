@@ -28,6 +28,21 @@ main { padding: 1.5rem 2rem; display: grid; grid-template-columns: 1fr 1fr; gap:
 form { display: flex; flex-direction: column; gap: 0.75rem; }
 label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
 label.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
+/* "Capture remote flag" gate — a tinted row so the success-bar override reads as
+   a deliberate requirement rather than a stray option. */
+label.capture-flag-toggle {
+  flex-wrap: wrap;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #d2904233;
+  border-radius: 6px;
+  background: #d2904212;
+}
+label.capture-flag-toggle:hover { border-color: #e3b341; background: #d2904220; }
+label.capture-flag-toggle:has(.capture-remote-flag-cb:checked) {
+  border-color: #e3b341;
+  background: #d2904226;
+}
+.capture-flag-note { color: #8b949e; font-size: 0.8rem; flex-basis: 100%; margin-left: 1.6rem; }
 input[type="file"], input[type="url"], input[type="text"], input[type="password"],
 textarea, select {
   background: #161b22;

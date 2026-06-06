@@ -53,6 +53,10 @@
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit (requires target URL)
         </label>
+        <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when exploit.py captures the REAL flag from the remote target. Local-only / banner-only validation will NOT pass.">
+          <input type="checkbox" class="capture-remote-flag-cb" />
+          🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working exploit</span>
+        </label>
         <label>
           Claude model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
@@ -90,6 +94,10 @@
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit (requires remote target)
+        </label>
+        <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when exploit.py captures the REAL flag from the remote target. Local-only / banner-only validation will NOT pass.">
+          <input type="checkbox" class="capture-remote-flag-cb" />
+          🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working exploit</span>
         </label>
         <label>
           Claude model (blank = global Settings value)
@@ -226,6 +234,10 @@
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
+        </label>
+        <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when the solver captures the REAL flag from the remote target/oracle. Local-only validation will NOT pass.">
+          <input type="checkbox" class="capture-remote-flag-cb" />
+          🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working solver</span>
         </label>
         <label class="checkbox">
           <input type="checkbox" name="use_sage" />

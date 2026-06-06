@@ -387,10 +387,42 @@ document.querySelectorAll(".tab").forEach((t) => {
   });
 });
 
+// Directive folded into the description when "Capture remote flag" is ticked.
+// Leads with the literal phrase so it's grep-able, then spells out the bar the
+// operator wants. NOTE this is a USER-TURN hint (description → build_user_prompt
+// → client.query), so it COUNTERS but does not override the system-prompt line
+// (CTF_PREAMBLE: "...or producing a working exploit is the explicit goal") that
+// otherwise lets a locally-validated / banner-only exploit read as goal-complete.
+// It's a strong operator directive, NOT a hard success gate — the orchestrator's
+// flag-scan + success decision (_common.py scan_job_for_flags / auto-run gate)
+// is separate and unchanged by this checkbox.
+const CAPTURE_REMOTE_FLAG_DIRECTIVE =
+  "capture remote flag — this job is ONLY successful if your exploit/solver " +
+  "captures the REAL flag from the remote target and prints it on its own line " +
+  "as `FLAG_CANDIDATE: <flag>`. Local-only validation, a planted test flag, or a " +
+  "banner-only smoke check do NOT count as success; keep iterating (reconnect/retry) " +
+  "until the genuine remote flag is captured.";
+
 async function submitJob(form, endpoint) {
   const fd = new FormData(form);
   for (const cb of form.querySelectorAll('input[type="checkbox"]')) {
+    // Nameless checkboxes (e.g. the capture-remote-flag toggle) are UI-only and
+    // must not leak into FormData as a blank-named field — they're handled below.
+    if (!cb.name) continue;
     fd.set(cb.name, cb.checked ? "true" : "false");
+  }
+  // "Capture remote flag" toggle → fold the directive into the description so the
+  // agent prompt (which otherwise accepts a "working exploit" as goal-complete)
+  // gets an explicit remote-capture success bar. The checkbox itself carries no
+  // `name`, so it never reaches the backend as a form field.
+  const crf = form.querySelector(".capture-remote-flag-cb");
+  if (crf && crf.checked) {
+    const cur = (fd.get("description") || "").trim();
+    if (!cur.toLowerCase().includes("capture remote flag")) {
+      fd.set("description", cur
+        ? `${cur}\n\n${CAPTURE_REMOTE_FLAG_DIRECTIVE}`
+        : CAPTURE_REMOTE_FLAG_DIRECTIVE);
+    }
   }
   // Drop empty optional fields so backend uses its default.
   const to = fd.get("job_timeout");
