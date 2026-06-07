@@ -718,6 +718,15 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
         return True
     if "<" in inner_raw and ">" in inner_raw:
         return True
+    # Embedded ellipsis = an ABBREVIATED / elided flag, never a real capture.
+    # Job a15ff70a6ed5: the judge wrote "captured the REAL flag DH{...20207ea}"
+    # into a prejudge issue; that abbreviation was scanned out of run.log
+    # (narrative tier) and stored as meta.flags[0] — while the genuine
+    # DH{<40 hex>} was dropped by the hash-width rule below. A real flag never
+    # contains a literal `...` / `…`, so reject it in every tier (incl. trusted:
+    # a banner echoing `DH{...}` is a template, not a capture).
+    if "..." in inner_raw or "…" in inner_raw:
+        return True
     # Raw hex with hash-typical lengths. Real CTF flags almost never
     # take the form DH{<64 raw hex chars>} — chal authors include words
     # / phrases / a leading prefix. Bare hex of canonical hash widths
