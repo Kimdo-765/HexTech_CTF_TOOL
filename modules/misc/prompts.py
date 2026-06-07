@@ -45,7 +45,7 @@ Constraints
 """
 
 
-def build_user_prompt(filename: str, description: str | None) -> str:
+def build_user_prompt(filename: str | None, description: str | None) -> str:
     base_desc, retry_hint = split_retry_hint(description)
     parts: list[str] = []
     if retry_hint:
@@ -53,10 +53,17 @@ def build_user_prompt(filename: str, description: str | None) -> str:
             "⚠ PRIORITY GUIDANCE (from prior-attempt review — read first):\n"
             + retry_hint
         )
-    parts.append(f"Input filename: {filename}")
-    parts.append("Working directory contents: findings.json, extracted/, analyze.log")
+    if filename:
+        parts.append(f"Input filename: {filename}")
+        parts.append("Working directory contents: findings.json, extracted/, analyze.log")
+    else:
+        parts.append(
+            "No input file was provided for this job — there is no misc tool "
+            "sweep (findings.json) to read. Work from the user-provided context "
+            "below and any files already present in the working directory."
+        )
     if base_desc:
         parts.append(f"User-provided context:\n{base_desc}")
-    if not retry_hint:
+    if not retry_hint and filename:
         parts.append("Begin by reading findings.json.")
     return "\n\n".join(parts)

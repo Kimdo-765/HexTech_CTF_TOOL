@@ -26,7 +26,7 @@ def _stream_to(path: Path, upload: UploadFile) -> int:
 
 @router.post("/analyze")
 async def analyze_misc(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     passphrase: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     skip_claude: bool = Form(False),
@@ -34,15 +34,20 @@ async def analyze_misc(
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
 ):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="file required")
-
     job_id = new_job_id()
-    fname = Path(file.filename).name
-    target = job_dir(job_id) / fname
-    size = _stream_to(target, file)
-    if size == 0:
-        raise HTTPException(status_code=400, detail="empty file")
+
+    # File is OPTIONAL: with no file the misc tool sweep is skipped and the
+    # job runs a description-only Claude analysis (the orchestrator guards on
+    # a falsy filename). An uploaded-but-empty file is still rejected.
+    has_file = bool(file and file.filename)
+    fname = None
+    size = 0
+    if has_file:
+        fname = Path(file.filename).name
+        target = job_dir(job_id) / fname
+        size = _stream_to(target, file)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="empty file")
 
     timeout = resolve_timeout(job_timeout)
     chosen_model = (model or "").strip() or None

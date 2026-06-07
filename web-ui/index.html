@@ -181,8 +181,9 @@
       <h2>Misc — File Format / Steganography Triage</h2>
       <form id="misc-form">
         <label>
-          File (image / audio / pdf / archive / unknown blob)
-          <input type="file" name="file" required />
+          File (image / audio / pdf / archive / unknown blob) — <em>optional</em>
+          <input type="file" name="file" />
+          <small style="color:#8b949e">Skip the file to run a description-only / Claude analysis (the misc tool sweep is skipped when no file is given).</small>
         </label>
         <label>
           Steghide passphrase (optional)

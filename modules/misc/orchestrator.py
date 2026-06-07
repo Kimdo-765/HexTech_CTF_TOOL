@@ -187,7 +187,7 @@ async def _claude_summary(
 
 def run_job(
     job_id: str,
-    filename: str,
+    filename: Optional[str],
     passphrase: Optional[str],
     description: Optional[str],
     skip_claude: bool = False,
@@ -196,9 +196,16 @@ def run_job(
     apply_to_env()
     _write_meta(job_id, status="running", stage="analyze")
     try:
-        _log(job_id, f"Spawning misc analyzer (file={filename})")
-        logs = _spawn_misc(job_id, filename, passphrase)
-        (_job_dir(job_id) / "analyzer.log").write_text(logs)
+        # File is optional. With no file, skip the misc tool sweep
+        # (`_spawn_misc` would build `/job/None`) and fall through to the
+        # description-only Claude analysis.
+        if filename:
+            _log(job_id, f"Spawning misc analyzer (file={filename})")
+            logs = _spawn_misc(job_id, filename, passphrase)
+            (_job_dir(job_id) / "analyzer.log").write_text(logs)
+        else:
+            _log(job_id, "No file provided — skipping misc tool sweep; "
+                         "running description-only Claude analysis.")
 
         findings_path = _job_dir(job_id) / "findings.json"
         findings = json.loads(findings_path.read_text()) if findings_path.exists() else {}
