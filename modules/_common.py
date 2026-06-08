@@ -727,26 +727,23 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     # a banner echoing `DH{...}` is a template, not a capture).
     if "..." in inner_raw or "…" in inner_raw:
         return True
-    # Raw hex with hash-typical lengths. Real CTF flags almost never
-    # take the form DH{<64 raw hex chars>} — chal authors include words
-    # / phrases / a leading prefix. Bare hex of canonical hash widths
-    # (sha256=64, sha1=40, md5=32) is almost always a chal-internal
-    # representation quoted from source / decomp / the agent's
-    # crypto analysis, not a captured flag. Job 44dd25365173 leaked
-    # `DH{3cbdaf66...}` as the sha256 of an unknown input that the
-    # agent imagined while reading `sha256_hexdigest`. The bound is
-    # narrow on purpose: 64-char hex IDs (UUIDs aren't hex-only) are
-    # rare enough as legit flags that the false-negative risk is low,
-    # and operators can override via `extra_files` if a chal really
-    # ships a raw-hex flag.
-    # Skip the hash-WIDTH heuristic for genuine run captures (trusted): a
-    # real run that prints DH{<64 hex>} captured the real flag, and Dreamhack
-    # flags take exactly that shape. The rule only guards NARRATIVE prose,
-    # where an agent-imagined sha256 (job 44dd25365173) can appear.
+    # Raw hex BLOBS — only the absurdly-long ones are placeholders.
+    # Real Dreamhack flags ARE `DH{<32|40|64 raw hex>}` (md5/sha1/sha256
+    # widths), so the old exact-width drop (32|40|64) was a false-negative
+    # machine: it killed genuine narrative-only captures — job
+    # a15ff70a6ed5 (DH{<40 hex>}) and db015a6d013c (DH{<64 hex>}, a real
+    # live XSS-exfil flag) both vanished from FLAG FOUND this way.
+    # Operator relaxed the ceiling to 100 hex (2026-06-08): hex inners up
+    # to 100 chars are KEPT as potential real flags; only hex strings
+    # LONGER than 100 chars (clearly a dumped blob / decomp constant, not
+    # a flag) are dropped. The specific empty-input hash decoys
+    # (sha256("")/md5("")/sha1("")) stay blocked via `_PLACEHOLDER_INNERS`
+    # above, independent of this width rule — so the job 44dd25365173
+    # empty-hash case is still caught; only ARBITRARY canonical-width
+    # hex in narrative prose is now allowed through (last-resort tier
+    # only; trusted captures already bypassed this rule entirely).
     import re as _re
-    if not trusted and _re.fullmatch(
-        r"[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", inner
-    ):
+    if not trusted and _re.fullmatch(r"[0-9a-f]{101,}", inner):
         return True
     return False
 
