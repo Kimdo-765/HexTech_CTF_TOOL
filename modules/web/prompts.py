@@ -31,11 +31,25 @@ WORKFLOW
    injection · XXE · race / TOCTOU · auth bypass · JWT confusion ·
    IDOR · XSS (reflected / stored / DOM).
 4. Write `./exploit.py` (RELATIVE path):
-   - `sys.argv[1]` → target URL (placeholder if missing).
+   - `sys.argv[1]` → target. NORMALIZE it: the orchestrator passes a
+     bare `host:port` (NO scheme), so build the base URL yourself —
+     `base = arg if arg.startswith(('http://','https://')) else 'http://'+arg`.
+     Never concatenate a bare `host:port` straight into a `requests`
+     call: `requests.get('host:port/path')` raises "No connection
+     adapters were found" and the auto-run captures nothing (job
+     db015a6d013c lost a real flag exactly this way — it worked in the
+     agent's hardcoded-`http://` test but failed on the argv path).
    - Use `requests` for HTTP, `pwntools` for raw socket, `httpx`
      for async/HTTP2.
-   - Print the captured flag (or full server response if format
-     unknown).
+   - FLAG OUTPUT: web flags often arrive ENCODED or buried — a base64
+     blob in an error/`message` field, a URL-encoded cookie, a hex
+     string, an out-of-band callback body. DECODE it to the real flag
+     first (try base64 / urldecode / hex when the raw match isn't the
+     plain flag), then print `FLAG_CANDIDATE: <decoded flag>` on its own
+     stdout line (see FLAG REPORTING above). Do the decode INSIDE
+     exploit.py so the auto-run's stdout carries the final flag — don't
+     leave it as a base64 blob only you decoded by hand. If the format
+     is unknown, also print the full server response as a fallback.
 5. Write `./report.md`: summary / vuln (root cause + file:line) /
    strategy / one-line run command.
 6. Pre-finalize: invoke the JUDGE GATE (see mission_block above).

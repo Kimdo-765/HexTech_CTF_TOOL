@@ -424,6 +424,21 @@ async function submitJob(form, endpoint) {
         : CAPTURE_REMOTE_FLAG_DIRECTIVE);
     }
   }
+  // "Flag format" → stored in meta for the scanner (authoritative matcher),
+  // AND folded into the description so the agent emits FLAG_CANDIDATE in the
+  // right format and uses LOCAL{...} for local-test flags.
+  const ff = (fd.get("flag_format") || "").trim();
+  if (ff) {
+    const cur = (fd.get("description") || "").trim();
+    const directive =
+      `FLAG FORMAT — the real flag for this challenge has the form \`${ff}\`. ` +
+      "Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any " +
+      "local/test flag you plant, use a different format like `LOCAL{...}` so it is " +
+      "never mistaken for the real capture.";
+    if (!cur.includes("FLAG FORMAT")) {
+      fd.set("description", cur ? `${cur}\n\n${directive}` : directive);
+    }
+  }
   // Drop empty optional fields so backend uses its default.
   const to = fd.get("job_timeout");
   if (to === "" || to == null) fd.delete("job_timeout");
@@ -431,6 +446,7 @@ async function submitJob(form, endpoint) {
   if (model === "" || model == null) fd.delete("model");
   const effort = fd.get("effort");
   if (effort === "" || effort == null) fd.delete("effort");
+  if (ff === "") fd.delete("flag_format");
 
   const res = await fetch(`${API}${endpoint}`, { method: "POST", body: fd });
   if (!res.ok) {

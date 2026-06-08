@@ -22,6 +22,7 @@ async def analyze_web(
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    flag_format: Optional[str] = Form(None),
 ):
     target_url = (target_url or "").strip() or None
     has_file = bool(file and file.filename)
@@ -54,6 +55,7 @@ async def analyze_web(
         "job_timeout": timeout,
         "model": chosen_model,
         "effort": chosen_effort,
+        "flag_format": (flag_format or "").strip() or None,
         "src_root": src_root,
         "remote_only": not has_file,
     }

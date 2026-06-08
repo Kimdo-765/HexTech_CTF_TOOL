@@ -377,6 +377,14 @@ to a flag template. If you never actually capture a flag, do NOT print the
 marker. For multi-stage chals, mark ONLY the final flag this way — keep
 intermediate subflags as ordinary prose.
 
+LOCAL-TEST FLAGS — when you plant a FAKE flag for local validation (a
+stand-in flag file, a mock `/flag`, a deploy-sim, an assertion fixture),
+make it a DELIBERATELY NON-REAL format such as `LOCAL{...}` or
+`TEST{...}` — NEVER the real challenge format (e.g. NOT `DH{...}`). The
+framework records only real-format flags, so a `LOCAL{...}` stand-in
+can never be mistaken for a capture and pollute FLAG FOUND. Reserve the
+real prefix exclusively for a genuine flag pulled off the target.
+
 """
 
 _TOOLS_BASE = """\

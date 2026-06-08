@@ -18,6 +18,7 @@ async def analyze_pwn(
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    flag_format: Optional[str] = Form(None),
 ):
     target = (target or "").strip() or None
     has_file = bool(file and file.filename)
@@ -55,6 +56,7 @@ async def analyze_pwn(
         "job_timeout": timeout,
         "model": chosen_model,
         "effort": chosen_effort,
+        "flag_format": (flag_format or "").strip() or None,
         "remote_only": not has_file,
     }
     write_job_meta(job_id, meta)

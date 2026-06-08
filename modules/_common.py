@@ -448,6 +448,50 @@ _NARRATIVE_FLAG_SOURCES = (
 )
 
 
+def flag_format_prefix(raw: str | None) -> str | None:
+    """Normalize an operator-supplied flag format into a bare prefix.
+
+    Accepts a prefix (`DH`), a sample (`DH{...}`), or a template
+    (`DH{}`); returns the token before the first `{`, stripped. Returns
+    None when empty/unusable so callers fall back to the generic
+    FLAG_RE. Prefix is validated to a sane charset to avoid building a
+    junk/over-broad regex.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if "{" in s:
+        s = s.split("{", 1)[0]
+    s = s.strip()
+    # A real flag prefix is a short token (letters/digits/_- ., e.g. DH,
+    # flag, CTF, picoCTF). Reject anything else so we never compile an
+    # operator typo into an over-matching pattern.
+    if not s or len(s) > 32 or not re.fullmatch(r"[A-Za-z0-9_.\-]+", s):
+        return None
+    return s
+
+
+def job_flag_format_re(job_id: str) -> "re.Pattern | None":
+    """Per-job authoritative flag matcher from `meta.flag_format`.
+
+    When the operator declares the real flag's format (e.g. `DH{...}`),
+    only flags of that exact prefix shape count — so local-test flags in
+    a DIFFERENT format (e.g. `LOCAL{...}`) are auto-excluded, and a real
+    `DH{<64 hex>}` is kept (the declared format IS the validation).
+    Returns None when unset/invalid (callers fall back to FLAG_RE).
+    """
+    try:
+        prefix = flag_format_prefix((read_meta(job_id) or {}).get("flag_format"))
+    except Exception:
+        return None
+    if not prefix:
+        return None
+    try:
+        return re.compile(re.escape(prefix) + r"\{[^}\r\n]{1,256}\}")
+    except re.error:
+        return None
+
+
 def scan_job_for_flags(
     job_id: str,
     extra_files: list[str] | None = None,
@@ -487,6 +531,15 @@ def scan_job_for_flags(
     """
     jd = job_dir(job_id)
 
+    # Operator-declared flag format (per-job, optional). When set it
+    # REPLACES the generic FLAG_RE for the scan tiers below: only flags
+    # of the declared prefix shape (e.g. DH{...}) match, so local-test
+    # flags in another format (LOCAL{...}) never surface and a real
+    # DH{<64 hex>} is kept. The FLAG_CANDIDATE marker tier stays
+    # format-agnostic (the exploit explicitly declares its capture).
+    fmt_re = job_flag_format_re(job_id)
+    scan_re = fmt_re or FLAG_RE
+
     def _scan(names) -> set[str]:
         out: set[str] = set()
         for name in names:
@@ -497,7 +550,7 @@ def scan_job_for_flags(
                 text = p.read_text(errors="replace")
             except Exception:
                 continue
-            out.update(FLAG_RE.findall(text))
+            out.update(scan_re.findall(text))
         return out
 
     def _scan_markers(names) -> set[str]:
@@ -3558,6 +3611,58 @@ where the budget hit. The retry SDK session is forked so prior
 reasoning context carries over.
 '''
 
+# Web-shaped fallback: a pwn socket skeleton (connect / send 'help' /
+# close) is meaningless against an HTTP target — `remote(host,port)`
+# treats the web service as a raw socket and the runner captures
+# nothing (job 5f4bb59d0b44). For module=="web" we drop an HTTP probe
+# instead so the sandbox + postjudge cycle gets coherent diagnostics.
+_FALLBACK_WEB_EXPLOIT_TEMPLATE = '''\
+#!/usr/bin/env python3
+"""Auto-generated WEB fallback — main session ended before drafting a
+real exploit. Probe-only: fingerprints the target so the sandbox +
+postjudge cycle fires and the next /retry carries an actionable hint.
+Replace with the real chain on /retry.
+"""
+import sys
+
+import requests
+
+# The orchestrator passes a bare host:port (no scheme) — normalize it.
+arg = sys.argv[1] if len(sys.argv) >= 2 else "http://127.0.0.1"
+base = arg if arg.startswith(("http://", "https://")) else "http://" + arg
+base = base.rstrip("/")
+
+
+def probe(path=""):
+    url = base + path
+    try:
+        r = requests.get(url, timeout=10, allow_redirects=True)
+        print(f"[{r.status_code}] {url}  ({len(r.content)} B)")
+        srv = r.headers.get("Server") or r.headers.get("X-Powered-By")
+        if srv:
+            print(f"    server: {srv}")
+        return r
+    except Exception as e:
+        print(f"[!] {url} -> {e}")
+        return None
+
+
+def main():
+    print(f"[*] web fallback probe against {base}")
+    root = probe("/")
+    for p in ("/robots.txt", "/admin", "/api", "/flag", "/.git/HEAD"):
+        probe(p)
+    if root is not None:
+        body = root.text[:500]
+        print("--- root body (first 500 B) ---")
+        print(body)
+    print("[!] no real exploit drafted — /retry to resume from postjudge hint")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
 
 WHY_STOPPED_FILENAME = "WHY_STOPPED.md"
 
@@ -3960,18 +4065,25 @@ def cleanup_job_processes(log_fn) -> None:
             continue
 
 
-def write_fallback_artifacts(work_dir: Path, log_fn) -> None:
+def write_fallback_artifacts(work_dir: Path, log_fn, module: str | None = None) -> None:
     """Drop a probe-only exploit.py + report.md when main's session
     ends WITHOUT producing them. Best-effort: any write error is logged
     and swallowed (the caller's downstream code handles "no artifact"
     fine — this is purely an upgrade to "no_flag / partial" status
     instead of "failed").
+
+    `module` selects the skeleton shape: web gets an HTTP probe (a pwn
+    socket skeleton is useless against an HTTP target — job
+    5f4bb59d0b44); everything else gets the pwntools skeleton.
     """
+    is_web = (module or "").lower().strip() == "web"
+    exploit_template = _FALLBACK_WEB_EXPLOIT_TEMPLATE if is_web else _FALLBACK_EXPLOIT_TEMPLATE
     try:
         ex = work_dir / "exploit.py"
         if not ex.is_file():
-            ex.write_text(_FALLBACK_EXPLOIT_TEMPLATE)
-            log_fn(f"[orchestrator] wrote fallback ./exploit.py ({len(_FALLBACK_EXPLOIT_TEMPLATE)} B)")
+            ex.write_text(exploit_template)
+            log_fn(f"[orchestrator] wrote fallback ./exploit.py ({len(exploit_template)} B"
+                   f"{', web-shaped' if is_web else ''})")
         rp = work_dir / "report.md"
         if not rp.is_file():
             rp.write_text(_FALLBACK_REPORT_TEMPLATE)
@@ -4233,6 +4345,13 @@ async def run_main_agent_session(
 
     max_retries = auto_retry_max() if auto_run else 0
 
+    # Module drives the fallback skeleton shape (web → HTTP probe, not a
+    # pwn socket skeleton). Read once; tolerate a missing meta.
+    try:
+        _fallback_module = (read_meta(job_id) or {}).get("module")
+    except Exception:
+        _fallback_module = None
+
     last_sandbox: dict | None = None
     # Track retry hints across attempts so the next postjudge call can
     # see "you already said this" — drives next_action=stop more
@@ -4440,7 +4559,7 @@ async def run_main_agent_session(
                                 "skeleton so sandbox still runs."
                             )
                             write_fallback_artifacts(
-                                work_dir, log_fn,
+                                work_dir, log_fn, _fallback_module,
                             )
                             summary["agent_error"] = (
                                 "budget exhausted; fallback artifact used"
@@ -4474,7 +4593,7 @@ async def run_main_agent_session(
                             _snapshot_cost(summary, "RESULT_IS_ERROR")
                             if not _pick_present_artifact(
                                     work_dir, artifact_names):
-                                write_fallback_artifacts(work_dir, log_fn)
+                                write_fallback_artifacts(work_dir, log_fn, _fallback_module)
                                 summary["fallback_artifact_used"] = True
                                 log_fn(
                                     "[orchestrator] ResultMessage is_error "
@@ -4511,7 +4630,7 @@ async def run_main_agent_session(
                 if summary.get("agent_error_kind") in ("killed", "timeout"):
                     exploit_missing = not (work_dir / "exploit.py").is_file()
                     report_missing = not (work_dir / "report.md").is_file()
-                    write_fallback_artifacts(work_dir, log_fn)
+                    write_fallback_artifacts(work_dir, log_fn, _fallback_module)
                     if exploit_missing or report_missing:
                         summary["fallback_artifact_used"] = True
                         log_fn(

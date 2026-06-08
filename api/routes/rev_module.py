@@ -39,6 +39,7 @@ async def analyze_rev(
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    flag_format: Optional[str] = Form(None),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="file required")
@@ -93,6 +94,7 @@ async def analyze_rev(
         "job_timeout": timeout,
         "model": chosen_model,
         "effort": chosen_effort,
+        "flag_format": (flag_format or "").strip() or None,
     }
     write_job_meta(job_id, meta)
 

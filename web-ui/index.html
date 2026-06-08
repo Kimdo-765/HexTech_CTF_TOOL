@@ -58,6 +58,11 @@
           🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working exploit</span>
         </label>
         <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:#8b949e">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
+        </label>
+        <label>
           Claude model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
@@ -98,6 +103,11 @@
         <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when exploit.py captures the REAL flag from the remote target. Local-only / banner-only validation will NOT pass.">
           <input type="checkbox" class="capture-remote-flag-cb" />
           🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working exploit</span>
+        </label>
+        <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:#8b949e">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
           Claude model (blank = global Settings value)
@@ -158,6 +168,11 @@
           Skip Claude summary (collection only)
         </label>
         <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:#8b949e">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
+        </label>
+        <label>
           Claude model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
@@ -196,6 +211,11 @@
         <label class="checkbox">
           <input type="checkbox" name="skip_claude" />
           Skip Claude summary (raw findings only)
+        </label>
+        <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:#8b949e">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
           Claude model (blank = global Settings value)
@@ -245,6 +265,11 @@
           Use SageMath sandbox (slower, supports lattice/Coppersmith)
         </label>
         <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:#8b949e">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
+        </label>
+        <label>
           Claude model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
@@ -278,6 +303,11 @@
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
+        </label>
+        <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:#8b949e">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
           Claude model (blank = global Settings value)
