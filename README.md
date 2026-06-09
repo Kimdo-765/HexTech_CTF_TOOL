@@ -86,6 +86,14 @@ For Web/Pwn/Crypto/Rev, an optional `auto_run` checkbox executes the produced
 script in a sandboxed `runner` container (network-isolated unless a remote
 target is given).
 
+Per-job form options (optional): **🚩 Capture remote flag** (folds a
+"the job is only solved when you capture the REAL remote flag" directive
+into the description), **Flag format** (e.g. `DH{...}` — only this shape
+counts in FLAG FOUND; see Flag-scan trusted sources), and on `/retry`,
+**Fresh context** (retry in a clean SDK session instead of forking the
+prior conversation). The Misc form's file upload is optional (skip it for
+a description-only Claude analysis).
+
 ## Architecture
 
 Seven Claude-driven roles, each with its own context window:
@@ -893,6 +901,17 @@ HexTech_CTF_TOOL/
 - Accepts a zip of source code or a single file.
 - Optionally a `target_url` to test against.
 - Auto-run runs the produced `exploit.py <url>` in a sandboxed runner.
+- The exploit must **normalize the target**: the orchestrator passes a
+  bare `host:port`, so `exploit.py` prepends `http://` when no scheme is
+  present (a raw `requests.get("host:port/…")` raises "No connection
+  adapters found" and captures nothing).
+- Web flags often arrive **encoded** (base64 in an error/`message` field,
+  url-encoded cookie, hex). The exploit decodes them and emits
+  `FLAG_CANDIDATE: <plaintext>` so the trusted-tier scan records the real
+  flag.
+- The auto-fallback skeleton (when a session ends without an exploit) is
+  **web-shaped** — an HTTP probe of the target, not a pwntools socket
+  skeleton.
 
 ### Pwn
 - **Upload**: zip preferred (any zip / tar bundle containing the
@@ -1059,6 +1078,8 @@ HexTech_CTF_TOOL/
   source for web-CTF disk images.
 
 ### Misc
+- File upload is **optional** — skip it to run a description-only Claude
+  analysis (the misc tool sweep is skipped when no file is given).
 - Unifies binwalk extraction, exiftool, zsteg LSB, steghide, pngcheck, pdf
   parsing. Common flag patterns are auto-extracted.
 - bulk_extractor is **not** included (Ubuntu 22.04 dropped the package).
@@ -1089,6 +1110,19 @@ docker compose ps                 # status
 # worker, and modules are all bind-mounted:
 docker compose restart api        # api/routes/*, api/main.py changes
 docker compose restart worker     # modules/*, worker/runner.py changes
+
+# IMPORTANT — verify a deploy via a LIVE HOST route, not `docker exec
+# python3` (which always fresh-imports and masks a stale serving
+# process). On WSL2 / Docker Desktop, `docker compose up -d
+# --force-recreate` can LEAK the old container's processes — the
+# container record is removed but the orphaned uvicorn keeps holding
+# host:8000 (serving STALE code) and an orphaned rq-worker tree keeps
+# pulling redis jobs with stale modules/. Symptom: container-internal
+# curl shows new code, host `curl localhost:8000` shows old code. Detect
+# with `ps -eo pid,cmd | grep 'uvicorn api.main'` (a PID that is NOT the
+# current api container's `.State.Pid`); fix by killing the orphan PIDs
+# (needs root) or restarting Docker Desktop, then re-bind with
+# `docker compose up -d --force-recreate api`.
 
 # Image rebuilds — needed only for Dockerfile, requirements.txt, or
 # tool-image (decompiler/forensic/misc/runner/sage) changes:
@@ -1394,22 +1428,36 @@ trusted.
 
 ### Flag-scan trusted sources
 
-`scan_job_for_flags` in `modules/_common.py` is now two-tier:
+`scan_job_for_flags` in `modules/_common.py` scans in priority order:
 
-1. **Trusted tier** — files produced by the actual runner / OOB
+1. **Authoritative marker tier** — an explicit `FLAG_CANDIDATE: <flag>`
+   line the exploit/solver printed on a genuine run (read ONLY from the
+   trusted files below, never narrative prose). The agent is *declaring*
+   "this exact string is the flag I captured", so it is honored verbatim,
+   format-agnostic. Web exploits decode encoded flags (base64/url/hex)
+   inside `exploit.py` before emitting the marker, so the trusted stdout
+   carries the final plaintext flag, not a blob.
+2. **Trusted tier** — files produced by the actual runner / OOB
    collector: `exploit.py.stdout`, `solver.py.stdout`,
    `callbacks.jsonl`, `summary.json`, `result.json`. If ANY
    non-placeholder flag appears here, return ONLY those.
-2. **Narrative tier** — `report.md`, `run.log`, `findings.json`.
-   Consulted ONLY when the trusted tier is empty.
+3. **Narrative tier** — `report.md`, `run.log`, `findings.json`.
+   Consulted ONLY when the trusted/marker tiers are empty.
 
-Previously, a chal-author's local-test default like
-`FLAG="DH{this_is_a_flag}"` in `chal/run.sh` got copied into
-`report.md` by the agent's recon, and the old single-tier scan picked
-both the real flag and the placeholder. The trusted-tier scan
-ignores the narrative copy when a real flag exists, and the placeholder
-list (`this_is_a_flag`, `here_is_the_flag`, `fake_flag`, `dummy_flag`,
-…) catches the case where the narrative tier is the only source.
+**Operator flag format (optional, per job).** A `Flag format` input on
+every job form (e.g. `DH{...}`) is stored as `meta.flag_format` and
+becomes the *authoritative matcher*: when set, ONLY flags of that prefix
+shape count, so a real `DH{<64 hex>}` is kept while strings in another
+format are ignored. The agent is told to plant local/test flags in a
+DIFFERENT format (`LOCAL{...}` / `TEST{...}`) — the format mismatch is
+itself the filter, so a stand-in can never be mistaken for a capture.
+
+**Placeholder filter.** `_is_placeholder_flag` drops template echoes
+(`this_is_a_flag`, `fake_flag`, `<sha256>`, `DH{%s}`, embedded `...`
+ellipsis abbreviations, empty-input hashes) but, in the narrative tier,
+only treats hex blobs LONGER than 100 chars as junk — real Dreamhack
+flags are `DH{<32|40|64 hex>}` and must be kept. Trusted-tier captures
+bypass the hash-width heuristic entirely.
 
 This is what makes the Save button trustworthy: the API refuses to
 save into the library unless `scan_job_for_flags` returns at least one
