@@ -1133,6 +1133,67 @@ function openManualHintForm(jobId, anchorBtn) {
   }
 }
 
+// Continue-in-place form: an operator note (folded into the SAME job's
+// session as priority guidance) + optional new target (a restarted DreamHack
+// instance often comes back on a new port). NOT a retry — same job/cwd/session.
+function openContinueForm(jobId, anchorBtn) {
+  const existing = document.getElementById("continue-form-" + jobId);
+  if (existing) { existing.querySelector("textarea")?.focus(); return; }
+  const form = document.createElement("div");
+  form.className = "retry-manual-form continue-form";
+  form.id = "continue-form-" + jobId;
+  form.innerHTML = `
+    <label class="retry-manual-label">Operator note (the agent CONTINUES the same session — no re-investigation)</label>
+    <textarea rows="4" placeholder="e.g. I restarted the instance — the registration slot is fresh now. Run your existing exploit (BASE72 long-pw oracle) in one shot; don't probe."></textarea>
+    <label class="retry-manual-label" style="margin-top:0.4rem">New target (blank = keep prior; a restarted instance usually has a new port)</label>
+    <input type="text" class="retry-manual-target" placeholder="e.g. http://host8.dreamhack.games:NEWPORT" />
+    <div class="retry-manual-row">
+      <button type="button" class="retry-manual-submit continue-submit">💬 Continue with note</button>
+      <button type="button" class="retry-manual-cancel">Cancel</button>
+      <small>Same job · resumes the session · note added as <code>[retry-hint]</code></small>
+    </div>
+  `;
+  anchorBtn.parentElement.insertAdjacentElement("afterend", form);
+  const ta = form.querySelector("textarea");
+  const targetIn = form.querySelector(".retry-manual-target");
+  const submit = form.querySelector(".continue-submit");
+  const cancel = form.querySelector(".retry-manual-cancel");
+  ta.focus();
+  cancel.addEventListener("click", () => form.remove());
+  submit.addEventListener("click", async () => {
+    const comment = ta.value.trim();
+    if (!comment) {
+      ta.focus(); ta.classList.add("invalid");
+      setTimeout(() => ta.classList.remove("invalid"), 600);
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "Continuing…";
+    try {
+      const body = { comment };
+      if (targetIn.value.trim()) body.target = targetIn.value.trim();
+      const res = await fetch(`${API}/jobs/${jobId}/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) { alert(`continue error: ${res.status} ${await res.text()}`); submit.disabled = false; submit.textContent = "💬 Continue with note"; return; }
+      form.remove();
+      await refreshJobs();
+      selectJob(jobId);
+    } catch (e) {
+      alert(`continue failed: ${e}`);
+      submit.disabled = false; submit.textContent = "💬 Continue with note";
+    }
+  });
+  for (const el of [ta, targetIn]) {
+    el.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); submit.click(); }
+      else if (e.key === "Escape") { e.preventDefault(); form.remove(); }
+    });
+  }
+}
+
 async function refreshJobs() {
   const res = await fetch(`${API}/jobs`);
   const data = await res.json();
@@ -1533,6 +1594,11 @@ async function renderJob(id, opts = {}) {
     const retryHtml = showRetry
       ? `<button class="retry-btn" data-action="retry">↻ Retry with reviewer hint</button>
          <button class="retry-btn retry-manual-open-btn" data-action="retry-manual">✏ Retry with my hint</button>` : "";
+    // Continue-in-place: same job/cwd/session + an operator note. For when the
+    // agent solved it but was blocked on an external action (instance restart,
+    // remote back up). NOT a retry — no re-investigation.
+    const continueHtml = showRetry
+      ? `<button class="retry-btn continue-open-btn" data-action="continue">💬 Continue (operator note)</button>` : "";
     const stopResumeHtml = showStopResume
       ? `<button class="retry-btn retry-stop-resume-btn" data-action="stop-resume-reviewer">↻ Stop &amp; resume with reviewer hint</button>
          <button class="retry-btn retry-stop-resume-btn" data-action="stop-resume">✋ Stop &amp; resume with my hint</button>` : "";
@@ -1555,7 +1621,7 @@ async function renderJob(id, opts = {}) {
            <span class="fresh-label">✨ fresh context</span>
          </label>` : "";
     runBlock = `<div class="retry-row" style="margin:0.5rem 0">
-      ${runHtml} ${targetHtml} ${retryHtml} ${stopResumeHtml}
+      ${runHtml} ${targetHtml} ${retryHtml} ${continueHtml} ${stopResumeHtml}
       ${freshToggleHtml}
       <small style="color:#8b949e">${helperBits.join(" · ")}</small>
     </div>`;
@@ -1775,6 +1841,10 @@ async function renderJob(id, opts = {}) {
   const retryManualBtn = detail.querySelector('.retry-btn[data-action="retry-manual"]');
   if (retryManualBtn) {
     retryManualBtn.addEventListener("click", () => openManualHintForm(id, retryManualBtn));
+  }
+  const continueBtn = detail.querySelector('.retry-btn[data-action="continue"]');
+  if (continueBtn) {
+    continueBtn.addEventListener("click", () => openContinueForm(id, continueBtn));
   }
   const stopResumeBtn = detail.querySelector('.retry-btn[data-action="stop-resume"]');
   if (stopResumeBtn) {

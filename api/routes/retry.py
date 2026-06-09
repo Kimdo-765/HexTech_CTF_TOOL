@@ -757,6 +757,118 @@ def _resubmit(
     return new_id
 
 
+# ---------------------------------------------------------------------------
+# Continue-in-place (operator comment, NOT a retry).
+#
+# For jobs that solved the chal but were blocked on an EXTERNAL action the
+# operator must take (restart a one-shot DreamHack instance, bring the remote
+# back up, hand over a credential) — e15333348597 is the canonical case. A
+# /retry forks the session into a NEW job id → NEW cwd, so the carried
+# conversation's paths go stale and the preamble forces the agent to re-read /
+# re-investigate (exactly why its retry bfcb125eda1c spun in circles and burned
+# the fresh slot with a wrong registration). Continuing IN PLACE keeps the same
+# job id, cwd, work tree AND SDK session, so the forked conversation's paths are
+# still valid and the agent picks up where it left off with just the operator's
+# note — no re-orientation.
+# ---------------------------------------------------------------------------
+_CONTINUE_HINT_TMPL = (
+    "OPERATOR CONTINUATION — the external blocker is resolved.\n"
+    "Operator note: {comment}\n\n"
+    "You are CONTINUING THE SAME job in the SAME work tree — your cwd is "
+    "UNCHANGED and every file you already wrote (exploit.py / solver.py / "
+    "report.md / findings.json / decomp / scratch) is still exactly where you "
+    "left it. This is NOT a fresh job and NOT a re-investigation.\n"
+    "DO NOT re-read, re-decompile, re-fingerprint or re-derive what you already "
+    "established — your full prior reasoning and analysis are intact. ACT on the "
+    "operator note immediately: run your existing exploit against the "
+    "now-unblocked target, or apply the single change the note implies. If a "
+    "one-shot / rate-limited resource just became available (a fresh "
+    "registration slot, a reset instance), spend it on your COMPLETE working "
+    "exploit in one shot — do NOT waste it on manual probing or experiments."
+)
+
+
+def _continue_in_place(prev_meta: dict, comment: str,
+                       target_override: str | None = None) -> str:
+    """Re-enqueue the SAME job id, resuming its SDK session with the operator's
+    note folded in as priority guidance. No new job, no cwd change, no work
+    copy — build_user_prompt surfaces the [retry-hint] and the forked session
+    references the unchanged cwd. Returns the (unchanged) job id.
+
+    `target_override` updates the target (a restarted DreamHack instance often
+    comes back on a NEW port); blank keeps the prior, "(none)" clears it."""
+    module = prev_meta.get("module")
+    if module not in ("web", "pwn", "crypto", "rev"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"continue is only supported for web/pwn/crypto/rev (got {module})",
+        )
+    job_id = prev_meta.get("id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job has no id")
+
+    hint = _CONTINUE_HINT_TMPL.format(comment=_sanitize_hint(comment).strip())
+    # Strip any prior [retry-hint] block so repeated continues don't stack.
+    description = (prev_meta.get("description") or "").strip()
+    cut = description.find("[retry-hint]")
+    if cut != -1:
+        description = description[:cut].rstrip()
+    description = (description + "\n\n[retry-hint]\n" + hint).strip()
+
+    # Same cwd → the prior session jsonl is already under this cwd's project
+    # key, so fork_session=True finds it without any carry step.
+    resume_sid = prev_meta.get("claude_session_id")
+    cont_n = int(prev_meta.get("continue_count") or 0) + 1
+    if target_override is not None:
+        clean_t = target_override.strip()
+        target = None if clean_t.lower() in ("(none)", "none", "") else clean_t
+    else:
+        target = (prev_meta.get("target_url") or "").strip() or None
+    auto_run = bool(prev_meta.get("auto_run"))
+    job_timeout = resolve_timeout(prev_meta.get("job_timeout"))
+    model = prev_meta.get("model")
+    use_sage = bool(prev_meta.get("use_sage"))
+
+    write_job_meta(job_id, {
+        **prev_meta,
+        "status": "queued",
+        "stage": "continue",
+        "target_url": target,
+        "remote_only": prev_meta.get("remote_only", target is not None),
+        "description": description,
+        "resume_session_id": resume_sid,
+        "resume_skipped_due_to_judge_stop": False,
+        "fresh_session_requested": False,
+        "continue_count": cont_n,
+        "continue_comment": comment,
+        # clear the prior terminal markers so the UI shows it active again.
+        "finished_at": None,
+        "error": None,
+        "error_kind": None,
+    })
+
+    q = get_queue()
+    rq_id = f"{job_id}-c{cont_n}"
+    ht = hard_timeout_for(job_timeout)
+    if module == "web":
+        q.enqueue("modules.web.analyzer.run_job",
+                  job_id, prev_meta.get("src_root"), target, description, auto_run, model,
+                  job_id=rq_id, job_timeout=ht)
+    elif module == "crypto":
+        q.enqueue("modules.crypto.analyzer.run_job",
+                  job_id, prev_meta.get("src_root"), target, description, auto_run, use_sage, model,
+                  job_id=rq_id, job_timeout=ht)
+    elif module == "pwn":
+        q.enqueue("modules.pwn.analyzer.run_job",
+                  job_id, prev_meta.get("filename"), target, description, auto_run, model,
+                  job_id=rq_id, job_timeout=ht)
+    else:  # rev
+        q.enqueue("modules.rev.analyzer.run_job",
+                  job_id, prev_meta.get("filename"), description, auto_run, model,
+                  job_id=rq_id, job_timeout=ht)
+    return job_id
+
+
 _MAX_MANUAL_HINT = 4000
 
 
@@ -986,6 +1098,44 @@ async def retry_with_hint(job_id: str, request: Request):
         "carried_work": (jd / "work").is_dir(),
         "fresh_session": fresh_session,
         "target_overridden": target_override is not None,
+    }
+
+
+@router.post("/{job_id}/continue")
+async def continue_with_comment(job_id: str, request: Request):
+    """Continue a finished job IN PLACE with an operator note — NOT a retry.
+
+    For the "agent solved it but was blocked on an external action" case
+    (restart a one-shot instance, remote came back, credential handed over).
+    Keeps the same job id / cwd / work tree / SDK session and just injects the
+    operator's note so the agent acts on it without re-investigating.
+
+    Body: JSON `{"comment": "..."}` (required).
+    """
+    safe = Path(job_id).name
+    _jd, prev_meta = _validate_retry(safe)
+    if prev_meta.get("status") in ("running", "queued", "analyze"):
+        raise HTTPException(
+            status_code=409,
+            detail="job is still active — use Stop & resume instead of Continue",
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    comment = (body.get("comment") or "").strip() if isinstance(body, dict) else ""
+    if not comment:
+        raise HTTPException(status_code=400, detail="comment required")
+    if len(comment) > _MAX_MANUAL_HINT:
+        comment = comment[:_MAX_MANUAL_HINT]
+    target_raw = body.get("target") if isinstance(body, dict) else None
+    target_override = target_raw if isinstance(target_raw, str) and target_raw.strip() else None
+    new_id = _continue_in_place(prev_meta, comment, target_override=target_override)
+    return {
+        "job_id": new_id,
+        "status": "queued",
+        "continued": True,
+        "resumed_session": bool(prev_meta.get("claude_session_id")),
     }
 
 

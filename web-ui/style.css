@@ -94,6 +94,11 @@ textarea, select {
 }
 .retry-btn:hover { background: #8957e5; }
 .retry-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+/* Continue-in-place: teal accent so it reads as "resume, not a fresh retry". */
+.retry-btn.continue-open-btn { background: #1f6f5c; }
+.retry-btn.continue-open-btn:hover { background: #2ea043; }
+.continue-form .continue-submit { background: #1f6f5c; }
+.continue-form .continue-submit:hover { background: #2ea043; }
 /* "fresh context" toggle — a pill chip that mirrors the purple retry tone.
    Native checkbox is visually hidden; .fresh-box is the custom check. */
 .fresh-toggle {
