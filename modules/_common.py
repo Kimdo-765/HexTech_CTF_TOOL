@@ -2541,6 +2541,75 @@ def _accumulate_tokens(
     return cur
 
 
+# Live flag-candidate scan: surface possible flags WHILE the job runs so
+# the operator can submit fast (the `[FLAG?]` box), WITHOUT writing them
+# into the curated meta.flags / FLAG FOUND. Accumulated per job from the
+# streamed agent messages; the operator-declared flag_format (if set)
+# narrows the matcher so local LOCAL{...} test flags never appear.
+_flag_candidate_state: dict[str, set[str]] = {}
+_flag_fmt_cache: dict[str, object] = {}
+_FMT_UNSET = object()
+
+
+def _job_scan_re(job_id: str):
+    """Cached per-job flag matcher (operator format if set, else FLAG_RE).
+    read_meta runs once per job, not once per streamed message."""
+    cached = _flag_fmt_cache.get(job_id, _FMT_UNSET)
+    if cached is _FMT_UNSET:
+        try:
+            cached = job_flag_format_re(job_id)
+        except Exception:
+            cached = None
+        _flag_fmt_cache[job_id] = cached
+    return cached or FLAG_RE
+
+
+def _extract_msg_text(msg) -> str:
+    """Best-effort plain text from an SDK message (AssistantMessage
+    TextBlocks + UserMessage tool-result content) for the candidate scan."""
+    parts: list[str] = []
+    content = getattr(msg, "content", None)
+    if isinstance(content, str):
+        parts.append(content)
+    elif isinstance(content, list):
+        for block in content:
+            t = getattr(block, "text", None)
+            if isinstance(t, str):
+                parts.append(t)
+            c = getattr(block, "content", None)
+            if isinstance(c, str):
+                parts.append(c)
+            elif isinstance(c, list):
+                for sub in c:
+                    st = getattr(sub, "text", None)
+                    if isinstance(st, str):
+                        parts.append(st)
+    return "\n".join(parts)
+
+
+def _accumulate_flag_candidates(job_id: str, msg) -> bool:
+    """Scan one streamed message for flag candidates (format-aware) +
+    explicit `FLAG_CANDIDATE:` markers; accumulate per job. Returns True
+    when a NEW candidate was added (used to flush the heartbeat
+    immediately so a found flag shows up without the 5s throttle delay).
+    Cheap: a regex over the message text, matcher cached, no disk I/O."""
+    text = _extract_msg_text(msg)
+    if not text or "{" not in text:
+        return False
+    found = set(_job_scan_re(job_id).findall(text))
+    for raw in _FLAG_MARKER_RE.findall(text):
+        cand = _MARKER_ESCAPE_RE.split(raw.strip(), 1)[0].strip().strip("\"'`").strip()
+        if cand:
+            found.add(cand)
+    fresh = {f for f in found if f and not _is_placeholder_flag(f)}
+    if not fresh:
+        return False
+    acc = _flag_candidate_state.setdefault(job_id, set())
+    before = len(acc)
+    acc.update(fresh)
+    return len(acc) > before
+
+
 def agent_heartbeat(job_id: str, msg) -> None:
     """Throttled write of agent liveness + token/cost tracking to
     meta.json. Called from each analyzer's SDK message loop on every
@@ -2559,6 +2628,10 @@ def agent_heartbeat(job_id: str, msg) -> None:
     import time as _time
     kind = type(msg).__name__
     is_result = kind == "ResultMessage"
+
+    # Live flag-candidate scan (always, before the throttle) so no flag is
+    # missed; a NEW candidate force-flushes below so it shows up at once.
+    new_candidate = _accumulate_flag_candidates(job_id, msg)
 
     # Token accumulation (lock-free per-process dict). Always update
     # in-memory; flush at most once per 5s except on Result.
@@ -2580,17 +2653,21 @@ def agent_heartbeat(job_id: str, msg) -> None:
 
     now = _time.monotonic()
     last = _heartbeat_state.get(job_id, 0.0)
-    throttled = (not is_result) and (now - last < _HEARTBEAT_MIN_INTERVAL_S)
+    # A newly-found flag candidate bypasses the 5s throttle so it appears
+    # in the `[FLAG?]` box immediately.
+    throttled = (not is_result) and (not new_candidate) and (now - last < _HEARTBEAT_MIN_INTERVAL_S)
     if throttled:
         return
     _heartbeat_state[job_id] = now
 
+    candidates = sorted(_flag_candidate_state.get(job_id) or [])
     write_meta(
         job_id,
         last_agent_event_at=datetime.now(timezone.utc).isoformat(),
         last_event_kind=kind,
         agent_tokens=tokens or None,
         agent_turns=turns or None,
+        flag_candidates=candidates or None,
         **updates,
     )
 
@@ -2604,6 +2681,8 @@ def agent_heartbeat(job_id: str, msg) -> None:
         meta_payload["tokens"] = tokens
     if "cost_usd" in updates:
         meta_payload["cost_usd"] = updates["cost_usd"]
+    if candidates:
+        meta_payload["flag_candidates"] = candidates
     if is_result:
         meta_payload["is_result"] = True
     _publish(job_id, "meta", meta_payload)

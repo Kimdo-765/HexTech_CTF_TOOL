@@ -384,6 +384,26 @@ textarea, select {
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
+/* [FLAG?] — tentative candidate box (amber), distinct from the confirmed
+   green Flag-found banner. Surfaced mid-run for fast CTF submission. */
+.flag-cand-banner {
+  background: #2b2511;
+  border: 1px dashed #d29922;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.6rem 0;
+}
+.flag-cand-banner h4 {
+  margin: 0 0 0.4rem 0;
+  font-size: 0.8rem;
+  color: #e3b341;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.flag-cand-banner h4 small { color: #8b949e; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.flag-cand-banner .flag-q { font-weight: 700; letter-spacing: 0.5px; }
+.flag-cand-banner code { color: #e3b341; }
 .flag-row {
   display: flex; align-items: center; gap: 0.5rem;
   margin: 0.25rem 0;

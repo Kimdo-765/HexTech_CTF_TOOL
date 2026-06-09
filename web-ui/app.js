@@ -245,7 +245,9 @@ function _openLiveStream(id) {
     // refreshes the tokens-pill every 8s, which is good enough.
     try {
       const payload = JSON.parse(e.data);
-      if (payload && payload.status_update) {
+      // A status change OR a freshly-spotted flag candidate ([FLAG?])
+      // warrants a detail rebuild so the operator sees it at once.
+      if (payload && (payload.status_update || payload.flag_candidates)) {
         _scheduleMetaRefresh(id);
       }
     } catch (_) {}
@@ -1598,6 +1600,26 @@ async function renderJob(id, opts = {}) {
     </div>`;
   }
 
+  // [FLAG?] — flag candidates spotted live during the run (separate from
+  // the curated 🚩 Flag found). Lets the operator submit fast in a CTF
+  // while the job is still running. Hide ones already promoted to flags.
+  let candBlock = "";
+  const cands = (job.flag_candidates || []).filter(
+    (c) => !(job.flags || []).includes(c));
+  if (cands.length) {
+    const rows = cands.map((f) =>
+      `<div class="flag-row">
+         <code>${escapeHtml(f)}</code>
+         <button class="copy-btn" data-flag="${escapeHtml(f)}">Copy</button>
+       </div>`).join("");
+    candBlock = `<div class="flag-cand-banner">
+        <h4>🏁 <span class="flag-q">[FLAG?]</span>
+          <small>candidate(s) spotted mid-run — verify &amp; submit (not yet confirmed)</small>
+        </h4>
+        ${rows}
+      </div>`;
+  }
+
   let flagBlock = "";
   if (job.flags && job.flags.length) {
     const multiFlags = job.flags.length > 1;
@@ -1632,6 +1654,7 @@ async function renderJob(id, opts = {}) {
     <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${stage}${cost}${timeout}${modelInfo}</small></div>
     ${timeoutBlock}
     ${descBlock}
+    ${candBlock}
     ${runBlock}
     ${errorBlock}
     ${flagBlock}
