@@ -1842,9 +1842,9 @@ async function renderJob(id, opts = {}) {
   if (retryManualBtn) {
     retryManualBtn.addEventListener("click", () => openManualHintForm(id, retryManualBtn));
   }
-  const continueBtn = detail.querySelector('.retry-btn[data-action="continue"]');
-  if (continueBtn) {
-    continueBtn.addEventListener("click", () => openContinueForm(id, continueBtn));
+  const continueNoteBtn = detail.querySelector('.retry-btn[data-action="continue"]');
+  if (continueNoteBtn) {
+    continueNoteBtn.addEventListener("click", () => openContinueForm(id, continueNoteBtn));
   }
   const stopResumeBtn = detail.querySelector('.retry-btn[data-action="stop-resume"]');
   if (stopResumeBtn) {
