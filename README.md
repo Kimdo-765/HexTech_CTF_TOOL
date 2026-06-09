@@ -65,11 +65,14 @@ seven Claude roles above.
 See [Architecture](#architecture) and [Agent architecture](#agent-architecture).
 
 Failed jobs (or finished-without-flag) can be **retried** with an automatic
-reviewer-written hint, a hand-written hint, or stop-and-resume mid-run.
-There's also an **inline auto-retry loop** that runs without leaving the
-job: when the sandboxed run fails, postjudge's retry_hint is injected back
-into main's same SDK session and main patches + re-finalizes (configurable
-via `AUTO_RETRY_MAX`, default unlimited). See [Retry / Resume](#retry--resume).
+reviewer-written hint, a hand-written hint, or stop-and-resume mid-run — or
+**continued IN PLACE with an operator note** (same job / cwd / session, for
+when the agent solved it but was blocked on an external action you've now
+taken, e.g. restarting a one-shot instance). There's also an **inline
+auto-retry loop** that runs without leaving the job: when the sandboxed run
+fails, postjudge's retry_hint is injected back into main's same SDK session
+and main patches + re-finalizes (configurable via `AUTO_RETRY_MAX`, default
+unlimited). See [Retry / Resume](#retry--resume).
 
 ## Modules
 
@@ -836,6 +839,7 @@ upload ──► /data/jobs/<id>/         ─► RQ enqueue
 | POST | `/api/jobs/{id}/retry/stream` | same as `/retry` but Server-Sent Events stream the reviewer text live |
 | POST | `/api/jobs/{id}/resume` | hard-stop a queued/running job, then enqueue a fresh one with the same body shape as `/retry`; `hint` required here. Carries `./work/` + forks the prior SDK session. |
 | POST | `/api/jobs/{id}/resume/stream` | SSE-streamed resume. With `{"hint":"…"}` works exactly like `/resume`. With an empty body, calls the reviewer to write the hint first. Both modes carry `./work/`, fork the prior session, and prepend the `[RESUMING]` preamble. |
+| POST | `/api/jobs/{id}/continue` | continue a finished job IN PLACE (same job id / cwd / work tree / SDK session) with an operator note. Body `{"comment": "...", "target?": "..."}` — `comment` required. NOT a retry: no new job, no re-investigation. The note is folded in as priority guidance; the optional `target` updates `meta.target_url`. 409 if the job is still active (use Stop & resume instead). |
 | POST | `/api/jobs/{id}/timeout/continue` | acknowledge the soft timeout — let the agent keep running |
 | POST | `/api/jobs/{id}/timeout/kill` | acknowledge the soft timeout — hard-stop the job |
 | POST | `/api/exploits/save` | copy a finished job's `report.md` + `exploit.py`/`solver.py` into the operator-curated library. Body `{"job_id": "...", "tags": [...], "notes": "...", "overwrite": true}`. Refuses jobs with no captured flag |
@@ -1124,6 +1128,11 @@ docker compose restart worker     # modules/*, worker/runner.py changes
 # (needs root) or restarting Docker Desktop, then re-bind with
 # `docker compose up -d --force-recreate api`.
 
+# web-ui/*.js changes — there is no build step (served static), so a
+# syntax error breaks the WHOLE UI (no buttons work). The host node is
+# too old to --check modern JS; validate with a modern node image:
+docker run --rm -v "$PWD/web-ui":/w node:20-slim node --check /w/app.js
+
 # Image rebuilds — needed only for Dockerfile, requirements.txt, or
 # tool-image (decompiler/forensic/misc/runner/sage) changes:
 docker compose build api worker
@@ -1262,7 +1271,7 @@ Internally:
 
 ## Retry / Resume
 
-Two flavors:
+Three flavors:
 
 1. **Inline auto-retry** (no user click) — driven by postjudge inside
    the same job. See [Auto-retry triangle](#auto-retry-triangle). Cap
@@ -1270,17 +1279,34 @@ Two flavors:
    is reused, so cache prefix is preserved across retries.
 2. **User-triggered retry / resume** — described below. Spawns a NEW
    job (new id, new RQ enqueue) and forks the prior SDK session.
+3. **Continue-in-place (operator note)** — re-runs the SAME job id with
+   an operator note, for the "agent solved it but was blocked on an
+   EXTERNAL action" case. See below.
 
 Web / Pwn / Crypto / Rev jobs can be re-issued at any terminal status
 (`failed`, `no_flag`, `finished`, `stopped`) — and Stop&resume can also
-fire while the job is still `queued` / `running`. Four buttons:
+fire while the job is still `queued` / `running`. Buttons:
 
 | Button | What happens |
 |---|---|
 | **↻ Retry with reviewer hint** | A separate Claude (Opus 4.7 by default) reads the prior job's `run.log`, exploit/solver, stdout/stderr, and key source files, then writes a one-paragraph diagnosis. That hint is appended to the original description as `[retry-hint] …` and a fresh job is enqueued. Reviewer output streams into the UI live (SSE). |
 | **✏ Retry with my hint** | Inline textarea. Whatever you type is appended as `[retry-hint]` — the reviewer is **not** called. |
+| **💬 Continue (operator note)** | `POST /api/jobs/{id}/continue {comment, target?}`. Re-runs the SAME job id (no new job, no new cwd) resuming the prior SDK session, with the operator note folded in as priority guidance under a "this is NOT a re-investigation — act on the note now; spend a one-shot resource on your COMPLETE exploit, don't probe" framing. Because the cwd is unchanged, the forked conversation's paths stay valid and there is no stale-path re-orientation. For when the agent fully solved the chal but waited on an external action (you restarted a one-shot DreamHack instance, the remote came back, a credential was handed over). The optional target updates `meta.target_url` (a restarted instance usually comes back on a new port — put it in the **New target** field, not the note). |
 | **↻ Stop & resume with reviewer hint** | Only visible while the job is `queued`/`running`. Halts the in-flight job, asks the reviewer to write a diagnosis from the partial run, and submits the new job with that hint. SSE streams progress. |
 | **✋ Stop & resume with my hint** | Same as the reviewer variant but you write the hint yourself. |
+
+**Continue vs Retry — why both.** A `/retry` forks into a NEW job id →
+NEW cwd, so the carried session's tool-history paths (`/data/jobs/<old>/
+work/...`) go stale and the preamble has to tell the agent "your cwd
+changed, re-read the artifacts to reconstruct where you were" — which
+makes the agent re-investigate (and, in one case, manually re-probe and
+burn a precious one-shot registration slot with a wrong value). `/continue`
+keeps the SAME job id / cwd / work tree / SDK session, so the agent picks
+up exactly where it left off and acts on the note immediately — no
+re-orientation. Validated on job e15333348597: the agent resumed, instantly
+recognized "the operator restarted the instance — fresh slot, this was the
+one remaining blocker", and went straight to grab the slot with its existing
+exploit.
 
 **What carries forward** (all four paths):
 
@@ -1483,6 +1509,23 @@ real flag, so placeholder-only jobs never enter the curated set.
   subagents include a per-spawn index in the chip
   (`recon#1`, `debugger#2`, …) so multiple delegations to the same
   role are visually distinct.
+- **Run-log search / filter**. A 🔎 box in the run-log titlebar filters
+  the displayed log (the 256 KB tail the poll fetches) to matching lines
+  (case-insensitive), highlights hits with `<mark>`, and shows a match
+  count. Highlight is applied only to TEXT segments of the colored HTML
+  so the spans aren't mangled. Per-job state survives the poll re-render;
+  the poll is skipped while the box is focused so typing isn't cut off.
+- **`[FLAG?]` live candidate box**. While a job runs, `agent_heartbeat`
+  passively regex-scans each streamed main-agent message for flag
+  candidates (the operator `flag_format` if set, else `FLAG_RE`, plus
+  explicit `FLAG_CANDIDATE:` markers; placeholders and `LOCAL{...}`
+  test flags filtered out) and accumulates them in `meta.flag_candidates`
+  WITHOUT touching the curated `meta.flags`. An amber `[FLAG?]` box
+  surfaces them above the green 🚩 Flag-found banner (each with a Copy
+  button) so the operator can submit fast in a CTF — a newly-found
+  candidate bypasses the 5 s heartbeat throttle and is pushed on the SSE
+  `meta` delta so it appears at once. This is a deterministic framework
+  scan (zero extra LLM tokens), not something the agent does.
 - **UTC ↔ Local timestamp toggle**. Run-log titlebar has a button
   flipping `[HH:MM:SS]` between UTC (default, what the orchestrator
   writes to disk) and the user's local timezone. Choice persists in
