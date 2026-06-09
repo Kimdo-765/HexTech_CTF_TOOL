@@ -187,6 +187,9 @@ function _appendLiveLogLine(id, payload) {
   // Backfill events are redundant — renderJob's /log fetch already
   // populated the pre. Streaming starts strictly after backfill_done.
   if (payload.backfill) return;
+  // A filter is active: the <pre> shows only matching lines, so don't append
+  // unfiltered live lines. The 2s poll re-fetches + re-applies the filter.
+  if ((_logSearch[id] || "").trim()) return;
   const pre = document.querySelector(
     `pre.run-log[data-job-id="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`,
   );
@@ -1228,6 +1231,11 @@ async function renderJob(id, opts = {}) {
           return null;
         }
       }
+      // Don't yank the run-log search box out from under the user mid-type.
+      const ae = document.activeElement;
+      if (ae && ae.classList && ae.classList.contains("run-log-search")) {
+        return null;
+      }
     } catch (_) {}
   }
   const res = await fetch(`${API}/jobs/${id}`);
@@ -1675,6 +1683,10 @@ async function renderJob(id, opts = {}) {
         <span class="run-log-dot run-log-dot-y"></span>
         <span class="run-log-dot run-log-dot-g"></span>
         <span class="run-log-title">job ${escapeHtml(id)} — ${escapeHtml(job.module || "?")}</span>
+        <input class="run-log-search" data-job-id="${id}" type="search"
+               spellcheck="false" autocomplete="off"
+               placeholder="🔎 filter log…" value="${escapeHtml(_logSearch[id] || "")}" />
+        <span class="run-log-search-count" data-job-id="${id}"></span>
         <button class="run-log-tz-toggle" data-action="toggle-tz"
                 title="Toggle run-log timestamps (UTC ↔ ${escapeHtml(_localTzName())})"
         >${runlogTz === "utc" ? "UTC" : "Local"}</button>
@@ -1883,6 +1895,20 @@ async function renderJob(id, opts = {}) {
         await refreshJobs();
       }
     });
+  }
+
+  // Run-log search: stash this poll's raw log + anchor, wire the input, and
+  // re-apply an active filter (the poll just rebuilt the <pre> with the full
+  // log). Typing is protected by the poll-skip guard up top.
+  _runLogRaw[id] = log;
+  _runLogAnchor[id] = job.started_at || null;
+  const logSearchInput = detail.querySelector(".run-log-search");
+  if (logSearchInput) {
+    logSearchInput.addEventListener("input", () => {
+      _logSearch[id] = logSearchInput.value;
+      applyLogSearch(id);
+    });
+    if ((_logSearch[id] || "").trim()) applyLogSearch(id);
   }
 
   const tzBtn = detail.querySelector('.run-log-tz-toggle[data-action="toggle-tz"]');
@@ -2209,6 +2235,57 @@ function _colorizeRunLogLine(line, anchor, state) {
   // System / unrecognised lines (e.g. "Launching Claude agent…",
   // "User chose CONTINUE…", "⏰ Soft timeout reached…").
   return `<span class="rl-ts">[${ts}]</span> ${agentChip}${indent}<span class="rl-system">${escapeHtml(rest)}</span>`;
+}
+
+// ---- run-log search (client-side filter + highlight of the loaded log) ----
+// Searches the displayed log (the 256 KB tail the poll fetches — the whole log
+// for most jobs). State is keyed by job so it survives the 2s poll re-render.
+const _logSearch = {};      // jobId -> query string
+const _runLogRaw = {};      // jobId -> raw log text (last poll fetch)
+const _runLogAnchor = {};   // jobId -> started_at iso (for timestamp colorize)
+
+function _escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Highlight `q` only in the TEXT segments of colorized HTML (never inside a
+// tag), so the run-log's colored spans aren't mangled.
+function _highlightLogHtml(html, q) {
+  if (!q) return html;
+  const rx = new RegExp(_escapeRegExp(q), "gi");
+  return html.replace(/(<[^>]+>)|([^<]+)/g, (m, tag, text) =>
+    tag ? tag : text.replace(rx, '<mark class="log-hit">$&</mark>'));
+}
+
+// Re-render the run-log <pre> for `id`: the full colorized log when the query
+// is empty, else only the matching lines (case-insensitive) with hits marked.
+function applyLogSearch(id) {
+  const esc = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
+  const pre = document.querySelector(`pre.run-log[data-job-id="${esc}"]`);
+  if (!pre) return;
+  const raw = _runLogRaw[id] || "";
+  const q = (_logSearch[id] || "").trim();
+  const anchor = _runLogAnchor[id] || null;
+  const countEl = document.querySelector(`.run-log-search-count[data-job-id="${esc}"]`);
+  if (!q) {
+    try { pre.innerHTML = raw ? colorizeRunLog(raw, anchor) : "(empty)"; } catch (_) {}
+    if (countEl) countEl.textContent = "";
+    return;
+  }
+  const ql = q.toLowerCase();
+  const lines = raw.split("\n");
+  const matching = lines.filter((l) => l.toLowerCase().includes(ql));
+  if (!matching.length) {
+    pre.innerHTML = '<span style="color:#8b949e">(no matching lines)</span>';
+    if (countEl) countEl.textContent = "0";
+    return;
+  }
+  try {
+    pre.innerHTML = _highlightLogHtml(colorizeRunLog(matching.join("\n"), anchor), q);
+  } catch (_) {
+    pre.textContent = matching.join("\n");
+  }
+  if (countEl) countEl.textContent = `${matching.length} / ${lines.length} lines`;
 }
 
 function colorizeRunLog(text, anchorIso) {
