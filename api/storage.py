@@ -1,11 +1,40 @@
 import json
 import os
+import re
 import shutil
 import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+# Split an operator target field into individual targets. Newlines are the
+# documented separator (the UI target box is a textarea — one per line);
+# commas are also accepted for the single-line retry/continue override inputs.
+# A CTF target (`host:port`, `nc host port`, `http://host:port/path`) does not
+# contain a raw comma, so comma-splitting is safe in practice.
+_TARGET_SPLIT_RE = re.compile(r"[\r\n,]+")
+
+
+def parse_targets(raw: Optional[str], *, limit: int = 32) -> list[str]:
+    """Parse a raw target field into a deduped, order-preserving list.
+
+    Empty / whitespace-only input → []. Each target is stripped; blanks are
+    dropped; duplicates are collapsed (first occurrence wins). Capped at
+    `limit` so a paste accident can't enqueue an unbounded list. The first
+    element is the PRIMARY target (argv[1] / meta.target_url); the full list
+    is exposed to the exploit via the TARGETS env var (see modules/_runner).
+    """
+    if not raw:
+        return []
+    out: list[str] = []
+    for piece in _TARGET_SPLIT_RE.split(raw):
+        t = piece.strip()
+        if t and t not in out:
+            out.append(t)
+            if len(out) >= limit:
+                break
+    return out
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 JOBS_DIR = DATA_DIR / "jobs"

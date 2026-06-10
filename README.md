@@ -97,6 +97,19 @@ counts in FLAG FOUND; see Flag-scan trusted sources), and on `/retry`,
 prior conversation). The Misc form's file upload is optional (skip it for
 a description-only Claude analysis).
 
+**Multiple targets.** The target field (Web/Pwn/Crypto) is a dynamic list —
+click **`+ add target`** to add another input row (`×` removes one) to register
+several (mirrored instances that expire fast, or distinct services in one
+chain). The first row is the **primary**
+(`meta.target_url`, passed to `exploit.py` as `argv[1]`); all of them are
+stored in `meta.target_urls` and handed to the exploit at run time via the
+`TARGETS` env var (primary first, newline-separated). The prompt tells the
+agent to drive off `argv[1]`/`TARGETS` and try each until one responds, so
+no host:port is hard-coded. `/retry`, continue-in-place, and
+`PATCH /jobs/{id}/target` all accept multiple too (newline **or** comma
+separated). The job detail shows `target: <primary> +N more` (hover for the
+full list).
+
 ## Architecture
 
 Seven Claude-driven roles, each with its own context window:
@@ -834,8 +847,8 @@ upload ──► /data/jobs/<id>/         ─► RQ enqueue
 | POST | `/api/modules/crypto/analyze` | upload zip → enqueue |
 | POST | `/api/modules/rev/analyze` | upload binary → enqueue |
 | POST | `/api/jobs/{id}/run` | re-run produced exploit/solver in a fresh sandbox |
-| PATCH | `/api/jobs/{id}/target` | update only `target_url` on the job's meta — no retry, no resume, no new job. Body `{"target": "<new>"}` (use `(none)` or `""` to clear). The next manual `/run` (and the default of any future `/retry`) picks up the new value. Audit-logged to `run.log`. |
-| POST | `/api/jobs/{id}/retry` | regenerate the job. JSON body fields all optional: `hint` (skip reviewer if present), `target` (override prior target_url; sentinel `(none)` clears it). Empty body = auto reviewer + keep prior target. |
+| PATCH | `/api/jobs/{id}/target` | update only `target_url` (+ `target_urls`) on the job's meta — no retry, no resume, no new job. Body `{"target": "<new>"}` (newline/comma-separate for several; use `(none)` or `""` to clear). The next manual `/run` (and the default of any future `/retry`) picks up the new value. Audit-logged to `run.log`. |
+| POST | `/api/jobs/{id}/retry` | regenerate the job. JSON body fields all optional: `hint` (skip reviewer if present), `target` (override prior target_url; newline/comma-separate for several; sentinel `(none)` clears it). Empty body = auto reviewer + keep prior target. |
 | POST | `/api/jobs/{id}/retry/stream` | same as `/retry` but Server-Sent Events stream the reviewer text live |
 | POST | `/api/jobs/{id}/resume` | hard-stop a queued/running job, then enqueue a fresh one with the same body shape as `/retry`; `hint` required here. Carries `./work/` + forks the prior SDK session. |
 | POST | `/api/jobs/{id}/resume/stream` | SSE-streamed resume. With `{"hint":"…"}` works exactly like `/resume`. With an empty body, calls the reviewer to write the hint first. Both modes carry `./work/`, fork the prior session, and prepend the `[RESUMING]` preamble. |

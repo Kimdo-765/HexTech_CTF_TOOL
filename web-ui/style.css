@@ -52,6 +52,47 @@ textarea, select {
   padding: 0.5rem;
   font-family: inherit;
 }
+/* Multi-target list — rows of host:port inputs grown/shrunk with + / ×. */
+.target-list { display: flex; flex-direction: column; gap: 0.3rem; }
+.target-rows { display: flex; flex-direction: column; gap: 0.3rem; }
+.target-row { display: flex; gap: 0.3rem; align-items: stretch; }
+.target-row .target-input {
+  flex: 1 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+.target-remove {
+  flex: 0 0 auto;
+  width: 1.9rem;
+  background: #21262d;
+  color: #8b949e;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1;
+  font-size: 1rem;
+}
+.target-remove:hover { color: #f85149; border-color: #f85149; }
+.target-add {
+  align-self: flex-start;
+  background: transparent;
+  color: #3fb950;
+  border: 1px dashed #2ea04366;
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.target-add:hover { background: #2ea04318; border-style: solid; }
+/* "+N more" badge next to the primary target in the job detail header. */
+.target-more {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 4px;
+  background: #1f6feb33;
+  color: #58a6ff;
+  cursor: help;
+}
 .hbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .cost-banner {
   display: flex; align-items: center; gap: 0.75rem;

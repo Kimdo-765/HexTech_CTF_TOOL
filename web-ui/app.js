@@ -410,6 +410,17 @@ const CAPTURE_REMOTE_FLAG_DIRECTIVE =
 
 async function submitJob(form, endpoint) {
   const fd = new FormData(form);
+  // Multi-target rows (the +/× list) → join non-empty values with newlines into
+  // the canonical field (target_url for web, target for pwn/crypto) so the
+  // backend's parse_targets() splits them. The row inputs are intentionally
+  // unnamed, so they never reach FormData on their own.
+  const tlist = form.querySelector(".target-list");
+  if (tlist && tlist.dataset.field) {
+    const vals = Array.from(tlist.querySelectorAll(".target-input"))
+      .map((i) => i.value.trim())
+      .filter(Boolean);
+    fd.set(tlist.dataset.field, vals.join("\n"));
+  }
   for (const cb of form.querySelectorAll('input[type="checkbox"]')) {
     // Nameless checkboxes (e.g. the capture-remote-flag toggle) are UI-only and
     // must not leak into FormData as a blank-named field — they're handled below.
@@ -462,6 +473,67 @@ async function submitJob(form, endpoint) {
   await refreshJobs();
   selectJob(data.job_id);
 }
+
+// ---- Multi-target rows (+ / × buttons) -----------------------------------
+// Web/Pwn/Crypto target fields are a dynamic list. "+ add target" appends a
+// row; "×" removes one (always keeping ≥1). submitJob() joins the row values
+// into the canonical field. Listeners are delegated so dynamically-added rows
+// work without re-binding.
+function makeTargetRow(placeholder) {
+  const row = document.createElement("div");
+  row.className = "target-row";
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.className = "target-input";
+  inp.placeholder = placeholder || "";
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "target-remove";
+  rm.tabIndex = -1;
+  rm.title = "Remove this target";
+  rm.textContent = "×";
+  row.append(inp, rm);
+  return row;
+}
+
+document.addEventListener("click", (e) => {
+  const addBtn = e.target.closest(".target-add");
+  if (addBtn) {
+    const list = addBtn.closest(".target-list");
+    const rows = list.querySelector(".target-rows");
+    const row = makeTargetRow(list.dataset.placeholder || "");
+    rows.appendChild(row);
+    row.querySelector(".target-input").focus();
+    return;
+  }
+  const rmBtn = e.target.closest(".target-remove");
+  if (rmBtn) {
+    const rows = rmBtn.closest(".target-rows");
+    if (rows.querySelectorAll(".target-row").length > 1) {
+      rmBtn.closest(".target-row").remove();
+    } else {
+      // Last remaining row: clear instead of removing so one input always stays.
+      const inp = rmBtn.closest(".target-row").querySelector(".target-input");
+      if (inp) inp.value = "";
+    }
+  }
+});
+
+// The native "Reset" button clears values but leaves added rows behind — prune
+// each target list back to a single empty row after the reset runs.
+document.addEventListener("reset", (e) => {
+  const lists = e.target.querySelectorAll
+    ? e.target.querySelectorAll(".target-list") : [];
+  if (!lists.length) return;
+  setTimeout(() => {
+    lists.forEach((list) => {
+      const rows = list.querySelector(".target-rows");
+      rows.querySelectorAll(".target-row").forEach((r, i) => { if (i > 0) r.remove(); });
+      const first = rows.querySelector(".target-input");
+      if (first) first.value = "";
+    });
+  }, 0);
+});
 
 document.getElementById("web-form").addEventListener("submit", (e) => {
   e.preventDefault(); submitJob(e.target, "/modules/web/analyze");
@@ -1720,12 +1792,20 @@ async function renderJob(id, opts = {}) {
       </div>`;
   }
 
+  // Multi-target jobs carry target_urls (primary first); show "+N" next to the
+  // primary and the full list as a hover title so the operator can confirm all
+  // their targets registered.
+  const _tgts = Array.isArray(job.target_urls) ? job.target_urls.filter(Boolean) : [];
+  const targetExtra = _tgts.length > 1
+    ? ` <span class="target-more" title="${escapeHtml(_tgts.join("\n"))}">+${_tgts.length - 1} more</span>`
+    : "";
+
   detail.innerHTML = `
     <h3>Job <span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button>
       <span class="status ${job.status}">${job.status}</span>
       ${timingPill}
     </h3>
-    <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${stage}${cost}${timeout}${modelInfo}</small></div>
+    <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${targetExtra}${stage}${cost}${timeout}${modelInfo}</small></div>
     ${timeoutBlock}
     ${descBlock}
     ${candBlock}

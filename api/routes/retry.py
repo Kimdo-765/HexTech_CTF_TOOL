@@ -37,7 +37,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from api.queue import get_queue, hard_timeout_for, resolve_timeout
-from api.storage import JOBS_DIR, job_dir, new_job_id, read_job_meta, write_job_meta
+from api.storage import (
+    JOBS_DIR,
+    job_dir,
+    new_job_id,
+    parse_targets,
+    read_job_meta,
+    write_job_meta,
+)
 from modules._common import (
     LATEST_JUDGE_MODEL,
     classify_agent_error,
@@ -545,6 +552,30 @@ def _carry_work_ignore(src: str, names: list[str]) -> list[str]:
     return skip
 
 
+def _resolve_targets(
+    target_override: str | None, prev_meta: dict,
+) -> tuple[str | None, list[str] | None]:
+    """Resolve (primary_target, target_urls) for a retry / continue.
+
+    `target_override` (operator-supplied; may carry several targets via
+    newline/comma) REPLACES the prior target list when given — "(none)"/""
+    clears it; None means keep the prior job's target_url (+ target_urls).
+    Returns (primary or None, target_urls list [only when ≥2, else None]).
+    Keeping target_urls alongside target_url means a multi-target job that is
+    retried / continued / target-updated doesn't silently drop its extras.
+    """
+    if target_override is not None:
+        clean_t = target_override.strip()
+        if clean_t.lower() in ("(none)", "none", ""):
+            return None, None
+        ts = parse_targets(clean_t)
+        primary = ts[0] if ts else None
+        return primary, (ts if len(ts) >= 2 else None)
+    primary = (prev_meta.get("target_url") or "").strip() or None
+    prior = [t for t in (prev_meta.get("target_urls") or []) if t]
+    return primary, (prior if len(prior) >= 2 else None)
+
+
 def _resubmit(
     prev_meta: dict,
     hint: str,
@@ -630,14 +661,7 @@ def _resubmit(
     # Target: caller can override (user-supplied via UI). Empty
     # override falls back to the prior target. Sentinel "(none)" lets
     # the user explicitly clear a target without re-using the prior.
-    if target_override is not None:
-        clean_t = target_override.strip()
-        if clean_t.lower() in ("(none)", "none", ""):
-            target = None
-        else:
-            target = clean_t
-    else:
-        target = (prev_meta.get("target_url") or "").strip() or None
+    target, target_urls = _resolve_targets(target_override, prev_meta)
     # Strip any prior [retry-hint] section so chained retries don't
     # accumulate stale hint paragraphs in the description blob — the
     # newest hint is always the only one attached.
@@ -683,6 +707,7 @@ def _resubmit(
         "module": module,
         "status": "queued",
         "target_url": target,
+        "target_urls": target_urls,
         "description": description,
         "auto_run": auto_run,
         "job_timeout": job_timeout,
@@ -819,11 +844,7 @@ def _continue_in_place(prev_meta: dict, comment: str,
     # key, so fork_session=True finds it without any carry step.
     resume_sid = prev_meta.get("claude_session_id")
     cont_n = int(prev_meta.get("continue_count") or 0) + 1
-    if target_override is not None:
-        clean_t = target_override.strip()
-        target = None if clean_t.lower() in ("(none)", "none", "") else clean_t
-    else:
-        target = (prev_meta.get("target_url") or "").strip() or None
+    target, target_urls = _resolve_targets(target_override, prev_meta)
     auto_run = bool(prev_meta.get("auto_run"))
     job_timeout = resolve_timeout(prev_meta.get("job_timeout"))
     model = prev_meta.get("model")
@@ -834,6 +855,7 @@ def _continue_in_place(prev_meta: dict, comment: str,
         "status": "queued",
         "stage": "continue",
         "target_url": target,
+        "target_urls": target_urls,
         "remote_only": prev_meta.get("remote_only", target is not None),
         "description": description,
         "resume_session_id": resume_sid,
@@ -894,7 +916,9 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
     return jd, prev_meta
 
 
-_MAX_MANUAL_TARGET = 1024
+# Generous cap: a multi-target override (several host:ports / URLs, one per
+# line) must fit. parse_targets caps the COUNT separately.
+_MAX_MANUAL_TARGET = 4096
 
 
 async def _read_retry_body(

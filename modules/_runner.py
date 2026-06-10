@@ -264,6 +264,25 @@ def run_in_sandbox(
     env["TMP"]    = _sandbox_tmp
     env["TEMP"]   = _sandbox_tmp
 
+    # Multi-target jobs: argv[1] carries the PRIMARY target (back-compat —
+    # every shipped exploit reads one host:port from argv). Expose the FULL
+    # operator list via the TARGETS env var (primary first, one per line) so a
+    # new-style exploit can fail over across mirrored instances or address
+    # several services in a chain. Primary-first + dedup so a mid-run target
+    # refresh (args[0] swapped from a now-live meta value) still leads. Only
+    # set when there are ≥2 distinct targets — single-target runs are unchanged.
+    try:
+        from modules._common import read_meta as _read_meta_t
+        _meta_targets = (_read_meta_t(job_id) or {}).get("target_urls") or []
+    except Exception:
+        _meta_targets = []
+    _all_targets: list[str] = []
+    for _t in ([args[0]] if args else []) + list(_meta_targets):
+        if _t and _t not in _all_targets:
+            _all_targets.append(_t)
+    if len(_all_targets) >= 2:
+        env["TARGETS"] = "\n".join(_all_targets)
+
     client = docker.from_env()
     container = client.containers.run(
         image=image,

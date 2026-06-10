@@ -42,8 +42,16 @@
           <input type="file" name="file" />
         </label>
         <label>
-          Target URL (required if no source)
-          <input type="url" name="target_url" placeholder="http://challenge.example.com:8080" />
+          Target URL (required if no source) <small>— click + to add more</small>
+          <div class="target-list" data-field="target_url" data-placeholder="http://challenge.example.com:8080">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="http://challenge.example.com:8080" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
         </label>
         <label>
           Description / hints (optional)
@@ -89,8 +97,16 @@
           <input type="file" name="file" />
         </label>
         <label>
-          Remote target (required if no binary, host:port)
-          <input type="text" name="target" placeholder="ctf.example.com:1337" />
+          Remote target (required if no binary, host:port) <small>— click + to add more</small>
+          <div class="target-list" data-field="target" data-placeholder="ctf.example.com:1337">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="ctf.example.com:1337" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
         </label>
         <label>
           Description / hints (optional)
@@ -245,8 +261,16 @@
           <input type="file" name="file" />
         </label>
         <label>
-          Remote target (required if no files, host:port)
-          <input type="text" name="target" placeholder="ctf.example.com:31337" />
+          Remote target (required if no files, host:port) <small>— click + to add more</small>
+          <div class="target-list" data-field="target" data-placeholder="ctf.example.com:31337">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="ctf.example.com:31337" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
         </label>
         <label>
           Description / hints (optional)

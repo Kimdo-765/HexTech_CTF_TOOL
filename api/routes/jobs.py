@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from api.queue import get_queue, get_redis
-from api.storage import JOBS_DIR, read_job_meta, write_job_meta
+from api.storage import JOBS_DIR, parse_targets, read_job_meta, write_job_meta
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
@@ -657,8 +657,14 @@ async def patch_target(job_id: str, request: Request):
     clean = ("" if raw is None else str(raw)).strip()
     if clean.lower() in ("(none)", "none", ""):
         new_target: str | None = None
+        new_targets: list[str] | None = None
     else:
-        new_target = clean
+        # Accept several targets (newline / comma separated) — primary is
+        # argv[1]/target_url; the rest ride along in target_urls so the next
+        # run's TARGETS env still has the full multi-target list.
+        parsed = parse_targets(clean)
+        new_target = parsed[0] if parsed else None
+        new_targets = parsed if len(parsed) >= 2 else None
 
     prior = meta.get("target_url")
     # IMPORTANT: use modules._common.write_meta (read-merge-write at
@@ -668,7 +674,7 @@ async def patch_target(job_id: str, request: Request):
     # constantly; full overwrite from here would clobber any keys the
     # worker added between our read and our write.
     from modules._common import write_meta as _merge_write_meta
-    _merge_write_meta(safe, target_url=new_target)
+    _merge_write_meta(safe, target_url=new_target, target_urls=new_targets)
 
     # Audit trail in run.log so the change is visible to the reviewer
     # on a future retry and to anyone tailing the run.
@@ -676,14 +682,22 @@ async def patch_target(job_id: str, request: Request):
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     try:
         with log.open("a") as fp:
+            extra = (
+                f" (+{len(new_targets) - 1} more)" if new_targets else ""
+            )
             fp.write(
                 f"[{ts}] [meta] target_url updated by user: "
-                f"{prior!r} -> {new_target!r}\n"
+                f"{prior!r} -> {new_target!r}{extra}\n"
             )
     except OSError:
         pass
 
-    return {"ok": True, "target_url": new_target, "prior": prior}
+    return {
+        "ok": True,
+        "target_url": new_target,
+        "target_urls": new_targets,
+        "prior": prior,
+    }
 
 
 def _record_decision(safe: str, decision: str, log_msg: str) -> dict:

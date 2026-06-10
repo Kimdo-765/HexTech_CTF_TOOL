@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
-from api.storage import job_dir, new_job_id, write_job_meta
+from api.storage import job_dir, new_job_id, parse_targets, write_job_meta
 
 router = APIRouter()
 
@@ -20,7 +20,8 @@ async def analyze_pwn(
     effort: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
 ):
-    target = (target or "").strip() or None
+    targets = parse_targets(target)
+    target = targets[0] if targets else None
     has_file = bool(file and file.filename)
     if not has_file and not target:
         raise HTTPException(
@@ -51,6 +52,7 @@ async def analyze_pwn(
         "status": "queued",
         "filename": binary_name,
         "target_url": target,
+        "target_urls": targets if len(targets) >= 2 else None,
         "description": description,
         "auto_run": auto_run,
         "job_timeout": timeout,

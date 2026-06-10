@@ -70,6 +70,10 @@ async def _run_agent(
         log_line(job_id, f"Forking prior Claude session {resume_sid[:8]}…")
 
     user_prompt = build_user_prompt(src_root, target_url, description, auto_run)
+    from modules._prompts import build_multi_target_block
+    _mt_block = build_multi_target_block(read_meta(job_id).get("target_urls"))
+    if _mt_block:
+        user_prompt = user_prompt + "\n\n" + _mt_block
 
     # Auto-pre-recon — recon maps the source tree (routes, sinks, auth)
     # before main's first turn so main starts with a route inventory

@@ -1322,6 +1322,10 @@ async def _run_agent(
         decomp_files=decomp_files,
         custom_libs=custom_libs,
     )
+    from modules._prompts import build_multi_target_block
+    _mt_block = build_multi_target_block(read_meta(job_id).get("target_urls"))
+    if _mt_block:
+        user_prompt = user_prompt + "\n\n" + _mt_block
 
     if recon_reply:
         user_prompt = (

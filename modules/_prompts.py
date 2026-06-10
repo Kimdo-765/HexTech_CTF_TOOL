@@ -12,6 +12,45 @@ keep working unchanged.
 """
 from __future__ import annotations
 
+
+def build_multi_target_block(targets) -> str:
+    """Prompt stanza appended when an operator supplies MULTIPLE targets for
+    one challenge (target_urls in meta has ≥2 entries). Returns "" for 0/1
+    target so single-target jobs read exactly as before.
+
+    argv[1] stays the PRIMARY target (back-compat: every shipped exploit reads
+    argv[1] as one host:port). The full list is also handed to the exploit at
+    run time via the `TARGETS` env var (primary first, one per line) — see
+    modules/_runner.run_in_sandbox. This block tells main to drive the exploit
+    off argv[1] / TARGETS rather than hard-coding a single endpoint.
+    """
+    ts = [t for t in (targets or []) if t]
+    if len(ts) < 2:
+        return ""
+    listed = "\n".join(f"  {i + 1}) {t}" for i, t in enumerate(ts))
+    primary = ts[0]
+    return (
+        f"MULTIPLE TARGETS — the operator supplied {len(ts)} targets for this "
+        "challenge:\n"
+        f"{listed}\n"
+        f"The PRIMARY target ({primary}) is passed to your exploit as argv[1]. "
+        "The FULL newline-separated list (primary first) is ALSO available to "
+        "your exploit at run time in the `TARGETS` environment variable.\n"
+        "Write exploit.py / solver.py to drive off these inputs, NOT a "
+        "hard-coded host:port:\n"
+        "  • read argv[1] as the primary, and if `TARGETS` is set, parse it "
+        "(one target per line) as the full candidate list;\n"
+        "  • if these are the SAME service mirrored across instances, try each "
+        "in order and use the FIRST that responds (instances expire fast, so a "
+        "live fallback matters);\n"
+        "  • if they are DISTINCT services in one chain (e.g. an app + an "
+        "out-of-band/callback host), use each for its role as the challenge "
+        "requires.\n"
+        "Driving everything off argv[1] / TARGETS means a target refresh "
+        "(operator updates meta) takes effect with no code edit."
+    )
+
+
 def mission_block(deliverables: str, deliverables_short: str = "") -> str:
     """One concise stanza for the top of every module SYSTEM_PROMPT.
 

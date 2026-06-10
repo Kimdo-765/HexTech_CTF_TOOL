@@ -6,6 +6,7 @@ from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_tim
 from api.storage import (
     extract_if_archive,
     new_job_id,
+    parse_targets,
     save_upload,
     write_job_meta,
 )
@@ -24,7 +25,8 @@ async def analyze_web(
     effort: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
 ):
-    target_url = (target_url or "").strip() or None
+    targets = parse_targets(target_url)
+    target_url = targets[0] if targets else None
     has_file = bool(file and file.filename)
     if not has_file and not target_url:
         raise HTTPException(
@@ -50,6 +52,7 @@ async def analyze_web(
         "status": "queued",
         "filename": file.filename if has_file else None,
         "target_url": target_url,
+        "target_urls": targets if len(targets) >= 2 else None,
         "description": description,
         "auto_run": auto_run,
         "job_timeout": timeout,
