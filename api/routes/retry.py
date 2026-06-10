@@ -1012,9 +1012,10 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 })
                 return
 
-            yield sse("stage", {"name": "asking"})
+            _rv_model = resolve_judge_model(job_id)
+            yield sse("stage", {"name": "asking", "model": _rv_model})
             try:
-                async for kind, payload in _ask_reviewer_streaming(context, model=resolve_judge_model(job_id)):
+                async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
                     if kind == "token":
                         yield sse("token", payload)
                     elif kind == "done":
@@ -1540,9 +1541,10 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 })
                 return
 
-            yield sse("stage", {"name": "asking"})
+            _rv_model = resolve_judge_model(job_id)
+            yield sse("stage", {"name": "asking", "model": _rv_model})
             try:
-                async for kind, payload in _ask_reviewer_streaming(context, model=resolve_judge_model(job_id)):
+                async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
                     if kind == "token":
                         yield sse("token", payload)
                     elif kind == "done":

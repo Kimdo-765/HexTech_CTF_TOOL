@@ -1042,10 +1042,14 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
     try { data = JSON.parse(dataStr); } catch (_) {}
     if (name === "stage") {
       const s = data.name;
+      // The backend sends the resolved reviewer model (resolve_judge_model:
+      // per-job meta.model → global claude_model → opus-4-7) so this shows the
+      // ACTUAL model, not a hardcoded label.
+      const reviewerModel = data.model || "reviewer";
       stageEl.textContent = ({
         halting: "halting current job…",
         gathering: "gathering prior job context…",
-        asking: "asking reviewer (Opus 4.7)…",
+        asking: `asking reviewer (${reviewerModel})…`,
         submitting: isManual
           ? (flow === "resume"
               ? "enqueueing fresh job (carrying ./work/) with your hint…"
