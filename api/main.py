@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +40,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(TokenAuthMiddleware)
+
+
+# Force browsers to revalidate the web-ui assets so a redeploy's new
+# app.js / style.css / index.html is picked up immediately instead of a
+# stale cached copy. `no-cache` still allows a cheap 304 via StaticFiles'
+# ETag when the file is unchanged — it only forbids using the cached copy
+# WITHOUT revalidating. Without this, the bind-mounted assets serve fresh
+# from disk but the browser keeps running old JS after a deploy (observed:
+# the +add-target button "not working" because the cached app.js predated
+# its handler). Scoped to the document + /static so API responses are
+# untouched.
+_NOCACHE_PATHS = {"/", "/index.html", "/login", "/terminal"}
+
+
+@app.middleware("http")
+async def _revalidate_web_ui(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path in _NOCACHE_PATHS or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 
 app.include_router(jobs_routes.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(web_module.router, prefix="/api/modules/web", tags=["web"])
