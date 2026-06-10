@@ -535,6 +535,75 @@ document.addEventListener("reset", (e) => {
   }, 0);
 });
 
+// Build a multi-target row list for the retry / continue / resume forms — same
+// markup + classes as the main submit forms, so the global +/× delegated
+// listeners and CSS apply automatically. `prefill` (optional, newline/comma
+// separated) seeds rows; blank → one empty row.
+function targetListHtml(placeholder, prefill) {
+  const vals = (prefill || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean);
+  if (!vals.length) vals.push("");
+  const ph = escapeHtml(placeholder || "");
+  const rows = vals.map((v) => `
+        <div class="target-row">
+          <input type="text" class="target-input" placeholder="${ph}" value="${escapeHtml(v)}" />
+          <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+        </div>`).join("");
+  return `<div class="target-list" data-placeholder="${ph}">
+        <div class="target-rows">${rows}</div>
+        <button type="button" class="target-add" title="Add another target">+ add target</button>
+      </div>`;
+}
+
+// Collect a form's non-empty target rows into a newline-joined string. The
+// backend (_read_retry_body → _resolve_targets → parse_targets) splits it:
+// "" = keep prior target, "(none)" = clear, several lines = multi-target.
+function gatherTargets(formEl) {
+  const list = formEl.querySelector(".target-list");
+  if (!list) return "";
+  return Array.from(list.querySelectorAll(".target-input"))
+    .map((i) => i.value.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Reviewer-mode retry/resume with an optional MULTI-target override (was a
+// single-line window.prompt). No manual hint — the auto-reviewer generates it;
+// this just lets the operator point the retry/resume at one or more new targets
+// via the +/× list. opts: {formKey, submitLabel, streamOpts}.
+function openReviewerRetryForm(jobId, anchorBtn, opts) {
+  opts = opts || {};
+  const key = opts.formKey || "retry";
+  const existing = document.getElementById(`reviewer-${key}-form-` + jobId);
+  if (existing) { existing.querySelector(".target-input")?.focus(); return; }
+  const form = document.createElement("div");
+  form.className = "retry-manual-form";
+  form.id = `reviewer-${key}-form-` + jobId;
+  form.innerHTML = `
+    <label class="retry-manual-label">Target (override; blank = keep prior, "(none)" = clear · <b>+ add target</b> for several)</label>
+    ${targetListHtml("e.g. http://newhost:8080  ·  ctf.example.com:31337")}
+    <div class="retry-manual-row">
+      <button type="button" class="retry-manual-submit">${opts.submitLabel || "↻ Retry (reviewer)"}</button>
+      <button type="button" class="retry-manual-cancel">Cancel</button>
+      <small>Auto-reviewer writes the hint · optional new target(s)</small>
+    </div>
+  `;
+  anchorBtn.parentElement.insertAdjacentElement("afterend", form);
+  const submit = form.querySelector(".retry-manual-submit");
+  const cancel = form.querySelector(".retry-manual-cancel");
+  form.querySelector(".target-input")?.focus();
+  cancel.addEventListener("click", () => form.remove());
+  submit.addEventListener("click", () => {
+    const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
+    const target = gatherTargets(form);
+    form.remove();
+    streamRetry(jobId, anchorBtn, null, {
+      ...(opts.streamOpts || {}),
+      target,
+      fresh: !!(freshCb && freshCb.checked),
+    });
+  });
+}
+
 document.getElementById("web-form").addEventListener("submit", (e) => {
   e.preventDefault(); submitJob(e.target, "/modules/web/analyze");
 });
@@ -1070,8 +1139,8 @@ function openStopResumeForm(jobId, anchorBtn) {
   form.innerHTML = `
     <label class="retry-manual-label">Extra hint to add before resuming</label>
     <textarea rows="5" placeholder="What should the next attempt do differently? e.g. 'the leaked endpoint is /api/v2/profile, not /profile' — appended to the new job's description as [retry-hint]"></textarea>
-    <label class="retry-manual-label" style="margin-top:0.4rem">Target (override; blank = keep prior, "(none)" = clear)</label>
-    <input type="text" class="retry-manual-target" placeholder="e.g. http://newhost:8080  ·  ctf.example.com:31337" />
+    <label class="retry-manual-label" style="margin-top:0.4rem">Target (override; blank = keep prior, "(none)" = clear · <b>+ add target</b> for several)</label>
+    ${targetListHtml("e.g. http://newhost:8080  ·  ctf.example.com:31337")}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit stop-resume-submit">✋ Stop &amp; resume</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -1082,7 +1151,6 @@ function openStopResumeForm(jobId, anchorBtn) {
   buttonRow.insertAdjacentElement("afterend", form);
 
   const ta = form.querySelector("textarea");
-  const targetIn = form.querySelector(".retry-manual-target");
   const submit = form.querySelector(".stop-resume-submit");
   const cancel = form.querySelector(".retry-manual-cancel");
   ta.focus();
@@ -1104,7 +1172,7 @@ function openStopResumeForm(jobId, anchorBtn) {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     try {
       const reqBody = { hint };
-      const t = targetIn.value.trim();
+      const t = gatherTargets(form);
       if (t) reqBody.target = t;
       const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
       if (freshCb && freshCb.checked) reqBody.fresh = true;
@@ -1132,7 +1200,7 @@ function openStopResumeForm(jobId, anchorBtn) {
       submit.textContent = orig;
     }
   });
-  for (const el of [ta, targetIn]) {
+  for (const el of [ta]) {
     el.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
@@ -1158,8 +1226,8 @@ function openManualHintForm(jobId, anchorBtn) {
   form.innerHTML = `
     <label class="retry-manual-label">Your hint for the next agent</label>
     <textarea rows="5" placeholder="e.g. The bot visits /report?id= and the cookie is on .site.com — exfiltrate via document.cookie to \$COLLECTOR_URL. Or: the heap leak comes from the formatted error on /api/echo, not /api/profile."></textarea>
-    <label class="retry-manual-label" style="margin-top:0.4rem">Target (override; blank = keep prior, "(none)" = clear)</label>
-    <input type="text" class="retry-manual-target" placeholder="e.g. http://newhost:8080  ·  ctf.example.com:31337" />
+    <label class="retry-manual-label" style="margin-top:0.4rem">Target (override; blank = keep prior, "(none)" = clear · <b>+ add target</b> for several)</label>
+    ${targetListHtml("e.g. http://newhost:8080  ·  ctf.example.com:31337")}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit">Submit hint &amp; retry</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -1171,7 +1239,6 @@ function openManualHintForm(jobId, anchorBtn) {
   buttonRow.insertAdjacentElement("afterend", form);
 
   const ta = form.querySelector("textarea");
-  const targetIn = form.querySelector(".retry-manual-target");
   const submit = form.querySelector(".retry-manual-submit");
   const cancel = form.querySelector(".retry-manual-cancel");
   ta.focus();
@@ -1187,12 +1254,12 @@ function openManualHintForm(jobId, anchorBtn) {
     }
     const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
     streamRetry(jobId, submit, hint, {
-      target: targetIn.value,
+      target: gatherTargets(form),
       fresh: !!(freshCb && freshCb.checked),
     });
   });
   // Ctrl/Cmd+Enter shortcut
-  for (const el of [ta, targetIn]) {
+  for (const el of [ta]) {
     el.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
@@ -1217,8 +1284,8 @@ function openContinueForm(jobId, anchorBtn) {
   form.innerHTML = `
     <label class="retry-manual-label">Operator note (the agent CONTINUES the same session — no re-investigation)</label>
     <textarea rows="4" placeholder="e.g. I restarted the instance — the registration slot is fresh now. Run your existing exploit (BASE72 long-pw oracle) in one shot; don't probe."></textarea>
-    <label class="retry-manual-label" style="margin-top:0.4rem">New target (blank = keep prior; a restarted instance usually has a new port)</label>
-    <input type="text" class="retry-manual-target" placeholder="e.g. http://host8.dreamhack.games:NEWPORT" />
+    <label class="retry-manual-label" style="margin-top:0.4rem">New target (blank = keep prior; a restarted instance usually has a new port · <b>+ add target</b> for several)</label>
+    ${targetListHtml("e.g. http://host8.dreamhack.games:NEWPORT")}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit continue-submit">💬 Continue with note</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -1227,7 +1294,6 @@ function openContinueForm(jobId, anchorBtn) {
   `;
   anchorBtn.parentElement.insertAdjacentElement("afterend", form);
   const ta = form.querySelector("textarea");
-  const targetIn = form.querySelector(".retry-manual-target");
   const submit = form.querySelector(".continue-submit");
   const cancel = form.querySelector(".retry-manual-cancel");
   ta.focus();
@@ -1243,7 +1309,8 @@ function openContinueForm(jobId, anchorBtn) {
     submit.textContent = "Continuing…";
     try {
       const body = { comment };
-      if (targetIn.value.trim()) body.target = targetIn.value.trim();
+      const _tg = gatherTargets(form);
+      if (_tg) body.target = _tg;
       const res = await fetch(`${API}/jobs/${jobId}/continue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1258,7 +1325,7 @@ function openContinueForm(jobId, anchorBtn) {
       submit.disabled = false; submit.textContent = "💬 Continue with note";
     }
   });
-  for (const el of [ta, targetIn]) {
+  for (const el of [ta]) {
     el.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); submit.click(); }
       else if (e.key === "Escape") { e.preventDefault(); form.remove(); }
@@ -1905,18 +1972,10 @@ async function renderJob(id, opts = {}) {
   }
   const retryBtn = detail.querySelector('.retry-btn[data-action="retry"]');
   if (retryBtn) {
-    retryBtn.addEventListener("click", () => {
-      // Reviewer-mode retry: prompt for an optional target override.
-      // Cancel keeps the prior target. Empty string keeps prior; the
-      // sentinel "(none)" clears it. Modifier-click skips the prompt.
-      const cur = job.target_url || "";
-      const t = window.prompt(
-        `Optional new target for the retry (blank = keep "${cur || "(none)"}", "(none)" = clear):`,
-        cur,
-      );
-      if (t === null) return; // user cancelled
-      streamRetry(id, retryBtn, null, { target: t, fresh: _freshCtx() });
-    });
+    // Reviewer-mode retry: open an inline form with an optional MULTI-target
+    // override (+/× list). Blank = keep prior, "(none)" = clear. The reviewer
+    // auto-generates the hint; this form only collects target(s).
+    retryBtn.addEventListener("click", () => openReviewerRetryForm(id, retryBtn));
   }
   const retryManualBtn = detail.querySelector('.retry-btn[data-action="retry-manual"]');
   if (retryManualBtn) {
@@ -1934,23 +1993,16 @@ async function renderJob(id, opts = {}) {
     '.retry-btn[data-action="stop-resume-reviewer"]',
   );
   if (stopResumeReviewerBtn) {
-    stopResumeReviewerBtn.addEventListener("click", () => {
-      // No manual hint: streamRetry will fetch the reviewer over SSE,
-      // backend will halt the source job first, carry ./work/, and
-      // submit the new job with a [RESUMING] preamble.
-      const cur = job.target_url || "";
-      const t = window.prompt(
-        `Optional new target for the resume (blank = keep "${cur || "(none)"}", "(none)" = clear):`,
-        cur,
-      );
-      if (t === null) return;
-      streamRetry(id, stopResumeReviewerBtn, null, {
-        endpoint: `${API}/jobs/${id}/resume/stream`,
-        flow: "resume",
-        target: t,
-        fresh: _freshCtx(),
-      });
-    });
+    // No manual hint: streamRetry fetches the reviewer over SSE, backend halts
+    // the source job first, carries ./work/, and submits with a [RESUMING]
+    // preamble. Inline form collects an optional MULTI-target override.
+    stopResumeReviewerBtn.addEventListener("click", () =>
+      openReviewerRetryForm(id, stopResumeReviewerBtn, {
+        formKey: "resume",
+        submitLabel: "↻ Stop & resume (reviewer)",
+        streamOpts: { endpoint: `${API}/jobs/${id}/resume/stream`, flow: "resume" },
+      }),
+    );
   }
 
   const continueBtn = detail.querySelector('.timeout-continue-btn[data-action="continue"]');
@@ -1965,7 +2017,10 @@ async function renderJob(id, opts = {}) {
   const changeTargetBtn = detail.querySelector('.change-target-btn[data-action="change-target"]');
   if (changeTargetBtn) {
     changeTargetBtn.addEventListener("click", () => {
-      const cur = job.target_url || "";
+      // Prefill with the job's current target(s) so the operator edits in place.
+      const curList = (Array.isArray(job.target_urls) && job.target_urls.length
+        ? job.target_urls
+        : (job.target_url ? [job.target_url] : [])).filter(Boolean);
       // Inline form anchored right after the button row, mirroring
       // the retry-manual-form layout.
       if (changeTargetBtn.dataset.openForm === "1") return;
@@ -1973,11 +2028,8 @@ async function renderJob(id, opts = {}) {
       const form = document.createElement("div");
       form.className = "retry-manual-form";
       form.innerHTML = `
-        <label class="retry-manual-label">New target
-          <input type="text" class="retry-manual-target change-target-input"
-                 placeholder="http://challenge.example.com:8080  (or "(none)" to clear)"
-                 value="${escapeHtml(cur)}" />
-        </label>
+        <label class="retry-manual-label">New target(s) · <b>+ add target</b> for several · clear all = remove</label>
+        ${targetListHtml("http://challenge.example.com:8080  ·  ctf.example.com:31337", curList.join("\n"))}
         <div style="display:flex;gap:0.5rem;align-items:center">
           <button class="retry-manual-submit change-target-save" type="button">Save target</button>
           <button class="retry-manual-cancel change-target-cancel" type="button">Cancel</button>
@@ -1985,16 +2037,17 @@ async function renderJob(id, opts = {}) {
         </div>
       `;
       changeTargetBtn.parentNode.insertBefore(form, changeTargetBtn.nextSibling);
-      const input = form.querySelector(".change-target-input");
-      input.focus();
-      input.select();
+      const firstInput = form.querySelector(".target-input");
+      if (firstInput) { firstInput.focus(); firstInput.select(); }
       const close = () => {
         form.remove();
         delete changeTargetBtn.dataset.openForm;
       };
       form.querySelector(".change-target-cancel").addEventListener("click", close);
       form.querySelector(".change-target-save").addEventListener("click", async () => {
-        const val = input.value;
+        // PATCH /target: "" clears the target (change-target semantics), a
+        // joined list sets target_url (primary) + target_urls (the rest).
+        const val = gatherTargets(form);
         try {
           const res = await fetch(`${API}/jobs/${id}/target`, {
             method: "PATCH",
@@ -2012,9 +2065,11 @@ async function renderJob(id, opts = {}) {
           alert(`change-target error: ${e}`);
         }
       });
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") form.querySelector(".change-target-save").click();
-        if (e.key === "Escape") close();
+      form.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && e.target.classList.contains("target-input")) {
+          e.preventDefault();
+          form.querySelector(".change-target-save").click();
+        } else if (e.key === "Escape") { close(); }
       });
     });
   }
