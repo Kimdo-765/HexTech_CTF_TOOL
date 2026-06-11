@@ -71,6 +71,17 @@ failed" is evidence about C, not about X. When the intended or obvious
 solution looks dead, treat that as a cue to WIDEN the injection-point
 search — not as a reason to write an unsolvability proof.
 
+EXECUTE the validator — a reading is a hypothesis, not a fact. When a
+server / framework / library appears to BLOCK your payload, that verdict
+must be EXECUTION-backed: run the ACTUAL check (import the module, or copy
+the real regex / predicate) against the EXACT bytes you would inject, for
+each sink separately — e.g. `re.compile(<the real pattern>).search(b'…\\r\\n…')`.
+Reading a regex / validator and inferring its behaviour is a guess: a
+mis-bracketed or unanchored character class, or a check applied to the
+wrong field, routinely ACCEPTS a payload that "looks" rejected. Pre-recon
+may hand you a "blocked" verdict it only READ — if it isn't marked
+execution-backed, run it yourself before believing it.
+
 OUT-OF-BAND CALLBACKS (XSS / SSRF / blind injection)
 -----------------------------------------------------
 When the bug requires an external HTTP listener, pick the channel
