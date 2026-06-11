@@ -504,7 +504,13 @@ def _carry_session_jsonl(sid: str, prev_work: Path, new_work: Path) -> None:
 #               different Python minor version path-binding than the
 #               api container, so carried .pyc files just get
 #               regenerated. Saves a few MB on every retry.
-_CARRY_WORK_IGNORE_NAMES = frozenset({"tmp", "__pycache__"})
+#
+# libsrc      — pinned web-stack SOURCE staged by web autoboot Layer-1
+#               (modules/web/analyzer.py _stage_pinned_web_stack). It is
+#               re-staged deterministically each attempt from the chal's
+#               manifests, so carrying it just bloats the retry tree by
+#               tens of MB (and re-pays the copytree cost) for nothing.
+_CARRY_WORK_IGNORE_NAMES = frozenset({"tmp", "__pycache__", "libsrc"})
 
 
 # Special-file types that shutil.copytree would try to open(.., 'rb') and
