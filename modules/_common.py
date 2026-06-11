@@ -725,6 +725,24 @@ _PLACEHOLDER_INNERS = {
     "da39a3ee5e6b4b0d3255bfef95601890afd80709",                          # sha1("")
 }
 
+# Glued placeholder words the exact-match set above misses: DH{testflag},
+# DH{faketest}, DH{dummyflag1}. Job ca27378ee3ee echoed `DH{testflag}` as a
+# local oracle test and it surfaced as a flag_candidate (→ [FLAG?] box + the
+# new flag alarm). The set has "test"/"test_flag" but not the glued "testflag".
+# SAFETY (memory real_flag_dropped_as_placeholder): this must NEVER drop a real
+# flag. Two guards make that true: (1) a leading lookahead REQUIRES at least one
+# UNAMBIGUOUS placeholder word, so a bare hex digest / `DH{123}` is not caught;
+# (2) the body is a full-match of placeholder-words+filler only, so an
+# incidental substring (`con-test-_winner`, `winnertest`) fails the body match
+# even though the lookahead sees "test". Real Dreamhack hex flags contain no
+# such word → never matched.
+_PLACEHOLDER_WORD_RE = re.compile(
+    r"^(?=.*(?:test|fake|dummy|example|sample|placeholder|redacted|todo))"
+    r"(?:test|fake|dummy|example|sample|placeholder|redacted|todo|flag|"
+    r"local|default|your|here|insert|the|real|change(?:me)?|goes|fill|blank|"
+    r"[_\-\s\d])+$"
+)
+
 
 def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     """True if `flag` is an obvious placeholder like FLAG{...} / DH{xxx} /
@@ -755,6 +773,10 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     if not inner:
         return True
     if inner in _PLACEHOLDER_INNERS:
+        return True
+    # Glued placeholder-word combos the exact set misses (DH{testflag} …).
+    # See _PLACEHOLDER_WORD_RE — engineered to never catch a real hex flag.
+    if _PLACEHOLDER_WORD_RE.match(inner):
         return True
     # All the same character (.... / xxxx / ____)
     if len(inner) >= 2 and len(set(inner)) == 1 and inner[0] in "._-x?…":
@@ -4550,6 +4572,10 @@ async def run_main_agent_session(
     # unchanged script → flag_likelihood=0.12 ship-block → job ended
     # ~2 minutes later than it should have.
     script_sha_at_last_inject: dict = {"sha": None, "script": None}
+    # Last assistant text of the current turn — used to CLASSIFY a
+    # ResultMessage is_error (the ResultMessage itself carries no message;
+    # an AUP refusal / transport error shows up as the final AGENT text).
+    last_assistant_text: dict = {"value": ""}
     # judge_out gets populated in the post-sandbox block (line ~6054).
     # Pre-initialize so the SHA-unchanged ship gate can reference it
     # safely when it fires before the first sandbox run completes
@@ -4579,6 +4605,15 @@ async def run_main_agent_session(
                     if isinstance(msg, AssistantMessage):
                         summary["messages"] = summary.get("messages", 0) + 1
                         log_assistant_blocks(job_id, msg, summary)
+                        try:
+                            _t = " ".join(
+                                getattr(b, "text", "") for b in (msg.content or [])
+                                if getattr(b, "text", "")
+                            ).strip()
+                            if _t:
+                                last_assistant_text["value"] = _t[:2000]
+                        except Exception:
+                            pass
                     elif isinstance(msg, UserMessage):
                         log_user_blocks(job_id, msg)
                     _maybe_soft_eject(summary.get("tool_calls", 0))
@@ -4664,11 +4699,22 @@ async def run_main_agent_session(
                         if (msg.is_error
                                 and not summary.get("agent_error")
                                 and not summary.get("fallback_artifact_used")):
+                            # Classify from the final AGENT text — is_error is
+                            # generic but the text reveals WHY (an AUP policy
+                            # refusal, a transport timeout, …). Recording the
+                            # specific kind matters because the retry-loop's
+                            # SHA-unchanged gate below uses it to avoid the
+                            # FALSE "main ignored the hint" diagnosis when the
+                            # turn actually DIED (job ca27378ee3ee: a redirect
+                            # turn refused on AUP, recorded as retry_hint_ignored).
+                            _err_txt = last_assistant_text["value"]
+                            _err_kind = classify_agent_error(_err_txt) or "agent_error"
                             summary["agent_error"] = (
-                                "SDK ResultMessage is_error (transport "
-                                "failure / request timeout); no artifact"
+                                _err_txt[:300] if _err_kind == "policy_refusal"
+                                else "SDK ResultMessage is_error (transport "
+                                "failure / timeout / refusal); no artifact"
                             )
-                            summary["agent_error_kind"] = "agent_error"
+                            summary["agent_error_kind"] = _err_kind
                             _snapshot_cost(summary, "RESULT_IS_ERROR")
                             if not _pick_present_artifact(
                                     work_dir, artifact_names):
@@ -4784,6 +4830,50 @@ async def run_main_agent_session(
                     current_sha is not None
                     and current_sha == script_sha_at_last_inject["sha"]
                 ):
+                    # The script is unchanged — but WHY? Distinguish
+                    # "main deliberately declined to apply the fix"
+                    # (retry_hint_ignored) from "the retry TURN died
+                    # before main could apply it" (AUP policy refusal /
+                    # transport error / timeout → ResultMessage is_error).
+                    # A dead turn also leaves the script byte-identical,
+                    # but stamping retry_hint_ignored writes a FALSE
+                    # "main ignored the hint" diagnosis into WHY_STOPPED
+                    # that /retry then carries forward as ground truth.
+                    # Job ca27378ee3ee: the redirect turn refused on AUP
+                    # (is_error) yet was recorded as retry_hint_ignored.
+                    retry_turn_errored = bool(
+                        (summary.get("result") or {}).get("is_error")
+                    )
+                    if retry_turn_errored:
+                        _ek = summary.get("agent_error_kind") or "agent_error"
+                        log_fn(
+                            f"[orchestrator] {picked} unchanged after "
+                            f"retry_hint inject (attempt {attempt}/{cap_str}) "
+                            f"— but the retry TURN errored ({_ek}); main never "
+                            f"got to apply the fix. Halting as agent_error, "
+                            f"NOT retry_hint_ignored."
+                        )
+                        summary["judge_stop_reason"] = (
+                            f"retry turn errored ({_ek}) before it could apply "
+                            f"postjudge feedback — {picked} unchanged because "
+                            f"the turn DIED, not because main ignored the hint"
+                        )
+                        write_meta(
+                            job_id,
+                            judge_next_action="stop",
+                            judge_stop_reason=summary["judge_stop_reason"],
+                        )
+                        write_why_stopped(
+                            work_dir,
+                            stop_kind="agent_error",
+                            attempt_idx=attempt,
+                            max_attempts=max_retries,
+                            judge_out=judge_out,
+                            sandbox_result=last_sandbox,
+                            summary=summary,
+                            log_fn=log_fn,
+                        )
+                        return last_sandbox
                     log_fn(
                         f"[orchestrator] {picked} unchanged after "
                         f"retry_hint inject (attempt {attempt}/"
