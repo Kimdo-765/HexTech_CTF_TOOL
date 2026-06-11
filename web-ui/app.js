@@ -1416,11 +1416,17 @@ function _showFlagToast(kind, job, text) {
     setTimeout(() => el.remove(), 400);
   }, ttl);
   _flagBeep();
-  // OS-level notification too — but only if already granted; never auto-prompt
+  // OS-level notification too — but only if already granted; never auto-prompt.
+  // Clicking it focuses the tab AND opens the job, same as the in-page toast.
   try {
     if (window.Notification && Notification.permission === "granted") {
-      new Notification(`${icon} ${title} — ${mod}`,
+      const n = new Notification(`${icon} ${title} — ${mod}`,
         { body: text || sid, tag: "flag-" + job.id });
+      n.onclick = () => {
+        try { window.focus(); } catch (_) {}
+        selectJob(job.id);
+        n.close();
+      };
     }
   } catch (_) {}
 }
