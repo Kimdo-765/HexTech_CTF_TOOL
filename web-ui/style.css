@@ -1234,3 +1234,67 @@ body.modal-open { overflow: hidden; }
 .exp-save-btn.copied {
   background: #2ea04322; color: #7ee787; border-color: #2ea04355;
 }
+
+/* ── Flag alarm toasts (bottom-right) ─────────────────────────────── */
+#flag-toast-container {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column-reverse;   /* newest at the bottom, stack upward */
+  gap: 10px;
+  max-width: min(360px, 90vw);
+  pointer-events: none;             /* container ignores clicks; toasts opt back in */
+}
+.flag-toast {
+  pointer-events: auto;
+  position: relative;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 10px 30px 10px 12px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+  color: #e6edf3;
+  cursor: pointer;
+  animation: flagToastIn 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.flag-toast.flag {
+  border-left-color: #2ea043;
+  background: linear-gradient(90deg, #14261a, #161b22 55%);
+}
+.flag-toast.cand {
+  border-left-color: #d29922;
+  background: linear-gradient(90deg, #2a2310, #161b22 55%);
+}
+.flag-toast.leaving { animation: flagToastOut 0.4s ease forwards; }
+.flag-toast-h { font-size: 0.92rem; letter-spacing: 0.2px; }
+.flag-toast.flag .flag-toast-h strong { color: #7ee787; }
+.flag-toast.cand .flag-toast-h strong { color: #e3b341; }
+.flag-toast-sub { font-size: 0.72rem; color: #8b949e; margin-top: 2px; }
+.flag-toast-id { font-family: ui-monospace, monospace; }
+.flag-toast-body { margin-top: 6px; }
+.flag-toast-body code {
+  font-size: 0.74rem; word-break: break-all;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  padding: 2px 5px; display: inline-block; max-width: 100%;
+}
+.flag-toast.flag .flag-toast-body code { color: #7ee787; }
+.flag-toast-x {
+  position: absolute; top: 4px; right: 6px;
+  background: none; border: none; color: #8b949e;
+  font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 2px;
+}
+.flag-toast-x:hover { color: #f85149; }
+@keyframes flagToastIn {
+  from { transform: translateX(40px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes flagToastOut {
+  from { transform: translateX(0);    opacity: 1; }
+  to   { transform: translateX(40px); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flag-toast, .flag-toast.leaving { animation: none; }
+}

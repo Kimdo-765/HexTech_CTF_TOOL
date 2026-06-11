@@ -102,6 +102,16 @@ let liveStreamJobId = null;
 let liveStreamConnected = false;
 let _metaRefreshTimer = null;
 
+// ── Flag alarm: bottom-right toast + beep on a NEW [FLAG?] candidate or
+// a NEW promoted 🚩 flag, for ANY job (works even with no detail panel
+// open, via the global poller added at startup). _flagSeen tracks the
+// per-job counts so we only alarm on a 0→N transition; the FIRST poll
+// seeds the baseline silently so we never alarm for jobs already flagged
+// when the page loads.
+const _flagSeen = {};            // jobId -> { flags: N, cands: M }
+let _flagAlarmReady = false;     // becomes true after the baseline pass
+let _flagAudioCtx = null;        // lazy WebAudio context for the beep
+
 function _scheduleMetaRefresh(id) {
   if (_metaRefreshTimer) return;
   _metaRefreshTimer = setTimeout(() => {
@@ -1337,9 +1347,115 @@ function openContinueForm(jobId, anchorBtn) {
   }
 }
 
+// Short two-note chirp via WebAudio (no asset). Autoplay policy may
+// suspend the context until the first user gesture — the visual toast
+// always shows regardless; the beep just catches up once the page has
+// been interacted with.
+function _flagBeep() {
+  try {
+    _flagAudioCtx = _flagAudioCtx ||
+      new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _flagAudioCtx;
+    if (ctx.state === "suspended") ctx.resume();
+    const t = ctx.currentTime;
+    [0, 0.18].forEach((dt, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = i === 0 ? 880 : 1320;
+      g.gain.setValueAtTime(0.0001, t + dt);
+      g.gain.exponentialRampToValueAtTime(0.25, t + dt + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dt + 0.15);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(t + dt);
+      o.stop(t + dt + 0.16);
+    });
+  } catch (_) { /* no WebAudio / autoplay-blocked — visual toast still shows */ }
+}
+
+function _flagToastContainer() {
+  let c = document.getElementById("flag-toast-container");
+  if (!c) {
+    c = document.createElement("div");
+    c.id = "flag-toast-container";
+    document.body.appendChild(c);
+  }
+  return c;
+}
+
+// kind: "flag" (promoted 🚩) | "cand" ([FLAG?] candidate)
+function _showFlagToast(kind, job, text) {
+  const c = _flagToastContainer();
+  const el = document.createElement("div");
+  el.className = "flag-toast " + kind;
+  const isFlag = kind === "flag";
+  const icon = isFlag ? "🚩" : "🏁";
+  const title = isFlag ? "FLAG FOUND" : "[FLAG?] candidate";
+  const mod = escapeHtml(job.module || "job");
+  const sid = escapeHtml(String(job.id || "").slice(0, 12));
+  el.innerHTML =
+    `<button class="flag-toast-x" title="dismiss">×</button>` +
+    `<div class="flag-toast-h">${icon} <strong>${title}</strong></div>` +
+    `<div class="flag-toast-sub">${mod} · <span class="flag-toast-id">${sid}</span></div>` +
+    (text ? `<div class="flag-toast-body"><code>${escapeHtml(text)}</code></div>` : "");
+  el.addEventListener("click", (e) => {
+    if (e.target.closest(".flag-toast-x")) return;
+    selectJob(job.id);
+    el.remove();
+  });
+  el.querySelector(".flag-toast-x").addEventListener("click", (e) => {
+    e.stopPropagation();
+    el.remove();
+  });
+  c.appendChild(el);
+  // promoted flags linger (manual × or 60s); candidates auto-fade at 18s
+  const ttl = isFlag ? 60000 : 18000;
+  setTimeout(() => {
+    el.classList.add("leaving");
+    setTimeout(() => el.remove(), 400);
+  }, ttl);
+  _flagBeep();
+  // OS-level notification too — but only if already granted; never auto-prompt
+  try {
+    if (window.Notification && Notification.permission === "granted") {
+      new Notification(`${icon} ${title} — ${mod}`,
+        { body: text || sid, tag: "flag-" + job.id });
+    }
+  } catch (_) {}
+}
+
+// [FLAG?] candidates = flag_candidates not yet promoted to flags (mirrors
+// the [FLAG?] box logic so the alarm and the box agree).
+function _candCount(job) {
+  const flags = job.flags || [];
+  return (job.flag_candidates || []).filter((x) => !flags.includes(x)).length;
+}
+
+function _detectFlagTransitions(jobs) {
+  for (const job of jobs || []) {
+    const nFlags = (job.flags || []).length;
+    const nCands = _candCount(job);
+    const prev = _flagSeen[job.id] || { flags: 0, cands: 0 };
+    if (_flagAlarmReady) {
+      if (nFlags > prev.flags) {
+        const fresh = (job.flags || []).slice(prev.flags);
+        _showFlagToast("flag", job, fresh[fresh.length - 1] || "");
+      } else if (nCands > prev.cands) {
+        const flags = job.flags || [];
+        const fc = (job.flag_candidates || []).filter((x) => !flags.includes(x));
+        _showFlagToast("cand", job, fc[fc.length - 1] || "");
+      }
+    }
+    _flagSeen[job.id] = { flags: nFlags, cands: nCands };
+  }
+  _flagAlarmReady = true;   // baseline seeded after the first pass
+}
+
 async function refreshJobs() {
   const res = await fetch(`${API}/jobs`);
   const data = await res.json();
+  _detectFlagTransitions(data.jobs);
   const ul = document.getElementById("jobs-list");
   ul.innerHTML = "";
   for (const job of data.jobs) {
@@ -2694,3 +2810,14 @@ fillModelSelects();
 fillEffortSelects();
 refreshJobs();
 refreshStats();
+
+// Global heartbeat — keeps the job list AND the flag alarm live even when
+// no detail panel is open (the per-job pollers only run for the open job).
+// Guarded so a slow /jobs fetch can't pile up overlapping refreshes. ~7s
+// is cheap (a dir scan) and well under a run's flag-capture latency.
+let _globalPollBusy = false;
+setInterval(async () => {
+  if (_globalPollBusy) return;
+  _globalPollBusy = true;
+  try { await refreshJobs(); } catch (_) {} finally { _globalPollBusy = false; }
+}, 7000);
