@@ -54,6 +54,23 @@ WORKFLOW
    strategy / one-line run command.
 6. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
 
+BEFORE CONCEDING — enumerate, don't generalize
+----------------------------------------------
+Before you conclude a vulnerability class is BLOCKED, or that the
+challenge is UNSOLVABLE / the intended path is dead, enumerate EVERY
+injection point of the primitive you control and test each one
+INDEPENDENTLY:
+  - a header you can write = the NAME *and* the VALUE (servers often
+    validate one but not the other — e.g. uvicorn rejects \\r\\n in a
+    header value but emits the NAME raw);
+  - a kwarg / dict you control = each key, not just one;
+  - a parser / sink = each field, encoding, content-type, and state.
+A single-variant negative (one field, one config, one state) does NOT
+generalize to the whole class. "I tried X in configuration C and it
+failed" is evidence about C, not about X. When the intended or obvious
+solution looks dead, treat that as a cue to WIDEN the injection-point
+search — not as a reason to write an unsolvability proof.
+
 OUT-OF-BAND CALLBACKS (XSS / SSRF / blind injection)
 -----------------------------------------------------
 When the bug requires an external HTTP listener, pick the channel
