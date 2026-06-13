@@ -144,7 +144,14 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 log "starting cloudflared quick-tunnel -> http://localhost:$PORT"
-cloudflared tunnel --url "http://localhost:$PORT" --no-autoupdate >"$CF_LOG" 2>&1 &
+# cloudflared reads TUNNEL_* env vars as its OWN config. Our TUNNEL_PIDFILE
+# (passed in by the auto-starter, or set by an operator to relocate the pidfile)
+# collides with cloudflared's `--pidfile`, so cloudflared would overwrite our
+# pidfile with ITS pid (breaking `stop` / the double-run guard). Strip the
+# colliding vars from cloudflared's environment only -- our shell vars are
+# untouched, so the pidfile keeps tunnel.sh's own pid.
+env -u TUNNEL_PIDFILE -u TUNNEL_URL_TIMEOUT \
+  cloudflared tunnel --url "http://localhost:$PORT" --no-autoupdate >"$CF_LOG" 2>&1 &
 CF_PID=$!
 
 extract_url() {
