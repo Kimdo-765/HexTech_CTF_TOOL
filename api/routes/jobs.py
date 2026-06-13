@@ -163,8 +163,14 @@ def get_stats():
 
 
 def _detect_runnable_script(job_dir: Path) -> str | None:
+    # Primary: <jobdir>/<name> (populated by the analyzer's carry step at
+    # the end of a run). Fallback: <jobdir>/work/<name> — present even
+    # when the carry hasn't run yet (e.g. a collector OOB capture marked
+    # the job finished while the main agent was still mid-analyze, or the
+    # run was stopped before stage=done). The /file/{name} route already
+    # has this work/ fallback, so the link resolves either way.
     for name in ("exploit.py", "solver.py", "solver.sage"):
-        if (job_dir / name).is_file():
+        if (job_dir / name).is_file() or (job_dir / "work" / name).is_file():
             return name
     return None
 
@@ -553,9 +559,27 @@ def get_job_file(job_id: str, name: str):
 @router.get("/{job_id}/result")
 def get_job_result(job_id: str):
     f = JOBS_DIR / job_id / "result.json"
-    if not f.exists():
-        raise HTTPException(status_code=404, detail="not yet")
-    return json.loads(f.read_text())
+    if f.exists():
+        return json.loads(f.read_text())
+    # result.json is only written by the analyzer's carry step at
+    # stage=done. A collector OOB capture can mark the job
+    # finished/success BEFORE that point (the bot calls in while the
+    # main agent is still mid-analyze), so for ~minutes there is a
+    # finished job with flags but no result.json and the UI's result
+    # link 404s. Synthesize a minimal result from meta so the link
+    # always resolves; the real file overwrites this view once carry
+    # runs.
+    meta = read_job_meta(Path(job_id).name)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "synthesized_from_meta": True,
+        "status": meta.get("status"),
+        "flags": meta.get("flags") or [],
+        "cost_usd": meta.get("cost_usd"),
+        "agent_error": meta.get("error"),
+        "agent_error_kind": meta.get("error_kind"),
+    }
 
 
 @router.post("/{job_id}/run")

@@ -2,6 +2,7 @@ import asyncio
 import importlib.metadata
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -467,6 +468,12 @@ def run_job(
     model_override: Optional[str] = None,
 ) -> dict:
     apply_to_env()
+    # Expose the concrete collector endpoint to the MAIN agent too (not just
+    # the sandbox subprocess in _runner.py). Without this the agent only sees
+    # CALLBACK_URL and burns turns hand-deriving `/api/collector/<job_id>`.
+    _cb = os.environ.get("CALLBACK_URL", "").strip()
+    if _cb:
+        os.environ["COLLECTOR_URL"] = f"{_cb.rstrip('/')}/api/collector/{job_id}"
     write_meta(job_id, status="running", stage="analyze")
     try:
         agent_summary = anyio.run(
