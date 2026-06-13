@@ -59,6 +59,26 @@ cd "$PROJECT_DIR" 2>/dev/null || { err "project dir not found: $PROJECT_DIR"; ex
 [ -d data/jobs ] || warn "no data/jobs/ under $PROJECT_DIR — collector verify will be skipped"
 log "project=$PROJECT  dir=$PROJECT_DIR  mode=$MODE  build=$BUILD"
 
+# --- run `docker compose` as the REAL user with the correct ~/.claude OAuth
+# mount. Running THIS script via sudo makes $HOME=/root, so the compose mount
+# `${HOST_CLAUDE_HOME:-${HOME}/.claude}` would point at the empty /root/.claude
+# and the worker would have NO claude.ai OAuth token ("OAuth missing"). Also,
+# root-created containers later clash with a user `compose up`. So: resolve the
+# invoking user's home, pin HOST_CLAUDE_HOME, and create containers AS that user.
+REAL_USER="${SUDO_USER:-$(stat -c %U "$PROJECT_DIR" 2>/dev/null || id -un)}"
+REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)"; REAL_HOME="${REAL_HOME:-$HOME}"
+export HOST_CLAUDE_HOME="${HOST_CLAUDE_HOME:-$REAL_HOME/.claude}"
+log "compose user=$REAL_USER  HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME (claude.ai OAuth mount)"
+[ -f "$HOST_CLAUDE_HOME/.credentials.json" ] \
+  || warn "no $HOST_CLAUDE_HOME/.credentials.json — worker will have NO OAuth token (run \`claude login\` as $REAL_USER)"
+dc() {
+  if [ "$(id -un)" = "$REAL_USER" ]; then
+    docker compose -p "$PROJECT" "$@"
+  else
+    sudo -u "$REAL_USER" env "HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME" docker compose -p "$PROJECT" "$@"
+  fi
+}
+
 # --- sudo upfront (cache creds; never hardcode the password) ----------------
 if ! sudo -n true 2>/dev/null; then
   log "sudo is required (kill root-owned orphans / restart daemon)"
@@ -74,7 +94,7 @@ fi
 
 # --- 1. clean compose state -------------------------------------------------
 log "docker compose down --remove-orphans (keeps named volumes e.g. redis-data)"
-docker compose -p "$PROJECT" down --remove-orphans 2>&1 | sed 's/^/    /'
+dc down --remove-orphans 2>&1 | sed 's/^/    /'
 
 # --- 2. report any docker-UNTRACKED orphan shims still around ----------------
 log "scanning for docker-untracked orphan containers (the trap)..."
@@ -112,12 +132,12 @@ fi
 # --- 4. (optional) rebuild --------------------------------------------------
 if [ "$BUILD" -eq 1 ]; then
   log "building images (api worker)"
-  docker compose -p "$PROJECT" build api worker 2>&1 | sed 's/^/    /'
+  dc build api worker 2>&1 | sed 's/^/    /'
 fi
 
 # --- 5. fresh up ------------------------------------------------------------
 log "docker compose up -d --force-recreate $CORE_SERVICES"
-docker compose -p "$PROJECT" up -d --force-recreate $CORE_SERVICES 2>&1 | sed 's/^/    /'
+dc up -d --force-recreate $CORE_SERVICES 2>&1 | sed 's/^/    /'
 
 # --- 6. VERIFY via live routes (not docker-exec, which fresh-imports) -------
 log "verifying api on http://localhost:8000 ..."
@@ -147,14 +167,14 @@ if [ -n "${probe_job:-}" ]; then
 fi
 
 # worker sanity — registered with redis?
-wcount=$(docker compose -p "$PROJECT" exec -T redis redis-cli scard rq:workers 2>/dev/null | tr -d '\r' )
+wcount=$(dc exec -T redis redis-cli scard rq:workers 2>/dev/null | tr -d '\r' )
 [ -n "${wcount:-}" ] && [ "${wcount:-0}" -gt 0 ] 2>/dev/null \
   && ok "rq workers registered: $wcount" \
   || warn "rq workers registered: ${wcount:-0} (worker may still be starting)"
 
 # --- 7. summary -------------------------------------------------------------
 log "docker compose ps:"
-docker compose -p "$PROJECT" ps 2>&1 | sed 's/^/    /'
+dc ps 2>&1 | sed 's/^/    /'
 if [ "$MODE" = "hard" ] && [ "${#OTHER[@]}" -gt 0 ]; then
   warn "unrelated containers stopped by the daemon restart (restart them if needed):"
   printf '         - %s\n' "${OTHER[@]}"
