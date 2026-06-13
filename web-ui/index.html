@@ -440,7 +440,7 @@
         <label>
           Callback URL (for XSS / SSRF / blind RCE)
           <input type="url" name="callback_url" placeholder="https://your-listener.example.com/x" />
-          <small style="color:#8b949e">forwarded to exploits as <code>CALLBACK_URL</code> env. Use ngrok / requestbin / your own VPS for remote bots that can't reach private IPs.</small>
+          <small style="color:#8b949e">forwarded to exploits as <code>CALLBACK_URL</code> env. Run <code>./tunnel.sh</code> (cloudflared) to auto-fill this with a tunnel that has no ngrok interstitial — or use requestbin / your own VPS for remote bots that can't reach private IPs.</small>
         </label>
         <label class="checkbox">
           <input type="checkbox" name="enable_judge" />

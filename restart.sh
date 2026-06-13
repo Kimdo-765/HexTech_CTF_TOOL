@@ -172,6 +172,25 @@ wcount=$(dc exec -T redis redis-cli scard rq:workers 2>/dev/null | tr -d '\r' )
   && ok "rq workers registered: $wcount" \
   || warn "rq workers registered: ${wcount:-0} (worker may still be starting)"
 
+# --- 6b. auto-start the cloudflared OOB tunnel (auto-sets Callback URL) ------
+# Reuses tunnel.sh, run AS the invoking user so the pidfile/detach are
+# user-owned (a root-launched tunnel would write a root-owned pidfile). Honors
+# AUTO_TUNNEL from .env (default 1); skips if the api isn't serving or
+# cloudflared isn't installed. Stop later with `./tunnel.sh stop`.
+AT="$(grep -E '^AUTO_TUNNEL=' "$PROJECT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
+if [ "${AT:-1}" != "0" ] && [ "$code" = "200" ]; then
+  log "auto-starting cloudflared tunnel (Callback URL auto-set; AUTO_TUNNEL=0 to skip)"
+  if [ "$(id -un)" = "$REAL_USER" ]; then
+    AUTO_TUNNEL=1 PROJECT_DIR="$PROJECT_DIR" API_BASE="http://localhost:8000" \
+      bash "$PROJECT_DIR/scripts/tunnel-autostart.sh" 2>&1 | sed 's/^/    /'
+  else
+    sudo -u "$REAL_USER" env AUTO_TUNNEL=1 PROJECT_DIR="$PROJECT_DIR" API_BASE="http://localhost:8000" \
+      bash "$PROJECT_DIR/scripts/tunnel-autostart.sh" 2>&1 | sed 's/^/    /'
+  fi
+elif [ "${AT:-1}" != "0" ]; then
+  warn "skipping tunnel auto-start (api not serving on :8000)"
+fi
+
 # --- 7. summary -------------------------------------------------------------
 log "docker compose ps:"
 dc ps 2>&1 | sed 's/^/    /'

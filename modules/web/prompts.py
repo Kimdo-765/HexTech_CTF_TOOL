@@ -103,7 +103,7 @@ banned char (`.`(`)`document`, the hostname's dots) sits inside base64 and
 the parenless `atob`…`` call dodges the `(` ban; `String.fromCharCode`,
 `\\xNN`/`\\uNNNN` escapes, `eval` of a decoded string are siblings. IMPLICATION
 THAT BIT A PRIOR RUN: do NOT reason "the WAF bans dots so I can't type the
-ngrok/collector hostname, therefore I need a raw-IP sink and there is none"
+tunnel/collector hostname, therefore I need a raw-IP sink and there is none"
 — the hostname can be hidden in an encoded literal, so the collector you
 ALREADY have is usable. A typing constraint never proves a channel dead.
 

@@ -1619,13 +1619,37 @@ request, logs it, and auto-extracts flag-shaped strings.
 
 Setup once:
 
-```bash
-# 1. Expose port 8000 publicly
-ngrok http 8000     # or any tunnel: cloudflared, frp, ssh -R, …
+`./start.sh` and `./restart.sh` **auto-start** this tunnel for you (set
+`AUTO_TUNNEL=0` in `.env` to opt out), so the Callback URL is normally set the
+moment the stack is up. To drive it by hand:
 
-# 2. Settings tab → Callback URL = https://<your-tunnel-host>
-#    (the orchestrator appends /api/collector/<job_id> per job)
+```bash
+# Run a cloudflared quick-tunnel and auto-PUT its public URL into the settings
+# (the orchestrator appends /api/collector/<job_id> per job):
+./tunnel.sh          # resident; Ctrl-C stops it and restores the prior URL
+./tunnel.sh stop     # stop an auto-started (backgrounded) tunnel
+
+# Or run any tunnel yourself and set Callback URL by hand in the Settings tab:
+#   cloudflared tunnel --url http://localhost:8000   # frp, ssh -R, a VPS, …
+#   ngrok http 8000                                   # see the interstitial note
 ```
+
+> **Why cloudflared, not ngrok?** ngrok's free tier answers with a 200 + HTML
+> browser-warning *interstitial* unless the caller sends the
+> `ngrok-skip-browser-warning` header — which an XSS beacon (`<img>`,
+> `sendBeacon`, a bare `fetch`) cannot set, so the bot's exfil hits the warning
+> page and the flag is silently lost. cloudflared `*.trycloudflare.com` tunnels
+> have no interstitial, so beacons pass through transparently.
+
+The tunnel exposes the **whole api** publicly, not just the collector. If you
+don't want jobs/settings reachable from the internet, set an **Auth Token** in
+the Settings tab — the `/api/collector/<job_id>` path stays public either way
+(the remote bot needs it; the job_id is its secret).
+
+Cloudflare quick-tunnels are best-effort: occasionally one never becomes
+reachable (a transient route error). If beacons aren't landing, roll a fresh
+URL with `./tunnel.sh stop && ./tunnel.sh` (the auto-start prints
+`reachable` / `NOT reachable yet` so you know).
 
 Then any agent-produced exploit can use `os.environ["COLLECTOR_URL"]`
 as its callback. The collector:

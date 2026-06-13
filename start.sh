@@ -165,3 +165,14 @@ if [ "$fail" -eq 0 ]; then
 else
   die "startup finished with problems (see warnings above)"
 fi
+
+# --- auto-start the cloudflared OOB tunnel (auto-sets Callback URL) ----------
+# Honors AUTO_TUNNEL from .env (default 1); skips cleanly if cloudflared isn't
+# installed. The api is verified up above, so the tunnel can publish its URL.
+# Reached only on success (die exits otherwise). Stop later: ./tunnel.sh stop
+AT="$(grep -E '^AUTO_TUNNEL=' .env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
+if [ "${AT:-1}" != "0" ]; then
+  say "Auto-starting cloudflared OOB tunnel (set AUTO_TUNNEL=0 in .env to skip)"
+  AUTO_TUNNEL=1 PROJECT_DIR="$(pwd)" WEB_PORT="$WEB_PORT" API_BASE="http://localhost:$WEB_PORT" \
+    bash scripts/tunnel-autostart.sh || true
+fi

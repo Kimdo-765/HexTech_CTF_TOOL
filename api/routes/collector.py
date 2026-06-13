@@ -2,8 +2,13 @@
 
 Lets the operator skip webhook.site / requestbin entirely:
 
-  1. Run `ngrok http 8000` (or any tunnel that exposes the api port).
-  2. Settings → Callback URL = `https://<ngrok>/api/collector/<job_id>`
+  1. Run `./tunnel.sh` — a cloudflared quick-tunnel that auto-publishes
+     its public URL into Settings → Callback URL (no ngrok interstitial,
+     no manual copy). Or expose port 8000 with any tunnel yourself
+     (`cloudflared tunnel --url http://localhost:8000`, ngrok, frp, ssh -R)
+     and set the Callback URL by hand.
+  2. Settings → Callback URL = `https://<tunnel-host>` (tunnel.sh sets this
+     for you; the orchestrator appends `/api/collector/<job_id>` per job)
      OR set CALLBACK_URL to a sentinel like `__BUILTIN__/<job_id>` and
      have the exploit read `BUILTIN_COLLECTOR_BASE` from env.
   3. Anything the bot fetches under that path is logged to

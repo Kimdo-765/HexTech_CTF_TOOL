@@ -243,8 +243,9 @@ def run_in_sandbox(
 
     # Forward CALLBACK_URL + COLLECTOR_BASE so exploits have a stable
     # OOB channel. CALLBACK_URL is the operator-supplied tunnel
-    # (ngrok / VPS); the agent should append `/api/collector/<JOB_ID>`
-    # to it so the built-in collector endpoint receives the callback,
+    # (cloudflared quick-tunnel via ./tunnel.sh, or a VPS); the agent
+    # should append `/api/collector/<JOB_ID>` to it so the built-in
+    # collector endpoint receives the callback,
     # auto-extracts any flag in the URL, and updates the job status.
     env: dict[str, str] = {
         "PYTHONUNBUFFERED": "1",
