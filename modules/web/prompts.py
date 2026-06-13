@@ -154,21 +154,53 @@ based on what's available — in this priority order:
    later GET, SSRF whose response is reflected, DNS-record injection,
    etc.
 
-DELEGATE TO RECON — concrete recipes
--------------------------------------
-- sink hunt: "find PHP files under ./src that pass user input to
-  system() / exec() / shell_exec(). Return file:line for each + the
-  variable that flows in. ≤20 hits."
-- route inventory: "list every Express route in ./app and which
-  middleware runs before it. Return route + handler:line."
+OFFLOAD CONTEXT-HEAVY WORK — delegate before your context balloons
+------------------------------------------------------------------
+Spawn an isolated subagent (`mcp__team__spawn_subagent`,
+subagent_type=recon | debugger) for any task that would otherwise spray
+DOZENS of tool-results into YOUR context. The subagent does the heavy
+search in its OWN session and hands back only the compact result — the
+hundreds of failed attempts never touch your context, so you stay lean
+for the exploit-CRAFT reasoning that only you can do. Two high-value
+offloads (this is the point — DO them, don't grind in-context):
+
+- BYPASS-PRIMITIVE / TECHNIQUE RESEARCH → recon (has WebSearch + Bash).
+  When a filter / WAF / charset limit / sanitizer / parser stands
+  between you and a sink, do NOT brainstorm bypasses turn-by-turn in
+  your own context. Ask recon: "Stack=<X>, lib=<name>==<version>; the
+  filter bans <restriction> (file:line). List DOCUMENTED bypass
+  primitives for THIS defense+version, ranked by applicability, WITH
+  sources (CVE / advisory / writeup), and the viable exfil channel;
+  verify each against the real predicate where you can." recon returns
+  a ranked menu — you pick one and CRAFT. (A charset/word ban limits
+  what you can REPRESENT, not what you can EXECUTE once a sink fires;
+  recon enumerates the channels so you don't rediscover them turn by
+  turn.)
+
+- BRUTEFORCE / FUZZING / VARIANT-SPRAY → debugger (has Write + Bash).
+  When the next step is "try N candidates and report which works"
+  (payload variants, encodings, parameter values, wordlists, cache-key
+  permutations, race iterations), do NOT loop it in your context — each
+  attempt's response body is dead weight that bloats you. Ask debugger:
+  "Write and run a script that tries <space> against <target/predicate>
+  and return ONLY the input(s) that succeeded + the success signal."
+  You get the winner; the N-1 failures stay in its session.
+
+STATIC-SOURCE recon recipes (also offload these):
+- sink hunt: "find files under ./src that pass user input to
+  system() / exec() / a template render / a deserializer. Return
+  file:line + the variable that flows in. ≤20 hits."
+- route inventory: "list every route in ./app + which middleware runs
+  before each. route + handler:line."
 - big source grep: "grep ./ for hardcoded secrets (apikey / token /
   jwt) — file:line + redacted value."
-- libc / framework symbol lookup when needed.
 
-KEEP DOING YOURSELF
--------------------
-- short verifications (one-line file Read, single curl, single
-  pwntools probe) — recon round-trip is overhead.
+KEEP DOING YOURSELF (the delegation round-trip isn't free)
+----------------------------------------------------------
+- the exploit-CRAFT loop — reasoning about WHY a specific payload
+  parsed / executed a certain way and iterating it. That is irreducibly
+  yours; a subagent can't hold your live hypothesis.
+- short verifications (one-line Read, single curl, single probe).
 - writing exploit.py / report.md.
 
 Constraints
