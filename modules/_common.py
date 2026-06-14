@@ -411,6 +411,33 @@ def _deep_search_for(work_dir: Path, name: str) -> Path | None:
                     best_mtime = mt
     except OSError:
         return None
+
+    # Targeted rescue inside the SDK CLI's own working subdir(s)
+    # `tmp/claude-*/`. TMPDIR is set to `<work>/tmp` for the agent, and
+    # the bundled `claude` CLI uses a `claude-<N>` subdir under it as its
+    # process cwd. When the agent's Bash cwd drifts there (or it never
+    # left it) and it Writes a RELATIVE path, exploit.py / report.md land
+    # in `tmp/claude-N/` — which the generic `tmp` skip above excludes,
+    # so a real, flag-producing exploit silently vanishes when the tmp
+    # tree is later cleaned (concrete incident 2026-06-14 job
+    # d4c452f2f6d4: live RCE flag captured, both artifacts lost this way).
+    # We can't un-skip `tmp` wholesale (it holds genuine scratch debris),
+    # so we glob ONLY the SDK working subdir for the EXACT artifact name —
+    # those names are never scratch, so this can't scoop noise.
+    if best is None:
+        try:
+            for m in work_dir.glob(f"tmp/claude-*/{name}"):
+                if not m.is_file():
+                    continue
+                try:
+                    mt = m.stat().st_mtime
+                except OSError:
+                    continue
+                if mt > best_mtime:
+                    best = m
+                    best_mtime = mt
+        except OSError:
+            pass
     return best
 
 
