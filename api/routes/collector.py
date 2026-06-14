@@ -14,10 +14,14 @@ Lets the operator skip webhook.site / requestbin entirely:
   3. Anything the bot fetches under that path is logged to
      /data/jobs/<job_id>/callbacks.jsonl AND any flag-shaped string in
      the path/query/body is auto-extracted via scan_job_for_flags().
+  4. For an ITERATIVE oracle (a boolean / LIKE-search leak that reveals
+     the flag one char per round), the exploit reads back which
+     conditional beacon fired via `GET /api/collector/<job_id>/_hits`
+     (JSON of the logged beacons; a pure read — not itself logged).
 
-This route is exempt from auth so external bots can hit it. The token
-is the job_id itself — the operator should keep job IDs secret if
-they care about that.
+This route is exempt from auth so external bots can hit it (and so the
+sandboxed exploit can poll `/_hits`). The token is the job_id itself —
+the operator should keep job IDs secret if they care about that.
 """
 from __future__ import annotations
 
@@ -26,12 +30,57 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from api.storage import JOBS_DIR, read_job_meta
 from modules._common import scan_job_for_flags, write_meta
 
 router = APIRouter()
+
+
+@router.get("/{job_id}/_hits")
+async def collector_hits(job_id: str, since: int = 0):
+    """Read-back for an ITERATIVE oracle.
+
+    Most OOB exfil is single-shot — the whole secret arrives in one
+    beacon and the write path below extracts it server-side; the script
+    never needs to read anything back. But a CSP-constrained boolean /
+    LIKE-search leak reveals the flag one char per round and the exploit
+    MUST learn which conditional beacon fired in order to extend the
+    next round. This endpoint returns the beacons logged for the job so
+    the exploit can poll for the round's marker.
+
+    Pure read: it does NOT log itself as a beacon, does NOT scan for
+    flags, and does NOT touch job status — so polling it can't pollute
+    callbacks.jsonl or false-finish the job. The bot visit is async, so
+    callers poll until the marker appears (or a timeout). `since=<n>`
+    returns only hits at/after index n (a cheap cursor for tight loops).
+
+    Defined ABOVE the catch-all `collect` so `/<job>/_hits` resolves
+    here instead of being swallowed as a beacon path.
+    """
+    safe = Path(job_id).name
+    jd = JOBS_DIR / safe
+    log = jd / "callbacks.jsonl"
+    hits: list[dict] = []
+    if log.is_file():
+        try:
+            for line in log.read_text().splitlines():
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                hits.append({
+                    "ts": r.get("ts"),
+                    "method": r.get("method"),
+                    "path": r.get("path"),
+                    "query": r.get("query"),
+                    "ua": (r.get("headers") or {}).get("user-agent", ""),
+                })
+        except OSError:
+            pass
+    sliced = hits[since:] if since > 0 else hits
+    return JSONResponse({"count": len(hits), "since": since, "hits": sliced})
 
 
 @router.api_route(

