@@ -3807,6 +3807,10 @@ _STOP_KIND_HEADERS = {
         "Conceded unsolvable — artifacts self-admit no working chain and "
         "prejudge flag_likelihood≈0 (true-negative, not a fixable near-miss)"
     ),
+    "policy_refusal": (
+        "Main turn blocked by the server-side Usage-Policy classifier "
+        "(AUP) — session context poisoned; halted without an in-place retry"
+    ),
 }
 
 
@@ -4022,6 +4026,24 @@ def write_why_stopped(
                 "issues.",
                 "2. **Check worker container health**: `docker logs "
                 "hextech_ctf_tool-worker-1 --tail 100`.",
+            ]
+        elif stop_kind == "policy_refusal":
+            out += [
+                "Main's turn was blocked by the server-side Usage-Policy "
+                "classifier (AUP). The block is on the ACCUMULATED "
+                "conversation, so retrying IN PLACE re-blocks "
+                "deterministically — the orchestrator therefore halted "
+                "without burning a re-block turn. Options:",
+                "",
+                "1. **`/retry`** — forks a FRESH SDK session against the "
+                "carried work tree. This sheds the poisoned conversation "
+                "(a fresh fork of the same job has run AUP-free afterward), "
+                "so it is the de-facto recovery. The analysis so far is in "
+                "`pre_recon_reply.txt` / `report.md`; the fresh session "
+                "resumes from those artifacts, not the blocked transcript.",
+                "2. If it re-blocks every fresh attempt, the challenge class "
+                "(e.g. XSS-exfil / CSP-bypass) reliably trips the classifier "
+                "on main's own reasoning — not a code bug on our side.",
             ]
         else:
             out += [
@@ -4743,6 +4765,15 @@ async def run_main_agent_session(
                             )
                             summary["agent_error_kind"] = _err_kind
                             _snapshot_cost(summary, "RESULT_IS_ERROR")
+                            # AUP poisons the conversation: clear any pending
+                            # in-place user-turn injections (FINAL_DRAFT /
+                            # soft-eject / scaffold) so they can't re-query the
+                            # blocked session and re-block. The postjudge-redirect
+                            # re-block is gated separately below.
+                            if _err_kind == "policy_refusal":
+                                final_draft_pending["value"] = False
+                                soft_eject_pending["value"] = False
+                                scaffold_nudge_pending["value"] = False
                             if not _pick_present_artifact(
                                     work_dir, artifact_names):
                                 write_fallback_artifacts(work_dir, log_fn, _fallback_module)
@@ -5184,6 +5215,36 @@ async def run_main_agent_session(
                 write_why_stopped(
                     work_dir,
                     stop_kind="no_hint",
+                    attempt_idx=attempt,
+                    max_attempts=max_retries,
+                    judge_out=judge_out,
+                    sandbox_result=last_sandbox,
+                    summary=summary,
+                    log_fn=log_fn,
+                )
+                return last_sandbox
+
+            # AUP-poisoned-session guard. If the main turn that just ran was
+            # blocked by the server-side Usage-Policy classifier
+            # (policy_refusal), the conversation context is poisoned: the
+            # `await client.query()` below re-issues into the SAME session and
+            # re-blocks deterministically (ab95a434bb0f 07:30:18,
+            # 2eba75783e83 11:39:46 — a guaranteed-fail re-block that wastes a
+            # turn + $; the SHA-unchanged gate then halts one iteration too
+            # late). Skip the in-place retry; halt now. WHY_STOPPED routes the
+            # operator to /retry, which forks a FRESH session that sheds the
+            # poison (the de-facto cure). Does NOT auto-spend — a fresh fork
+            # is operator-initiated.
+            if summary.get("agent_error_kind") == "policy_refusal":
+                log_fn(
+                    "[orchestrator] main turn AUP-blocked (policy_refusal) — "
+                    "in-place retry would re-block the poisoned session "
+                    "deterministically; halting WITHOUT retry. /retry forks a "
+                    "fresh session that sheds the context."
+                )
+                write_why_stopped(
+                    work_dir,
+                    stop_kind="policy_refusal",
                     attempt_idx=attempt,
                     max_attempts=max_retries,
                     judge_out=judge_out,
