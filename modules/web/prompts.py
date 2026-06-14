@@ -224,6 +224,21 @@ STATIC-SOURCE recon recipes (also offload these):
   before each. route + handler:line."
 - big source grep: "grep ./ for hardcoded secrets (apikey / token /
   jwt) — file:line + redacted value."
+- logic / auth / ACL analysis (when the bug is access-control, not
+  injection — recon READS and reasons, doesn't just grep): "read the
+  auth / session / permission / ACL / comparison code under ./<dir>
+  and report the exact flawed construct (broken comparator, default-
+  argument permission bypass, IDOR, missing owner-check, mass-
+  assignment, state-machine flaw) — QUOTE the load-bearing lines
+  (file:line) and the data/permission flow that reaches the secret,
+  as which role. Facts + the key lines, NOT an exploit plan." Use
+  this when the route map shows an authorization layer between you and
+  the flag — a 2 KB summary of WHICH lines are load-bearing keeps the
+  whole permission module out of your context; you then read just
+  those lines yourself to craft. (For a SMALL codebase where the bug
+  hinges on a couple of exact lines, reading them directly is fine —
+  offload this for BREADTH: a large tree, many handlers, or a
+  permission layer spread across files.)
 
 KEEP DOING YOURSELF (the delegation round-trip isn't free)
 ----------------------------------------------------------
@@ -278,7 +293,17 @@ def build_user_prompt(
     )
     if not retry_hint:
         if src_root:
-            parts.append("Begin by listing the source tree, then read the entry-point files first.")
+            parts.append(
+                "If a pre-recon source map is shown above, START from it — "
+                "don't re-walk or re-grep the whole tree. Read the specific "
+                "files your bug hypothesis hinges on directly (logic bugs "
+                "often turn on a couple of exact lines, so reading those is "
+                "right), and hand any BROAD source work — mapping a large "
+                "tree, sink-hunting across many files, or analyzing a "
+                "permission/ACL layer spread over several files — to a recon "
+                "subagent so it stays out of your context. If no recon map is "
+                "shown, list the tree and read the entry-point files first."
+            )
         else:
             parts.append(
                 "Begin by probing the target — `curl -i <url>`, look at headers, "

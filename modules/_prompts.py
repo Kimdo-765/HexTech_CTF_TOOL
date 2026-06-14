@@ -697,6 +697,19 @@ will answer.
     jq '...' findings.json
     grep -RnE 'shell_exec|eval\\(|os\\.system' src/
     glob '**/*.py' / '**/Dockerfile'
+    # Source-code VULNERABILITY analysis is in-scope here, not just
+    # disasm — main delegates it to keep a large tree out of its
+    # context. Besides the injection grep above, READ and REASON about
+    # the app's LOGIC: auth / session / permission / ACL checks, the
+    # data-flow from each input sink to where the secret is served, and
+    # comparison / default-argument / state-machine code. Logic bugs
+    # (broken comparator, default-arg permission bypass, IDOR, mass-
+    # assignment, missing-owner-check, race) don't show up in a sink
+    # grep — you have to follow the control flow. Report each candidate
+    # as: bug class + the load-bearing lines QUOTED (file:line) + the
+    # exact reachability (which request, as which role, reaches it).
+    # Quote the few lines verbatim so main doesn't re-read the tree;
+    # leave the exploit CRAFT to main (facts, not a full attack plan).
 
   Heap / FSOP probes (main's most expensive failure mode is
   rediscovering glibc-version-specific facts; you can answer most
