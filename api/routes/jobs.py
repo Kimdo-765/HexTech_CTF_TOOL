@@ -209,7 +209,18 @@ def get_job(job_id: str):
     # Always derive a `runnable_script` field from the filesystem so the UI
     # can show the run-now button even on jobs whose meta was written before
     # the field existed (or whose orchestrator didn't set it).
-    runnable_script = _detect_runnable_script(JOBS_DIR / Path(job_id).name)
+    _jd = JOBS_DIR / Path(job_id).name
+    runnable_script = _detect_runnable_script(_jd)
+
+    # WHY_STOPPED.md only exists on abnormal stops (judge_stop / agent_error /
+    # no_hint / budget) — written by write_why_stopped() to the work tree and
+    # carried to root at stage=done. Surface a presence flag so the UI can show
+    # its file link only when it exists (unlike report.md/exploit.py which are
+    # always linked), avoiding a dead 404 link on clean flag-capture runs.
+    has_why_stopped = (
+        (_jd / "WHY_STOPPED.md").is_file()
+        or (_jd / "work" / "WHY_STOPPED.md").is_file()
+    )
 
     return {
         **meta,
@@ -217,6 +228,7 @@ def get_job(job_id: str):
         "rq_worker_name": rq_worker_name,
         "rq_worker_heartbeat_at": rq_worker_heartbeat,
         "runnable_script": runnable_script,
+        "has_why_stopped": has_why_stopped,
     }
 
 

@@ -1625,6 +1625,11 @@ async function renderJob(id, opts = {}) {
       fileLink("result.json", `${API}/jobs/${id}/result`, "result.json"),
       fileLink("report.md", `${API}/jobs/${id}/file/report.md`, "report.md"),
     ];
+    // WHY_STOPPED.md only exists on abnormal stops — gate on the API's
+    // presence flag so a clean flag-capture run doesn't show a dead link.
+    if (job.has_why_stopped) {
+      links.push(fileLink("WHY_STOPPED.md", `${API}/jobs/${id}/file/WHY_STOPPED.md`, "WHY_STOPPED.md"));
+    }
     if (job.module === "web" || job.module === "pwn") {
       links.push(fileLink("exploit.py", `${API}/jobs/${id}/file/exploit.py`, "exploit.py"));
       links.push(fileLink("stdout", `${API}/jobs/${id}/file/exploit.py.stdout`, "exploit.py.stdout"));
