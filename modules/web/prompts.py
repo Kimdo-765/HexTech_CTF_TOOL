@@ -257,7 +257,20 @@ subagent_type=recon | debugger) for any task that would otherwise spray
 DOZENS of tool-results into YOUR context. The subagent does the heavy
 search in its OWN session and hands back only the compact result — the
 hundreds of failed attempts never touch your context, so you stay lean
-for the exploit-CRAFT reasoning that only you can do. Two high-value
+for the exploit-CRAFT reasoning that only you can do.
+
+DELEGATE EARLY — the trigger is reasoning BREADTH, not just tool-result
+volume. When the intended path is a breadth-first HUNT over a large
+candidate space — a deserialization / gadget chain across many classes,
+the viable bypass vectors for a given CSP / filter / sanitizer, an
+injection sink hidden among many handlers — hand the ENUMERATION to a
+subagent on your FIRST substantive step, before you work through the
+space turn-by-turn in your own reasoning. The subagent returns a ranked
+shortlist; you pick and CRAFT from it. Enumerating a wide candidate space
+across your own turns is the slow path, bloats your context, and earns
+nothing a single focused subagent pass wouldn't — so when you notice the
+next several turns would all be "consider candidate, reject, consider
+next," that is the signal to delegate the whole sweep NOW. Two high-value
 offloads (this is the point — DO them, don't grind in-context):
 
 - BYPASS-PRIMITIVE / TECHNIQUE RESEARCH → recon (has WebSearch + Bash).

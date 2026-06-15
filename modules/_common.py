@@ -2328,6 +2328,16 @@ def make_spawn_subagent_mcp(
                                 float(summary.get("cost_usd", 0.0))
                                 + float(cost)
                             )
+                        # Capture the subagent's terminal error flag. An AUP
+                        # policy_refusal (or transport / timeout) surfaces here
+                        # as is_error=True — frequently with NO assistant text,
+                        # which would otherwise fall through to the misleading
+                        # "returned no text — treat as no useful output" default
+                        # below and trick main into concluding the candidate
+                        # space is EMPTY. Record it so we return a LOUD
+                        # incomplete signal instead (see post-loop guard).
+                        if getattr(msg, "is_error", False):
+                            sub_summary["is_error"] = True
         except Exception as e:
             log_fn(
                 f"[orchestrator] isolated {tag} crashed: {e!r} — "
@@ -2339,6 +2349,38 @@ def make_spawn_subagent_mcp(
                     "text": (
                         f"SUBAGENT_ERROR ({sub_type}): {type(e).__name__}: "
                         f"{str(e)[:400]}"
+                    ),
+                }],
+                "isError": True,
+            }
+
+        # A subagent that ended on a terminal error (AUP policy_refusal /
+        # transport / timeout) must NOT be handed back as a low-signal
+        # "no useful output": main would read that as "the enumeration found
+        # nothing" and falsely concede the candidate space is empty — a NEW
+        # false-negative that the breadth-first OFFLOAD directive could
+        # introduce by relocating a main-session trip into the subagent. The
+        # main loop's policy_refusal detection + halt does NOT reach this
+        # isolated child, so guard it here: return an explicit INCOMPLETE
+        # marker so main falls back to doing the analysis itself (= original,
+        # no-worse behavior) or re-delegates a narrower slice — never treats
+        # the error as a finding. Skip the cache (don't memoize a non-result).
+        if sub_summary.get("is_error"):
+            log_fn(
+                f"[orchestrator] isolated {tag} ended with is_error — "
+                f"returning INCOMPLETE (not 'empty') to main"
+            )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"SUBAGENT_INCOMPLETE ({sub_type}): the isolated "
+                        f"subagent did not finish — its session ended with an "
+                        f"error (e.g. policy / transport / timeout). This is "
+                        f"NOT a result of 'nothing found' and does NOT mean "
+                        f"the candidate space is empty. Do this analysis "
+                        f"yourself in the main session, or re-delegate a "
+                        f"NARROWER slice; never treat this as a finding."
                     ),
                 }],
                 "isError": True,
