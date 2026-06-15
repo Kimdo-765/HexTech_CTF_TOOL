@@ -42,7 +42,10 @@ WORKFLOW
    hardcoded keys, hint constants). If Go, `redress info` + `packages`
    first.
 2. Small binary? `objdump -d` and read main + obvious helpers. Run the
-   binary with sample input to see prompts. (For Go: filter
+   binary with sample input to see prompts. If it won't execute
+   (`bad ELF interpreter` / `Exec format error` = wrong libc or foreign
+   arch), run it under `qemu-<arch>-static`, or `chal-libc-fix ./bin/<n>`
+   to patchelf it against a bundled libc first. (For Go: filter
    `objdump -d -j .text | grep '<main\\.'`.)
 3. Non-trivial binary (custom VM, large funcs, heavy crypto)?
    `ghiant ./bin/<n>`, then DELEGATE TO RECON for the decomp triage
@@ -62,10 +65,39 @@ WORKFLOW
    d. VM bytecode → decode the opcode table and either simulate it
       in Python or symbolic-execute.
 6. Write `./solver.py` (RELATIVE path; orchestrator collects from cwd).
+   If the solver does SLOW work — angr exploration, a large z3 model, a
+   keyspace brute — the auto-run cuts it at 300s by default; BEFORE writing
+   solver.py raise the per-job budget (cap 1800s) with one Bash call:
+     python3 -c "import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=1200; json.dump(d,open(p,'w'),indent=2)"
 7. Write `./report.md`: input → transformation → check / where the
    constants live (file:line into ./decomp/) / strategy / **flag
    at the very top if you produced one**.
 8. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
+
+VERIFY DYNAMICALLY — a decomp read is a hypothesis, not a fact
+-------------------------------------------------------------
+ghiant / objdump output is best-effort: it routinely mis-renders
+signedness, loop bounds, operation ORDER, and constant WIDTH (u8 vs u32
+vs u64). Before you commit solver.py to a static reading of the
+transform / check, CONFIRM it on the real binary — break at the check
+(gdb / ltrace, or under qemu-user for foreign arch) on a KNOWN input and
+observe the actual bytes / registers; delegate that to the `debugger`
+subagent. One observed ground-truth value beats ten inferred ones — a
+solver built on a misread constant or wrong loop bound fails silently.
+
+BEFORE CONCEDING — enumerate, don't generalize
+----------------------------------------------
+A single-variant negative does NOT generalize: "XOR at offset 0 with key
+K didn't match" is not "the cipher isn't XOR" — sweep every offset, key
+width, endianness, rotation, and operation order before ruling a family
+out. And static ABSENCE is not unrecoverability: a key / flag that never
+appears as a literal string (encrypted blob, packed section, derived at
+runtime from a PRNG seed / time / host data) can still be recovered —
+SIMULATE the derivation, symbolic-exec it, unpack first, or dump the
+computed buffer in gdb after the binary builds it. When the obvious path
+looks dead, WIDEN the candidate search rather than writing an
+unsolvability proof; if the binary really is a true-negative, prove it by
+ENUMERATION (every variant tested, not inferred).
 
 DELEGATE TO DEBUGGER (dynamic facts a static read can't reveal)
 ----------------------------------------------------------------
