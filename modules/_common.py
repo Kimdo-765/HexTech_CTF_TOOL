@@ -2943,6 +2943,73 @@ def module_autoboot(
     }
 
 
+def reap_chal_containers(job_id: str, log_fn=None, *, reason: str = "") -> int:
+    """Tear down any LOCAL challenge containers/networks a job spun up.
+
+    Web (and pwn) agents may `docker build`/`docker run` the challenge's
+    own Dockerfile/compose locally to understand the real runtime env and
+    test the exploit end-to-end before the remote (the prompt prescribes a
+    job-scoped name `chal_<job_id>`, the label `hextech_job=<job_id>`, and —
+    for multi-service stacks — the network `chal_<job_id>_net`). The worker
+    talks to the host docker daemon over the mounted socket, so these are
+    HOST siblings that DON'T die with the job: a SIGKILL/OOM skips the
+    finally block, orphaning a container that holds a port + RAM (see the
+    WSL2-orphan-shadows-port class). So this reaps by the job label both at
+    job START (sweep stale leftovers from a prior crashed run of the SAME
+    id) and at job END (finally). Idempotent + best-effort — never raises;
+    a missing docker / no matches is a silent no-op. Returns the number of
+    containers removed.
+
+    Keyed on the label so it catches anything the agent tagged regardless
+    of how it named/ran it; also reaps the compose project + the job net.
+    """
+    import subprocess
+    import socket as _socket
+
+    def _run(args, timeout=60):
+        try:
+            return subprocess.run(
+                ["docker", *args], capture_output=True, text=True,
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+
+    label = f"hextech_job={job_id}"
+    proj = f"chal_{job_id}"
+    net = f"chal_{job_id}_net"
+    removed = 0
+    try:
+        ids: set[str] = set()
+        for filt in (
+            f"label={label}",
+            f"label=com.docker.compose.project={proj}",
+            f"name=^{proj}",
+        ):
+            r = _run(["ps", "-aq", "--filter", filt], timeout=30)
+            if r and r.returncode == 0 and r.stdout.strip():
+                ids.update(r.stdout.split())
+        if ids:
+            r = _run(["rm", "-f", *sorted(ids)], timeout=90)
+            if r and r.returncode == 0:
+                removed = len(ids)
+        # Drop the job network: disconnect THIS worker first (it joined the
+        # net to reach the chal by service-name), else `network rm` blocks.
+        _run(["network", "disconnect", "-f", net, _socket.gethostname()],
+             timeout=20)
+        _run(["network", "rm", net], timeout=20)
+        if removed and log_fn:
+            log_fn(
+                f"[chal-docker] reaped {removed} local challenge "
+                f"container(s) for {job_id}"
+                + (f" ({reason})" if reason else "")
+            )
+    except Exception as e:  # noqa: BLE001 - teardown must never break the job
+        if log_fn:
+            log_fn(f"[chal-docker] teardown best-effort error: {e}")
+    return removed
+
+
 def split_retry_hint(description: str | None) -> tuple[str, str]:
     """Split a job description into (base, retry_hint).
 

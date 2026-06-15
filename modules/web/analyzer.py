@@ -17,6 +17,7 @@ from modules._common import (
     collect_outputs,
     extract_cost,
     job_dir,
+    reap_chal_containers,
     log_line,
     make_main_session_options,
     REPORT_SCHEMA_WEB,
@@ -474,6 +475,11 @@ def run_job(
     _cb = os.environ.get("CALLBACK_URL", "").strip()
     if _cb:
         os.environ["COLLECTOR_URL"] = f"{_cb.rstrip('/')}/api/collector/{job_id}"
+    # Sweep any stale challenge containers a PRIOR crashed run of this same
+    # job id left behind (a SIGKILL/OOM skips the finally teardown below), so
+    # this run starts from a clean slate before the agent may `docker run` the
+    # chal's own Dockerfile/compose for local end-to-end testing.
+    reap_chal_containers(job_id, lambda s: log_line(job_id, s), reason="startup sweep")
     write_meta(job_id, status="running", stage="analyze")
     try:
         agent_summary = anyio.run(
@@ -513,3 +519,10 @@ def run_job(
         log_line(job_id, f"ERROR: {e}\n{traceback.format_exc()}")
         write_meta(job_id, status="failed", error=str(e))
         raise
+    finally:
+        # Reap any local challenge containers/networks the agent spun up
+        # (label hextech_job=<job_id>). Runs on success, failure, AND the
+        # _Stop/agent-error paths — best-effort, never masks the real result.
+        reap_chal_containers(
+            job_id, lambda s: log_line(job_id, s), reason="job complete",
+        )

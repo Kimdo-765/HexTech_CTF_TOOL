@@ -199,6 +199,57 @@ based on what's available — in this priority order:
    later GET, SSRF whose response is reflected, DNS-record injection,
    etc.
 
+RUN THE CHALLENGE LOCALLY (when a Dockerfile / docker-compose is shipped)
+------------------------------------------------------------------------
+The source bundle usually ships the challenge's OWN Dockerfile /
+docker-compose.yml. You can stand the whole thing up locally — this
+worker has the docker CLI and the host docker socket is mounted — and it
+is the single highest-value move for a server-side-filter / browser-bot
+challenge. Use it to (a) learn the REAL runtime: exact library versions,
+the admin bot's actual headless-Chrome, the live response headers / CSP,
+and how the real HTML parser treats your payload; and (b) run your
+exploit END-TO-END against the local instance BEFORE the remote. The #1
+web failure mode is "my payload passes the server-side filter, so I
+shipped it" — but the value only fires if the bot's browser actually
+EXECUTES it, and a middle step (e.g. the server re-interpolating your
+payload into the bot's URL unencoded, truncating it at the first `&`/`#`)
+silently breaks that. Locally you can WATCH the bot receive the payload
+and see whether the script runs — the only way to verify the execute side
+without guessing.
+
+Mechanics (the orchestrator reaps everything when the job ends — you do
+NOT need to tear down, but you MUST use these exact names/labels or
+cleanup misses them and they orphan):
+- Label EVERY container `--label hextech_job=$JOB_ID`. Name a single
+  container / compose project `chal_$JOB_ID`; use network
+  `chal_${JOB_ID}_net` for a multi-service stack.
+- Build: `docker build -t chal_$JOB_ID <dir-with-Dockerfile>` (the build
+  context dir is a worker-local path — fine).
+- SINGLE service → share THIS worker's network namespace so the chal
+  binds your localhost:
+      docker run -d --name chal_$JOB_ID --label hextech_job=$JOB_ID \
+        --network container:$(hostname) chal_$JOB_ID
+  then reach it at `http://localhost:<port>` (the port the app binds).
+- MULTI service (app + db + bot) → a job network, then join it:
+      docker network create chal_${JOB_ID}_net
+      docker run -d --name <svc> --network chal_${JOB_ID}_net \
+        --label hextech_job=$JOB_ID <img>      # per service
+      docker network connect chal_${JOB_ID}_net $(hostname)
+  then reach each service by name: `http://<svc>:<port>`.
+- `docker compose` is NOT installed here — if only a compose.yml ships,
+  read it and translate to the `docker build`/`docker run` above (most
+  web chals are a single `app` service; run any db/bot services the same
+  way on the job network).
+- HOST-PATH gotcha: the daemon is the HOST's, so any `-v` volume path it
+  resolves must be a HOST path — use `$HOST_DATA_DIR/jobs/$JOB_ID/...`,
+  NOT the container-local `/data/...` (which the host can't see). The
+  build context you pass to `docker build <dir>` is exempt (the CLI tars
+  and sends it).
+This is OPTIONAL — skip it for a trivial remote-only probe; reach for it
+whenever execution fidelity matters (XSS-bot, CSP, a parser/filter
+differential, a stateful multi-step flow). Offload a long build to a
+subagent if it would spray output into your context.
+
 OFFLOAD CONTEXT-HEAVY WORK — delegate before your context balloons
 ------------------------------------------------------------------
 Spawn an isolated subagent (`mcp__team__spawn_subagent`,
