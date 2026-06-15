@@ -524,8 +524,22 @@ def scan_job_for_flags(
     extra_files: list[str] | None = None,
     *,
     sandbox_result: dict | None = None,
+    trusted_only: bool = False,
 ) -> list[str]:
     """Return real captured flags for a job.
+
+    `trusted_only=True` skips the NARRATIVE tier entirely (run.log /
+    report.md / findings.json) — the caller is asserting that the only
+    valid evidence is a genuine runner/collector artifact. The OOB
+    collector uses this: a beacon proves a capture ONLY via its own
+    logged content (callbacks.jsonl, a trusted source); the agent's
+    run.log prose (recon's flag-FORMAT description, chal-source seeds
+    like `DH{**fake_flag**}`) must never trigger a finish. Without it,
+    ANY beacon — including the agent's own selftest of the collector /
+    `/_hits` API mid-analyze — re-scanned run.log and false-finished the
+    job on scraped placeholders (job da10075b585e: marked finished at
+    turn 9 mid-analyze, before exploit.py existed or the judge gate
+    ran).
 
     Two-tier scan to keep test/placeholder flags out of `meta.flags`:
 
@@ -635,7 +649,7 @@ def scan_job_for_flags(
             or sandbox_result.get("error") == "prejudge_blocked"
         )
     )
-    if sandbox_skipped:
+    if sandbox_skipped or trusted_only:
         return []
 
     narrative = {f for f in _scan(_NARRATIVE_FLAG_SOURCES) if not _is_placeholder_flag(f)}

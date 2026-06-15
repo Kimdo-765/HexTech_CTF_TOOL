@@ -118,8 +118,16 @@ async def collect(request: Request, job_id: str, tail: str = ""):
     with log.open("a") as f:
         f.write(json.dumps(record) + "\n")
 
-    # Re-scan for flags now that the callback might contain one
-    flags = scan_job_for_flags(safe, extra_files=["callbacks.jsonl"])
+    # Re-scan for flags now that the callback might contain one.
+    # trusted_only=True: a beacon is evidence ONLY via its own logged
+    # content (callbacks.jsonl). NEVER fall through to the narrative
+    # tier (run.log / report.md) — otherwise any beacon, including the
+    # agent's own selftest of this collector / the /_hits API mid-
+    # analyze, re-scans run.log and false-finishes the job on scraped
+    # placeholders (recon's flag-FORMAT description, chal-source seeds).
+    flags = scan_job_for_flags(
+        safe, extra_files=["callbacks.jsonl"], trusted_only=True
+    )
     meta = read_job_meta(safe) or {}
     if flags and set(flags) != set(meta.get("flags") or []):
         write_meta(safe, flags=flags, status="finished")
