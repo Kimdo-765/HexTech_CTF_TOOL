@@ -4116,12 +4116,13 @@ def write_why_stopped(
                 "deterministically — the orchestrator therefore halted "
                 "without burning a re-block turn. Options:",
                 "",
-                "1. **`/retry`** — forks a FRESH SDK session against the "
-                "carried work tree. This sheds the poisoned conversation "
-                "(a fresh fork of the same job has run AUP-free afterward), "
-                "so it is the de-facto recovery. The analysis so far is in "
-                "`pre_recon_reply.txt` / `report.md`; the fresh session "
-                "resumes from those artifacts, not the blocked transcript.",
+                "1. **`/retry`** — starts a FRESH SDK session against the "
+                "carried work tree. On a policy_refusal the fork is now "
+                "force-skipped automatically (no need to tick 'fresh start'): "
+                "the new agent boots on a clean context and reads the carried "
+                "`pre_recon_reply.txt` / `report.md` instead of re-inheriting "
+                "the blocked transcript, so it sheds the poison by default "
+                "(a fresh run of the same job has gone AUP-free afterward).",
                 "2. If it re-blocks every fresh attempt, the challenge class "
                 "(e.g. XSS-exfil / CSP-bypass) reliably trips the classifier "
                 "on main's own reasoning — not a code bug on our side.",

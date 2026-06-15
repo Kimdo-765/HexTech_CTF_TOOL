@@ -698,10 +698,24 @@ def _resubmit(
     prior_stopped = (
         (prev_meta.get("judge_next_action") or "").lower() == "stop"
     )
+    # If the prior job died on a server-side Usage-Policy (AUP) block
+    # (error_kind=policy_refusal), the prior SDK transcript IS the poison:
+    # forking it (fork_session=True) re-presents the exact accumulated
+    # conversation the classifier already refused, so a DEFAULT /retry
+    # (fresh=False) re-blocks deterministically. Every observed AUP death
+    # fires at attempt 0 (before any postjudge auto-retry), so /retry is the
+    # SOLE recovery path — it MUST shed the transcript, not inherit it. Force
+    # a clean context (same effect as the operator ticking "fresh start"); the
+    # carried work tree + reviewer hint preserve the actionable progress. This
+    # makes the WHY_STOPPED "de-facto cure" claim actually true by default
+    # rather than only when the operator remembers to tick the box.
+    prior_aup_blocked = (
+        (prev_meta.get("error_kind") or "") == "policy_refusal"
+    )
     # fresh_session (operator-selected) forces a clean context too — same
     # rationale as prior_stopped, but chosen explicitly to break a
     # retry-fork-chain context overflow rather than inferred from a judge stop.
-    if prior_stopped or fresh_session:
+    if prior_stopped or fresh_session or prior_aup_blocked:
         resume_sid = None
     else:
         resume_sid = (
@@ -728,6 +742,10 @@ def _resubmit(
         # prior judge decided stop (see prior_stopped above).
         "resume_session_id": resume_sid,
         "resume_skipped_due_to_judge_stop": prior_stopped,
+        # True when the prior job died of an AUP policy_refusal: the fork was
+        # force-skipped so the new agent boots on a clean context instead of
+        # re-inheriting the poisoned transcript that the classifier refused.
+        "resume_skipped_due_to_aup": prior_aup_blocked,
         # True when the operator ticked "fresh start (no conversation fork)"
         # on this retry — carried files + hint only, clean SDK context.
         "fresh_session_requested": bool(fresh_session),
