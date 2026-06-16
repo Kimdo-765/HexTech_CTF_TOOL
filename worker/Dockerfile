@@ -121,17 +121,40 @@ RUN apt-get update \
 # heavy (~700 MB); IF that bloat is unacceptable on the always-on worker, the
 # documented FALLBACK is to move ilspycmd into the per-job `decompiler`
 # sibling image (already carrying Ghidra/JDK weight) and keep only `mono`
-# here. Isolated || true.
+# here. ilspycmd is PINNED to 8.2.x: the unpinned `dotnet tool install`
+# grabs the newest (10.x, net10-targeted) which fails on the 8.0 SDK with
+# "DotnetToolSettings.xml not found" — pin the tool to the SDK's TFM
+# (verified in a throwaway). Isolated || true.
 ARG DOTNET_CHANNEL=8.0
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
-RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh 2>/dev/null \
- && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir /usr/share/dotnet 2>&1 | tail -3 \
- && ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
- && dotnet tool install --global ilspycmd 2>&1 | tail -3 \
- && ln -sf /root/.dotnet/tools/ilspycmd /usr/local/bin/ilspycmd \
- && (command -v ilspycmd >/dev/null 2>&1 && echo "ilspycmd OK" || echo "[WARN] ilspycmd unavailable") \
- || echo "[WARN] .NET / ilspycmd install failed; managed-PE C# decompile unavailable"
-ENV PATH=/usr/local/bin:/root/.dotnet/tools:$PATH
+# libicu is REQUIRED first: .NET aborts on startup without an ICU package
+# ("Couldn't find a valid ICU package installed") — verified in a throwaway.
+# The versioned name tracks the Debian release (bookworm=libicu72,
+# trixie=libicu76, …) so pick the highest libicuNN apt offers rather than
+# hard-coding a number that breaks on the next base-image bump. Inside this
+# isolated layer so a miss still can't break the worker (RUN is WARN-masked).
+RUN ( apt-get update && apt-get install -y --no-install-recommends \
+        "$(apt-cache search '^libicu[0-9]' | awk '{print $1}' | sort -V | tail -1)" 2>&1 | tail -2 ; rm -rf /var/lib/apt/lists/* ) \
+ ; ( curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh 2>/dev/null \
+     && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir /usr/share/dotnet 2>&1 | tail -3 \
+     && ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
+     && dotnet tool install --global ilspycmd --version 8.2.0.7535 2>&1 | tail -3 \
+     && ln -sf /root/.dotnet/tools/ilspycmd /usr/local/bin/ilspycmd \
+     && (command -v ilspycmd >/dev/null 2>&1 && echo "ilspycmd OK" || echo "[WARN] ilspycmd unavailable") ) \
+   || echo "[WARN] .NET / ilspycmd install failed; managed-PE C# decompile unavailable"
+# DOTNET_ROOT must point at the script-installed location: a framework-
+# dependent global tool (ilspycmd) resolves its runtime via DOTNET_ROOT, and
+# dotnet-install.sh's /usr/share/dotnet isn't a registered path — without
+# this, `ilspycmd` aborts with "You must install or update .NET to run this
+# application" (verified in a throwaway).
+ENV DOTNET_ROOT=/usr/share/dotnet
+# ilspycmd 8.2's apphost targets an OLDER major (net6) than the 8.0 runtime
+# the SDK ships; default roll-forward (Minor, within the same major) can't
+# bridge that, so the tool aborts "You must install or update .NET". Allow
+# rolling forward across majors so the installed runtime satisfies any tool
+# TFM regardless of channel (verified in a throwaway).
+ENV DOTNET_ROLL_FORWARD=LatestMajor
+ENV PATH=/usr/local/bin:/root/.dotnet/tools:/usr/share/dotnet:$PATH
 # ============================================================================
 
 # one_gadget — finds libc one-shot RCE gadgets (constraints + offset).
