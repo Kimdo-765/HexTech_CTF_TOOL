@@ -607,6 +607,18 @@ def scan_job_for_flags(
             for raw in _FLAG_MARKER_RE.findall(text):
                 cand = _MARKER_ESCAPE_RE.split(raw.strip(), 1)[0]
                 cand = cand.strip().strip("\"'`").strip()
+                # A FLAG_CANDIDATE marker quoted INSIDE prose (e.g.
+                # result.json's judge stop_reason: "Flag captured cleanly:
+                # FLAG_CANDIDATE: DH{x} on stdout, exit 0, no errors.")
+                # otherwise captures the whole trailing sentence as the flag
+                # (job bcd883b0e70f surfaced 3 entries: the flag + two prose
+                # tails once the <<_>> flag stopped being filtered). If the
+                # value carries a PREFIX{...} brace-flag, reduce to it;
+                # brace-less declared flags (raw hex / prefix-less) have no
+                # `{...}` and are kept verbatim.
+                _bf = re.search(r"\w{1,15}\{[^}\r\n]{1,256}\}", cand)
+                if _bf:
+                    cand = _bf.group(0)
                 if cand:
                     out.add(cand)
         return out
@@ -829,10 +841,27 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     # printf format / metavariable markers
     # Job 44dd25365173: chal's printf("Flag is: DH{%s}\n", ...) leaked
     # into report.md verbatim → `DH{%s}` scanned as a flag. Any inner
-    # containing `%` (format) or `<...>` (metavariable) is template.
+    # containing `%` (format) is a template.
     if "%" in inner_raw:
         return True
-    if "<" in inner_raw and ">" in inner_raw:
+    # A `<word>` METAVARIABLE template (`<flag>`, `<your_flag_here>`,
+    # `<secret>`) is a placeholder — but ONLY when the angle brackets wrap a
+    # LETTER-led token. Do NOT reject a flag that merely CONTAINS `<` / `>`
+    # as literal content: job bcd883b0e70f's REAL flag was
+    # `DH{Br1ll1ant_bit_dr1bble_<<_>>}` (the chal is a bit-shift `<<`/`>>`
+    # keygen). The old "`<` and `>` both present" pair-rule discarded it at
+    # EVERY tier (marker + trusted + narrative), after which the narrative
+    # fallback scraped the logged solver SOURCE line
+    # `flag = "DH{" + secret + "}"` out of run.log as the (wrong) capture.
+    # `<%s>` stays caught by the `%` rule above; `<<_>>` has no letter after
+    # any `<`, so it correctly survives.
+    if _re.search(r"<[a-z][\w ]*>", inner):
+        return True
+    # A literal quote in the inner is a code fragment, never a flag (a real
+    # flag can't contain the quote that delimits the string it is printed
+    # from). Backstop for the bcd883b0e70f narrative scrape above:
+    # `DH{" + secret + "}` carries a `"` and would otherwise pass.
+    if '"' in inner_raw or "'" in inner_raw:
         return True
     # Embedded ellipsis = an ABBREVIATED / elided flag, never a real capture.
     # Job a15ff70a6ed5: the judge wrote "captured the REAL flag DH{...20207ea}"
@@ -2704,6 +2733,11 @@ def _accumulate_flag_candidates(job_id: str, msg) -> bool:
     found = set(_job_scan_re(job_id).findall(text))
     for raw in _FLAG_MARKER_RE.findall(text):
         cand = _MARKER_ESCAPE_RE.split(raw.strip(), 1)[0].strip().strip("\"'`").strip()
+        # Reduce a prose-embedded marker to its PREFIX{...} brace-flag (see
+        # _scan_markers in scan_job_for_flags); brace-less flags kept as-is.
+        _bf = re.search(r"\w{1,15}\{[^}\r\n]{1,256}\}", cand)
+        if _bf:
+            cand = _bf.group(0)
         if cand:
             found.add(cand)
     fresh = {f for f in found if f and not _is_placeholder_flag(f)}
