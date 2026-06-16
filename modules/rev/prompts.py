@@ -74,6 +74,35 @@ WORKFLOW
    at the very top if you produced one**.
 8. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
 
+WINDOWS / PE TARGETS (.exe / .dll) — branch on `file` FIRST
+----------------------------------------------------------
+The ELF guidance above still holds for NATIVE PE, but the toolchain forks
+by format — run `file ./bin/<n>` and route:
+- NATIVE PE (C/C++; `file` says "PE32+ ... x86-64" / "PE32 ... 80386"):
+  `ghiant ./bin/<n>` decompiles PE exactly like ELF (Ghidra auto-detects
+  the loader); angr loads PE too, and `objdump -d -M intel` / capstone
+  disassemble it. Same workflow as ELF — only the ABI shifts (Win32 API
+  instead of libc; no chal-libc-fix). `pefile` (Python) parses
+  headers / imports / sections / resources / TLS callbacks.
+- MANAGED / .NET (`file` says "Mono/.Net assembly", or you see a CLR
+  header / many `System.*` / `mscorlib` strings): do NOT Ghidra it —
+  decompile to near-source C# with `ilspycmd ./bin/<n> -o ./decomp/`
+  (ICSharpCode ILSpy) and read the C# directly; `ikdasm` / `monodis` give
+  IL-level detail, `dnfile` (Python) parses the .NET metadata.
+- RUN a managed assembly locally — no Wine needed, .NET is cross-platform:
+  `.NET Framework (4.x)` → `mono ./bin/<n>`; modern `.NET (5+/.dll)` →
+  `dotnet ./bin/<n>`. This is the .NET analog of running an ELF — drive the
+  check / observe runtime-computed values, then delegate deeper dynamic
+  questions to the `debugger` subagent.
+- UPX-packed (`upx`/`UPX!` in strings)? `upx -d ./bin/<n>` to unpack before
+  any static pass. Hard commercial packers (VMProtect / Themida) are out of
+  scope — pivot to dynamic/symbolic, don't grind the unpacker.
+- NATIVE PE *dynamic execution* (running a C/C++ .exe under a Windows ABI)
+  is NOT provisioned on the worker yet (Wine is the planned backend). For
+  native PE prefer static (ghiant) + angr symbolic; if a native PE genuinely
+  MUST be executed to solve, say so explicitly in report.md so the run
+  backend can be added rather than faking it.
+
 VERIFY DYNAMICALLY — a decomp read is a hypothesis, not a fact
 -------------------------------------------------------------
 ghiant / objdump output is best-effort: it routinely mis-renders

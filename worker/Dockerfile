@@ -20,6 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # decompiler sibling image already has Ghidra.)
     gdb gdb-multiarch strace ltrace patchelf \
     qemu-user-static \
+    # UPX unpacker (Tier A) — the single most common PE/ELF packer in
+    # CTF; `upx -d` restores the original image before any static pass.
+    upx-ucl \
     # Cross-arch binutils — objdump/readelf/nm for foreign-arch ELFs
     # (very common in CTF VMs / firmware images). Without these the
     # native objdump prints "UNKNOWN architecture" and the agent has
@@ -89,6 +92,47 @@ ARG ANGR_VERSION=9.2.214
 RUN pip install --no-cache-dir "angr==${ANGR_VERSION}" 2>&1 | tail -5 || true \
  && python3 -c "import angr; print('angr OK', angr.__version__)" 2>&1 \
    || echo "[WARN] angr install failed; symbolic-execution tooling unavailable"
+
+# ============================================================================
+# Windows / .NET reverse-engineering (Tier B).  *** UNVERIFIED — authored
+# without a Docker build available (WSL integration was down); every step is
+# isolated with `|| true` / `|| echo WARN` exactly like the angr layer above,
+# so a failed resolve can NEVER break the worker image — the tool is simply
+# absent until a build confirms it. Validate each `... OK` line on the first
+# real build, then this banner comes off. ***
+#
+# floss (FLARE) — recover obfuscated / stack / tight strings from PE & ELF
+# that a plain `strings` misses (decoded keys, hidden flags). Pulls vivisect;
+# isolated so its dep tree can't disturb capstone/unicorn.
+RUN pip install --no-cache-dir flare-floss 2>&1 | tail -3 || true \
+ && (command -v floss >/dev/null 2>&1 && echo "floss OK $(floss --version 2>&1 | head -1)" \
+     || echo "[WARN] floss unavailable")
+
+# mono — run .NET Framework (4.x) assemblies on Linux (`mono foo.exe`, no Wine
+# needed) and disassemble IL (`ikdasm` / `monodis`). Debian `mono-complete`.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends mono-complete 2>&1 | tail -3 || true \
+ ; rm -rf /var/lib/apt/lists/* \
+ ; (command -v mono >/dev/null 2>&1 && echo "mono OK $(mono --version 2>&1 | head -1)" \
+     || echo "[WARN] mono unavailable")
+
+# .NET SDK + ilspycmd — decompile managed PE to near-source C# (ICSharpCode
+# ILSpy) and run modern .NET (5+) assemblies (`dotnet foo.dll`). The SDK is
+# heavy (~700 MB); IF that bloat is unacceptable on the always-on worker, the
+# documented FALLBACK is to move ilspycmd into the per-job `decompiler`
+# sibling image (already carrying Ghidra/JDK weight) and keep only `mono`
+# here. Isolated || true.
+ARG DOTNET_CHANNEL=8.0
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh 2>/dev/null \
+ && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir /usr/share/dotnet 2>&1 | tail -3 \
+ && ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
+ && dotnet tool install --global ilspycmd 2>&1 | tail -3 \
+ && ln -sf /root/.dotnet/tools/ilspycmd /usr/local/bin/ilspycmd \
+ && (command -v ilspycmd >/dev/null 2>&1 && echo "ilspycmd OK" || echo "[WARN] ilspycmd unavailable") \
+ || echo "[WARN] .NET / ilspycmd install failed; managed-PE C# decompile unavailable"
+ENV PATH=/usr/local/bin:/root/.dotnet/tools:$PATH
+# ============================================================================
 
 # one_gadget — finds libc one-shot RCE gadgets (constraints + offset).
 # Standard tool the pwn agent reaches for after locating libc; cheaper

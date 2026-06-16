@@ -18,6 +18,12 @@ ROPgadget==7.5
 # without it ROPgadget --binary <aarch64.so> silently produces 0
 # gadgets and the agent falls back to byte-level hand search.
 capstone>=5.0,<6
+# rev — Windows / PE parsing (Tier A). pefile: PE headers / imports /
+# sections / resources / TLS callbacks. dnfile: .NET (managed PE) metadata
+# without a full decompiler. Both pure-Python (dnfile depends on pefile), no
+# native-wheel conflict with capstone/unicorn — safe in the core resolver.
+pefile==2024.8.26
+dnfile==0.15.0
 # NOTE: angr is installed in a SEPARATE RUN layer (see worker/Dockerfile)
 # because angr drags `unicorn==1.0.2rc4` which conflicts with capstone>=5.
 # Keeping it out of the main requirements.txt means a bad angr release
