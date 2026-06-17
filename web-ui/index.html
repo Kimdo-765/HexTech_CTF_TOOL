@@ -317,8 +317,20 @@
       <h2>Reversing — Ghidra Decompile + Solver</h2>
       <form id="rev-form">
         <label>
-          Binary (ELF/PE) (zip preferred, single binary ok)
-          <input type="file" name="file" required />
+          Binary / artifact (ELF/PE · .NET/Java/Python/WASM/… · zip) — <em>or skip if remote-only</em>
+          <input type="file" name="file" />
+        </label>
+        <label>
+          Remote target (optional; required if no artifact — host:port / URL) <small>— click + to add more</small>
+          <div class="target-list" data-field="target" data-placeholder="ctf.example.com:1337">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="ctf.example.com:1337" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
         </label>
         <label>
           Description / hints (optional)
@@ -327,6 +339,10 @@
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
+        </label>
+        <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when solver.py captures the REAL flag from the remote target. A local-only derivation that never touches the service will NOT pass.">
+          <input type="checkbox" class="capture-remote-flag-cb" />
+          🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working solver</span>
         </label>
         <label>
           Flag format (optional)

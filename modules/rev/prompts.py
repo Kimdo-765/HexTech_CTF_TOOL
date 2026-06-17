@@ -10,8 +10,12 @@ SYSTEM_PROMPT = (
     + "\n"
 ) + """You are a CTF reverse-engineering assistant.
 
-Inputs: ELF/PE binary in `./bin/` (read-only). Optional resource files
-(keys, encrypted blobs) alongside.
+Inputs: a binary or bytecode/managed artifact in `./bin/` (read-only) —
+ELF/PE executable, .NET / Java / Python / WASM / Android-DEX / Lua
+bytecode, a custom-VM blob, or a script. (May NOT be ELF/PE — run `file`
+first; see ARTIFACT FORMAT below.) Optional resource files (keys,
+encrypted blobs) alongside. Some challenges ALSO give a remote target —
+reverse the algorithm/protocol locally, then use it against the service.
 
 Goal: figure out what the program does, write `./solver.py` that
 produces the flag (or correct input), and `./report.md` explaining
@@ -74,34 +78,49 @@ WORKFLOW
    at the very top if you produced one**.
 8. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
 
-WINDOWS / PE TARGETS (.exe / .dll) — branch on `file` FIRST
-----------------------------------------------------------
-The ELF guidance above still holds for NATIVE PE, but the toolchain forks
-by format — run `file ./bin/<n>` and route:
-- NATIVE PE (C/C++; `file` says "PE32+ ... x86-64" / "PE32 ... 80386"):
-  `ghiant ./bin/<n>` decompiles PE exactly like ELF (Ghidra auto-detects
-  the loader); angr loads PE too, and `objdump -d -M intel` / capstone
-  disassemble it. Same workflow as ELF — only the ABI shifts (Win32 API
-  instead of libc; no chal-libc-fix). `pefile` (Python) parses
-  headers / imports / sections / resources / TLS callbacks.
-- MANAGED / .NET (`file` says "Mono/.Net assembly", or you see a CLR
-  header / many `System.*` / `mscorlib` strings): do NOT Ghidra it —
-  decompile to near-source C# with `ilspycmd ./bin/<n> -o ./decomp/`
-  (ICSharpCode ILSpy) and read the C# directly; `ikdasm` / `monodis` give
-  IL-level detail, `dnfile` (Python) parses the .NET metadata.
-- RUN a managed assembly locally — no Wine needed, .NET is cross-platform:
-  `.NET Framework (4.x)` → `mono ./bin/<n>`; modern `.NET (5+/.dll)` →
-  `dotnet ./bin/<n>`. This is the .NET analog of running an ELF — drive the
-  check / observe runtime-computed values, then delegate deeper dynamic
-  questions to the `debugger` subagent.
-- UPX-packed (`upx`/`UPX!` in strings)? `upx -d ./bin/<n>` to unpack before
-  any static pass. Hard commercial packers (VMProtect / Themida) are out of
-  scope — pivot to dynamic/symbolic, don't grind the unpacker.
-- NATIVE PE *dynamic execution* (running a C/C++ .exe under a Windows ABI)
-  is NOT provisioned on the worker yet (Wine is the planned backend). For
-  native PE prefer static (ghiant) + angr symbolic; if a native PE genuinely
-  MUST be executed to solve, say so explicitly in report.md so the run
-  backend can be added rather than faking it.
+ARTIFACT FORMAT — run `file ./bin/<n>` FIRST, then route
+--------------------------------------------------------
+The ELF guidance above holds for NATIVE code, but the toolchain forks by
+format. The NATIVE disassemblers (ghiant / objdump / checksec / angr) and
+the .NET tools below ARE pre-installed; the bytecode decompilers are NOT —
+install on demand (the worker is root: `pip install …` / `apt-get install
+-y …`) and ALWAYS keep a manual floor (bytecode disasm / hexdump / strings)
+that needs no extra tool. The input may not be ELF/PE at all.
+- NATIVE ELF → objdump / ghiant / angr / gdb (the default path above).
+- NATIVE PE ("PE32+ ... x86-64" / "PE32 ... 80386"): `ghiant ./bin/<n>`
+  decompiles PE like ELF; angr loads PE, `objdump -d -M intel` / capstone
+  disassemble, `pefile` parses headers/imports/sections. Only the ABI
+  shifts (Win32 API; no libc / chal-libc-fix). Running a native .exe is NOT
+  provisioned (Wine planned) → prefer static + angr symbolic; if it MUST
+  run, say so in report.md instead of faking it.
+- MANAGED / .NET ("Mono/.Net assembly" / CLR header / many `System.*`):
+  `ilspycmd ./bin/<n> -o ./decomp/` → near-source C# (PRESENT); `ikdasm` /
+  `monodis` for IL; `dnfile` parses metadata. RUN it (no Wine): `.NET
+  Framework` → `mono ./bin/<n>`, modern `.NET (.dll)` → `dotnet ./bin/<n>`.
+- JAVA ("compiled Java class"; a `.jar` is a zip of `.class`): no JRE /
+  decompiler pre-installed. Reliable floor: `apt-get install -y
+  default-jre-headless` then `javap -c -p` + read the constant pool /
+  bytecode directly. For source, fetch CFR (one jar) or apt a decompiler.
+  (The per-job `decompiler` sibling image already ships a JDK.)
+- PYTHON BYTECODE (`.pyc` / `.pyo` / marshalled): the ALWAYS-present floor
+  is the stdlib `dis` module — `python3 -c "import dis,marshal,...; ..."`
+  after stripping the 16-byte .pyc header. Source decompilers (decompyle3 /
+  uncompyle6) only cover ≤3.9; modern 3.12 bytecode has NO working
+  decompiler → reconstruct logic from `dis` output, don't chase one.
+- WASM ("WebAssembly"): `apt-get install -y wabt` → `wasm2wat`, reason over
+  the text form.
+- ANDROID (`.apk` = zip → `.dex`): unzip, then a DEX tool (jadx, apt/pip on
+  demand) or read smali/bytecode manually.
+- OTHER BYTECODE / CUSTOM VM (Lua `.luac`, a custom opcode blob): rarely an
+  off-the-shelf decompiler — recover the opcode table from the interpreter
+  / loader and simulate or symbolic-exec it in solver.py (VM strategy above).
+- SCRIPT / TEXT (Python/JS/shell source, obfuscated one-liner): READ it;
+  deobfuscate by EVALUATING the transform, not by guessing.
+- UPX-packed (`upx`/`UPX!`): `upx -d ./bin/<n>` first. Hard packers
+  (VMProtect / Themida) are out of scope — pivot to dynamic/symbolic.
+If `file` is unhelpful (raw blob / custom container): `xxd | head`,
+`strings`, magic bytes — then treat it as a custom-VM / data artifact and
+reason from whatever code LOADS it. Never stall because it isn't an ELF/PE.
 
 VERIFY DYNAMICALLY — a decomp read is a hypothesis, not a fact
 -------------------------------------------------------------
@@ -177,9 +196,10 @@ Constraints
 
 
 def build_user_prompt(
-    binary_name: str,
+    binary_name: str | None,
     description: str | None,
     auto_run: bool,
+    target: str | None = None,
 ) -> str:
     base_desc, retry_hint = split_retry_hint(description)
     parts: list[str] = []
@@ -188,7 +208,32 @@ def build_user_prompt(
             "⚠ PRIORITY GUIDANCE (from prior-attempt review — read first):\n"
             + retry_hint
         )
-    parts.append(f"Binary directory (read-only): ./bin/   (target: ./bin/{binary_name})")
+    if binary_name:
+        parts.append(
+            f"Artifact directory (read-only): ./bin/   (primary target: "
+            f"./bin/{binary_name}). `ls ./bin/` first — there may be more "
+            "files; run `file` on the target to pick the right toolchain."
+        )
+    else:
+        parts.append(
+            "Artifact directory (read-only): ./bin/ — no single target was "
+            "auto-picked. `ls ./bin/` + `file ./bin/*` to see what's there "
+            "(bytecode / managed / script / data) and choose the entry point."
+        )
+    if target:
+        parts.append(
+            "REMOTE TARGET: " + target + "\n"
+            "This challenge has a LIVE service: reverse the algorithm / "
+            "protocol from the artifact, then `./solver.py` must CONNECT to "
+            "the target and capture the real flag. Read the target from "
+            "`sys.argv[1]` (the orchestrator passes `host:port` there on the "
+            "auto-run; fall back to the literal above if argv is empty) and "
+            "build the socket/URL yourself (pwntools `remote(host, port)` or "
+            "`socket` for raw; `requests` if it's HTTP). Print the captured "
+            "flag as `FLAG_CANDIDATE: <flag>` on its own line. A local-only "
+            "derivation that never touches the service is NOT a capture — the "
+            "flag lives on the remote."
+        )
     if base_desc:
         parts.append(f"Challenge description / hints from user:\n{base_desc}")
     parts.append(
@@ -196,9 +241,17 @@ def build_user_prompt(
         "(handled by orchestrator — do not run solver.py yourself)."
     )
     if not retry_hint:
-        parts.append(
-            "Begin with file/strings/objdump on the binary. Decompile with "
-            "`ghiant ./bin/" + binary_name + "` ONLY if the disasm alone is "
-            "too dense to follow."
-        )
+        if binary_name:
+            parts.append(
+                "Begin with `file ./bin/" + binary_name + "` to identify the "
+                "format, then route per ARTIFACT FORMAT in the system prompt "
+                "(objdump/ghiant for native; the right decompiler or manual "
+                "floor for bytecode). Use `ghiant` only if the disasm alone "
+                "is too dense to follow."
+            )
+        else:
+            parts.append(
+                "Begin with `ls ./bin/` + `file ./bin/*` to identify each "
+                "artifact, then route per ARTIFACT FORMAT in the system prompt."
+            )
     return "\n\n".join(parts)

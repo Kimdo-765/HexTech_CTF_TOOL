@@ -35,7 +35,7 @@ from modules.settings_io import apply_to_env, get_setting
 
 async def _run_agent(
     job_id: str,
-    binary_name: str,
+    binary_name: str | None,
     bin_dir: Path,
     description: Optional[str],
     auto_run: bool,
@@ -76,13 +76,27 @@ async def _run_agent(
         resume_sid=resume_sid,
         effort=resolve_effort(read_meta(job_id).get("effort")),
     )
-    user_prompt = build_user_prompt(binary_name, description, auto_run)
+    target = (read_meta(job_id).get("target_url") or "").strip() or None
+    user_prompt = build_user_prompt(binary_name, description, auto_run, target=target)
+
+    # ELF/PE detection — the static-triage pre-recon below runs ghiant
+    # (Ghidra) + checksec, which only make sense for a NATIVE executable.
+    # For a non-native artifact (Java .class/.jar, Python .pyc, WASM, DEX,
+    # Lua, custom-VM bytecode, a script) skip it: main's format-aware prompt
+    # does `file`-first routing instead of burning a Ghidra run that errors.
+    is_native = False
+    if binary_name:
+        try:
+            _magic = (staged_bin / binary_name).read_bytes()[:4]
+            is_native = _magic.startswith(b"\x7fELF") or _magic[:2] == b"MZ"
+        except OSError:
+            pass
 
     # Auto-pre-recon — recon does the static triage before main's first
     # turn so main starts with the inventory in its prompt instead of
     # having to decide "should I delegate?". Skipped on retries (main
-    # is resuming a prior session) and when no binary is staged.
-    if binary_name and not resume_sid:
+    # is resuming a prior session) and for non-native / no-binary jobs.
+    if is_native and not resume_sid:
         # See modules/pwn/analyzer.py for the carry_work=True rationale —
         # web/crypto/rev share the same retry plumbing.
         recon_reply = load_cached_pre_recon(
@@ -136,6 +150,13 @@ async def _run_agent(
                 job_id,
                 f"[pre-recon] reply ready ({len(recon_reply)} chars)",
             )
+    elif binary_name and not resume_sid:
+        log_line(
+            job_id,
+            f"[pre-recon] skipped — {binary_name!r} is not ELF/PE; main "
+            "identifies the format with `file` and routes to the right "
+            "decompiler / manual analysis itself.",
+        )
 
     from modules._common import build_exploit_library_hint
     _lib_hint = build_exploit_library_hint("rev")
@@ -152,8 +173,11 @@ async def _run_agent(
     sandbox_result: Optional[dict] = None
 
     def _sandbox_for(script_name: str) -> Optional[dict]:
+        # Pass the remote target (if any) so the auto-run hands solver.py the
+        # service via sys.argv[1] — a rev chal can require connecting to the
+        # live service to capture the flag, not just a local derivation.
         return attempt_sandbox_run(
-            job_id, script_name, None, lambda s: log_line(job_id, s),
+            job_id, script_name, target, lambda s: log_line(job_id, s),
             prior_hints=list(summary.get("judge_hints", [])),
         )
 
@@ -229,14 +253,16 @@ async def _run_agent(
 
 def run_job(
     job_id: str,
-    binary_rel: str,
+    binary_rel: str | None,
     description: Optional[str],
     auto_run: bool,
     model_override: Optional[str] = None,
 ) -> dict:
     jd = job_dir(job_id)
     bin_dir = jd / "bin"
-    binary_name = Path(binary_rel).name
+    # binary_rel may be None: a zip that carried no ELF/PE and no usable
+    # fallback file (rev_module.py), or a remote-target-only rev job.
+    binary_name = Path(binary_rel).name if binary_rel else None
 
     apply_to_env()
     write_meta(job_id, status="running", stage="analyze")
