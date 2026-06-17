@@ -1245,6 +1245,10 @@ body.modal-open { overflow: hidden; }
   flex-direction: column-reverse;   /* newest at the bottom, stack upward */
   gap: 10px;
   max-width: min(360px, 90vw);
+  /* Toasts are STICKY (no auto-fade) so unacknowledged flags can stack —
+     cap the stack to the viewport and scroll rather than run off the top. */
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
   pointer-events: none;             /* container ignores clicks; toasts opt back in */
 }
 .flag-toast {

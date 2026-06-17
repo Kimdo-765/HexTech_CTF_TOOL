@@ -1409,19 +1409,22 @@ function _showFlagToast(kind, job, text) {
     el.remove();
   });
   c.appendChild(el);
-  // promoted flags linger (manual × or 60s); candidates auto-fade at 18s
-  const ttl = isFlag ? 60000 : 18000;
-  setTimeout(() => {
-    el.classList.add("leaving");
-    setTimeout(() => el.remove(), 400);
-  }, ttl);
+  // STICKY: both FLAG FOUND and [FLAG?] candidate toasts persist until the
+  // operator acknowledges them — clicking the toast (opens the job) or the ×
+  // removes it. No auto-fade: a flag / candidate must never silently vanish
+  // before it has been seen (operator request 2026-06-17). Pile-up is bounded
+  // by per-candidate dedup in _detectFlagTransitions + the container's
+  // max-height scroll (style.css).
   _flagBeep();
   // OS-level notification too — but only if already granted; never auto-prompt.
   // Clicking it focuses the tab AND opens the job, same as the in-page toast.
   try {
     if (window.Notification && Notification.permission === "granted") {
       const n = new Notification(`${icon} ${title} — ${mod}`,
-        { body: text || sid, tag: "flag-" + job.id });
+        // requireInteraction keeps the OS notification on screen until the
+        // operator dismisses/clicks it (supported browsers) — mirrors the
+        // sticky in-page toast so a flag isn't lost to an auto-timeout.
+        { body: text || sid, tag: "flag-" + job.id, requireInteraction: true });
       n.onclick = () => {
         try { window.focus(); } catch (_) {}
         selectJob(job.id);
