@@ -438,6 +438,41 @@ def _deep_search_for(work_dir: Path, name: str) -> Path | None:
                     best_mtime = mt
         except OSError:
             pass
+
+    # Last resort: the agent `cd`-d INTO a SKIPPED dir (most often `bin/`,
+    # where the local challenge binary lives, to run it) and then Wrote a
+    # RELATIVE artifact there — a Bash `cd` shifts the process cwd that the
+    # Write/Read tools resolve against, despite the prompt claiming otherwise
+    # (job 4100442bcf71: report.md landed in work/bin/report.md after a
+    # `cd ./bin && ./similar`, and the `bin` skip above hid it → no report.md
+    # / findings.json). We DO want the agent's artifact out of a skipped dir,
+    # but must NOT scoop a challenge-author file of the same name. Gate on the
+    # job-start marker: AUTOBOOT.md is written fresh at run start, while staged
+    # chal files keep their (earlier) upload/extract mtime via copytree's
+    # copy2 — so an artifact NEWER than AUTOBOOT.md was written by the agent
+    # this run, not shipped with the challenge. Search even skipped dirs under
+    # that gate; newest wins.
+    if best is None:
+        try:
+            ab = work_dir / "AUTOBOOT.md"
+            gate = ab.stat().st_mtime if ab.is_file() else work_dir.stat().st_mtime
+        except OSError:
+            gate = 0.0
+        try:
+            for m in work_dir.rglob(name):
+                if not m.is_file():
+                    continue
+                try:
+                    mt = m.stat().st_mtime
+                except OSError:
+                    continue
+                # Only agent-written files (post job-start); rejects
+                # challenge-shipped same-name files (pre-start mtime).
+                if mt >= gate and mt > best_mtime:
+                    best = m
+                    best_mtime = mt
+        except OSError:
+            pass
     return best
 
 

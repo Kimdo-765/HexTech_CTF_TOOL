@@ -397,14 +397,19 @@ THREE RULES that eliminate the entire class of bug:
      && python3 server.py &` — the `cd` only affects THIS call's
      subshell, the next Bash starts wherever you last `cd`-d to.
      If you don't chain, the next call still runs in that subdir.
-  2. For files YOU produce (exploit.py / report.md / chain.json /
-     findings.json / THREAT_MODEL.md): always use the Write tool
-     with bare names like `exploit.py`, NEVER a Bash heredoc
-     (`cat > ./report.md << EOF ... EOF`). The Write tool ignores
-     Bash-cd state and always writes relative to the SDK's starting
-     cwd (the work tree root); Bash heredocs follow bash cwd and
-     will silently land your output in a `cd`-shifted subdir where
-     the orchestrator's `collect_outputs` won't find it.
+  2. The Write / Read / Edit / Glob file tools resolve a RELATIVE
+     path against the SAME persisted cwd Bash uses (rule 1) — they do
+     NOT pin to the work root. So after a bare `cd ./bin`, a later
+     `Write report.md` lands in `./bin/report.md`, which the
+     orchestrator may not collect. Produce your deliverables
+     (exploit.py / solver.py / report.md / chain.json / findings.json
+     / THREAT_MODEL.md) while cwd IS the work root: do any subdir work
+     in a one-shot chained `cd sub && …` (rule 1, so cwd never
+     persists), or `cd` back to the work root BEFORE writing. Prefer
+     the Write tool over a Bash heredoc, but note BOTH follow the cwd.
+     (The orchestrator now also recovers a deliverable written into a
+     cd-shifted subdir after job start, as a backstop — don't rely on
+     it; keep cwd at the root when you write.)
   3. Env vars ($JOB_ID, $HOST_DATA_DIR, $TMPDIR, …) expand ONLY in
      the Bash tool. The Read / Glob / Grep / Edit / Write tools take
      LITERAL paths — a `$JOB_ID` (or `/data/jobs/$JOB_ID/...`) handed
