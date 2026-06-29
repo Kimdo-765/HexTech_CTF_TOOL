@@ -1167,6 +1167,40 @@ def make_standalone_options(
             f"order bug; ensure prompts load before "
             f"make_standalone_options is called"
         )
+    # MODULE SCOPE guard. RECON_AGENT_PROMPT / DEBUGGER_AGENT_PROMPT are
+    # pwn-exploit-flavored (29 KB / 20 KB of one_gadget / FSOP / safe-linking /
+    # tcache-poison / House-of-* / hooks heap-RCE framing) and are selected by
+    # agent_type ALONE — no module key — so a rev / web / crypto recon|debugger
+    # subagent inherits the full pwn exploitation frame. That mis-stamped job
+    # afeda41720a4: an alloc-only (no free/realloc) Aho-Corasick matcher got
+    # its rev pre-recon ranked "House-of-Einherjar / tcache-overlap" as the TOP
+    # candidate into main's authoritative frame. (It self-corrected, but the
+    # leak is structural + has multi-hour-waste precedent.) Prepend a scope note
+    # for NON-pwn recon/debugger so the exploit-mitigation vocabulary reads as
+    # PWN-ONLY reference, not a family hypothesis to pursue. The exploit-LIBRARY
+    # hint already filters by module (build_exploit_library_hint); the system
+    # prompts didn't — this closes that asymmetry. pwn stays byte-identical.
+    module = ""
+    try:
+        module = (read_meta(job_id).get("module") or "").lower()
+    except Exception:
+        pass
+    if agent_type in ("recon", "debugger") and module and module != "pwn":
+        prompt = (
+            f"MODULE SCOPE — this is a `{module}` job, NOT pwn. The exploit-"
+            "mitigation framing in the guidance below (one_gadget / FSOP / "
+            "safe-linking / tcache-poison / House-of-* / hooks / heap-spray / "
+            "ROP-to-RCE) is PWN-ONLY. Do NOT assume memory corruption, do NOT "
+            "pre-commit an exploitation plan, and do NOT classify the challenge "
+            "family as heap-pwn unless EXECUTED evidence (a real free/realloc + "
+            "a reachable metadata write, or a UAF/overflow you actually "
+            "demonstrated) proves it. Use heap / allocator / libc knowledge "
+            "ONLY to UNDERSTAND data structures and RECOVER data (custom "
+            "allocators, tries, object layouts, serialization). Classify the "
+            "challenge family from disassembly / source evidence, never from "
+            "the technique vocabulary below.\n\n"
+        ) + prompt
+
     tools = list(_AGENT_TOOLS_BY_TYPE[agent_type])
     sub_model = (
         LATEST_JUDGE_MODEL if agent_type == "judge"
