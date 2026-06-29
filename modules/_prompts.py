@@ -388,11 +388,11 @@ NEVER write to /tmp/<filename> with a hardcoded absolute path, never
 pass dir='/tmp' to tempfile.*, and never `cd /tmp`. Concurrent jobs
 share the worker's /tmp; only $TMPDIR keeps them apart.
 
-PATH DISCIPLINE — your cwd starts at /data/jobs/$JOB_ID/work/, but
-the Bash tool's cwd PERSISTS across calls. After ANY `cd <subdir>`
+PATH DISCIPLINE — your cwd starts at the job work-tree root (`./`),
+but the Bash tool's cwd PERSISTS across calls. After ANY `cd <subdir>`
 in one Bash call, every subsequent Bash call inherits that subdir
 as cwd. Long sessions (50+ tool calls) routinely lose track of this.
-TWO RULES that eliminate the entire class of bug:
+THREE RULES that eliminate the entire class of bug:
   1. Chain in one call: `cd /data/jobs/$JOB_ID/work/chal/deploy/app
      && python3 server.py &` — the `cd` only affects THIS call's
      subshell, the next Bash starts wherever you last `cd`-d to.
@@ -405,6 +405,13 @@ TWO RULES that eliminate the entire class of bug:
      cwd (the work tree root); Bash heredocs follow bash cwd and
      will silently land your output in a `cd`-shifted subdir where
      the orchestrator's `collect_outputs` won't find it.
+  3. Env vars ($JOB_ID, $HOST_DATA_DIR, $TMPDIR, …) expand ONLY in
+     the Bash tool. The Read / Glob / Grep / Edit / Write tools take
+     LITERAL paths — a `$JOB_ID` (or `/data/jobs/$JOB_ID/...`) handed
+     to one of them is NOT substituted, so the path won't exist. Your
+     cwd is ALREADY the work dir: use bare RELATIVE names with those
+     tools (`./bin/chal.c`, `report.md`); reach for an absolute path
+     only inside a Bash command, where the shell expands the var.
 
 FLAG REPORTING — the moment your exploit/solver captures the flag from a
 genuine run, print it on its own dedicated stdout line in exactly this
