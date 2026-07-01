@@ -2835,3 +2835,45 @@ setInterval(async () => {
   _globalPollBusy = true;
   try { await refreshJobs(); } catch (_) {} finally { _globalPollBusy = false; }
 }, 7000);
+
+// --- Version / last-patch badge -------------------------------------------
+// Fills the header #version-badge from GET /api/version so the operator can
+// confirm at a glance that a redeploy actually took (recurring "container ran
+// the old image / stale code" class of bug). `commit` is stamped at deploy;
+// `patched_at` is the live newest source mtime (always current). Shows the
+// most recent of the two as the date, and flags when live code is newer than
+// the stamped commit (i.e. an un-deployed/hot edit).
+(function initVersionBadge() {
+  const el = document.getElementById('version-badge');
+  if (!el) return;
+  const fmt = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleString('ko-KR', {
+      year: '2-digit', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  };
+  fetch('/api/version', { credentials: 'same-origin' })
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((v) => {
+      const ver = v.commit ? ('#' + v.commit) : ('v' + (v.version || '?'));
+      // "last patch" = the freshest signal we have
+      const dates = [v.patched_at, v.deployed_at, v.commit_date].filter(Boolean);
+      dates.sort();
+      const latest = dates.length ? dates[dates.length - 1] : null;
+      el.textContent = ver + (latest ? ' · ' + fmt(latest) : '');
+      // warn (amber) if live source is newer than the stamped commit date
+      const stale = v.patched_at && v.commit_date && v.patched_at > v.commit_date
+        && (!v.deployed_at || v.patched_at > v.deployed_at);
+      el.classList.toggle('version-badge--dirty', !!stale);
+      el.title =
+        'version ' + (v.version || '?') +
+        '\ncommit ' + (v.commit || 'n/a') + (v.commit_date ? ' (' + fmt(v.commit_date) + ')' : '') +
+        '\ndeployed ' + (v.deployed_at ? fmt(v.deployed_at) : 'n/a') +
+        '\nlast patch (live) ' + (v.patched_at ? fmt(v.patched_at) : 'n/a') +
+        (stale ? '\n⚠ live code newer than stamped commit — redeploy/stamp pending' : '');
+    })
+    .catch(() => { el.textContent = ''; });
+})();

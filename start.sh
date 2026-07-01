@@ -156,6 +156,10 @@ for svc in redis api worker; do
   fi
 done
 
+# stamp web-ui/version.json so the UI version badge shows the deployed commit
+# (start.sh has cd'd to its own dir above, so the relative path is correct)
+[ -x ./stamp-version.sh ] && ./stamp-version.sh || true
+
 # --- summary ----------------------------------------------------------------
 WEB_PORT="$(grep -E '^WEB_PORT=' .env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
 WEB_PORT="${WEB_PORT:-8000}"

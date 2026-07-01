@@ -1302,3 +1302,27 @@ body.modal-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .flag-toast, .flag-toast.leaving { animation: none; }
 }
+
+/* Version / last-patch badge in the header (see initVersionBadge in app.js).
+   Muted monospace chip so the operator can confirm the deployed version at a
+   glance; turns amber when live source is newer than the stamped commit. */
+.version-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1;
+  color: #8a93a6;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-left: 10px;
+  white-space: nowrap;
+  cursor: default;
+  align-self: center;
+}
+.version-badge:empty { display: none; }
+.version-badge--dirty {
+  color: #e0a33a;
+  border-color: rgba(224, 163, 58, 0.45);
+  background: rgba(224, 163, 58, 0.10);
+}

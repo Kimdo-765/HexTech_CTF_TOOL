@@ -149,5 +149,8 @@ if api_up; then ok "api $API_URL -> 200"; else warn "api not 200 yet — check '
 # stamp the deploy so --changed can no-op next time
 git rev-parse HEAD > "$LAST_DEPLOY_FILE" 2>/dev/null || true
 
+# stamp web-ui/version.json so the UI version badge shows the deployed commit
+[ -x "$PROJECT_DIR/stamp-version.sh" ] && "$PROJECT_DIR/stamp-version.sh" || true
+
 ok "deployed. UI is served no-cache from the ./web-ui mount — just refresh the"
 ok "browser (Ctrl-Shift-R) to see UI changes; backend now runs the latest code."

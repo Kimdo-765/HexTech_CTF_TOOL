@@ -82,6 +82,56 @@ def health():
     return {"status": "ok", "auth_required": bool(str(get_setting("auth_token") or "").strip())}
 
 
+@app.get("/api/version")
+def version_info():
+    """Version banner for the UI so the operator can confirm a redeploy took.
+
+    `commit` / `commit_date` are stamped into web-ui/version.json at deploy time
+    (start.sh / deploy.sh — the container itself has no git). `patched_at` is
+    computed LIVE from the newest bind-mounted source mtime, so it stays
+    accurate even if the stamp is missing or stale (e.g. a code edit that was
+    hot-reloaded without re-running a deploy script)."""
+    import json as _json
+    import datetime as _dt
+
+    info = {
+        "version": app.version,
+        "commit": None,
+        "commit_date": None,
+        "deployed_at": None,
+        "patched_at": None,
+    }
+    stamp = WEB_UI_DIR / "version.json"
+    try:
+        if stamp.exists():
+            d = _json.loads(stamp.read_text())
+            for k in ("commit", "commit_date", "deployed_at"):
+                if d.get(k):
+                    info[k] = d[k]
+    except Exception:
+        pass
+
+    newest = 0.0
+    for base in ("/app/api", "/app/modules", "/app/web-ui"):
+        root = Path(base)
+        if not root.exists():
+            continue
+        for f in root.rglob("*"):
+            if (not f.is_file() or "__pycache__" in f.parts
+                    or f.name == "version.json"):
+                continue
+            try:
+                mt = f.stat().st_mtime
+            except OSError:
+                continue
+            if mt > newest:
+                newest = mt
+    if newest:
+        info["patched_at"] = _dt.datetime.fromtimestamp(
+            newest, _dt.timezone.utc).isoformat()
+    return info
+
+
 @app.get("/api/modules")
 def list_modules():
     return {
