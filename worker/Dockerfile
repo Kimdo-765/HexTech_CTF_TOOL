@@ -157,6 +157,70 @@ ENV DOTNET_ROLL_FORWARD=LatestMajor
 ENV PATH=/usr/local/bin:/root/.dotnet/tools:/usr/share/dotnet:$PATH
 # ============================================================================
 
+# ============================================================================
+# Windows native-PE DYNAMIC execution / hooking (Tier C).  Wine runs a REAL
+# Windows PE headlessly — x64 via `wine`, x86 via wine32:i386 — under a virtual
+# X display, so a GUI challenge that DRAWS its flag (GDI / GDI+) can be rendered
+# and screenshotted, and its Windows-API calls traced live. This is the
+# executable substrate that the Unicorn / angr emulation path can only
+# approximate (emulation has no real Win32 runtime → heap/GDI state must be
+# hand-reconstructed; running under Wine gives it for free).
+#
+#   * wine 10 + wine32:i386  — 64- AND 32-bit PE support (both common in CTF).
+#   * xvfb / xvfb-run + xauth — headless X server; a GUI PE won't render at all
+#     without a display, so Wine alone does NOT deliver the "screenshot the
+#     drawn flag" use case — these are mandatory, not optional.
+#   * imagemagick `import` / `convert` — screenshot the rendered Wine window.
+#   * WINDOWS-API HOOK is Wine's BUILT-IN relay tracer, not frida:
+#         WINEDEBUG=+relay,+gdiplus  xvfb-run wine app.exe
+#     traces cross-DLL calls (GdipDrawLineI args, etc.) with zero extra tooling.
+#     (frida — added below — is for NATIVE-LINUX-ELF instrumentation; under Wine
+#     it would hook Wine's gdiplus *shim*, not a real DLL, so it is the weak leg
+#     of the Windows-hook story. Use +relay for Wine, frida for ELF.)
+#
+# Validated on the trixie base in a throwaway: wine + wine32:i386 install clean,
+# `wine --version` has no wine32-missing warning, the syswow64 (32-bit)
+# subsystem is present, an x64 console PE runs under `xvfb-run wine`,
+# gdiplus.dll is in the prefix, and +relay emits call traces. Isolated with
+# `|| true` / WARN-mask exactly like the angr / floss / .NET layers so a bad
+# wine release can NEVER break the worker image — the tool is simply absent
+# until a build confirms it. The prefix is NOT baked (saves ~770 MB); the first
+# wine-using job in a container's lifetime inits it once (~10-15 s) and it then
+# persists for that container. WINEDLLOVERRIDES suppresses the mono/gecko
+# install prompt so that first init can't hang a job under headless Xvfb.
+ENV WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all \
+    WINEDLLOVERRIDES="mscoree,mshtml="
+# wine64 is REQUIRED even for a 64-bit-only workload: on Debian trixie the bare
+# `wine` metapackage + wine32:i386 defaults its loader to 32-bit, so the prefix
+# is created as a WIN32 install and every x64 PE aborts with "WINEARCH set to
+# win64 but '<prefix>' is a 32-bit installation" (caught by the hooking smoke
+# test — the x64 GdipDrawLineI PE wouldn't run, +relay stayed empty). Adding
+# wine64 provisions the 64-bit runtime so the prefix comes up #arch=win64 with a
+# syswow64 subsystem → runs BOTH 64- and 32-bit PEs (WoW64). The wine64 package
+# no longer ships a distinct `wine64` binary in wine 10 (one dispatcher) — it is
+# the RUNTIME that matters. Verified in a throwaway: with wine64 the PE runs and
+# +relay captures GdipDrawLineI(g,pen,20,10,20,70)… with exact stroke coords.
+RUN dpkg --add-architecture i386 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      wine wine64 wine32:i386 xvfb xauth x11-utils imagemagick 2>&1 | tail -8 || true \
+ ; rm -rf /var/lib/apt/lists/* \
+ ; ( command -v wine >/dev/null 2>&1 \
+     && echo "wine OK $(wine --version 2>&1 | head -1) [win64 prefix inits on first use]" \
+     || echo "[WARN] wine unavailable; native-PE dynamic execution disabled" )
+
+# frida — dynamic instrumentation for NATIVE Linux ELF processes: attach to a
+# running binary, hook functions / library exports, trace calls, and patch
+# memory at runtime. Fills the worker's live-hooking gap for Linux rev / pwn
+# (the Windows-PE-under-Wine hook path is Wine's +relay tracer above, NOT this).
+# Prebuilt manylinux wheels — clean install, no capstone / unicorn conflict
+# (validated in a throwaway: frida 17.x + frida-tools CLIs). Isolated || true so
+# a bad release can't break the pip resolver, matching the angr / floss layers.
+RUN pip install --no-cache-dir frida frida-tools 2>&1 | tail -3 || true \
+ && ( python3 -c "import frida" 2>/dev/null \
+      && echo "frida OK $(frida --version 2>&1 | head -1)" \
+      || echo "[WARN] frida unavailable" )
+
 # one_gadget — finds libc one-shot RCE gadgets (constraints + offset).
 # Standard tool the pwn agent reaches for after locating libc; cheaper
 # than building a full ROP chain when one_gadget conditions hold.

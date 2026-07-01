@@ -39,6 +39,13 @@ REV-SPECIFIC TOOLS (full catalogue is in the BASH CLIs block above):
                                       attach to foreign-arch ELFs.
 - `gdb-multiarch -batch -ex …`        non-interactive debugging;
                                       pair with QEMU-user gdbserver.
+- `xvfb-run -a wine ./bin/<n>`        run a REAL Windows PE headlessly
+                                      (x64+x86). GUI PE that draws its
+                                      flag → `import -window root f.png`.
+                                      Hook a Win32/GDI+ call live via
+                                      `WINEDEBUG=+relay,+gdiplus`.
+- `frida` / `frida-trace`             live hook/trace a running NATIVE
+                                      ELF (attach, hook exports, patch).
 
 WORKFLOW
 --------
@@ -86,13 +93,23 @@ the .NET tools below ARE pre-installed; the bytecode decompilers are NOT —
 install on demand (the worker is root: `pip install …` / `apt-get install
 -y …`) and ALWAYS keep a manual floor (bytecode disasm / hexdump / strings)
 that needs no extra tool. The input may not be ELF/PE at all.
-- NATIVE ELF → objdump / ghiant / angr / gdb (the default path above).
+- NATIVE ELF → objdump / ghiant / angr / gdb (the default path above); to
+  HOOK/trace a running ELF live use `frida` / `frida-trace` (attach, hook
+  exports, patch memory) — the dynamic complement to gdb.
 - NATIVE PE ("PE32+ ... x86-64" / "PE32 ... 80386"): `ghiant ./bin/<n>`
   decompiles PE like ELF; angr loads PE, `objdump -d -M intel` / capstone
   disassemble, `pefile` parses headers/imports/sections. Only the ABI
-  shifts (Win32 API; no libc / chal-libc-fix). Running a native .exe is NOT
-  provisioned (Wine planned) → prefer static + angr symbolic; if it MUST
-  run, say so in report.md instead of faking it.
+  shifts (Win32 API; no libc / chal-libc-fix). DYNAMIC is now provisioned —
+  run the real .exe headlessly under Wine (x64 AND x86) with a virtual X:
+  `xvfb-run -a wine ./bin/<n>`. A GUI PE that DRAWS its flag → screenshot the
+  window (`DISPLAY=:99` under `xvfb-run`, then `import -window root out.png`)
+  and READ it, instead of reconstructing the render in an emulator. To HOOK a
+  Win32 / GDI+ call live, use Wine's built-in relay tracer:
+  `WINEDEBUG=+relay,+gdiplus xvfb-run -a wine ./bin/<n> 2>relay.log`, then grep
+  the call name + args — far cheaper than emulating the draw loop in Unicorn.
+  (frida can attach to the Wine process but only sees Wine's DLL *shims*; the
+  +relay tracer is the reliable Windows-API hook.) Static + angr symbolic
+  remain the floor when an actual run isn't needed.
 - MANAGED / .NET ("Mono/.Net assembly" / CLR header / many `System.*`):
   `ilspycmd ./bin/<n> -o ./decomp/` → near-source C# (PRESENT); `ikdasm` /
   `monodis` for IL; `dnfile` parses metadata. RUN it (no Wine): `.NET
