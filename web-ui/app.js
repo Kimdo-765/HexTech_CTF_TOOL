@@ -441,14 +441,34 @@ async function submitJob(form, endpoint) {
   // agent prompt (which otherwise accepts a "working exploit" as goal-complete)
   // gets an explicit remote-capture success bar. The checkbox itself carries no
   // `name`, so it never reaches the backend as a form field.
+  //
+  // GATE on an actual target: only fold the "capture from the REMOTE target"
+  // mandate in when the job HAS a remote target. `tlist.dataset.field` is the
+  // canonical target field (target_url for web, target for pwn/crypto/rev),
+  // already populated from the row inputs above, so `fd.get()` is authoritative
+  // here. An empty value means a genuinely offline job (e.g. a rev crackme with
+  // only a binary) where "capture the REAL flag from the remote target" is
+  // unsatisfiable by construction — folding it in there just makes the agent
+  // chase a nonexistent remote (this misdirected offline rev job 0d0c3de3fbfb).
+  // Any filled target row makes this non-empty, so TARGETED jobs are unchanged.
   const crf = form.querySelector(".capture-remote-flag-cb");
-  if (crf && crf.checked) {
+  const tfield = tlist && tlist.dataset.field;
+  const hasTarget = tfield ? (fd.get(tfield) || "").trim() !== "" : false;
+  if (crf && crf.checked && hasTarget) {
     const cur = (fd.get("description") || "").trim();
     if (!cur.toLowerCase().includes("capture remote flag")) {
       fd.set("description", cur
         ? `${cur}\n\n${CAPTURE_REMOTE_FLAG_DIRECTIVE}`
         : CAPTURE_REMOTE_FLAG_DIRECTIVE);
     }
+  } else if (crf && crf.checked && !hasTarget) {
+    // Operator ticked the box but gave no target — surface it (dev console)
+    // rather than silently folding an unsatisfiable remote mandate into an
+    // offline job.
+    console.warn(
+      "🚩 Capture remote flag ticked but no remote target provided — " +
+        "mandate not applied (offline job).",
+    );
   }
   // "Flag format" → stored in meta for the scanner (authoritative matcher),
   // AND folded into the description so the agent emits FLAG_CANDIDATE in the

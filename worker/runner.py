@@ -2,6 +2,7 @@ import multiprocessing
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -160,6 +161,90 @@ def _sweep_stale_tmp(max_age_h: int = 24) -> None:
         )
 
 
+def _preinit_wine_prefix() -> None:
+    """Settle the Wine prefix's first-run init to a controlled point, once.
+
+    Native-PE rev jobs run the real .exe under `wine` / `xvfb-run` (Tier C).
+    The prefix is deliberately NOT baked into the image (~1.4 GB); it inits
+    lazily on first use. Doing that init HERE — once, in the parent at startup,
+    before any job's agent can touch wine — means the first agent `wine app.exe`
+    finds a ready WINEARCH=win64 prefix instead of racing / overlapping an
+    on-demand `wineboot`. That overlap is the most plausible cause of the wine
+    segfaults that made job 0d0c3de3fbfb misdiagnose wine as unusable (seccomp)
+    and abandon dynamic rendering — the exact capability Tier C added. NOTE the
+    crash was NOT reproducible on demand (7 negative repros incl. the job's
+    exact sequence), so this is DEFENSIVE / cause-unconfirmed: cheap, idempotent
+    and timeout-bounded so a wedged headless `wineboot` can NEVER hang worker
+    startup. Best-effort throughout — any failure logs a WARN and the lazy
+    first-use path still applies.
+    """
+    if not shutil.which("wine"):
+        return  # Tier C wine layer absent (WARN-masked build) — nothing to do.
+    prefix = os.environ.get("WINEPREFIX", "/root/.wine")
+    # XDG_RUNTIME_DIR silences Wine's "invalid or not set" warning (cosmetic;
+    # all repros were rc=0 without it). setdefault so an operator override wins.
+    xrt = os.environ.setdefault("XDG_RUNTIME_DIR", "/run/user/0")
+    try:
+        os.makedirs(xrt, mode=0o700, exist_ok=True)
+        os.chmod(xrt, 0o700)
+    except OSError:
+        pass
+    # Idempotent: a prefix already up as win64 is left untouched, so a plain
+    # `restart worker` (writable layer persists /root/.wine) skips instantly;
+    # only a fresh / force-recreated container pays the one-time ~15 s init.
+    sysreg = Path(prefix) / "system.reg"
+
+    def _is_win64() -> bool:
+        try:
+            return sysreg.is_file() and "#arch=win64" in sysreg.read_text(
+                errors="ignore"
+            )[:4096]
+        except OSError:
+            return False
+
+    if _is_win64():
+        print("[worker] wine prefix ready (win64)", flush=True)
+        return
+    print("[worker] pre-initialising wine prefix (once) ...", flush=True)
+    try:
+        # wineboot touches an X display → run under a throwaway Xvfb. `timeout`
+        # bounds DURATION (|| true would only bound exit status, not a hang).
+        subprocess.run(
+            ["xvfb-run", "-a", "wineboot", "--init"],
+            timeout=180,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Block until wineserver settles so the prefix is fully written.
+        subprocess.run(
+            ["wineserver", "-w"],
+            timeout=60,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "[worker] [WARN] wine prefix pre-init timed out; lazy init on first use",
+            flush=True,
+        )
+        return
+    except Exception as e:  # noqa: BLE001 — must never block worker startup
+        print(
+            f"[worker] [WARN] wine prefix pre-init failed ({e}); lazy init on first use",
+            flush=True,
+        )
+        return
+    # Verify win64 (the trixie win32-default gotcha: a silently-created win32
+    # prefix would abort every x64 PE — treat it as not-ready so first use re-inits).
+    print(
+        "[worker] wine prefix "
+        + ("OK (win64)" if _is_win64() else "[WARN] not win64; lazy re-init on first use"),
+        flush=True,
+    )
+
+
 def main() -> int:
     n = _resolve_concurrency()
     print(f"[worker] launching {n} worker process(es)", flush=True)
@@ -173,6 +258,10 @@ def main() -> int:
     # on a freshly-built image; only matters after `docker compose
     # restart worker` on a long-running deployment.
     _sweep_stale_tmp()
+    # Settle the Wine prefix ONCE before any job can race it (native-PE rev
+    # Tier C). Idempotent + timeout-bounded; a no-op when wine is absent or the
+    # prefix is already win64-ready.
+    _preinit_wine_prefix()
 
     # Cleanup thread runs in the parent only.
     threading.Thread(target=cleanup_loop, daemon=True).start()
