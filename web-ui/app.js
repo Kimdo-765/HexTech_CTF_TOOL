@@ -950,6 +950,30 @@ async function deleteJob(id, ev) {
   refreshStats();
 }
 
+// Pure stop — halt a running/queued job but KEEP it (record + ./work/). Unlike
+// deleteJob (removes the job) and stop-&-resume (forks a fresh job), this just
+// flips status to 'stopped'. Re-renders the detail so the operator sees the
+// stopped pill and can then retry / run / delete at their leisure.
+async function stopJob(id, btn) {
+  if (!confirm(`Stop job ${id}?\nHalts the run but KEEPS the job and ./work/ artifacts (not deleted, not resumed).`)) return;
+  const orig = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "■ stopping…"; }
+  try {
+    const res = await fetch(`${API}/jobs/${id}/stop`, { method: "POST" });
+    if (!res.ok) {
+      alert(`stop failed: ${res.status} ${await res.text()}`);
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+      return;
+    }
+    await refreshJobs();
+    await selectJob(id);
+    refreshStats();
+  } catch (e) {
+    alert(`stop error: ${e}`);
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
 async function decideTimeout(jobId, decision, btn) {
   // Disable both decision buttons in the same banner
   const banner = btn.closest(".timeout-banner");
@@ -1873,12 +1897,15 @@ async function renderJob(id, opts = {}) {
   const showStopResume = isExploitableModule && (
     job.status === "queued" || job.status === "running"
   );
+  // Pure stop: halt a live job of ANY module WITHOUT deleting it or forking a
+  // resume — keeps the record + ./work/ artifacts, just stops the work.
+  const showStop = job.status === "queued" || job.status === "running";
   // "Change target" only makes sense for modules that take a target
   // (web/pwn/crypto/rev) — same set as retry. Visible at any status.
   const showChangeTarget = isExploitableModule;
   if (
     job.runnable_script || job.exploit_present || job.solver_present
-    || showRetry || showStopResume || showChangeTarget
+    || showRetry || showStopResume || showChangeTarget || showStop
   ) {
     const scriptName = job.runnable_script || (job.exploit_present ? "exploit.py" : "solver.py");
     const runHtml = (job.runnable_script || job.exploit_present || job.solver_present)
@@ -1895,9 +1922,13 @@ async function renderJob(id, opts = {}) {
     const stopResumeHtml = showStopResume
       ? `<button class="retry-btn retry-stop-resume-btn" data-action="stop-resume-reviewer">↻ Stop &amp; resume with reviewer hint</button>
          <button class="retry-btn retry-stop-resume-btn" data-action="stop-resume">✋ Stop &amp; resume with my hint</button>` : "";
+    // Pure stop — halt only, keep everything (no delete, no resume).
+    const stopHtml = showStop
+      ? `<button class="stop-job-btn" data-action="stop" title="Halt this job but KEEP the record + ./work/ artifacts (not deleted, not resumed)">■ Stop</button>` : "";
     const targetHtml = showChangeTarget
       ? `<button class="retry-btn change-target-btn" data-action="change-target">✎ Change target</button>` : "";
     const helperBits = [];
+    if (stopHtml) helperBits.push("stop = halt this run, keep the job + ./work/ (no delete, no resume)");
     if (runHtml) helperBits.push("re-runs the produced script");
     if (retryHtml) helperBits.push("reviewer hint = Claude diagnoses the failure · my hint = you write the hint yourself");
     if (stopResumeHtml) helperBits.push("stop & resume = halt this job, carry over ./work/, and start fresh with a reviewer-written or hand-written hint");
@@ -1914,7 +1945,7 @@ async function renderJob(id, opts = {}) {
            <span class="fresh-label">✨ fresh context</span>
          </label>` : "";
     runBlock = `<div class="retry-row" style="margin:0.5rem 0">
-      ${runHtml} ${targetHtml} ${retryHtml} ${continueHtml} ${stopResumeHtml}
+      ${stopHtml} ${runHtml} ${targetHtml} ${retryHtml} ${continueHtml} ${stopResumeHtml}
       ${freshToggleHtml}
       <small style="color:#8b949e">${helperBits.join(" · ")}</small>
     </div>`;
@@ -2166,6 +2197,11 @@ async function renderJob(id, opts = {}) {
   const killBtn = detail.querySelector('.timeout-kill-btn[data-action="kill"]');
   if (killBtn) {
     killBtn.addEventListener("click", () => decideTimeout(id, "kill", killBtn));
+  }
+
+  const stopBtn = detail.querySelector('.stop-job-btn[data-action="stop"]');
+  if (stopBtn) {
+    stopBtn.addEventListener("click", () => stopJob(id, stopBtn));
   }
 
   const changeTargetBtn = detail.querySelector('.change-target-btn[data-action="change-target"]');

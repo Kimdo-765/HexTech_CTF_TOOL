@@ -269,6 +269,16 @@ textarea, select {
 .timeout-kill-btn:hover { background: #da3633; }
 .timeout-kill-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
 
+/* Pure-stop button (halt-but-keep) — danger red, distinct from the purple
+   retry/resume buttons so it reads as "this ends the run". */
+.stop-job-btn {
+  background: #b62324; color: white; border: 0;
+  padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer;
+  font-size: 0.85rem; font-weight: 600;
+}
+.stop-job-btn:hover { background: #da3633; }
+.stop-job-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+
 /* Forensic log-miner findings panel */
 .log-findings-panel {
   background: #161b22;

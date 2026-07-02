@@ -307,6 +307,37 @@ def delete_job(job_id: str):
     return {"deleted": safe, "halt": halt_info}
 
 
+@router.post("/{job_id}/stop")
+def stop_job(job_id: str):
+    """Pure stop: halt a queued/running job WITHOUT deleting it — keep the job
+    record and ./work/ artifacts, just stop the work.
+
+    Cancels the RQ job (so it won't auto-resume on a worker restart) via the
+    same _hard_stop_job used by DELETE and by 'stop & resume', then rewrites
+    meta.status='stopped' so the UI no longer shows it live. Distinct from:
+      * DELETE /{job_id}        — halts AND removes the job entirely.
+      * 'stop & resume' (retry) — halts THIS job and forks a fresh one.
+    On an already-terminal job it just stamps status=stopped (no re-halt). No
+    error/error_kind is set — a user stop is a clean terminal state, not a
+    failure, so the detail view shows a plain 'stopped' pill (not an error
+    banner). Mirrors retry._halt_source_job minus the resume."""
+    safe = _validate_job_id(job_id)
+    meta = read_job_meta(safe)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    was = meta.get("status")
+    halt_info = None
+    if was in ("queued", "running"):
+        halt_info = _hard_stop_job(safe)
+    stopped_meta = {
+        **meta,
+        "status": "stopped",
+        "stopped_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_job_meta(safe, stopped_meta)
+    return {"stopped": safe, "prev_status": was, "status": "stopped", "halt": halt_info}
+
+
 @router.post("/{job_id}/flags/delete")
 async def delete_job_flags(job_id: str, request: Request):
     """Prune operator-selected entries from a job's captured ``flags``.
