@@ -19,6 +19,12 @@ const CLAUDE_MODELS = [
   // Sonnet/Haiku [1m] respond with "Usage credits are required for
   // long context requests" — billing-tier limited and intentionally
   // not listed here.
+  //
+  // Claude 5 family — newest. Fable 5 base + [1m] BOTH verified 2026-07-02 on
+  // the worker's authenticated plan (trivial-prompt round-trip: FABLE_OK /
+  // FABLE1M_OK). Unlike Sonnet/Haiku, Fable 5[1m] is NOT credit-gated here.
+  "claude-fable-5",
+  "claude-fable-5[1m]",
   "claude-opus-4-8",
   "claude-opus-4-8[1m]",
   "claude-opus-4-7",
