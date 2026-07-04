@@ -95,7 +95,17 @@ def read_job_meta(job_id: str) -> Optional[dict[str, Any]]:
     f = JOBS_DIR / job_id / "meta.json"
     if not f.exists():
         return None
-    return json.loads(f.read_text())
+    meta = json.loads(f.read_text())
+    # The directory name IS the canonical job id. Some old / half-written
+    # meta.json files (e.g. one clobbered by an early agent_heartbeat write
+    # before the creation meta landed) lack an "id" key — the UI then renders
+    # the job as "undefined" and DELETE /api/jobs/undefined 400s, so it can
+    # never be removed. Inject it here (the single reader both list_jobs and
+    # get_job route through); callers rebuild meta as {**read_job_meta(...)}
+    # so the id also self-heals to disk on the next write.
+    if isinstance(meta, dict):
+        meta.setdefault("id", job_id)
+    return meta
 
 
 def save_upload(job_id: str, filename: str, content: bytes) -> Path:
