@@ -1752,6 +1752,7 @@ async def run_pre_recon(
     )
     chunks: list[str] = []
     crashed = False
+    result_is_error = False
 
     try:
         async with ClaudeSDKClient(options=options) as client:
@@ -1779,6 +1780,7 @@ async def run_pre_recon(
                                 f"[{tag}] TOOL {nm}: {preview}",
                             )
                 elif isinstance(msg, ResultMessage):
+                    result_is_error = bool(getattr(msg, "is_error", False))
                     cost = getattr(msg, "total_cost_usd", None)
                     if isinstance(cost, (int, float)) and cost:
                         log_fn(f"[{tag}] cost: ${cost:.4f}")
@@ -1788,6 +1790,26 @@ async def run_pre_recon(
 
     out = "".join(chunks).strip()
     if not out:
+        return ""
+    # A hard API error / policy refusal comes back as assistant text that
+    # IS the error — the bundled `claude` CLI surfaces an AUP block as an
+    # AssistantMessage TextBlock ("API Error: … violates our Usage Policy")
+    # rather than a clean exception — or as a ResultMessage is_error=True.
+    # Returning that text would LAUNDER a refusal into main's user_prompt
+    # inside `==== RECON REPLY ====` as if it were legitimate recon output,
+    # and store_pre_recon_cache would persist it for a later /resume. Job
+    # d8989cc6a8d1 (a benign Byte-Caesar chal): the pre-recon AUP string
+    # got injected + cached, and main itself AUP-blocked 10s later — the
+    # laundered refusal is a plausible contamination vector. Treat it as a
+    # failed recon → "" so the caller's `if recon_reply:` skips injection
+    # and store_pre_recon_cache skips the empty reply; main then falls back
+    # to its own delegate-as-needed flow with a clean context.
+    if result_is_error or classify_agent_error(out) == "policy_refusal":
+        log_fn(
+            f"[{tag}] reply flagged as error/refusal "
+            f"(is_error={result_is_error}) — discarding so it isn't "
+            f"laundered into main's prompt; main will delegate as needed"
+        )
         return ""
     # Sanitize control bytes that would corrupt downstream consumers.
     # The recon reply is embedded into main's user_prompt and shipped
