@@ -3080,7 +3080,9 @@ def module_autoboot(
         parts.append("- common bypass classes: SSRF (gopher://, file://), IDOR (parameter sequence walk), race (concurrent submit)")
     elif module == "crypto":
         parts.append("- pycryptodome / gmpy2 / sympy / z3-solver / ecdsa available")
-        parts.append("- sage NOT in this container — write solver.sage for sage runner if needed")
+        parts.append("- fpylll available (LLL/BKZ/GSO/enum) — Coppersmith / HNP biased-nonce / LWE without a Sage round-trip")
+        parts.append("- sage NOT in THIS container, but a separate Sage sandbox (image pre-pulled) runs solver.sage for EC ops / small_roots / discrete_log")
+        parts.append("- a deterministic pre-analysis (param extraction + RSA auto-factor) may already be in your prompt — check it first")
         parts.append("- before deep math: encrypt a known plaintext through the oracle and OBSERVE patterns")
     elif module == "rev":
         parts.append("- ghiant pre-bake (cached project under ./.ghidra_proj/)")

@@ -22,6 +22,16 @@ RUN pip install --no-cache-dir \
     requests==2.32.3 \
     httpx==0.27.2
 
+# fpylll + cysignals — lattice reduction (LLL/BKZ) so a lattice solver.py the
+# agent writes in the worker actually RUNS here in the sandbox-validation
+# container too (worker and runner must have the same crypto capability or the
+# final sandbox run fails on a missing import). cp312 manylinux wheels, no
+# compilation / apt deps (throwaway-validated). Isolated so a bad release can't
+# break the runner image — a lattice solver just won't validate until fixed.
+RUN pip install --no-cache-dir cysignals fpylll 2>&1 | tail -3 || true \
+ && ( python3 -c "from fpylll import LLL, IntegerMatrix; print('fpylll OK in runner')" \
+      || echo "[WARN] fpylll unavailable in runner" )
+
 WORKDIR /work
 # Default to bash so the web terminal works; orchestrators set their
 # own command (`python3 /work/exploit.py ...` or `sage ...`) via

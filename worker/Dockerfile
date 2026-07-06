@@ -337,6 +337,24 @@ RUN git clone --depth 1 https://github.com/shellphish/how2heap.git /opt/how2heap
  && rm -rf /opt/how2heap/.git \
  && echo "how2heap: $(ls -d /opt/how2heap/glibc_* | wc -l) glibc-version dirs, $(find /opt/how2heap/glibc_* -name '*.c' | wc -l) PoCs"
 
+# fpylll + cysignals — lattice reduction (LLL/BKZ), GSO, enumeration. The one
+# heavy-crypto capability class the symbolic stack (z3/sympy/gmpy2) genuinely
+# cannot cover in-container: Coppersmith small-roots, Hidden-Number-Problem
+# (biased-nonce ECDSA), LWE/knapsack, and any "build a lattice, LLL-reduce,
+# read off the short vector" CTF attack. Strictly better than reaching for the
+# separate SageMath runner for these (no multi-GB image, no cross-container
+# hop). Both ship cp312 manylinux wheels — NO compilation, NO apt deps beyond
+# the base (validated in a throwaway on bare python:3.12-slim: install is
+# wheel-only and a 6x6 LLL.reduction runs). cysignals is fpylll's runtime dep
+# and is NOT auto-pulled by the fpylll wheel, so it is listed explicitly.
+# Isolated + WARN-masked exactly like the angr / frida layers so a bad release
+# can never break the worker image — lattice tooling is simply absent until a
+# build confirms it. Placed last so it can't invalidate the expensive layers
+# above on a rebuild.
+RUN pip install --no-cache-dir cysignals fpylll 2>&1 | tail -3 || true \
+ && ( python3 -c "from fpylll import IntegerMatrix, LLL, GSO, Enumeration; import fpylll; print('fpylll OK', fpylll.__version__)" \
+      || echo "[WARN] fpylll unavailable; lattice (LLL/BKZ/Coppersmith) tooling disabled" )
+
 ENV PYTHONPATH=/app
 
 CMD ["python", "-m", "worker.runner"]

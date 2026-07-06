@@ -539,10 +539,18 @@ Crypto-specific:
   - shell          : openssl (genrsa, dgst, aes-*, ec, …)
   - Python (import): Crypto (pycryptodome), gmpy2, sympy, z3 (z3-solver),
                      ecdsa, pwntools (for remote-oracle protocols)
-  - SageMath       : NOT in this container — the orchestrator can spawn
-                     a separate Sage runner only if `solver.sage` is
-                     produced and the user enabled the Sage sandbox.
-                     For everything else, prefer the libs above.
+  - lattices       : fpylll (IN this container) — LLL/BKZ reduction, GSO,
+                     enumeration. Reach for it on Coppersmith small-roots
+                     (stereotyped-message / partial-key RSA), Hidden-Number-
+                     Problem (biased/partial ECDSA nonce), LWE / knapsack,
+                     and any "build a basis, LLL-reduce, read the short
+                     vector" attack — no SageMath round-trip needed.
+                     `from fpylll import IntegerMatrix, LLL, GSO, Enumeration`.
+  - SageMath       : NOT in THIS container, but the orchestrator can run a
+                     `solver.sage` in a separate Sage sandbox (image is
+                     pre-pulled). Use it only for what fpylll + the libs
+                     above can't do (e.g. elliptic-curve group ops,
+                     `small_roots`, `discrete_log`, number-field machinery).
 """
 
 TOOLS_FORENSIC = _TOOLS_BASE + """\
