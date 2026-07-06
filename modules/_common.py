@@ -1804,7 +1804,15 @@ async def run_pre_recon(
     # failed recon → "" so the caller's `if recon_reply:` skips injection
     # and store_pre_recon_cache skips the empty reply; main then falls back
     # to its own delegate-as-needed flow with a clean context.
-    if result_is_error or classify_agent_error(out) == "policy_refusal":
+    # is_error is the authoritative signal. The text-match is a fallback for
+    # when the CLI surfaces AUP as assistant text WITHOUT setting is_error;
+    # bound it to a SHORT reply so a long, legitimate recon that merely
+    # mentions "usage policy" verbatim (e.g. web recon over a site's ToS
+    # page) isn't false-discarded — a real refusal IS the ~250-char error
+    # string and nothing else, whereas a real recon reply is structured bullets.
+    if result_is_error or (
+        len(out) < 800 and classify_agent_error(out) == "policy_refusal"
+    ):
         log_fn(
             f"[{tag}] reply flagged as error/refusal "
             f"(is_error={result_is_error}) — discarding so it isn't "
