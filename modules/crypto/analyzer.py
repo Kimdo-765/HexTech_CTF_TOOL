@@ -135,6 +135,27 @@ async def _run_agent(
                 f"[pre-recon] reply ready ({len(recon_reply)} chars)",
             )
 
+        # Deterministic (no-LLM) crypto pre-analysis. Runs INDEPENDENTLY of the
+        # recon subagent above: it is pure code, so (a) it still produces facts
+        # even when the LLM recon AUP-refused and returned "" (see memory
+        # crypto_aup_bytecaesar_falsepos), and (b) on a factorable modulus it
+        # effectively hands main the solve. Injected above the recon reply so
+        # the reliable facts sit first.
+        from modules.crypto.pre_analysis import run_crypto_pre_analysis
+        pre_analysis = run_crypto_pre_analysis(
+            src_root, lambda s: log_line(job_id, s)
+        )
+        if pre_analysis:
+            user_prompt = (
+                "==== DETERMINISTIC PRE-ANALYSIS (automated static pass, "
+                "no LLM) ====\n"
+                "The orchestrator extracted these facts before your turn. "
+                "Lines marked ★ are near-solves — verify and use them "
+                "directly rather than re-deriving.\n\n"
+                f"{pre_analysis}\n"
+                "==== END PRE-ANALYSIS ====\n\n"
+            ) + user_prompt
+
     from modules._common import build_exploit_library_hint
     _lib_hint = build_exploit_library_hint("crypto")
     if _lib_hint:
