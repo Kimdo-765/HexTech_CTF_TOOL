@@ -898,14 +898,23 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     # `DH{" + secret + "}` carries a `"` and would otherwise pass.
     if '"' in inner_raw or "'" in inner_raw:
         return True
-    # Embedded ellipsis = an ABBREVIATED / elided flag, never a real capture.
+    # Embedded ellipsis in NARRATIVE prose = an ABBREVIATED / elided flag.
     # Job a15ff70a6ed5: the judge wrote "captured the REAL flag DH{...20207ea}"
     # into a prejudge issue; that abbreviation was scanned out of run.log
-    # (narrative tier) and stored as meta.flags[0] — while the genuine
-    # DH{<40 hex>} was dropped by the hash-width rule below. A real flag never
-    # contains a literal `...` / `…`, so reject it in every tier (incl. trusted:
-    # a banner echoing `DH{...}` is a template, not a capture).
-    if "..." in inner_raw or "…" in inner_raw:
+    # (narrative tier, trusted=False) and stored as meta.flags[0] — while the
+    # genuine DH{<40 hex>} was dropped by the hash-width rule below.
+    #
+    # `not trusted`-ONLY: a TRUSTED capture (FLAG_CANDIDATE marker / runner
+    # stdout) may legitimately carry `...` as real flag CONTENT. Job
+    # 187a2d3ee182's genuine capture was `DH{Amo_is_watching_you...:...==}`
+    # (the chal is literally "Amo is watching you…"); this rule silently
+    # dropped it at EVERY tier → status=no_flag despite judge verdict=success,
+    # flag never shown in the UI. The bare `DH{...}` template echo this rule
+    # was also meant to catch for trusted is ALREADY caught by the filler-only
+    # rule above (`[._\-\s…]+` fullmatches `...`), so exempting trusted here
+    # lets only real mid-content ellipses through, never a template. Mirrors
+    # the hash-width gate below, which is likewise `not trusted`.
+    if not trusted and ("..." in inner_raw or "…" in inner_raw):
         return True
     # Raw hex BLOBS — only the absurdly-long ones are placeholders.
     # Real Dreamhack flags ARE `DH{<32|40|64 raw hex>}` (md5/sha1/sha256
@@ -5263,6 +5272,18 @@ async def run_main_agent_session(
             if _hint_just_now:
                 summary["judge_hints"].append(_hint_just_now)
             if flags_now or verdict == "success":
+                if verdict == "success" and not flags_now:
+                    # Silent contradiction: the judge confirmed a capture but
+                    # scan_job_for_flags harvested nothing. Almost always a
+                    # placeholder-filter false-positive eating a real flag
+                    # (job 187a2d3ee182: `DH{...}`-content flag dropped by the
+                    # ellipsis rule). Surface it loudly so the flag isn't lost
+                    # to a silent no_flag — see memory real_flag_dropped_as_placeholder.
+                    log_fn(
+                        f"[orchestrator] WARNING turn {attempt}: judge verdict=success "
+                        f"but 0 flags harvested — a real capture may have been dropped by "
+                        f"the placeholder filter; check solver stdout for FLAG_CANDIDATE"
+                    )
                 log_fn(
                     f"[orchestrator] auto-run turn {attempt} succeeded "
                     f"(flags={len(flags_now)}, verdict={verdict}) — exiting loop"
