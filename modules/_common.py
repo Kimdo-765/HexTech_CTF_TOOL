@@ -654,6 +654,20 @@ def scan_job_for_flags(
                 _bf = re.search(r"\w{1,15}\{[^}\r\n]{1,256}\}", cand)
                 if _bf:
                     cand = _bf.group(0)
+                elif re.search(r"\s", cand):
+                    # No PREFIX{...} brace-flag AND the value carries internal
+                    # whitespace → this is PROSE that merely quotes the
+                    # `FLAG_CANDIDATE:` convention, not a declared capture. A
+                    # genuine brace-less flag (raw hex / prefix-less token) is a
+                    # single whitespace-free token. result.json is a TRUSTED
+                    # source but embeds the judge's prejudge/postjudge prose
+                    # (e.g. "...uses a `FLAG_CANDIDATE:` prefix the harvester
+                    # must strip."), which the marker regex over-captured as the
+                    # flag `prefix the harvester must strip.`. This surfaces only
+                    # on a RE-SCAN (result.json exists after finish; a live job's
+                    # finish-time harvest predates it), e.g. the 187a2d3ee182
+                    # backfill. Skip it.
+                    continue
                 if cand:
                     out.add(cand)
         return out
