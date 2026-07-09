@@ -136,6 +136,97 @@ def kill_guard_hooks():
     return {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[_bash_kill_guard])]}
 
 
+# ---------------------------------------------------------------------------
+# Read-only-source guard (PreToolUse hook on Write/Edit)
+# ---------------------------------------------------------------------------
+# main's cwd is work_dir (<jobroot>/work/), and the orchestrator's auto-run
+# collects the deliverable ONLY from there (with a job_dir-root fallback,
+# commit 6299cdf). But main sometimes writes the solver with an ABSOLUTE path
+# INTO the challenge source dir — which is declared read-only in the prompt
+# yet is actually writable because it's passed via add_dirs. Job cb6e7896d1ec
+# wrote /data/jobs/<id>/src/extracted/solver.py there; auto-run never saw it,
+# the sandbox never ran, and the job ended no_flag despite a correct solver.
+# The prompt already forbids this (CTF_PREAMBLE relative-path rule) and the
+# agent ignored it — same failure class as the Bash kill-guard — so a HARD
+# deny that redirects to cwd is the durable fix. Only ABSOLUTE paths are
+# judged: a relative file_path resolves against main's cwd (= work_dir), which
+# is exactly where deliverables belong, so those always pass. The job_dir ROOT
+# is intentionally NOT guarded (it's not in add_dirs, and the 6299cdf fallback
+# rescues a root write) — this hook owns only the source-dir escape.
+_READONLY_WRITE_MSG = (
+    "BLOCKED: {src} is the READ-ONLY challenge source directory. A solver/"
+    "exploit written here is INVISIBLE to the orchestrator's auto-run — it "
+    "collects your deliverable only from your CURRENT WORKING DIRECTORY "
+    "({wd}), so the job would end no_flag even if your code is correct (job "
+    "cb6e7896d1ec did exactly this). Write to cwd with a RELATIVE name "
+    "instead:  Write(file_path=\"solver.py\", ...)  — never an absolute path "
+    "into the source tree."
+)
+
+
+def readonly_write_reason(
+    file_path: str, readonly_dirs, work_dir,
+) -> str | None:
+    """Deny reason if `file_path` is an ABSOLUTE write into one of the
+    read-only reference dirs (and not under work_dir); else None. Pure /
+    synchronously testable — the async hook is a thin wrapper."""
+    if not file_path or not os.path.isabs(file_path):
+        # Relative → resolves against main's cwd (work_dir); always allowed.
+        return None
+    target = os.path.realpath(file_path)
+    wd = os.path.realpath(str(work_dir)) if work_dir else None
+    # work_dir (incl. its absolute TMPDIR <work>/tmp) is always writable —
+    # check FIRST so a cwd-absolute write passes even if a future add_dirs
+    # entry were ever to overlap the work tree.
+    if wd and (target == wd or target.startswith(wd + os.sep)):
+        return None
+    for d in (readonly_dirs or []):
+        if not d:
+            continue
+        rd = os.path.realpath(d)
+        if target == rd or target.startswith(rd + os.sep):
+            return _READONLY_WRITE_MSG.format(src=rd, wd=wd or "<cwd>")
+    return None
+
+
+def _readonly_write_guard(readonly_dirs, work_dir):
+    """Factory → PreToolUse hook denying Write/Edit into a read-only source
+    dir. Bound to the session's add_dirs + work_dir at option-build time."""
+    async def _guard(input_data, tool_use_id, context):
+        try:
+            if (input_data or {}).get("tool_name") not in ("Write", "Edit"):
+                return {}
+            ti = input_data.get("tool_input") or {}
+            fp = ti.get("file_path") or ""
+            reason = readonly_write_reason(fp, readonly_dirs, work_dir)
+        except Exception:
+            return {}
+        if not reason:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+    return _guard
+
+
+def main_session_hooks(add_dirs, work_dir):
+    """PreToolUse hooks for a MAIN agent session: the Bash kill-guard PLUS a
+    read-only-source guard that denies Write/Edit whose absolute path escapes
+    into the challenge source dir (add_dirs). Subagents keep the bare
+    kill_guard_hooks() — they only READ the source, never write deliverables."""
+    from claude_agent_sdk import HookMatcher
+    guard = _readonly_write_guard(add_dirs, work_dir)
+    return {"PreToolUse": [
+        HookMatcher(matcher="Bash", hooks=[_bash_kill_guard]),
+        HookMatcher(matcher="Write", hooks=[guard]),
+        HookMatcher(matcher="Edit", hooks=[guard]),
+    ]}
+
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 JOBS_DIR = DATA_DIR / "jobs"
 # Operator-curated exploit library; mounted into worker via the
@@ -2033,7 +2124,7 @@ def make_main_session_options(
             fork_session=bool(resume_sid),
             mcp_servers={"team": mcp_server},
             effort=effort,
-            hooks=kill_guard_hooks(),
+            hooks=main_session_hooks(add_dirs, work_dir),
         )
         log_fn_local(
             "[orchestrator] subagent isolation: ON "
@@ -2054,7 +2145,7 @@ def make_main_session_options(
             fork_session=bool(resume_sid),
             agents=build_recon_agents(model),
             effort=effort,
-            hooks=kill_guard_hooks(),
+            hooks=main_session_hooks(add_dirs, work_dir),
         )
         log_fn_local(
             "[orchestrator] subagent isolation: OFF (legacy in-process)"
