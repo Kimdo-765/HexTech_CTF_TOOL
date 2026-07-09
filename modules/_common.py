@@ -5153,6 +5153,40 @@ async def run_main_agent_session(
                 return last_sandbox
             picked = _pick_present_artifact(work_dir, artifact_names)
             if not picked:
+                # The agent sometimes writes the solver with an ABSOLUTE
+                # path to the JOB_DIR ROOT (/data/jobs/<id>/) instead of its
+                # cwd (work_dir = <jobroot>/work/). Job 389e39530990 wrote
+                # /data/jobs/<id>/solver.sage; auto-run then skipped entirely
+                # (picked=None) and the sandbox NEVER ran, despite a valid
+                # solver — status ended no_flag with sandbox=null.
+                # attempt_sandbox_run ALREADY tolerates the jobroot layout
+                # (it scans <jobroot>/<script> and copies into work/), so
+                # this gate was strictly NARROWER than the runner it guards.
+                # Mirror the runner: fall back to job_dir root and PROMOTE
+                # the file into work_dir so every downstream `work_dir/picked`
+                # (sha gate, carry, re-inject) resolves. work_dir stays
+                # canonical (checked first) so a fresh /retry solver always
+                # wins over a stale prior-attempt copy at the root.
+                jd_root = job_dir(job_id)
+                root_pick = _pick_present_artifact(jd_root, artifact_names)
+                if root_pick:
+                    try:
+                        (work_dir / root_pick).write_bytes(
+                            (jd_root / root_pick).read_bytes()
+                        )
+                        picked = root_pick
+                        log_fn(
+                            f"[orchestrator] {root_pick} was written to the "
+                            f"job_dir root (not cwd/work) — promoted into "
+                            f"work/ so auto-run can execute it"
+                        )
+                    except OSError as e:
+                        log_fn(
+                            f"[orchestrator] found {root_pick} at job_dir "
+                            f"root but promote into work/ failed: {e}"
+                        )
+                        picked = None
+            if not picked:
                 # Main produced nothing this round — no script to run.
                 return last_sandbox
 

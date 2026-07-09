@@ -47,7 +47,15 @@ WORKFLOW
    `pwntools`. SageMath is NOT in this container — only emit
    `solver.sage` if no Python equivalent exists; the orchestrator
    will spawn a separate Sage runner.
-4. Write `./solver.py` (RELATIVE path):
+4. Write `./solver.py` (RELATIVE path — into your CWD, never an
+   absolute path into the source dir or the job root):
+   - CRITICAL: the orchestrator's auto-run only finds the solver in
+     your CWD (and, as a fallback, the job root). If you Write it into
+     the read-only source directory instead — even though that dir
+     happens to be writable — auto-run cannot see it, the sandbox
+     NEVER runs, and the job ends `no_flag` with no captured flag even
+     when your solver is perfectly correct. Always `Write "solver.py"`
+     as a bare relative name; do NOT construct an absolute path.
    - If a remote target is provided, accept `host:port` as
      `sys.argv[1]` and use `pwntools.remote()`.
    - Otherwise solve from local files only.
