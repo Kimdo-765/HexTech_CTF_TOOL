@@ -235,9 +235,25 @@ def run_in_sandbox(
     # the runner.
     mount_root = f"/data/jobs/{job_id}"
     workdir = f"{mount_root}/work"
+    run_user = None
     if use_sage:
         image = SAGE_IMAGE
         cmd = ["sage", f"{workdir}/{script_rel}", *args]
+        # sagemath/sagemath ships `USER sage` (uid 1001), but the work tree is
+        # root:root 0755 (created by the uid-0 worker). Before ANY solver line
+        # runs, `sage <script>.sage` preparses it and writes solver.sage.py via
+        # tempfile.mkstemp(dir=os.path.dirname(realpath(script))) = the work
+        # dir itself (NOT TMPDIR, which sage ignores here) → EACCES as uid 1001,
+        # solver never executes, stdout 0 bytes (job 4cc7f5dad29b, the first
+        # ever production sage run, died exactly here). The python3 runner image
+        # has NO USER directive and ALREADY runs as root, so running sage as
+        # uid 0 MATCHES that existing posture (does not widen it) and is the one
+        # fix agnostic to WHERE preparse writes (top-level work/, a load()ed
+        # sub-.sage's dir, a future layout). Verified end-to-end: root-owned
+        # 0755 work dir + this + the real solver.sage → preparse succeeds and
+        # E.order() runs. Only the sage branch sets run_user, so the python3
+        # containers.run() kwargs stay byte-identical (see Edit 3).
+        run_user = "0:0"
     else:
         cmd = ["python3", f"{workdir}/{script_rel}", *args]
 
@@ -264,6 +280,15 @@ def run_in_sandbox(
     env["TMPDIR"] = _sandbox_tmp
     env["TMP"]    = _sandbox_tmp
     env["TEMP"]   = _sandbox_tmp
+    if use_sage:
+        # `--user 0:0` (Edit 1/3) overrides the image's `USER sage`, so HOME
+        # would otherwise be unset for root. Pin it to the image's prebuilt,
+        # populated DOT_SAGE parent (/home/sage/.sage) so Sage doesn't re-init
+        # its startup cache. Root can read/write that uid-1001-owned dir fine.
+        # Not load-bearing — the observed worst case without this is a slower
+        # first run, not a failure — but it keeps the sage run warm. Guarded by
+        # use_sage so the python3 env stays byte-identical.
+        env["HOME"] = "/home/sage"
 
     # Multi-target jobs: argv[1] carries the PRIMARY target (back-compat —
     # every shipped exploit reads one host:port from argv). Expose the FULL
@@ -300,6 +325,12 @@ def run_in_sandbox(
         stderr=True,
         detach=True,
         labels={"hextech_ctf_tool_job_id": job_id, "hextech_ctf_tool_role": "runner"},
+        # Only the sage path sets a user (uid 0, so preparse can write the
+        # root:root 0755 work dir). When run_user is None (python3 path) no
+        # `user` kwarg is passed → the call is byte-identical to before, zero
+        # blast radius. This is the single chokepoint: run_in_sandbox is the
+        # only caller of containers.run.
+        **({"user": run_user} if run_user else {}),
     )
     exit_code = -1
     out = b""
