@@ -40,7 +40,42 @@ from modules.settings_io import get_setting
 RUNNER_IMAGE = "hextech_ctf_tool-runner"
 SAGE_IMAGE = "sagemath/sagemath:latest"
 DEFAULT_TIMEOUT_S = 300
+# crypto `.sage` solvers legitimately run for many minutes: a Gröbner basis /
+# resultant / small_roots over a large modulus is compute-heavy AND silent
+# (prints a start banner, then nothing until it returns). The 300s default
+# kills them mid-computation — job 4e1be4f76c96's e=257 bivariate GB over a
+# 2047-bit Zmod(N) was cut at the 301s hard timeout with only its start banner
+# emitted. This path gets a 6000s (100-min) ceiling. It's a CEILING, not a
+# fixed wait: fast sage runs (EC group ops, discrete_log) still exit the instant
+# they finish and pay nothing. The 2g mem_limit OOM-kills a memory-blowup GB
+# long before this, and Singular GB is deterministic (terminates or exhausts
+# memory — it does not spin), so the worst realistic case is "runs long, then
+# finishes or hits the ceiling" — exactly the budget this is meant to grant.
+CRYPTO_SAGE_TIMEOUT_S = 6000
 DEFAULT_MEM = "2g"
+
+
+def _resolve_sandbox_timeout(module, use_sage, override) -> int:
+    """Resolve the sandbox HARD-timeout (seconds) for one run.
+
+    Only the crypto `.sage` path is widened: its default becomes
+    CRYPTO_SAGE_TIMEOUT_S and an explicit `exploit_timeout_seconds` override is
+    clamped to that ceiling. EVERY other path — all modules' python3 runs, and
+    any non-crypto `.sage` — keeps the historical 300s default / 1800s override
+    cap byte-for-byte. `override` is meta.exploit_timeout_seconds (may be
+    None / str / int / junk; non-positive or unparseable → ignored).
+    """
+    is_crypto_sage = (module == "crypto") and bool(use_sage)
+    base = CRYPTO_SAGE_TIMEOUT_S if is_crypto_sage else DEFAULT_TIMEOUT_S
+    cap = CRYPTO_SAGE_TIMEOUT_S if is_crypto_sage else 1800
+    if override is not None:
+        try:
+            ov = int(override)
+        except (TypeError, ValueError):
+            ov = 0
+        if ov > 0:
+            return min(ov, cap)
+    return base
 
 # How long can the container go without emitting any new stdout/stderr
 # before we ask the judge whether to kill it. Single-shot: we ask at
@@ -661,29 +696,29 @@ def attempt_sandbox_run(
 
         # ---------- Stage 2: actual run ----------
         args = [target] if target else []
-        # Per-job exploit timeout override via meta.json
-        # `exploit_timeout_seconds`. Default 300s; capped at 1800s to
-        # protect the worker from a runaway. Retry-driven heap exploits
-        # (job aa86e561: 24 attempts × ~25s each ≈ 10 min) get cut at
-        # 5 min and never reach the favorable ASLR roll.
+        # Sandbox hard-timeout. Base 300s (capped-1800s override) for every
+        # path EXCEPT crypto `.sage`, which gets a 6000s ceiling — a Gröbner /
+        # resultant / small_roots run is legitimately many minutes and silent
+        # (job 4e1be4f76c96 was cut at 301s mid-GB). Per-job override via
+        # meta.json `exploit_timeout_seconds` (retry-driven heap exploits —
+        # job aa86e561: 24 attempts × ~25s ≈ 10 min — need more than the base).
+        # See _resolve_sandbox_timeout for the exact clamp.
         per_job_timeout = DEFAULT_TIMEOUT_S
         try:
             from modules._common import read_meta as _read_meta
-            override = (_read_meta(job_id) or {}).get(
-                "exploit_timeout_seconds"
+            _m = _read_meta(job_id) or {}
+            per_job_timeout = _resolve_sandbox_timeout(
+                _m.get("module"), use_sage, _m.get("exploit_timeout_seconds"),
             )
-            if override is not None:
-                ov_int = int(override)
-                if ov_int > 0:
-                    per_job_timeout = min(ov_int, 1800)
-                    if per_job_timeout != DEFAULT_TIMEOUT_S:
-                        log_fn(
-                            f"[runner] exploit_timeout override: "
-                            f"{per_job_timeout}s (raw={ov_int}, "
-                            f"capped at 1800s)"
-                        )
+            if per_job_timeout != DEFAULT_TIMEOUT_S:
+                log_fn(
+                    f"[runner] sandbox timeout: {per_job_timeout}s "
+                    f"(module={_m.get('module')}, sage={use_sage}, "
+                    f"override={_m.get('exploit_timeout_seconds')})"
+                )
         except Exception as e:
-            log_fn(f"[runner] exploit_timeout read failed: {e}")
+            log_fn(f"[runner] timeout resolve failed: {e}; using "
+                   f"{DEFAULT_TIMEOUT_S}s")
         log_fn(
             f"[runner] executing {script_filename} "
             f"(target={target}, sage={use_sage}, judge={enable_judge}, "
