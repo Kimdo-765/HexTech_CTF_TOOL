@@ -551,6 +551,24 @@ Crypto-specific:
                      pre-pulled). Use it only for what fpylll + the libs
                      above can't do (e.g. elliptic-curve group ops,
                      `small_roots`, `discrete_log`, number-field machinery).
+                     RING CONSTRAINT — bites at RUNTIME, not compile: Sage's
+                     `.resultant()` and `GF(n)` require a FIELD or ZZ base.
+                     Over a COMPOSITE `Zmod(N)` (an RSA modulus) or `GF(p)`
+                     with char > 2^29 they raise `NotImplementedError` — and
+                     it fires only AFTER preparse, mid-run, so py_compile / a
+                     static self-review never catches it (this has crashed 3
+                     solvers). To eliminate a variable modulo a COMPOSITE N,
+                     either `P.sylvester_matrix(Q, var).det()` (base-agnostic,
+                     dodges libsingular) or take the `.resultant()` over ZZ and
+                     reduce mod N afterwards. For a polynomial-GCD (e.g.
+                     Franklin–Reiter), run Euclid by hand in `Zmod(N)[x]` with
+                     `inverse_mod` — a non-invertible leading coeff would just
+                     factor N (also a win). COST: both elimination routes are
+                     ~e^2-degree and blow up fast — measured ~40s at e=17 and
+                     it does NOT finish by e=31. So for LARGE e (high-exponent
+                     / stereotyped-message RSA) the resultant family is the
+                     WRONG tool: use a lattice (fpylll multivariate
+                     Coppersmith), not Sage elimination.
 """
 
 TOOLS_FORENSIC = _TOOLS_BASE + """\
