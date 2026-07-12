@@ -51,23 +51,41 @@ DEFAULT_TIMEOUT_S = 300
 # long before this, and Singular GB is deterministic (terminates or exhausts
 # memory — it does not spin), so the worst realistic case is "runs long, then
 # finishes or hits the ceiling" — exactly the budget this is meant to grant.
+# The full 6000s applies ONLY to an OFFLINE solve (no remote target): a
+# REMOTE-timed crypto oracle (job 4fc37cfcd04a: McNie, "20 stages / 150s total")
+# drops the connection at its own window, so runner time past that is pure waste
+# — remote crypto sage gets CRYPTO_SAGE_REMOTE_TIMEOUT_S, a generous backstop
+# that still can't clip a solver the server itself would let finish.
 CRYPTO_SAGE_TIMEOUT_S = 6000
+CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
 DEFAULT_MEM = "2g"
 
 
-def _resolve_sandbox_timeout(module, use_sage, override) -> int:
+def _resolve_sandbox_timeout(module, use_sage, override, has_target) -> int:
     """Resolve the sandbox HARD-timeout (seconds) for one run.
 
-    Only the crypto `.sage` path is widened: its default becomes
-    CRYPTO_SAGE_TIMEOUT_S and an explicit `exploit_timeout_seconds` override is
-    clamped to that ceiling. EVERY other path — all modules' python3 runs, and
-    any non-crypto `.sage` — keeps the historical 300s default / 1800s override
-    cap byte-for-byte. `override` is meta.exploit_timeout_seconds (may be
-    None / str / int / junk; non-positive or unparseable → ignored).
+    Only the crypto `.sage` path is widened, split on offline vs remote-timed:
+      * crypto `.sage`, NO target (offline GB/resultant/LLL) → CRYPTO_SAGE_TIMEOUT_S
+        (6000s) — a local algebraic solve can legitimately run many minutes.
+      * crypto `.sage`, WITH a remote target → CRYPTO_SAGE_REMOTE_TIMEOUT_S
+        (900s) — the server's per-connection window bounds it regardless, so a
+        100-min ceiling is pointless (job 4fc37cfcd04a burned the full 6000s
+        producing zero output against a 150s server budget).
+    An explicit `exploit_timeout_seconds` override is honored up to
+    CRYPTO_SAGE_TIMEOUT_S on EITHER crypto-sage branch (so an operator can lift a
+    remote solve above 900s when a challenge genuinely needs it). EVERY other
+    path — all modules' python3 runs, any non-crypto `.sage` — keeps the
+    historical 300s default / 1800s override cap byte-for-byte. `override` is
+    meta.exploit_timeout_seconds (None / str / int / junk; ≤0 or unparseable →
+    ignored); `has_target` is bool(target) at the call site.
     """
     is_crypto_sage = (module == "crypto") and bool(use_sage)
-    base = CRYPTO_SAGE_TIMEOUT_S if is_crypto_sage else DEFAULT_TIMEOUT_S
-    cap = CRYPTO_SAGE_TIMEOUT_S if is_crypto_sage else 1800
+    if is_crypto_sage:
+        base = CRYPTO_SAGE_REMOTE_TIMEOUT_S if has_target else CRYPTO_SAGE_TIMEOUT_S
+        cap = CRYPTO_SAGE_TIMEOUT_S
+    else:
+        base = DEFAULT_TIMEOUT_S
+        cap = 1800
     if override is not None:
         try:
             ov = int(override)
@@ -78,9 +96,19 @@ def _resolve_sandbox_timeout(module, use_sage, override) -> int:
     return base
 
 # How long can the container go without emitting any new stdout/stderr
-# before we ask the judge whether to kill it. Single-shot: we ask at
-# most once per run (conservative cost mode).
+# before we ask the judge whether to kill it.
 SUPERVISE_STALL_S = 60
+# For SHORT runs the supervise call is single-shot (conservative cost mode):
+# ask once, then only the hard timeout can stop it. For LONG runs (crypto-sage
+# offline = 6000s) that one-shot leaves a genuinely-stuck solve to burn the full
+# 100 min in silence (job 4fc37cfcd04a). So when timeout_s exceeds
+# SUPERVISE_PERIODIC_THRESHOLD_S we RE-ASK the judge every
+# SUPERVISE_REASK_INTERVAL_S of continued silence — each re-ask hands the judge a
+# larger stall duration, so it can decide the run is infeasible and kill early
+# (~min, not ~100min). A run that emits output (per-stage progress — crypto
+# solvers are prompted to) resets the silence clock and never triggers a re-ask.
+SUPERVISE_PERIODIC_THRESHOLD_S = 1800
+SUPERVISE_REASK_INTERVAL_S = 300
 # Polling cadence inside _wait_with_supervise. Cheap on docker-py.
 _POLL_INTERVAL_S = 2.0
 
@@ -123,7 +151,10 @@ def _wait_with_supervise(
     start = time.time()
     last_size = 0
     last_change = start
-    supervised = False
+    # None until the first supervise call. Periodic re-ask (long runs only)
+    # keys off the elapsed time since this timestamp; short runs stay one-shot.
+    last_supervise: float | None = None
+    periodic = timeout_s > SUPERVISE_PERIODIC_THRESHOLD_S
     supervise_result: dict | None = None
 
     while True:
@@ -176,13 +207,18 @@ def _wait_with_supervise(
             last_change = time.time()
         elif (
             enable_judge
-            and not supervised
             and (time.time() - last_change) > SUPERVISE_STALL_S
+            and (
+                last_supervise is None  # first ask (always) — one-shot for short runs
+                or (periodic
+                    and (time.time() - last_supervise) > SUPERVISE_REASK_INTERVAL_S)
+            )
         ):
             stall_real = int(time.time() - last_change)
+            _reask = last_supervise is not None
             log_fn(
                 f"[runner] no output for {stall_real}s while alive — "
-                f"asking judge whether to kill"
+                f"{'RE-asking' if _reask else 'asking'} judge whether to kill"
             )
             try:
                 out_tail = container.logs(stdout=True, stderr=False).decode(
@@ -208,7 +244,7 @@ def _wait_with_supervise(
             except Exception as e:
                 log_fn(f"[judge] supervise failed: {e}")
                 supervise_result = {"action": "continue", "reason": str(e)}
-            supervised = True
+            last_supervise = time.time()
             if supervise_result.get("action") == "kill":
                 try:
                     container.kill()
@@ -708,12 +744,14 @@ def attempt_sandbox_run(
             from modules._common import read_meta as _read_meta
             _m = _read_meta(job_id) or {}
             per_job_timeout = _resolve_sandbox_timeout(
-                _m.get("module"), use_sage, _m.get("exploit_timeout_seconds"),
+                _m.get("module"), use_sage,
+                _m.get("exploit_timeout_seconds"), bool(target),
             )
             if per_job_timeout != DEFAULT_TIMEOUT_S:
                 log_fn(
                     f"[runner] sandbox timeout: {per_job_timeout}s "
                     f"(module={_m.get('module')}, sage={use_sage}, "
+                    f"remote={bool(target)}, "
                     f"override={_m.get('exploit_timeout_seconds')})"
                 )
         except Exception as e:
