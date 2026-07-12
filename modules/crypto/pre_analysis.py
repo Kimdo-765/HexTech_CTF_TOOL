@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 import re
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -184,6 +185,107 @@ def _analyse_rsa(params: dict[str, int], log_fn) -> list[str]:
                "it's a hard semiprime, look for a leaked bit / partial key "
                "(Coppersmith) or a protocol reuse (common modulus).")
     return out
+
+
+def _sanitize_banner(raw: bytes) -> str:
+    """Render captured wire bytes for the prompt: printable text kept as-is,
+    every other byte shown as \\xHH so a binary handshake is still legible and
+    can't inject control chars into the prompt. Bounded length."""
+    out = []
+    for b in raw[:1200]:
+        if b in (9, 10, 13) or 32 <= b <= 126:
+            out.append(chr(b))
+        else:
+            out.append("\\x%02x" % b)
+    s = "".join(out)
+    if len(raw) > 1200:
+        s += "\n… (truncated at 1200 bytes)"
+    return s
+
+
+def probe_remote_banner(target: str | None, log_fn) -> str:
+    """Deterministic, no-LLM capture of what a remote crypto oracle emits on
+    connect — injected into main's prompt so it writes its I/O parser against
+    the REAL wire format instead of guessing.
+
+    Job e8d25067458e hung the whole run: main GUESSED the prompt delimiter
+    (`recvuntil(b') > ')`), the real server never sent `') > '`, and the
+    per-recv (not total-deadline) timeout blocked until the outer 900s kill —
+    the Gröbner solve never even ran. The prompt already says "connect to learn
+    the protocol", but main writes the solver in ONE shot with no way to act on
+    it. This hands it the first exchange up front.
+
+    Passive: opens ONE short-lived connection, sends nothing, captures whatever
+    the server volunteers within a few seconds, closes. That is exactly the
+    first-prompt format that determines the delimiter/regex — NOT a full
+    multi-round transcript (a protocol that needs input to advance won't reveal
+    later stages here; main still drives those live).
+
+    Best-effort / warn-not-fail (memory preflight_dead_remote_waste): a dead or
+    flaky target at probe time (the dreamhack target for THIS job is already
+    refused) must NOT block the job — probe-time reachability ≠ solve-time
+    reachability, so a failure just returns "" and the job runs normally. Runs
+    in the worker as a SEPARATE connection before the solver, so it never eats a
+    timed challenge's solve budget. Never raises.
+    """
+    if not target:
+        return ""
+    try:
+        host, _, port_s = target.rpartition(":")
+        port = int(port_s)
+        if not host:
+            return ""
+    except (ValueError, AttributeError):
+        return ""
+    try:
+        with socket.create_connection((host, port), timeout=8) as s:
+            s.settimeout(4)
+            chunks: list[bytes] = []
+            total = 0
+            # Read whatever the server volunteers on connect. Stop on a short
+            # read-timeout (server is waiting for us), EOF, or a size cap.
+            while total < 8192:
+                try:
+                    d = s.recv(4096)
+                except socket.timeout:
+                    break
+                if not d:
+                    break
+                chunks.append(d)
+                total += len(d)
+        raw = b"".join(chunks)
+    except Exception as e:
+        log_fn(
+            f"[crypto-preprobe] {target} not reachable at probe time "
+            f"({type(e).__name__}) — skipping banner capture (the solve run "
+            f"may still reach it; this is warn-not-fail)"
+        )
+        return ""
+    if not raw:
+        log_fn(
+            f"[crypto-preprobe] connected to {target} but it sent nothing on "
+            f"connect (server likely waits for input first) — no banner to show"
+        )
+        return (
+            f"REMOTE BANNER PROBE — connected to `{target}` but the server sent "
+            f"NOTHING before input. So it expects the client to speak first / "
+            f"the protocol is input-driven; instrument your first exchange (send "
+            f"a probe, print the raw reply) rather than assuming a prompt format."
+        )
+    log_fn(f"[crypto-preprobe] captured {len(raw)}B banner from {target}")
+    return (
+        f"REMOTE BANNER PROBE (deterministic, no-LLM) — the FIRST bytes `{target}` "
+        f"emits on connect, captured verbatim so you write your parser against "
+        f"the REAL format (non-printable bytes shown as \\xHH):\n"
+        f"```\n{_sanitize_banner(raw)}\n```\n"
+        f"Use the ACTUAL delimiter/labels above — do NOT guess a `recvuntil` "
+        f"token. This is only the first prompt (a passive connect); later stages "
+        f"of a multi-round protocol advance after you send input.\n"
+        f"I/O ROBUSTNESS: give `recvuntil`/read loops a TOTAL deadline (not a "
+        f"per-recv timeout) and, on a delimiter miss, PRINT the bytes actually "
+        f"received then fail fast — a silent per-recv loop hangs to the outer "
+        f"timeout with zero diagnostic (job e8d25067458e died exactly this way)."
+    )
 
 
 def run_crypto_pre_analysis(src_root: str | None, log_fn) -> str:

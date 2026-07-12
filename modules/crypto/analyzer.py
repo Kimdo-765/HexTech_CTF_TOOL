@@ -72,6 +72,24 @@ async def _run_agent(
     if _mt_block:
         user_prompt = user_prompt + "\n\n" + _mt_block
 
+    # Deterministic remote-banner pre-probe (no LLM). When a remote oracle is
+    # the target, capture the FIRST bytes it emits on connect and inject them so
+    # main writes its I/O parser against the REAL wire format instead of
+    # guessing a `recvuntil` delimiter (job e8d25067458e hung the entire 900s
+    # run on a wrong `') > '` guess, never reaching the solve). Best-effort /
+    # warn-not-fail: a dead target at probe time returns "" and the job runs
+    # normally. Covers remote-only jobs too (runs regardless of src_root); gated
+    # on `not resume_sid` so a forked/resumed session doesn't re-probe.
+    if target and not resume_sid:
+        from modules.crypto.pre_analysis import probe_remote_banner
+        _banner = probe_remote_banner(target, lambda s: log_line(job_id, s))
+        if _banner:
+            user_prompt = (
+                "==== REMOTE PROTOCOL PRE-PROBE (automated, no LLM) ====\n"
+                f"{_banner}\n"
+                "==== END REMOTE PRE-PROBE ====\n\n"
+            ) + user_prompt
+
     # Auto-pre-recon — recon identifies the cipher + parameters before
     # main's first turn so main starts with the math already framed.
     if src_root and not resume_sid:
