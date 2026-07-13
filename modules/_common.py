@@ -2654,6 +2654,56 @@ def make_spawn_subagent_mcp(
             f"{len(final)} B response{cost_note}"
         )
 
+        # ---- Frame-lockin dead-end detector (Tooth 1 arming) ----
+        # If this isolated subagent returned evidence that DISCONFIRMS a
+        # core assumption of main's current frame (a "no primitive" /
+        # "premise wrong" / "dead end" reply) AND the job is easy-/shortcut-
+        # framed AND we are past the spend threshold, arm a ONE-SHOT
+        # contrarian reframe user-turn (consumed at the main-loop turn
+        # boundary). This is the anti-anchoring lever: job 78bd896e0f3c
+        # ground $19.81 because main re-subordinated exactly this class of
+        # subagent evidence to a frame it would not abandon (recon#4 ASM-
+        # proved the core assumption wrong; main kept the frame). Gated +
+        # one-shot so it can't nag, and easy_framing-gated so a normal hard
+        # chal's expected "no primitive yet" replies don't trigger it.
+        try:
+            if (
+                summary.get("easy_framing")
+                and not summary.get("contrarian_fired")
+                and _DEADEND_REPLY_RE.search(final)
+            ):
+                try:
+                    thr = float(os.environ.get(
+                        "CONTRARIAN_MIN_COST_USD",
+                        str(DEFAULT_CONTRARIAN_MIN_COST_USD),
+                    ))
+                except (TypeError, ValueError):
+                    thr = DEFAULT_CONTRARIAN_MIN_COST_USD
+                # TRUE spend = subagent sum (summary["cost_usd"]) + main's
+                # cumulative cost (summary["result"]; set at the prior turn
+                # boundary — spawns run mid-turn so it lags the current turn's
+                # main spend, which only harmlessly delays arming). See the
+                # cost-cap note in run_main_agent_session for why these two
+                # sources are disjoint and must be summed.
+                spent_now = (
+                    float(summary.get("cost_usd", 0.0) or 0.0)
+                    + float(
+                        (summary.get("result") or {}).get("total_cost_usd", 0.0)
+                        or 0.0
+                    )
+                )
+                if thr >= 0 and spent_now >= thr:
+                    summary["contrarian_fired"] = True
+                    summary["contrarian_pending"] = True
+                    log_fn(
+                        f"[orchestrator] CONTRARIAN_ARM: {tag} returned a "
+                        f"premise-refuted/dead-end signal on an easy-framed "
+                        f"job at ${spent_now:.2f} — arming one contrarian "
+                        f"reframe user-turn (Tooth 1)."
+                    )
+        except Exception:
+            pass
+
         # Phase 2: JSON-typed reply validation for triage / debugger.
         # The prompts ask for strict JSON; main programmatically
         # consumes the fields. If we can't recover a JSON object,
@@ -2848,6 +2898,102 @@ If the chal is NOT menu-shaped (e.g. single-shot ROP, custom protocol),
 ignore this — but say so explicitly in report.md so the judge knows
 why you skipped them. This nudge fires once per job.
 """
+
+
+CONTRARIAN_REFRAME_USER_TURN = """\
+⚠️ ORCHESTRATOR INTERRUPT — POSSIBLE FRAME LOCK-IN.
+
+An independent subagent just returned evidence that DISCONFIRMS a core
+assumption of your current approach (a "no primitive" / "premise wrong" /
+"proven wrong" / "dead end" signal), and this run has now spent enough
+that continuing on the same frame risks grinding to no result. This is a
+checkpoint, NOT an instruction to give up. Before you spend anything more:
+
+  1. STATE, in one sentence, the load-bearing ASSUMPTION your current
+     plan depends on. Then ask: did a subagent just contradict it with
+     concrete evidence (ASM, a failed primitive, a proof)? If yes, you
+     may NOT re-subordinate that evidence back under the frame — when an
+     experiment disproves the premise, the experiment wins, not the plan.
+
+  2. SPAWN ONE subagent whose prompt does NOT assume your current frame
+     is correct. Tell it explicitly: "find a DIFFERENT solution path, or
+     argue this challenge needs a different frame / cannot be solved as
+     currently approached." Do not pre-commit it to your existing
+     heap/oracle/ROP/etc narrative — a spawn that inherits your framing
+     cannot falsify it.
+
+  3. THEN CHOOSE: (a) pursue a genuinely different approach the contrarian
+     surfaced, or (b) conclude this frame is disproven and write up what
+     you actually have in report.md (including the confirmed primitives)
+     rather than repeating the ruled-out chain.
+
+If your assumption genuinely still holds despite the signal, say why in
+one line and proceed — this fires once per job and won't nag again.
+"""
+
+
+# ---- Cost / framing circuit-breaker configuration ----
+# Framing-INDEPENDENT hard ceiling on TOTAL spend (main's cumulative cost +
+# the subagent sum — see _total_spend / the cost-cap note for why the two
+# are disjoint). A backstop against runaway grinding when an anchored model
+# won't abandon a disconfirmed frame (job 78bd896e0f3c: 51 turns / ~5h,
+# ~$27 all-in, with no stop mechanism). Deliberately GENEROUS: a legit hard
+# multi-debugger heap solve can run $30+ all-in, so this must NOT clip it —
+# it catches only the extreme tail, and the halt is RECOVERABLE
+# (write_why_stopped → operator /retry). CONSEQUENCE: at $40 this would NOT
+# have stopped 78bd (~$27); a total cap low enough to catch it would clip
+# legit solves. The targeted anti-anchoring lever is therefore the
+# contrarian breaker (Tooth 1), NOT this ceiling. Override with COST_CAP_USD
+# (0 disables).
+DEFAULT_COST_CAP_USD = 40.0
+# Minimum TOTAL spend before a subagent dead-end signal is allowed to arm
+# the contrarian reframe (Tooth 1). The forensic point-of-no-return on job
+# 78bd896e0f3c was ~$7 all-in — below this, a "no primitive yet" reply is
+# just normal early exploration, not evidence of a locked-in frame. Override
+# with CONTRARIAN_MIN_COST_USD.
+DEFAULT_CONTRARIAN_MIN_COST_USD = 6.0
+
+# Generic author-tone "this is easy / take the shortcut" framing. When an
+# operator description minimizes difficulty or implies a cheap intended
+# path, an anchored model is likelier to lock onto a single "intended"
+# frame and grind past disconfirming evidence. Presence of any of these
+# arms the contrarian breaker (Tooth 1) so a dead-end signal can trigger a
+# reframe. Kept to GENERIC tone words ONLY — no phrasing lifted from the
+# one challenge that motivated it (job 78bd896e0f3c) — so it does not
+# overfit. A false arm is low-harm: it only adds ONE reframe user-turn, and
+# only when a dead-end signal ALSO fires past the spend threshold.
+_EASY_FRAMING_KEYWORDS = (
+    "easy", "simple", "trivial", "shortcut", "short cut",
+    "one line", "one-line", "one-liner", "beginner",
+    "warmup", "warm-up", "baby chal", "babyheap", "baby heap",
+)
+
+# Subagent-reply signals that a core premise of the current frame is
+# disconfirmed. Focused on high-precision markers ("no primitive",
+# "premise/assumption wrong", refute/disprove, "dead end", "structural
+# deadlock", "no viable path") to keep false positives low; the arm is
+# additionally gated by easy_framing + a spend threshold + one-shot.
+_DEADEND_REPLY_RE = re.compile(
+    r"no\s+(?:write|useful|viable|exploitable|working)\s+primitiv"
+    r"|(?:premise|assumption)\s+(?:is\s+|was\s+)?(?:wrong|false|incorrect|flawed|invalid)"
+    r"|(?:disprove|disproven|disproved|refute|refuted|contradict)"
+    r"|proven\s+(?:wrong|false|impossible)"
+    r"|structural\s+deadlock"
+    r"|dead[\s-]?end"
+    r"|no\s+(?:viable|working|feasible)\s+(?:path|chain|exploit|approach)"
+    r"|cannot\s+be\s+(?:exploited|solved)\s+as",
+    re.IGNORECASE,
+)
+
+
+def _detect_easy_framing(description: str | None) -> bool:
+    """True when the operator description leans on difficulty-minimizing or
+    shortcut-implying language (arms the contrarian reframe breaker). Pure
+    substring scan over GENERIC tone words — see `_EASY_FRAMING_KEYWORDS`."""
+    if not description:
+        return False
+    low = description.lower()
+    return any(kw in low for kw in _EASY_FRAMING_KEYWORDS)
 
 
 _TOKEN_KEYS = (
@@ -4183,6 +4329,10 @@ _STOP_KIND_HEADERS = {
         "Main turn blocked by the server-side Usage-Policy classifier "
         "(AUP) — session context poisoned; halted without an in-place retry"
     ),
+    "cost_cap": (
+        "Cumulative spend hit the cost-cap circuit breaker — halted to "
+        "bound runaway grinding on a non-converging run; recoverable via /retry"
+    ),
 }
 
 
@@ -4417,6 +4567,27 @@ def write_why_stopped(
                 "2. If it re-blocks every fresh attempt, the challenge class "
                 "(e.g. XSS-exfil / CSP-bypass) reliably trips the classifier "
                 "on main's own reasoning — not a code bug on our side.",
+            ]
+        elif stop_kind == "cost_cap":
+            out += [
+                "Cumulative spend (main + all subagents) reached the "
+                "`COST_CAP_USD` circuit breaker. This fires when a run keeps "
+                "spending without capturing a flag — often an anchored frame "
+                "that won't converge (the anti-AI false-negative class, where "
+                "the model mis-frames rather than hits a true dead-end). The "
+                "cap is a BACKSTOP, not a verdict on solvability. Options:",
+                "",
+                "1. **Read `report.md` + this file** — decide whether the "
+                "approach was genuinely converging or stuck on one frame that "
+                "subagent evidence had already disconfirmed.",
+                "2. **`/retry` (fresh start)** — a clean context is the most "
+                "reliable way to break an anchored frame the in-place session "
+                "could not abandon.",
+                "3. **Raise `COST_CAP_USD`** in `.env` and `/retry` if the "
+                "chal legitimately needs the spend (a hard multi-stage heap "
+                "solve can run several debuggers).",
+                "4. **`/retry` with a manual hint** that steers to a DIFFERENT "
+                "frame if your reading says the approach itself was wrong.",
             ]
         else:
             out += [
@@ -4871,9 +5042,28 @@ async def run_main_agent_session(
     # Module drives the fallback skeleton shape (web → HTTP probe, not a
     # pwn socket skeleton). Read once; tolerate a missing meta.
     try:
-        _fallback_module = (read_meta(job_id) or {}).get("module")
+        _meta_for_run = read_meta(job_id) or {}
     except Exception:
-        _fallback_module = None
+        _meta_for_run = {}
+    _fallback_module = _meta_for_run.get("module")
+    # Arm the contrarian reframe breaker (Tooth 1) when the operator's
+    # description leans on easy/shortcut framing — that tone correlates
+    # with anti-anchoring traps where a disconfirmed frame must be
+    # abandoned mid-run. Stored on the SHARED summary so the isolated-
+    # subagent spawn path (which sets contrarian_pending on a dead-end
+    # reply) can read it without a signature change. Framing-INDEPENDENT
+    # levers (the cost cap below) do not consult this.
+    try:
+        summary["easy_framing"] = _detect_easy_framing(
+            _meta_for_run.get("description")
+        )
+        if summary["easy_framing"]:
+            log_fn(
+                "[orchestrator] easy/shortcut framing detected in "
+                "description — contrarian reframe breaker armed (Tooth 1)"
+            )
+    except Exception:
+        summary["easy_framing"] = False
 
     last_sandbox: dict | None = None
     # Track retry hints across attempts so the next postjudge call can
@@ -4981,6 +5171,60 @@ async def run_main_agent_session(
     final_draft_pending = {"value": False}
     final_draft_used = {"value": False}
 
+    # ---- Cost-cap circuit breaker (Tooth 2) ----
+    # Framing-INDEPENDENT backstop against runaway grinding. The TRUE total
+    # spend is main's cumulative cost PLUS the subagent sum, and those live
+    # in two disjoint places: main runs in this SDK session (its cumulative
+    # total_cost_usd lands in summary["result"] at each turn boundary — the
+    # SDK reports it cumulatively, see the overwrite in agent_heartbeat),
+    # while every subagent runs in a SEPARATE CLI process whose cost is
+    # accumulated into summary["cost_usd"] on each spawn return
+    # (make_spawn_subagent_mcp ~L2569). main's cost is NEVER added to
+    # cost_usd, so we must sum both here — reading cost_usd alone would only
+    # gate on subagent spend and miss a main-heavy grind (few spawns, long
+    # self-loop) entirely. On breach we HALT with a RECOVERABLE
+    # write_why_stopped so the operator can /retry (ideally fresh-start)
+    # rather than pay for more of the same. Un-dismissible by the anchored
+    # model — pure orchestrator arithmetic on the shared summary. See
+    # DEFAULT_COST_CAP_USD for why the default is deliberately generous.
+    def _total_spend() -> float:
+        sub = 0.0
+        main = 0.0
+        try:
+            sub = float(summary.get("cost_usd", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            sub = 0.0
+        try:
+            main = float(
+                (summary.get("result") or {}).get("total_cost_usd", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            main = 0.0
+        return sub + main
+
+    cost_cap_fired = {"value": False}
+    cost_cap_pending = {"value": False}
+
+    def _maybe_cost_cap() -> None:
+        if cost_cap_fired["value"]:
+            return
+        try:
+            cap = float(os.environ.get("COST_CAP_USD", str(DEFAULT_COST_CAP_USD)))
+        except (TypeError, ValueError):
+            cap = DEFAULT_COST_CAP_USD
+        if cap <= 0:
+            return
+        spent = _total_spend()
+        if spent < cap:
+            return
+        cost_cap_fired["value"] = True
+        cost_cap_pending["value"] = True
+        log_fn(
+            f"COST_CAP: total spend ${spent:.2f} (main + subagents) ≥ cap "
+            f"${cap:.2f} (COST_CAP_USD; 0=disable) — will halt after this "
+            f"turn boundary (recoverable via /retry)."
+        )
+
     # SHA of the script we last fed into a sandbox run. After injecting
     # postjudge retry feedback we capture the script's SHA; on the next
     # auto-run iteration we compare against the CURRENT SHA — if main
@@ -5040,6 +5284,13 @@ async def run_main_agent_session(
                         log_user_blocks(job_id, msg)
                     _maybe_soft_eject(summary.get("tool_calls", 0))
                     _maybe_scaffold_nudge(summary.get("tool_calls", 0))
+                    # Cost-cap backstop (Tooth 2): checked every msg so a
+                    # single runaway turn spawning many subagents can't blow
+                    # past the ceiling before a turn boundary. On breach we
+                    # break out and the turn-boundary handler halts.
+                    _maybe_cost_cap()
+                    if cost_cap_pending["value"]:
+                        break
                     # Budget check is SUPPRESSED during the FINAL_DRAFT
                     # turn — `tool_calls` and missing-artifact state
                     # carry over from the previous turn, so re-running
@@ -5208,6 +5459,46 @@ async def run_main_agent_session(
                 else:
                     return last_sandbox
 
+            # ---- Cost-cap halt (Tooth 2) — highest priority: stop the bleed ----
+            # Fires before every other turn-boundary handler. A recoverable
+            # hard stop: write WHY_STOPPED (stop_kind=cost_cap) + meta stop,
+            # then return so the caller collects whatever artifacts exist.
+            if cost_cap_pending["value"]:
+                cost_cap_pending["value"] = False
+                spent = _total_spend()
+                log_fn(
+                    f"[orchestrator] COST_CAP halt at ${spent:.2f} "
+                    f"(main + subagents) — writing WHY_STOPPED and returning "
+                    f"(recoverable via /retry)"
+                )
+                summary["judge_stop_reason"] = (
+                    f"cost cap reached (${spent:.2f} total ≥ COST_CAP_USD) — "
+                    f"halted to bound runaway spend on a non-converging run; "
+                    f"recoverable via /retry (ideally fresh-start)"
+                )
+                # Deliberate stop, NOT an agent error: follow the judge_stop /
+                # retry_hint_ignored precedent (judge_next_action=stop +
+                # judge_stop_reason) so the status finalizer resolves this to
+                # no_flag/stopped, not failed, and any flag in last_sandbox is
+                # still captured on the return below.
+                write_meta(
+                    job_id,
+                    judge_next_action="stop",
+                    judge_stop_reason=summary["judge_stop_reason"],
+                )
+                _snapshot_cost(summary, "COST_CAP")
+                write_why_stopped(
+                    work_dir,
+                    stop_kind="cost_cap",
+                    attempt_idx=attempt,
+                    max_attempts=max_retries,
+                    judge_out=judge_out,
+                    sandbox_result=last_sandbox,
+                    summary=summary,
+                    log_fn=log_fn,
+                )
+                return last_sandbox
+
             # ---- FINAL_DRAFT last-chance injection ----
             # Highest priority — budget already overrun and the
             # alternative is aborting the whole job. Always inject if
@@ -5237,6 +5528,23 @@ async def run_main_agent_session(
                 scaffold_nudge_pending["value"] = False
                 log_fn("[orchestrator] injecting scaffold-missing nudge")
                 await client.query(SCAFFOLD_MISSING_USER_TURN)
+                continue
+
+            # ---- Contrarian reframe injection (Tooth 1) ----
+            # An isolated subagent returned a premise-refuted / dead-end
+            # signal on an easy-framed job past the spend threshold (armed
+            # in make_spawn_subagent_mcp) — the exact shape of the anchoring
+            # trap. Inject ONE contrarian user-turn that de-commits main from
+            # its current frame and points it at a genuinely independent
+            # spawn or a reframe/concede. One-shot (contrarian_fired guards
+            # re-arming); does not halt — main keeps its turn budget.
+            if summary.get("contrarian_pending"):
+                summary["contrarian_pending"] = False
+                log_fn(
+                    "[orchestrator] injecting contrarian reframe user-turn "
+                    "(Tooth 1) — dead-end signal on an easy-framed job"
+                )
+                await client.query(CONTRARIAN_REFRAME_USER_TURN)
                 continue
 
             # ---- Decide whether to feed postjudge back to main ----
