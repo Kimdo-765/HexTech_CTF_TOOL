@@ -385,6 +385,12 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
 _TASKS: dict[str, "asyncio.Task"] = {}
 
 
+def _is_terminal(job_id: str) -> bool:
+    """True if the job's meta.status is a terminal state (the run is over)."""
+    meta = _read_json(JOBS_DIR / Path(job_id).name / "meta.json")
+    return meta.get("status") in _TERMINAL
+
+
 def ensure_monitor(job_id: str) -> None:
     """Start a monitor task for job_id if none is alive. Idempotent.
     Must be called from within the API's asyncio loop."""
@@ -392,6 +398,19 @@ def ensure_monitor(job_id: str) -> None:
         return
     t = _TASKS.get(job_id)
     if t is not None and not t.done():
+        return
+    # Don't spin up a LIVE monitor for a job that's already terminal. The run
+    # is over and run.log won't grow, so a fresh task would only re-emit
+    # stage/flag/terminal (prev_* start at None) and re-narrate the tail —
+    # which is exactly the "monitor keeps working after the job ends" bug
+    # (job cff9474c35cf): the route calls ensure_monitor on every GET
+    # /monitor and every SSE /stream open, neither status-gated, so each UI
+    # reconnect to a finished job spawned a fresh short-lived task that
+    # re-appended duplicate terminal/stage/flag entries. The route serves
+    # monitor.jsonl history directly, so a finished job's feed still renders
+    # in full without any live task. (The supervisor already filters terminal
+    # jobs; this closes the same gap for the two route call sites.)
+    if _is_terminal(job_id):
         return
     try:
         loop = asyncio.get_running_loop()
