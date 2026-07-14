@@ -975,6 +975,70 @@ mark.log-hit {
   background: #161b22;
 }
 
+/* --- Monitor view: Run-log|Monitor tabs, language select, feed -------- */
+.rl-viewtabs { display: inline-flex; gap: 2px; margin-left: 0.5rem; flex: 0 0 auto; }
+.rl-viewtab {
+  background: #161b22; color: #8b949e;
+  border: 1px solid #30363d; border-radius: 5px;
+  padding: 0.12rem 0.6rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem; cursor: pointer; user-select: none;
+}
+.rl-viewtab:hover { color: #f0f6fc; border-color: #484f58; }
+.rl-viewtab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.monitor-lang {
+  margin-left: 0.4rem; flex: 0 0 auto;
+  background: #21262d; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px;
+  padding: 0.1rem 0.35rem; font-size: 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+.monitor-lang:focus { outline: none; border-color: #58a6ff; }
+
+/* view switching: show the raw log OR the monitor feed, plus the controls
+   relevant to each. .run-log-search pushes right via margin-left:auto, so
+   when it's hidden the language select keeps that alignment. */
+.run-log-window[data-view="log"] .monitor-feed { display: none; }
+.run-log-window[data-view="monitor"] .run-log { display: none; }
+.run-log-window[data-view="monitor"] .run-log-search,
+.run-log-window[data-view="monitor"] .run-log-search-count { display: none; }
+.run-log-window[data-view="log"] .monitor-lang { display: none; }
+.run-log-window[data-view="monitor"] .monitor-lang { margin-left: auto; }
+
+.monitor-feed {
+  background: #0b0d12;
+  max-height: 520px; min-height: 120px;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem 1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem; line-height: 1.5;
+}
+.mon-empty { color: #6e7681; padding: 1.2rem 0.4rem; text-align: center; }
+.mon-row {
+  display: flex; align-items: baseline; gap: 0.5rem;
+  padding: 0.28rem 0.35rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  border-left: 3px solid transparent;
+}
+.mon-row:hover { background: rgba(255, 255, 255, 0.02); }
+.mon-ico { flex: 0 0 auto; font-size: 0.7rem; }
+.mon-time { flex: 0 0 auto; color: #6e7681; font-size: 0.7rem; }
+.mon-kind {
+  flex: 0 0 auto; font-size: 0.62rem; text-transform: uppercase;
+  letter-spacing: 0.4px; color: #8b949e;
+  background: #161b22; border: 1px solid #21262d; border-radius: 3px;
+  padding: 0 0.3rem;
+}
+.mon-text { flex: 1 1 auto; color: #d6d3c0; word-break: break-word; }
+.mon-good { border-left-color: #2ea043; }
+.mon-good .mon-text { color: #7ee787; }
+.mon-warn { border-left-color: #d29922; }
+.mon-warn .mon-text { color: #e3b341; }
+.mon-err  { border-left-color: #f85149; }
+.mon-err  .mon-text { color: #ff7b72; }
+.mon-info { border-left-color: #30363d; }
+
 /* The <pre.run-log> sitting inside the window frame */
 .run-log-window .run-log {
   background: #0b0d12;
