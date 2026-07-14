@@ -277,6 +277,12 @@ function _openLiveStream(id) {
       _renderSdkEvent(id, JSON.parse(e.data));
     } catch (_) {}
   });
+  es.addEventListener("monitor", (e) => {
+    if (liveStreamJobId !== id) return;
+    try {
+      _appendMonitorEntry(id, JSON.parse(e.data));
+    } catch (_) {}
+  });
   es.addEventListener("backfill_done", () => {
     liveStreamConnected = true;
     // Now that the live stream is providing events, widen the poll
@@ -345,6 +351,88 @@ function _setRunlogTz(tz) {
 function _localTzName() {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "local"; }
   catch (_) { return "local"; }
+}
+
+// --- MONITOR view: curated, LLM-narrated signal feed over run.log --------
+// A per-job monitor task (api-side) filters run.log to meaningful signals and
+// narrates each batch in every configured language; entries stream over the
+// SSE `monitor` channel and back-fill from /api/jobs/<id>/monitor. The run-log
+// window has a Run-log|Monitor view toggle + a language <select>. Both prefs
+// persist like runlogTz.
+let monitorView = (() => {
+  try { return localStorage.getItem("monitor_view") === "1"; }
+  catch (_) { return false; }
+})();
+let monitorLang = (() => {
+  try { return localStorage.getItem("monitor_lang") || "ko"; }
+  catch (_) { return "ko"; }
+})();
+function _setMonitorView(on) {
+  monitorView = !!on;
+  try { localStorage.setItem("monitor_view", monitorView ? "1" : "0"); } catch (_) {}
+  if (selectedJob) renderJob(selectedJob, { force: true });
+}
+function _setMonitorLang(lang) {
+  monitorLang = lang || "ko";
+  try { localStorage.setItem("monitor_lang", monitorLang); } catch (_) {}
+  if (selectedJob) renderJob(selectedJob, { force: true });
+}
+
+const _MON_SEV_ICON = { good: "🟢", info: "●", warn: "▲", err: "■" };
+
+function _fmtMonTime(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    if (runlogTz === "local") return d.toLocaleTimeString([], { hour12: false });
+    return d.toISOString().slice(11, 19);  // UTC HH:MM:SS
+  } catch (_) { return ""; }
+}
+
+function _monText(entry, lang) {
+  const t = entry && entry.text;
+  if (!t) return "";
+  if (typeof t === "string") return t;
+  return t[lang] || t.en || t.ko
+    || Object.values(t).find((v) => typeof v === "string" && v) || "";
+}
+
+function _monRowHtml(entry, lang) {
+  const sev = entry.sev || "info";
+  const kind = entry.kind || "";
+  const time = _fmtMonTime(entry.ts);
+  const text = _monText(entry, lang);
+  const raw = Array.isArray(entry.raw) ? entry.raw.join("\n") : "";
+  return `<div class="mon-row mon-${escapeHtml(sev)}" title="${escapeHtml(raw)}">`
+    + `<span class="mon-ico">${_MON_SEV_ICON[sev] || "●"}</span>`
+    + `<span class="mon-time">${escapeHtml(time)}</span>`
+    + `<span class="mon-kind mon-kind-${escapeHtml(kind)}">${escapeHtml(kind)}</span>`
+    + `<span class="mon-text">${escapeHtml(text)}</span>`
+    + `</div>`;
+}
+
+function renderMonitorEntries(entries, lang) {
+  if (!entries || !entries.length) {
+    return `<div class="mon-empty">아직 모니터 해설이 없습니다 · no monitor commentary yet</div>`;
+  }
+  return entries.map((e) => _monRowHtml(e, lang)).join("");
+}
+
+function _appendMonitorEntry(id, payload) {
+  // Backfilled entries already arrived via renderJob's /monitor fetch.
+  if (payload && payload.backfill) return;
+  const feed = document.querySelector(
+    `.monitor-feed[data-job-id="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`,
+  );
+  if (!feed) return;
+  const empty = feed.querySelector(".mon-empty");
+  if (empty) empty.remove();
+  const wasAtBottom =
+    feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 12;
+  feed.insertAdjacentHTML("beforeend", _monRowHtml(payload, monitorLang));
+  while (feed.children.length > 800) feed.removeChild(feed.firstChild);
+  if (wasAtBottom) feed.scrollTop = feed.scrollHeight;
 }
 // Lightweight 1-second tick that updates ONLY the timing pill's
 // textContent on running jobs. Independent of pollTimer (which
@@ -1629,6 +1717,23 @@ async function renderJob(id, opts = {}) {
   const logRes = await fetch(`${API}/jobs/${id}/log?tail=262144`);
   const log = await logRes.text();
 
+  // Curated MONITOR feed (LLM-narrated signal commentary). Fetched every
+  // render so it stays authoritative; live SSE `monitor` events fill the gap
+  // between polls. Hitting this endpoint also ensures the job's monitor task
+  // is running api-side. Language variants live in each entry — switching
+  // language re-renders from the same data, no refetch.
+  let monitorEntries = [];
+  try {
+    const mr = await fetch(`${API}/jobs/${id}/monitor?tail=400`);
+    if (mr.ok) monitorEntries = (await mr.json()).entries || [];
+  } catch (_) {}
+  const monitorFeedHTML = renderMonitorEntries(monitorEntries, monitorLang);
+  const prevMonFeed = detail.querySelector(".monitor-feed");
+  const prevMonAtBottom = prevMonFeed
+    ? (prevMonFeed.scrollTop + prevMonFeed.clientHeight >= prevMonFeed.scrollHeight - 12)
+    : true;
+  const prevMonScrollTop = prevMonFeed ? prevMonFeed.scrollTop : 0;
+
   // Preserve log scroll position across re-renders. If the user was already
   // at (or near) the bottom, snap to bottom after re-render so new entries
   // are visible (tail behavior). Otherwise keep their scroll position.
@@ -2081,21 +2186,31 @@ async function renderJob(id, opts = {}) {
       <div class="sdk-live-feed"></div>
     </div>
     <h4>Run log <small style="color:#8b949e;font-weight:normal">(auto-follows when scrolled to bottom)</small></h4>
-    <div class="run-log-window">
+    <div class="run-log-window" data-view="${monitorView ? "monitor" : "log"}">
       <div class="run-log-titlebar">
         <span class="run-log-dot run-log-dot-r"></span>
         <span class="run-log-dot run-log-dot-y"></span>
         <span class="run-log-dot run-log-dot-g"></span>
-        <span class="run-log-title">job ${escapeHtml(id)} — ${escapeHtml(job.module || "?")}</span>
+        <div class="rl-viewtabs">
+          <button class="rl-viewtab ${monitorView ? "" : "active"}" data-action="view-log"
+                  title="Raw run log">Run log</button>
+          <button class="rl-viewtab ${monitorView ? "active" : ""}" data-action="view-monitor"
+                  title="Curated, LLM-narrated monitor commentary">Monitor</button>
+        </div>
         <input class="run-log-search" data-job-id="${id}" type="search"
                spellcheck="false" autocomplete="off"
                placeholder="🔎 filter log…" value="${escapeHtml(_logSearch[id] || "")}" />
         <span class="run-log-search-count" data-job-id="${id}"></span>
+        <select class="monitor-lang" data-action="monitor-lang" title="Monitor language">
+          <option value="ko" ${monitorLang === "ko" ? "selected" : ""}>한국어</option>
+          <option value="en" ${monitorLang === "en" ? "selected" : ""}>English</option>
+        </select>
         <button class="run-log-tz-toggle" data-action="toggle-tz"
-                title="Toggle run-log timestamps (UTC ↔ ${escapeHtml(_localTzName())})"
+                title="Toggle timestamps (UTC ↔ ${escapeHtml(_localTzName())})"
         >${runlogTz === "utc" ? "UTC" : "Local"}</button>
       </div>
       <pre class="run-log" data-job-id="${id}" data-status="${escapeHtml(job.status || "")}">${log ? colorizeRunLog(log, job.started_at) : "(empty)"}</pre>
+      <div class="monitor-feed" data-job-id="${id}">${monitorFeedHTML}</div>
       ${livenessPill || tokensPill ? `
       <div class="run-log-footer">
         ${livenessPill}
@@ -2137,6 +2252,14 @@ async function renderJob(id, opts = {}) {
       newPre.scrollTop = newPre.scrollHeight;
     } else {
       newPre.scrollTop = prevScrollTop;
+    }
+  }
+  const newMonFeed = detail.querySelector(".monitor-feed");
+  if (newMonFeed) {
+    if (!isSameJob || prevMonAtBottom) {
+      newMonFeed.scrollTop = newMonFeed.scrollHeight;
+    } else {
+      newMonFeed.scrollTop = prevMonScrollTop;
     }
   }
   // Restore the modal-body scroll for same-job re-renders so reading the
@@ -2317,6 +2440,20 @@ async function renderJob(id, opts = {}) {
     tzBtn.addEventListener("click", () => {
       _setRunlogTz(runlogTz === "utc" ? "local" : "utc");
     });
+  }
+
+  // Run-log ↔ Monitor view toggle + monitor language select.
+  const viewLogBtn = detail.querySelector('.rl-viewtab[data-action="view-log"]');
+  if (viewLogBtn) {
+    viewLogBtn.addEventListener("click", () => { if (monitorView) _setMonitorView(false); });
+  }
+  const viewMonBtn = detail.querySelector('.rl-viewtab[data-action="view-monitor"]');
+  if (viewMonBtn) {
+    viewMonBtn.addEventListener("click", () => { if (!monitorView) _setMonitorView(true); });
+  }
+  const monLangSel = detail.querySelector('.monitor-lang[data-action="monitor-lang"]');
+  if (monLangSel) {
+    monLangSel.addEventListener("change", () => _setMonitorLang(monLangSel.value));
   }
 
   const sdkLiveBtn = detail.querySelector('.sdk-live-toggle[data-action="toggle-sdk-live"]');

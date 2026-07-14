@@ -420,6 +420,39 @@ def get_job_log(job_id: str, tail: int | None = None):
     return PlainTextResponse(log.read_text(errors="replace"))
 
 
+@router.get("/{job_id}/monitor")
+async def get_job_monitor(job_id: str, tail: int | None = None):
+    """Curated MONITOR feed for a job — the filtered, LLM-narrated signal
+    entries from <job>/monitor.jsonl. Each entry carries a `text` map keyed
+    by language ({"ko": "...", "en": "..."}); the client picks which to show,
+    so switching language is instant with no refetch. With ?tail=N, returns
+    only the last N entries. Opening this (or the SSE /stream) also ensures
+    the job's live monitor task is running."""
+    safe = _validate_job_id(job_id)
+    try:
+        from modules._monitor import ensure_monitor
+        ensure_monitor(safe)
+    except Exception:
+        pass
+    p = JOBS_DIR / safe / "monitor.jsonl"
+    entries: list[dict] = []
+    if p.exists():
+        try:
+            for line in p.read_text(errors="replace").splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    entries.append(json.loads(s))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            entries = []
+    if tail and tail > 0:
+        entries = entries[-tail:]
+    return {"entries": entries}
+
+
 _TERMINAL_META_STATUSES = {"finished", "failed", "no_flag", "stopped"}
 
 
@@ -453,6 +486,13 @@ async def stream_job(job_id: str, request: Request):
         return f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
 
     async def event_gen():
+        # Opening the live stream also guarantees the job's monitor task is
+        # running (belt-and-suspenders with the always-on supervisor).
+        try:
+            from modules._monitor import ensure_monitor
+            ensure_monitor(safe)
+        except Exception:
+            pass
         from redis import asyncio as aioredis
         r = aioredis.from_url(REDIS_URL)
         pubsub = r.pubsub()
@@ -464,6 +504,7 @@ async def stream_job(job_id: str, request: Request):
                 f"job:{safe}:log",
                 f"job:{safe}:meta",
                 f"job:{safe}:sdk",
+                f"job:{safe}:monitor",
             )
 
             # --- Backfill --------------------------------------------
@@ -508,6 +549,25 @@ async def stream_job(job_id: str, request: Request):
                             "ts": ts,
                             "line": body,
                         })
+            except Exception:
+                pass
+
+            # Backfill the curated monitor feed (last 400 entries) so the
+            # Monitor view renders instantly on connect, same as the run log.
+            try:
+                mon = jd / "monitor.jsonl"
+                if mon.exists():
+                    lines = mon.read_text(errors="replace").splitlines()[-400:]
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        entry["backfill"] = True
+                        yield sse("monitor", entry)
             except Exception:
                 pass
 

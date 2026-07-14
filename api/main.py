@@ -77,6 +77,20 @@ app.include_router(retry_routes.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(exploits_routes.router, prefix="/api/exploits", tags=["exploits"])
 
 
+# --- live per-job MONITOR --------------------------------------------------
+# Curated, LLM-narrated signal feed over each running job's run.log, written
+# to <job>/monitor.jsonl and streamed via the SSE `monitor` channel. The
+# supervisor sweeps running jobs and ensures one monitor task each (always-on;
+# opt out with MONITOR_ENABLED=0). Best-effort — never blocks startup.
+@app.on_event("startup")
+async def _start_monitor_supervisor():
+    try:
+        from modules._monitor import start_supervisor
+        start_supervisor()
+    except Exception:
+        pass
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "auth_required": bool(str(get_setting("auth_token") or "").strip())}
