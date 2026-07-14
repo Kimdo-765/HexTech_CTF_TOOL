@@ -58,31 +58,43 @@ DEFAULT_TIMEOUT_S = 300
 # that still can't clip a solver the server itself would let finish.
 CRYPTO_SAGE_TIMEOUT_S = 6000
 CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
+# web solvers routinely wait on slow round-trips the 300s default clips:
+# an XSS/SSRF bot fetch + OOB callback settle, a multi-request chain, or a
+# slow brute-force against a rate-limited endpoint. Give the whole web path
+# a 3000s (50-min) ceiling. Like the crypto-sage ceiling it's a CEILING, not
+# a fixed wait — a fast web solve exits the instant it finishes and pays
+# nothing; the stall watchdog + hard timeout still bound a genuinely stuck run.
+WEB_TIMEOUT_S = 3000
 DEFAULT_MEM = "2g"
 
 
 def _resolve_sandbox_timeout(module, use_sage, override, has_target) -> int:
     """Resolve the sandbox HARD-timeout (seconds) for one run.
 
-    Only the crypto `.sage` path is widened, split on offline vs remote-timed:
+    Two module paths are widened past the 300s default:
       * crypto `.sage`, NO target (offline GB/resultant/LLL) → CRYPTO_SAGE_TIMEOUT_S
         (6000s) — a local algebraic solve can legitimately run many minutes.
       * crypto `.sage`, WITH a remote target → CRYPTO_SAGE_REMOTE_TIMEOUT_S
         (900s) — the server's per-connection window bounds it regardless, so a
         100-min ceiling is pointless (job 4fc37cfcd04a burned the full 6000s
         producing zero output against a 150s server budget).
-    An explicit `exploit_timeout_seconds` override is honored up to
-    CRYPTO_SAGE_TIMEOUT_S on EITHER crypto-sage branch (so an operator can lift a
-    remote solve above 900s when a challenge genuinely needs it). EVERY other
-    path — all modules' python3 runs, any non-crypto `.sage` — keeps the
-    historical 300s default / 1800s override cap byte-for-byte. `override` is
-    meta.exploit_timeout_seconds (None / str / int / junk; ≤0 or unparseable →
-    ignored); `has_target` is bool(target) at the call site.
+      * web (any run) → WEB_TIMEOUT_S (3000s) — bot fetch + OOB callback settle,
+        multi-request chains, and rate-limited brute force routinely outlast 300s.
+    An explicit `exploit_timeout_seconds` override is honored up to the branch's
+    cap (CRYPTO_SAGE_TIMEOUT_S on crypto-sage, WEB_TIMEOUT_S on web) so an
+    operator can lift or lower it within that ceiling. EVERY other path — all
+    non-web / non-crypto-sage python3 runs — keeps the historical 300s default /
+    1800s override cap byte-for-byte. `override` is meta.exploit_timeout_seconds
+    (None / str / int / junk; ≤0 or unparseable → ignored); `has_target` is
+    bool(target) at the call site.
     """
     is_crypto_sage = (module == "crypto") and bool(use_sage)
     if is_crypto_sage:
         base = CRYPTO_SAGE_REMOTE_TIMEOUT_S if has_target else CRYPTO_SAGE_TIMEOUT_S
         cap = CRYPTO_SAGE_TIMEOUT_S
+    elif module == "web":
+        base = WEB_TIMEOUT_S
+        cap = WEB_TIMEOUT_S
     else:
         base = DEFAULT_TIMEOUT_S
         cap = 1800
