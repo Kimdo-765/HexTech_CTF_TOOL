@@ -82,8 +82,8 @@ unlimited). See [Retry / Resume](#retry--resume).
 | **Pwn** | ghiant decomp + ghiant xrefs (cached Ghidra project) + chal-libc-fix base-image lib extraction + GEF gdb + debugger agent → Claude analysis → `exploit.py` | exploit.py + report.md |
 | **Forensic** | sleuthkit + qemu-img + Volatility 3 artifact sweep → optional Claude summary | summary.json + artifacts/ + report.md |
 | **Misc** | binwalk + foremost + exiftool + steghide + zsteg + pngcheck + qpdf → Claude triage | findings.json + extracted/ + report.md |
-| **Crypto** | Claude analyzes source → writes `solver.py` using gmpy2/sympy/z3/pycryptodome (or `solver.sage` with optional SageMath sandbox) | solver.py + report.md |
-| **Reversing** | ghiant decomp + xrefs + debugger agent → Claude reverses logic → `solver.py` | solver.py + report.md |
+| **Crypto** | deterministic no-LLM pre-analysis (RSA auto-factor, cipher/param extraction, remote-banner probe) → Claude analyzes source → writes `solver.py` using gmpy2/sympy/z3/pycryptodome/fpylll (or `solver.sage` with optional SageMath sandbox) | solver.py + report.md |
+| **Reversing** | ghiant decomp + xrefs + debugger agent → Claude reverses logic → `solver.py`. ELF plus Windows/PE & managed-.NET (mono / ilspycmd) and headless native-PE run under Wine (experimental) | solver.py + report.md |
 
 For Web/Pwn/Crypto/Rev, an optional `auto_run` checkbox executes the produced
 script in a sandboxed `runner` container (network-isolated unless a remote
@@ -112,7 +112,7 @@ full list).
 
 ## Architecture
 
-Seven Claude-driven roles, each with its own context window:
+Eight Claude-driven roles, each with its own context window:
 
 | Role | Where it runs | Tools | Purpose |
 |---|---|---|---|
@@ -123,6 +123,7 @@ Seven Claude-driven roles, each with its own context window:
 | **judge** (peer subagent + lifecycle gate) | own subprocess when invoked by main · separate orchestrator-owned session around every `auto_run` execution | `Read` `Bash` `Glob` `Grep` (no Write) | Pre-finalize hang/parse review when invoked by main · pre/supervise/post lifecycle around the runner sandbox · pinned to latest model |
 | **debugger** (peer subagent) | own `claude` CLI subprocess spawned via MCP | `Read` `Write` `Edit` `Bash` `Glob` `Grep` | Dynamic analysis under gdb (GEF) / strace / ltrace / qemu-user. Auto-extracts the chal's libc + ld + NEEDED libs from the Dockerfile's base image via `chal-libc-fix`. Returns **strict JSON** `{observed, trace, conclusion, caveats}` |
 | **report phase** | terminal stateless `query()` after main finishes (no MCP, no tools, no system_prompt bloat) | `allowed_tools=[]` (pure transformation) | Converts main's `report.md` + `exploit.py`/`solver.py` prose into module-specific `findings.json` (pwn / web / crypto / rev each have their own schema). Defaulted to sonnet for cost — rote pattern-matching doesn't need opus |
+| **monitor** | `api` container, always-on supervisor (one background task per running job) | `allowed_tools=[]` (narration only) | Filters `run.log` to meaningful SIGNAL events and narrates "what just happened" in one line per configured language. Pinned to a cheap model (`MONITOR_MODEL`, default sonnet — NEVER the job's opus). Output → `<job>/monitor.jsonl` + Redis `job:<id>:monitor` for the live UI panel. See [MONITOR](#monitor-modules_monitorpy) |
 
 ```
    browser :8000
@@ -168,6 +169,11 @@ Seven Claude-driven roles, each with its own context window:
             │ (per-job, removed)        │
             └───────────────────────────┘
 ```
+
+Not shown above: an always-on **monitor** in the `api` container — one
+background narration task per running job that turns the raw `run.log`
+into a curated, per-language commentary feed (see
+[monitor](#monitor-modules_monitorpy)).
 
 ### reviewer (`api/routes/retry.py`)
 
@@ -416,10 +422,13 @@ backstops still run around the runner:
   are recorded into `result.json` so the retry reviewer can
   reference them. **Never blocks** the run — main already
   owned the gate.
-- **supervise** — single one-shot when output stalls 60 s while
-  still alive. Same Claude session as prejudge (resumed via
-  `session_id`), so judge sees its earlier findings while making
-  the kill/continue call.
+- **supervise** — asks judge whether to kill when output stalls 60 s
+  while still alive. Single one-shot for short runs; for long sandbox
+  runs (`timeout_s > 1800`, e.g. crypto-sage offline) it re-asks
+  **periodically** so a genuinely-stuck long solve is killed early
+  instead of burning the full ceiling in silence. Same Claude session
+  as prejudge (resumed via `session_id`), so judge sees its earlier
+  findings while making the kill/continue call.
 - **postjudge** — categorize the finished run as one of `success` /
   `partial` / `hung` / `parse_error` / `network_error` / `crash` /
   `timeout` / `unknown` and emit a retry-ready hint.
@@ -462,6 +471,8 @@ Loop terminates on the FIRST hit among:
   unrecoverable" verdict — final authority, overrides remaining budget)
 - postjudge produced no actionable retry_hint
 - main's SDK session errored / hit `INVESTIGATION_BUDGET`
+- total spend (main + subagents) hit the cost-cap circuit breaker
+  (`COST_CAP_USD`) — recoverable halt, see [circuit breaker](#anti-anchoring-circuit-breaker)
 - `AUTO_RETRY_MAX` cap reached (when configured to a non-negative N)
 - user pressed Stop / soft / hard timeout
 
@@ -470,7 +481,7 @@ Loop terminates on the FIRST hit among:
 Any time the auto-retry loop exits **without** a flag, the
 orchestrator writes a human-readable `WHY_STOPPED.md` into the work
 tree (carried to the job dir alongside `report.md` / `findings.json`
-/ `THREAT_MODEL.md`). One of four reason classes is recorded — each
+/ `THREAT_MODEL.md`). One of several reason classes is recorded — each
 maps to a different operator playbook the file spells out:
 
 | `stop_kind` | Trigger | Operator playbook the doc suggests |
@@ -479,6 +490,10 @@ maps to a different operator playbook the file spells out:
 | `budget_exhausted` | `AUTO_RETRY_MAX` cap hit; judge was still cooperative | `/retry` for another budget, or raise `AUTO_RETRY_MAX` if convergence looks plausible |
 | `no_hint` | Postjudge couldn't propose a concrete fix | `/retry` with manual hint, or run exploit.py against the live target outside the sandbox |
 | `agent_error` | Main's SDK session died (SIGKILL / timeout / transport) | `/retry` — the carried work tree + fresh session usually clears transient SDK issues |
+| `retry_hint_ignored` | Main returned without editing the script after a postjudge hint (a re-run would be a guaranteed-fail repeat) | `/retry` with a manual hint, or read the script + diagnosis and edit by hand |
+| `unsolvable_by_analysis` | Artifacts self-admit no working chain and prejudge `flag_likelihood≈0` (confident true-negative, not a near-miss) | Read `report.md` / `chain.json` — any `verified=true` primitive is still real; `/retry` only with a demonstrably-missed primitive |
+| `policy_refusal` | Main's turn was blocked by the server-side Usage-Policy classifier (AUP) — retrying in place re-blocks | `/retry` — a fresh SDK session is force-started automatically and usually sheds the poison |
+| `cost_cap` | Total spend (main + subagents) hit `COST_CAP_USD` — bounds a non-converging / anchored run | `/retry` (fresh start breaks an anchored frame), or raise `COST_CAP_USD` if the chal legitimately needs the spend |
 
 Each `WHY_STOPPED.md` consolidates the judge's structured fields —
 `stop_reason`, `failure_code`, `specific_diagnosis`, `what_worked`,
@@ -487,6 +502,33 @@ plus the last sandbox `stdout`/`stderr` tail, so a human operator
 doesn't have to reconstruct the picture from `run.log` + `meta.json`.
 The `/retry` flow copies the file along with the rest of `work/`, so
 the next attempt's reviewer sees the prior diagnosis as context.
+
+### Anti-anchoring circuit breaker
+
+A mid-run guard against the failure mode where an anchored agent keeps
+grinding a frame that the evidence has already disconfirmed (e.g. an
+anti-AI chal that names a known challenge to bait the "intended"
+solution, then modifies one line so it no longer applies). Two mechanical
+teeth in `run_main_agent_session`, both operating on the shared running
+cost meter (main + every subagent):
+
+- **Cost cap (framing-independent backstop).** When total spend crosses
+  `COST_CAP_USD` (default **40**, `0` disables), the loop HALTS with a
+  recoverable `WHY_STOPPED.md` (`stop_kind=cost_cap`) so the operator can
+  `/retry` — ideally fresh-start — instead of paying for more of the same.
+  Deliberately generous: a legit hard multi-debugger heap solve can run
+  $30+ all-in, so this catches only the extreme tail.
+- **Contrarian reframe (targeted).** When an isolated subagent returns a
+  premise-refuted / dead-end signal AND the job is *easy-/shortcut-framed*
+  (the operator description leans on difficulty-minimizing words) AND
+  total spend is past `CONTRARIAN_MIN_COST_USD` (default **6**), the loop
+  injects ONE contrarian user-turn that de-commits main from its current
+  frame and points it at a genuinely independent subagent or a
+  reframe/concede. One-shot per job.
+
+Both are env-overridable; the cost cap is the un-dismissible bound, the
+contrarian turn is what actually targets the anchoring. Neither guarantees
+a solve — the value is *bound-the-loss-or-reframe*, not a fix.
 
 ### Fallback artifact safety net
 
@@ -562,6 +604,33 @@ GEF (single-file modern gdb plugin) is auto-loaded via
 `/etc/gdb/gdbinit`; `gdb -nx` disables it for plain gdb. Worker also
 ships `gdb-multiarch`, `qemu-aarch64-static` / `qemu-arm-static` for
 foreign-arch chals, `patchelf`, `strace`, `ltrace`.
+
+### monitor (`modules/_monitor.py`)
+
+A live, LLM-narrated commentary feed over `run.log`. A raw run log is
+~96% `TOOL` / `TOOL_RESULT` echo, so reading it live to understand "what
+is the agent actually doing" means eyeballing noise. The monitor filters
+`run.log` to meaningful SIGNAL events (stage/status changes, `AGENT:`
+prose, subagent lifecycle, judge / prejudge / retry, errors,
+`FLAG_CANDIDATE`), batches them, and asks a cheap model to narrate WHAT
+JUST HAPPENED in one short line — in every configured language.
+
+- **HYBRID.** Structured meta changes (stage / status / flag) get a
+  deterministic, localized entry (no LLM); prose signal batches get an
+  LLM narration.
+- **Always-on.** An async supervisor started from `api.main` sweeps
+  running jobs every few seconds and ensures one monitor task per job, so
+  commentary is generated even if nobody is watching. It never spins a
+  task for a job that is already terminal. Opt out with `MONITOR_ENABLED=0`.
+- **Cheap + clean.** Pinned to `MONITOR_MODEL` (default `claude-sonnet-4-6`,
+  NEVER the job's own opus). Runs in the `api` container (has SDK + auth +
+  redis, free of the worker's exploit-run glibc pollution).
+- **Output.** Appended to `<job>/monitor.jsonl` (each entry a `{lang: line}`
+  map keyed by `MONITOR_LANGS`, default `ko,en`) and published to Redis
+  `job:<id>:monitor` for the SSE stream. The UI renders it beside the raw
+  run log with a language selector — switching language is instant, no
+  refetch. Best-effort: every failure is swallowed and never touches
+  `run.log` / `meta.json`.
 
 ## Agent architecture
 
@@ -768,6 +837,11 @@ All knobs live in two places:
    | `USE_ISOLATED_SUBAGENTS` | `1` | when `1` (default), main delegates via the MCP tool `mcp__team__spawn_subagent` — each subagent runs in its own `claude` CLI subprocess and only the final-text reply lands in main's history. Set to `0` for the legacy in-process `agents={}` path (kept as a fast rollback). See [Subagent isolation](#subagent-isolation-default-on). |
    | `SUBAGENT_SPAWN_CAP` | `0` | runaway cost guard. `0` = unlimited (recommended — aggressive delegation is encouraged for context efficiency, and the orchestrator already auto-spawns a recon subagent before main's first turn). Set to a positive int to bound how many delegations one run can make. |
    | `ENABLE_EXPLOIT_LIBRARY_HINT` | `0` | when `1`, every job's user prompt is prepended with a short paragraph listing same-module entries from the operator-curated [Exploit Library](#exploit-library) at `/data/exploits/`. OFF by default — flip on once the library has curated entries you trust. |
+   | `COST_CAP_USD` | `40` | total-spend circuit breaker (main + subagents). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). Generous by design — catches only a runaway tail. `0` disables. See [circuit breaker](#anti-anchoring-circuit-breaker). |
+   | `CONTRARIAN_MIN_COST_USD` | `6` | minimum total spend before a subagent dead-end signal can arm the one-shot contrarian-reframe user-turn (only on easy-/shortcut-framed jobs). See [circuit breaker](#anti-anchoring-circuit-breaker). |
+   | `MONITOR_ENABLED` | `1` | live per-job [monitor](#monitor-modules_monitorpy) narration feed. `0` disables the always-on supervisor and all narration. |
+   | `MONITOR_MODEL` | `claude-sonnet-4-6` | cheap model pinned for monitor narration — never the job's opus. |
+   | `MONITOR_LANGS` | `ko,en` | comma-separated languages the monitor narrates each signal batch in (the UI picks which to show). |
 
 2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides `.env`
    without restart for: Anthropic API key, Claude model, Auth token, Job TTL,
@@ -833,6 +907,7 @@ upload ──► /data/jobs/<id>/         ─► RQ enqueue
 | GET | `/api/jobs/{id}` | job meta |
 | GET | `/api/jobs/{id}/log[?tail=N]` | run log (text). `?tail=N` returns only the trailing N bytes (newline-aligned, used by the polling UI). |
 | GET | `/api/jobs/{id}/stream` | Server-Sent Events: live multiplex of `log` (every run.log line), `meta` (status / flag / token+turn deltas), and `sdk` (raw assistant blocks: text / thinking / tool_use / tool_result). On connect: replays current meta + the last ~256 KB of run.log marked `backfill:true`, then streams new events. 15 s `: ping` heartbeats; auto-closes on terminal status. Cookie/token auth via the standard middleware. |
+| GET | `/api/jobs/{id}/monitor[?tail=N]` | curated [monitor](#monitor-modules_monitorpy) feed — the filtered, LLM-narrated signal entries from `<job>/monitor.jsonl`. Each entry carries a `text` map keyed by language, so the client switches language with no refetch. `?tail=N` returns only the last N. |
 | GET | `/api/jobs/{id}/result` | result JSON |
 | GET | `/api/jobs/{id}/file/{name}` | any artifact under the job dir |
 | DELETE | `/api/jobs/{id}` | delete one job (cancels queued/running) |
@@ -853,6 +928,7 @@ upload ──► /data/jobs/<id>/         ─► RQ enqueue
 | POST | `/api/jobs/{id}/resume` | hard-stop a queued/running job, then enqueue a fresh one with the same body shape as `/retry`; `hint` required here. Carries `./work/` + forks the prior SDK session. |
 | POST | `/api/jobs/{id}/resume/stream` | SSE-streamed resume. With `{"hint":"…"}` works exactly like `/resume`. With an empty body, calls the reviewer to write the hint first. Both modes carry `./work/`, fork the prior session, and prepend the `[RESUMING]` preamble. |
 | POST | `/api/jobs/{id}/continue` | continue a finished job IN PLACE (same job id / cwd / work tree / SDK session) with an operator note. Body `{"comment": "...", "target?": "..."}` — `comment` required. NOT a retry: no new job, no re-investigation. The note is folded in as priority guidance; the optional `target` updates `meta.target_url`. 409 if the job is still active (use Stop & resume instead). |
+| POST | `/api/jobs/{id}/stop` | halt a running/queued job WITHOUT deleting it — flips status to `stopped`, keeps the record + `./work/` so you can inspect, `/retry`, or `/resume` afterward |
 | POST | `/api/jobs/{id}/timeout/continue` | acknowledge the soft timeout — let the agent keep running |
 | POST | `/api/jobs/{id}/timeout/kill` | acknowledge the soft timeout — hard-stop the job |
 | POST | `/api/exploits/save` | copy a finished job's `report.md` + `exploit.py`/`solver.py` into the operator-curated library. Body `{"job_id": "...", "tags": [...], "notes": "...", "overwrite": true}`. Refuses jobs with no captured flag |
@@ -929,6 +1005,13 @@ HexTech_CTF_TOOL/
 - The auto-fallback skeleton (when a session ends without an exploit) is
   **web-shaped** — an HTTP probe of the target, not a pwntools socket
   skeleton.
+- **Sandbox timeout is 3000 s** (not the 300 s default): a bot fetch + OOB
+  callback settle, a multi-request chain, or a rate-limited brute force
+  routinely outlast 300 s. It's a ceiling — a fast solve exits immediately.
+- **Local end-to-end test.** When the challenge ships a Dockerfile, the
+  web module can spin the challenge itself in a local sibling container
+  (the worker has the docker socket) for full environment fidelity and a
+  true end-to-end exploit run, tearing it down afterward.
 
 ### Pwn
 - **Upload**: zip preferred (any zip / tar bundle containing the
@@ -1102,18 +1185,42 @@ HexTech_CTF_TOOL/
 - bulk_extractor is **not** included (Ubuntu 22.04 dropped the package).
 
 ### Crypto
+- **Deterministic pre-analysis (no LLM).** Before main's first turn a
+  zero-LLM pass (`modules/crypto/pre_analysis.py`) runs RSA factorization
+  attempts, cipher/param extraction, auto-solve of trivial classical
+  ciphers, and — for a remote target — a **banner pre-probe** that opens
+  one connection, captures the server's first bytes, and injects them so
+  the solver parses the REAL wire protocol instead of guessing. Results
+  are injected into the prompt; being pure code, this path is also
+  AUP-immune (a content-blocked classical chal can still capture the flag).
 - Solver runs in the worker by default; check **Use SageMath sandbox** to
   execute via the `sagemath/sagemath` image (supports lattice/Coppersmith).
 - Available libs in the runner sandbox: pycryptodome, gmpy2, sympy, z3-solver,
-  ecdsa, pwntools.
+  ecdsa, pwntools, **fpylll** (LLL / BKZ lattice reduction).
+- **Sandbox timeout** for a `.sage` solver is widened past the 300 s
+  default: **6000 s offline** (Gröbner / resultant / `small_roots` are
+  legitimately many minutes and silent) and **900 s** when a remote target
+  is set (the server's own window bounds it). Both are ceilings, overridable
+  per job via `meta.exploit_timeout_seconds`.
 
 ### Reversing
 - **Upload**: zip preferred (the API auto-extracts and picks the
   largest ELF/PE inside as the canonical `binary_name`, flattening
   it into `bin/` so the agent's `./bin/<name>` reference resolves
-  cleanly) or a bare single ELF/PE.
+  cleanly) or a bare single ELF/PE. Also proceeds on non-ELF/PE
+  artifacts and accepts a remote target (capture-remote-flag).
 - Reuses the `decompiler` image.
 - Solver auto-runs in the runner container if requested.
+- **Windows / PE & managed-.NET (experimental).** The worker image
+  carries a Windows-RE layer: `mono` (run .NET Framework 4.x assemblies),
+  `dotnet` (run modern .NET 5+), and `ilspycmd` (ILSpy — decompile managed
+  PE to near-source C#); plus a native-PE dynamic layer — **Wine** (x64 +
+  x86) running a real Windows PE headlessly under **Xvfb**, `import` to
+  screenshot a GUI PE that draws its flag, and `WINEDEBUG=+relay` to trace
+  Win32/GDI+ calls (use `frida` for native-Linux-ELF instrumentation, not
+  Wine shims). These tools are installed best-effort (WARN-masked) so a
+  failed resolve can never break the worker image — a given build may have
+  them present or absent; verified end-to-end on a real PE-hooking chal.
 
 ## Operational commands
 
@@ -1124,7 +1231,12 @@ docker compose logs -f worker     # tail worker logs
 docker compose ps                 # status
 
 # Source-code changes — restart is enough (no rebuild) because api,
-# worker, and modules are all bind-mounted:
+# worker, and modules are all bind-mounted. The deploy.sh helper does the
+# no-rebuild "apply the latest patch to the running stack" for you:
+./deploy.sh --changed             # restart only the services whose code changed
+                                  # (defers the worker restart while a job is
+                                  #  live; run ./deploy.sh --worker when idle)
+# ...or restart by hand:
 docker compose restart api        # api/routes/*, api/main.py changes
 docker compose restart worker     # modules/*, worker/runner.py changes
 
@@ -1538,7 +1650,9 @@ real flag, so placeholder-only jobs never enter the curated set.
   button) so the operator can submit fast in a CTF — a newly-found
   candidate bypasses the 5 s heartbeat throttle and is pushed on the SSE
   `meta` delta so it appears at once. This is a deterministic framework
-  scan (zero extra LLM tokens), not something the agent does.
+  scan (zero extra LLM tokens), not something the agent does. The
+  **FLAG FOUND / `[FLAG?]` alarms stay sticky** until you acknowledge them,
+  so a capture is never scrolled past unseen.
 - **UTC ↔ Local timestamp toggle**. Run-log titlebar has a button
   flipping `[HH:MM:SS]` between UTC (default, what the orchestrator
   writes to disk) and the user's local timezone. Choice persists in
@@ -1604,6 +1718,20 @@ real flag, so placeholder-only jobs never enter the curated set.
   result=green, error=red). 60-line FIFO, auto-tails to bottom when
   scrolled there, holds position when scrolled up. Click `hide` in
   the header to collapse; preference persists in `localStorage`.
+- **Live monitor commentary + language selector**. Beside the raw run
+  log, a curated [monitor](#monitor-modules_monitorpy) feed shows a cheap
+  model's one-line "what just happened" narration of each signal batch,
+  streamed over SSE. A language selector flips every entry between the
+  configured languages (`MONITOR_LANGS`, default ko/en) instantly — each
+  entry carries all languages, so switching is a client-side toggle with
+  no refetch.
+- **Stop button**. Halts a running/queued job WITHOUT deleting it — the
+  status flips to `stopped` and the record + `./work/` are kept, so you
+  can inspect artifacts and then `/retry` or `/resume`. Distinct from
+  Delete (which removes the job) and from the soft-timeout kill.
+- **Version / last-patch badge**. The header shows the running commit +
+  patch timestamp (stamped by `deploy.sh`) so an operator can confirm a
+  redeploy actually took effect rather than serving stale code.
 - **CLI live status (`scripts/job-status.sh <job_id>`)**. Single
   carriage-return-refreshed terminal line carrying status / stage /
   turns / token deltas (`↓in ↑out ⟳cache`) / cost / worker / log
