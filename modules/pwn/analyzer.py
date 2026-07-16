@@ -506,28 +506,23 @@ def _build_pre_recon_prompt(
             "  viable but mmap_threshold trick is shorter and more\n"
             "  reliable across libc versions."
         )
-        # FSOP magic / leak-via-buffered-output writeup search hint
-        # for the recon subagent. Main is isolated from WebSearch
-        # (USE_ISOLATED_SUBAGENTS=1 by default) but recon is not. If
-        # the chal has stdout setvbuf-unbuffered + an OOB write that
-        # could reach _IO_2_1_stdout_, instruct recon to surface
-        # `0xfbad1800`-style magic from public writeups instead of
-        # forcing main to re-derive it from glibc source.
+        # FSOP magic / leak-via-buffered-output note. Web research is
+        # disabled (anti-writeup), so this magic comes from the local
+        # catalog / the target's own libc, never a blog.
         parts.append(
-            "RECON SEARCH HINT (for the recon subagent, not for main):\n"
+            "FSOP-LEAK NOTE:\n"
             "  If chal source calls `setvbuf(stdout, NULL, _IONBF, 0)`\n"
             "  AND an OOB primitive can reach `_IO_2_1_stdout_`\n"
             "  (typically via an unsorted-bin chunk's fd/bk = "
-            "main_arena.bins[0] = main_arena + 0x60), search for\n"
-            "  public FSOP-leak writeups using these terms:\n"
-            "    'FSOP leak _IONBF 0xfbad1800',\n"
-            "    'house of apple stdout leak unbuffered',\n"
-            "    'main_arena bins[0] stdout corruption libc leak'.\n"
-            "  Surface concrete `_flags` magic values + the\n"
-            "  per-version main_arena→stdout offset in the recon\n"
-            "  reply. Main agent cannot WebSearch directly\n"
-            "  (subagent isolation policy), so this offloading is the\n"
-            "  intended path for chal-specific FSOP knowledge."
+            "main_arena.bins[0] = main_arena + 0x60), this is a classic\n"
+            "  FSOP libc leak: overwrite `_flags` with a buffered-output\n"
+            "  magic (e.g. `0xfbad1800`) so the next puts/printf dumps\n"
+            "  buffer contents. Take the exact `_flags` magic + the\n"
+            "  per-version main_arena→stdout offset from the pre-recon\n"
+            "  FSOP-AS-LEAK TABLE / local libc KB; if the version isn't\n"
+            "  covered, read the `_IO_FILE` layout straight out of the\n"
+            "  target's own libc with gdb / readelf. Do NOT search the\n"
+            "  web — writeup lookups are disabled at the framework level."
         )
     if custom_libs:
         # Chal author shipped non-standard .so files. THIS IS THE FIRST

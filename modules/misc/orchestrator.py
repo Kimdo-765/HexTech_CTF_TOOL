@@ -25,6 +25,7 @@ from modules._common import (
     agent_heartbeat,
     extract_cost,
     format_tool_result,
+    kill_guard_hooks,
     log_thinking,
     read_meta,
     resolve_effort,
@@ -134,6 +135,8 @@ async def _claude_summary(
             "TEMP":   _tmp_str,
         },
         effort=resolve_effort(read_meta(job_id).get("effort")),
+        # Deny WebSearch/WebFetch under bypass (anti-writeup) + Bash kill-guard.
+        hooks=kill_guard_hooks(job_id),
     )
     prompt = build_user_prompt(filename, description)
     from modules._common import build_exploit_library_hint

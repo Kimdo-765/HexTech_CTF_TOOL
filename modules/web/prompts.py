@@ -273,18 +273,18 @@ next several turns would all be "consider candidate, reject, consider
 next," that is the signal to delegate the whole sweep NOW. Two high-value
 offloads (this is the point — DO them, don't grind in-context):
 
-- BYPASS-PRIMITIVE / TECHNIQUE RESEARCH → recon (has WebSearch + Bash).
-  When a filter / WAF / charset limit / sanitizer / parser stands
-  between you and a sink, do NOT brainstorm bypasses turn-by-turn in
-  your own context. Ask recon: "Stack=<X>, lib=<name>==<version>; the
-  filter bans <restriction> (file:line). List DOCUMENTED bypass
-  primitives for THIS defense+version, ranked by applicability, WITH
-  sources (CVE / advisory / writeup), and the viable exfil channel;
-  verify each against the real predicate where you can." recon returns
-  a ranked menu — you pick one and CRAFT. (A charset/word ban limits
-  what you can REPRESENT, not what you can EXECUTE once a sink fires;
-  recon enumerates the channels so you don't rediscover them turn by
-  turn.)
+- BYPASS-PRIMITIVE / TECHNIQUE ANALYSIS → recon (READ-ONLY, LOCAL —
+  no web). When a filter / WAF / charset limit / sanitizer / parser
+  stands between you and a sink, do NOT brainstorm bypasses turn-by-turn
+  in your own context. Ask recon: "Stack=<X>, lib=<name>==<version>; the
+  filter bans <restriction> (file:line). Read the sanitizer/parser SOURCE
+  and enumerate what it actually fails to cover — bypass primitives
+  ranked by applicability, each verified against the REAL predicate in
+  the code, plus the viable exfil channel." recon derives the menu from
+  the code in front of it (NOT from web writeups — web research is
+  disabled); you pick one and CRAFT. (A charset/word ban limits what you
+  can REPRESENT, not what you can EXECUTE once a sink fires; recon
+  enumerates the channels so you don't rediscover them turn by turn.)
 
 - BRUTEFORCE / FUZZING / VARIANT-SPRAY → debugger (has Write + Bash).
   When the next step is "try N candidates and report which works"

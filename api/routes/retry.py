@@ -48,6 +48,7 @@ from api.storage import (
 from modules._common import (
     LATEST_JUDGE_MODEL,
     classify_agent_error,
+    kill_guard_hooks,
     resolve_judge_model,
 )
 from modules.settings_io import apply_to_env, get_setting
@@ -285,6 +286,10 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
         allowed_tools=[],
         permission_mode="bypassPermissions",
         env={"MAX_THINKING_TOKENS": _REVIEWER_MAX_THINKING_TOKENS},
+        # Deny WebSearch/WebFetch under bypass (anti-writeup): the reviewer is
+        # diagnostic-only, but bypassPermissions leaves built-in web tools
+        # reachable, so close the hole.
+        hooks=kill_guard_hooks(),
     )
     hint_parts: list[str] = []
     framed_context = _frame_reviewer_context(context)
@@ -349,6 +354,10 @@ async def _ask_reviewer_streaming(
         allowed_tools=[],
         permission_mode="bypassPermissions",
         env={"MAX_THINKING_TOKENS": _REVIEWER_MAX_THINKING_TOKENS},
+        # Deny WebSearch/WebFetch under bypass (anti-writeup): the reviewer is
+        # diagnostic-only, but bypassPermissions leaves built-in web tools
+        # reachable, so close the hole.
+        hooks=kill_guard_hooks(),
     )
     accumulated: list[str] = []
     last_emitted = 0

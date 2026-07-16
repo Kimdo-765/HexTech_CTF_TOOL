@@ -57,6 +57,7 @@ from claude_agent_sdk import (
 from modules._common import (
     LATEST_JUDGE_MODEL,
     build_judge_agents,
+    kill_guard_hooks,
     resolve_judge_model,
 )
 from modules.pwn import chain_schema
@@ -350,6 +351,9 @@ async def _run_judge_turn(
         agents=build_judge_agents(_jm),
         resume=resume_sid,
         fork_session=False if resume_sid else None,
+        # Deny WebSearch/WebFetch under bypass (anti-writeup). No job_id in
+        # scope here, so the deny fires without the run.log attempt line.
+        hooks=kill_guard_hooks(),
     )
     parts: list[str] = []
     captured_sid: str | None = None
