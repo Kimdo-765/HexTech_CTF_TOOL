@@ -307,6 +307,51 @@ JOBS_DIR = DATA_DIR / "jobs"
 # `ls /data/exploits/`, `cat /data/exploits/<id>/report.md`.
 EXPLOITS_DIR = DATA_DIR / "exploits"
 
+# Account-global rate-limit status cache for the UI usage chip. The SDK emits
+# a RateLimitEvent (claude_agent_sdk types) on EVERY run — status ∈
+# allowed/allowed_warning/rejected, plus resets_at + (subscription) a
+# `utilization` float that is frequently absent for OAuth accounts. Rate limit
+# is per-ACCOUNT, not per-job, so we persist the latest event to ONE global
+# file (last-write-wins across concurrent workers) and the api reads it for
+# GET /api/usage. Best-effort observability — never blocks the run.
+RATE_LIMIT_CACHE = DATA_DIR / "rate_limit.json"
+
+
+def record_rate_limit_event(msg) -> None:
+    """If `msg` is an SDK RateLimitEvent, persist its RateLimitInfo to the
+    account-global RATE_LIMIT_CACHE. Duck-typed on class name so it needs no
+    import and silently ignores every other message type. Never raises."""
+    try:
+        if type(msg).__name__ != "RateLimitEvent":
+            return
+        info = getattr(msg, "rate_limit_info", None)
+        if info is None:
+            return
+        payload = {
+            "status": getattr(info, "status", None),
+            "resets_at": getattr(info, "resets_at", None),
+            "rate_limit_type": getattr(info, "rate_limit_type", None),
+            "utilization": getattr(info, "utilization", None),
+            "overage_status": getattr(info, "overage_status", None),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        RATE_LIMIT_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = RATE_LIMIT_CACHE.with_name(RATE_LIMIT_CACHE.name + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(RATE_LIMIT_CACHE)  # atomic swap
+    except Exception:
+        pass
+
+
+def read_rate_limit() -> dict | None:
+    """Latest account-global rate-limit status (or None). Best-effort."""
+    try:
+        if RATE_LIMIT_CACHE.is_file():
+            return json.loads(RATE_LIMIT_CACHE.read_text())
+    except Exception:
+        pass
+    return None
+
 # Single source of truth for the latest Claude model used by ad-hoc
 # Claude calls (retry reviewer, exploit/solver judge). Bump here and
 # every helper that imports it picks up the new model on the next
@@ -2584,6 +2629,7 @@ def make_spawn_subagent_mcp(
             async with ClaudeSDKClient(options=sub_options) as sub_client:
                 await sub_client.query(sub_prompt_effective)
                 async for msg in sub_client.receive_response():
+                    record_rate_limit_event(msg)  # account-global usage chip
                     # Logging mirrors log_assistant_blocks but tagged
                     # by the isolated subagent's identity. We don't
                     # call log_assistant_blocks because that helper
@@ -5344,6 +5390,7 @@ async def run_main_agent_session(
                 async for msg in client.receive_response():
                     capture_session_id(msg, job_id)
                     agent_heartbeat(job_id, msg)
+                    record_rate_limit_event(msg)  # account-global usage chip
                     if isinstance(msg, AssistantMessage):
                         summary["messages"] = summary.get("messages", 0) + 1
                         log_assistant_blocks(job_id, msg, summary)

@@ -18,6 +18,8 @@
       <span id="version-badge" class="version-badge" title="deployed version · last patch — hover for detail">ver …</span>
       <div id="cost-banner" class="cost-banner" title="Cumulative Claude API spend">
         <span id="queue-info" title="busy/total workers · queued jobs">0/0 · 0 queued</span>
+        <span id="ratelimit-chip" class="rl-chip" title="Claude account rate-limit status (subscription usage window)" hidden></span>
+        <span id="usage-pill" class="usage-pill" title="operator spend vs configured budget (Settings → Spend budget)" hidden></span>
         <span id="cost-total">$0.00</span>
         <button id="logout-btn" type="button" class="logout">logout</button>
       </div>
@@ -453,6 +455,11 @@
           Worker concurrency (parallel jobs)
           <input type="number" name="worker_concurrency" min="1" max="32" placeholder="3" />
           <small style="color:#8b949e">requires <code>docker compose restart worker</code> to apply</small>
+        </label>
+        <label>
+          Spend budget (USD, 0=off)
+          <input type="number" name="budget_usd" min="0" step="1" placeholder="0" />
+          <small style="color:#8b949e">operator budget for the top-bar <code>used / budget</code> pill — cumulative spend vs this ceiling. This is YOUR budget, not the Claude account limit (a true remaining-quota number isn't retrievable on OAuth).</small>
         </label>
         <label>
           Callback URL (for XSS / SSRF / blind RCE)

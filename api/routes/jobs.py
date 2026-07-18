@@ -162,6 +162,39 @@ def get_stats():
     return {"total_cost_usd": round(total, 4), "by_module": by_module, "count": count}
 
 
+@router.get("/usage")
+def get_usage():
+    """Top-bar usage pill data: cumulative SPENT cost vs an operator-set
+    budget, plus the latest account-global rate-limit STATUS.
+
+    Honest scope: this deployment authenticates via OAuth (subscription), so a
+    true numeric account-quota "remaining %" is NOT retrievable in the headless
+    path. `remaining_usd` here is `budget_usd - spent` against the OPERATOR'S
+    configured budget (0 = no budget → spent-only). `rate_limit` is the coarse,
+    subscription-real signal the SDK already emits (status + reset epoch; the
+    `utilization` number is frequently absent for OAuth accounts).
+    """
+    from modules.settings_io import get_setting
+    from modules._common import read_rate_limit
+
+    stats = get_stats()
+    spent = float(stats.get("total_cost_usd") or 0.0)
+    try:
+        budget = float(get_setting("budget_usd") or 0.0)
+    except (TypeError, ValueError):
+        budget = 0.0
+    remaining = round(budget - spent, 4) if budget > 0 else None
+    pct_used = round(min(spent / budget * 100.0, 999.9), 1) if budget > 0 else None
+    return {
+        "spent_usd": round(spent, 4),
+        "budget_usd": round(budget, 4),
+        "remaining_usd": remaining,
+        "pct_used": pct_used,
+        "count": stats.get("count", 0),
+        "rate_limit": read_rate_limit(),
+    }
+
+
 def _detect_runnable_script(job_dir: Path) -> str | None:
     # Primary: <jobdir>/<name> (populated by the analyzer's carry step at
     # the end of a run). Fallback: <jobdir>/work/<name> — present even

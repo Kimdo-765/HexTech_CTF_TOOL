@@ -99,6 +99,27 @@ textarea, select {
   font-size: 0.85rem; color: #8b949e;
 }
 #cost-total { color: #58a6ff; font-weight: 600; }
+
+/* Operator "used / budget" pill (top bar). Color escalates with fraction
+   consumed: default (under 80%), amber (>=80%), red (>=100%). */
+.usage-pill {
+  font-weight: 600; color: #3fb950;
+  border: 1px solid #238636; border-radius: 10px;
+  padding: 0.05rem 0.5rem; white-space: nowrap;
+}
+.usage-pill[hidden] { display: none; }
+.usage-pill--warn { color: #d29922; border-color: #9e6a03; }
+.usage-pill--over { color: #f85149; border-color: #da3633; }
+
+/* Account rate-limit status chip (subscription usage window). */
+.rl-chip {
+  font-weight: 600; border-radius: 10px;
+  padding: 0.05rem 0.5rem; white-space: nowrap;
+}
+.rl-chip[hidden] { display: none; }
+.rl-chip--ok { color: #3fb950; border: 1px solid #238636; }
+.rl-chip--warn { color: #d29922; border: 1px solid #9e6a03; }
+.rl-chip--rejected { color: #f85149; border: 1px solid #da3633; }
 .logout {
   background: transparent; color: #8b949e; border: 1px solid #30363d;
   padding: 0.2rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.75rem;

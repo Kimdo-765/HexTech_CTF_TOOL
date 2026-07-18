@@ -25,6 +25,13 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     ("job_timeout_seconds", "JOB_TIMEOUT", int, 900),
     ("worker_concurrency", "WORKER_CONCURRENCY", int, 3),
     ("callback_url", "CALLBACK_URL", str, ""),
+    # Operator spend budget (USD) for the top-bar "used / budget" usage pill.
+    # 0 = no budget set → the pill shows cumulative spend only (no bar / %).
+    # This is an OPERATOR budget, NOT the Claude account limit — a true
+    # remaining-quota number isn't retrievable in the OAuth/headless path
+    # (see the usage-widget feasibility notes); the pill reads existing
+    # aggregate cost against this ceiling.
+    ("budget_usd", "BUDGET_USD", float, 0.0),
     # Quality-gate judge that wraps auto_run exploit/solver execution
     # (pre-flight script review → stall supervisor → post-mortem
     # verdict). Each stage is one short no-tools Claude call against

@@ -777,6 +777,8 @@ async function loadSettings() {
     s.job_timeout_seconds != null ? s.job_timeout_seconds : "";
   f.querySelector("[name=worker_concurrency]").value =
     s.worker_concurrency != null ? s.worker_concurrency : "";
+  const budgetInput = f.querySelector("[name=budget_usd]");
+  if (budgetInput) budgetInput.value = s.budget_usd ? s.budget_usd : "";
   f.querySelector("[name=callback_url]").value = s.callback_url || "";
   // enable_judge default-True; only un-check when explicitly stored false
   f.querySelector("[name=enable_judge]").checked = s.enable_judge !== false;
@@ -814,7 +816,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       payload[k] = null;  // null = clear the override
       continue;
     }
-    if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "worker_concurrency") {
+    if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "worker_concurrency" || k === "budget_usd") {
       payload[k] = Number(v);
     } else {
       payload[k] = v;
@@ -1011,9 +1013,10 @@ document.getElementById("logout-btn").addEventListener("click", async () => {
 
 async function refreshStats() {
   try {
-    const [statsRes, queueRes] = await Promise.all([
+    const [statsRes, queueRes, usageRes] = await Promise.all([
       fetch(`${API}/jobs/stats`),
       fetch(`${API}/jobs/queue`),
+      fetch(`${API}/jobs/usage`),
     ]);
     if (statsRes.ok) {
       const s = await statsRes.json();
@@ -1030,7 +1033,62 @@ async function refreshStats() {
         `${w.name}: ${w.state}${w.job_id ? " (" + w.job_id + ")" : ""}`
       ).join("\n") || "no workers";
     }
+    if (usageRes.ok) renderUsage(await usageRes.json());
   } catch (_) {}
+}
+
+// Render the operator budget pill + the account rate-limit status chip from
+// GET /api/jobs/usage. Both hide gracefully when there's nothing to show
+// (no budget set / no rate-limit event seen yet).
+function renderUsage(u) {
+  // --- budget pill: "used / budget" with a color by fraction consumed ---
+  const pill = document.getElementById("usage-pill");
+  if (pill) {
+    if (u && u.budget_usd > 0) {
+      const spent = u.spent_usd || 0, budget = u.budget_usd;
+      const pct = u.pct_used != null ? u.pct_used : (spent / budget * 100);
+      pill.hidden = false;
+      pill.textContent = `$${spent.toFixed(2)} / $${budget.toFixed(0)} (${pct.toFixed(0)}%)`;
+      pill.classList.remove("usage-pill--warn", "usage-pill--over");
+      if (pct >= 100) pill.classList.add("usage-pill--over");
+      else if (pct >= 80) pill.classList.add("usage-pill--warn");
+      const rem = u.remaining_usd != null ? u.remaining_usd : (budget - spent);
+      pill.title = `operator budget — spent $${spent.toFixed(4)} of $${budget.toFixed(2)}; `
+        + `$${rem.toFixed(2)} left. NOT the Claude account limit.`;
+    } else {
+      pill.hidden = true;  // no budget configured
+    }
+  }
+  // --- rate-limit status chip: green/amber/red + "resets in HH:MM" ---
+  const chip = document.getElementById("ratelimit-chip");
+  if (chip) {
+    const rl = u && u.rate_limit;
+    if (rl && rl.status) {
+      chip.hidden = false;
+      chip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
+      let label;
+      if (rl.status === "rejected") { chip.classList.add("rl-chip--rejected"); label = "limit hit"; }
+      else if (rl.status === "allowed_warning") { chip.classList.add("rl-chip--warn"); label = "near limit"; }
+      else { chip.classList.add("rl-chip--ok"); label = "usage ok"; }
+      // optional numeric utilization (frequently absent on OAuth)
+      if (typeof rl.utilization === "number") label += ` ${Math.round(rl.utilization * 100)}%`;
+      let resetTxt = "";
+      if (rl.resets_at) {
+        const secs = rl.resets_at - Math.floor(Date.now() / 1000);
+        if (secs > 0) {
+          const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+          resetTxt = h > 0 ? ` · resets ${h}h${m}m` : ` · resets ${m}m`;
+        }
+      }
+      chip.textContent = `⏳ ${label}${resetTxt}`;
+      chip.title = `Claude rate-limit: ${rl.status}`
+        + (rl.rate_limit_type ? ` (${rl.rate_limit_type})` : "")
+        + (rl.resets_at ? `\nresets at ${new Date(rl.resets_at * 1000).toLocaleString()}` : "")
+        + (rl.updated_at ? `\nlast event ${new Date(rl.updated_at).toLocaleString()}` : "");
+    } else {
+      chip.hidden = true;  // no rate-limit event seen yet
+    }
+  }
 }
 
 async function deleteJob(id, ev) {
@@ -3032,7 +3090,7 @@ let _globalPollBusy = false;
 setInterval(async () => {
   if (_globalPollBusy) return;
   _globalPollBusy = true;
-  try { await refreshJobs(); } catch (_) {} finally { _globalPollBusy = false; }
+  try { await refreshJobs(); await refreshStats(); } catch (_) {} finally { _globalPollBusy = false; }
 }, 7000);
 
 // --- Version / last-patch badge -------------------------------------------
