@@ -1292,12 +1292,17 @@ def build_team_agents(model: str | None) -> dict:
 
     Imported lazily inside analyzers so unit tests / non-SDK paths
     don't have to install the SDK.
+
+    An active model-preset can pin any of these roles independently; a blank
+    entry falls through to the existing default (recon/debugger/triage follow
+    main for cache alignment; judge → LATEST_JUDGE_MODEL).
     """
+    from modules.model_presets import resolve_role_model
     return {
-        "recon": _recon_def(model),
-        "judge": _judge_def(),
-        "debugger": _debugger_def(model),
-        "triage": _triage_def(model),
+        "recon": _recon_def(resolve_role_model("recon", model)),
+        "judge": _judge_def(resolve_role_model("judge", LATEST_JUDGE_MODEL)),
+        "debugger": _debugger_def(resolve_role_model("debugger", model)),
+        "triage": _triage_def(resolve_role_model("triage", model)),
     }
 
 
@@ -1307,9 +1312,12 @@ def build_judge_agents(model: str | None) -> dict:
     Registers only `recon` — the judge can delegate to recon for heavy
     investigation, but is not allowed to invoke itself recursively.
     Recon uses the same LATEST_JUDGE_MODEL so cache prefixes line up
-    between judge's own thinking and recon's responses.
+    between judge's own thinking and recon's responses — unless an active
+    model-preset pins the recon role, which overrides (at the cost of that
+    cache alignment).
     """
-    return {"recon": _recon_def(model or LATEST_JUDGE_MODEL)}
+    from modules.model_presets import resolve_role_model
+    return {"recon": _recon_def(resolve_role_model("recon", model or LATEST_JUDGE_MODEL))}
 
 
 # Backward compatibility — the analyzers historically called
@@ -1471,10 +1479,15 @@ def make_standalone_options(
         ) + prompt
 
     tools = list(_AGENT_TOOLS_BY_TYPE[agent_type])
-    sub_model = (
+    # Base = existing behavior: judge pinned to LATEST_JUDGE_MODEL, everyone
+    # else follows the spawner (main). An active model-preset can override the
+    # role (recon / debugger / triage / judge); a blank entry keeps the base.
+    from modules.model_presets import resolve_role_model
+    _base_sub_model = (
         LATEST_JUDGE_MODEL if agent_type == "judge"
         else (model or LATEST_JUDGE_MODEL)
     )
+    sub_model = resolve_role_model(agent_type, _base_sub_model)
     env = {"JOB_ID": job_id, "AGENT_ROLE": agent_type}
     # Same per-job TMPDIR + terminfo silencing as main session — keeps
     # subagent Bash output clean and prevents /tmp collision when

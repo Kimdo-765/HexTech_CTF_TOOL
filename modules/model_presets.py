@@ -23,12 +23,22 @@ Shape::
       }
     }
 
-Only three roles are configurable — the ones that today either follow main
-(``judge``, and via ``resolve_judge_model`` its prejudge / postjudge /
-supervise / retry-reviewer family) or sit pinned on a cheap constant
-(``report``, ``monitor``). ``main`` is deliberately excluded (that's the
-per-job model picker / global ``claude_model`` setting); ``recon`` is
-excluded because it shares its spawner's model for cache-prefix alignment.
+Configurable roles:
+  - ``judge``    — orchestrator quality gate (prejudge / postjudge / supervise /
+                   retry-reviewer via ``resolve_judge_model``) AND the judge
+                   subagent; default = follow main / LATEST_JUDGE_MODEL.
+  - ``recon``    — read-only static-investigation subagent; default = follow spawner.
+  - ``debugger`` — dynamic-analysis (gdb/strace/qemu) subagent; default = follow spawner.
+  - ``triage``   — candidate-vuln verifier subagent; default = follow spawner.
+  - ``report``   — terminal findings.json transform; default = follow main.
+  - ``monitor``  — live progress narrator; default = MONITOR_MODEL (cheap).
+
+``main`` is deliberately excluded — that's the per-job model picker / global
+``claude_model`` setting. NB: ``recon`` / ``debugger`` / ``triage`` normally
+share their spawner's model for CACHE-PREFIX ALIGNMENT; pinning them to a
+different model is a valid operator choice but sacrifices that cache locality
+(higher cost / latency), so the UI flags it. A blank role entry keeps the
+current follow-spawner behavior.
 """
 from __future__ import annotations
 
@@ -43,7 +53,9 @@ MODEL_PRESETS_PATH = Path(
 )
 
 # Roles the operator may pin to a model. Order = UI display order.
-CONFIGURABLE_ROLES: tuple[str, ...] = ("judge", "report", "monitor")
+CONFIGURABLE_ROLES: tuple[str, ...] = (
+    "judge", "recon", "debugger", "triage", "report", "monitor",
+)
 
 _lock = threading.Lock()
 

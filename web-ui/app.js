@@ -865,6 +865,9 @@ let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["judge", "rep
 // Human-readable default a blank role falls back to (shown in the "(inherit)" option).
 const PRESET_ROLE_DEFAULTS = {
   judge: "follows main model",
+  recon: "follows main — cache-aligned",
+  debugger: "follows main — cache-aligned",
+  triage: "follows main — cache-aligned",
   report: "follows main model",
   monitor: "claude-sonnet-4-6",
 };
