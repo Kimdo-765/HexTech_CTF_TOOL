@@ -129,6 +129,17 @@ if [ "$WITH_SAGE" -eq 1 ]; then
   ok "sage image pulled"
 fi
 
+# --- stop any stale cloudflared OOB tunnel from a prior run -----------------
+# The tunnel runs as a docker-run SIBLING (hextech_ctf_tool_tunnel, label
+# hextech_ctf_tool_role=tunnel), NOT a compose service; a stale one would keep
+# pointing at the old api and hold a dead Callback URL. Reap it before bringing
+# the stack up — re-activate via Settings > Activate tunnel afterwards.
+say "Removing any stale cloudflared tunnel sibling container"
+docker rm -f hextech_ctf_tool_tunnel >/dev/null 2>&1 && ok "removed stale hextech_ctf_tool_tunnel" || true
+for c in $(docker ps -aq --filter "label=hextech_ctf_tool_role=tunnel" 2>/dev/null); do
+  docker rm -f "$c" >/dev/null 2>&1 || true
+done
+
 # --- bring up / (re)build the core stack -----------------------------------
 # --build is layer-cached (a no-op recreate when nothing changed) and
 # self-heals a core image that was pruned, so we always pass it.

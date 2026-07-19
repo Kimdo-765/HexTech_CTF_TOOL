@@ -96,6 +96,18 @@ fi
 log "docker compose down --remove-orphans (keeps named volumes e.g. redis-data)"
 dc down --remove-orphans 2>&1 | sed 's/^/    /'
 
+# --- 1b. stop the api-managed cloudflared OOB tunnel ------------------------
+# The tunnel runs as a docker-run SIBLING container (hextech_ctf_tool_tunnel,
+# label hextech_ctf_tool_role=tunnel), NOT a compose service — so the
+# `compose down --remove-orphans` above does NOT reap it. Remove it explicitly,
+# else it orphans (keeps pointing at the old api / holds a stale Callback URL).
+# Re-activate after the restart via Settings > Activate tunnel.
+log "stopping cloudflared OOB tunnel sibling container (if any)"
+docker rm -f hextech_ctf_tool_tunnel >/dev/null 2>&1 && log "    removed hextech_ctf_tool_tunnel" || true
+for c in $(docker ps -aq --filter "label=hextech_ctf_tool_role=tunnel" 2>/dev/null); do
+  docker rm -f "$c" >/dev/null 2>&1 || true
+done
+
 # --- 2. report any docker-UNTRACKED orphan shims still around ----------------
 log "scanning for docker-untracked orphan containers (the trap)..."
 orphan_found=0
