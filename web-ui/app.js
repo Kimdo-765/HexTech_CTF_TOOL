@@ -35,6 +35,8 @@ const CLAUDE_MODELS = [
   "claude-opus-4-8[1m]",
   "claude-opus-4-7",
   "claude-opus-4-7[1m]",
+  "claude-opus-4-6",
+  "claude-opus-4-6[1m]",
   "claude-opus-4-1",
   "claude-opus-4-1[1m]",
   "claude-opus-4",
