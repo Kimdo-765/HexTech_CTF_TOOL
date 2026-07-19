@@ -227,16 +227,18 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
 
 
 # Wall-clock ceiling for a SINGLE reviewer call. The reviewer runs with max
-# extended-thinking (31999 tokens), so a real call can legitimately take a
-# couple of minutes on a 22 KB context; 240 s is generous headroom. The REAL
-# purpose is to bound a HANG: if the SDK `query()` async generator never
-# yields and never completes — OAuth token expired mid-call, a transport
-# stall, or a usage-policy block that doesn't surface as a clean ResultMessage
-# — an un-bounded `async for` pins uvicorn's SINGLE event loop forever and the
-# entire web service goes dark (every route 000/timeout) until a manual
-# `docker compose restart api`. Observed 2026-06-03: repeated
-# POST /retry/stream of job 21314c04d74d wedged the api twice in a row.
-_REVIEWER_WALL_CLOCK_S = 240.0
+# extended-thinking (31999 tokens), so a real call can legitimately take
+# SEVERAL minutes on a large context — observed hitting ~211 s against a ~22 KB
+# context, right up against the old 240 s ceiling — so it is raised to 600 s to
+# give heavy reviews real headroom. The REAL purpose is still to bound a HANG:
+# if the SDK `query()` async generator never yields and never completes — OAuth
+# token expired mid-call, a transport stall, or a usage-policy block that
+# doesn't surface as a clean ResultMessage — an un-bounded `async for` pins
+# uvicorn's SINGLE event loop forever and the entire web service goes dark
+# (every route 000/timeout) until a manual `docker compose restart api`.
+# Observed 2026-06-03: repeated POST /retry/stream of job 21314c04d74d wedged
+# the api twice in a row. 600 s still bounds that hang; it is not "no limit".
+_REVIEWER_WALL_CLOCK_S = 600.0
 
 
 async def _iter_reviewer_messages(framed_context: str, options, deadline_s: float):
