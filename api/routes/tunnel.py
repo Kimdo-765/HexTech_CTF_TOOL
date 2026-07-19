@@ -133,8 +133,12 @@ def tunnel_status(probe: bool = False):
     # Re-sync drift: cloudflared can reconnect with a NEW URL mid-session. If the
     # live tunnel URL differs from what's published, re-publish it. This is NOT a
     # tunnel re-creation (no rate-limit concern) — just republishing a live URL.
+    # Guard (like /stop): only overwrite callback_url when it's empty or itself a
+    # trycloudflare URL, so an operator's manual VPS/collector URL is left intact.
     try:
-        if st.get("running") and st.get("url") and st["url"] != st.get("callback_url"):
+        cb = st.get("callback_url") or ""
+        if (st.get("running") and st.get("url") and st["url"] != cb
+                and (not cb or _TRYCF_RE.match(cb))):
             from modules.settings_io import update_settings
             update_settings({"callback_url": st["url"]})
             st["callback_url"] = st["url"]
@@ -161,12 +165,16 @@ def tunnel_start():
             existing.reload()
         except Exception:
             pass
-        if getattr(existing, "status", "") == "running":
+        state = getattr(existing, "status", "")
+        # Treat any NON-terminal state as up — including the transient "created"
+        # window a concurrent /start races through. Only a genuinely terminal
+        # (exited/dead) leftover is force-removed; force-removing a "created"
+        # container would destroy an in-flight tunnel another /start is polling.
+        if state in ("running", "created", "restarting"):
             st = _status_payload(client)
             st["ok"] = True
-            st["note"] = "tunnel already running"
+            st["note"] = "tunnel already running" if state == "running" else "tunnel already starting"
             return st
-        # exited/dead leftover → clear it before re-creating (name would collide)
         try:
             existing.remove(force=True)
         except Exception:
@@ -235,14 +243,17 @@ def tunnel_stop():
         st["note"] = "no tunnel running"
         return st
     prior = (getattr(c, "labels", None) or {}).get(_PRIOR_LABEL, "")
+    our_url = _extract_url(c)  # the URL THIS tunnel published, before we remove it
     try:
         c.remove(force=True)
     except Exception as e:
         return {"ok": False, "error": f"stop failed: {e}", **_status_payload(client)}
-    # Only touch callback_url if it's STILL our tunnel URL (leave an operator's
-    # manual VPS URL alone). Restore the prior unless it was itself a dead tunnel.
+    # Only undo OUR OWN publish: touch callback_url only when it still equals the
+    # URL this tunnel published (or, if we couldn't re-extract it, when it's some
+    # trycloudflare URL). An operator's manual VPS/other URL is left untouched.
     cur = str(get_setting("callback_url") or "")
-    if _TRYCF_RE.match(cur):
+    if cur and (cur == our_url or (not our_url and _TRYCF_RE.match(cur))):
+        # Restore the prior unless it was itself a (now-dead) trycloudflare tunnel.
         restore = "" if _TRYCF_RE.match(prior or "") else (prior or "")
         update_settings({"callback_url": restore})
     st = _status_payload(client)

@@ -862,6 +862,12 @@ document.querySelector('.tab[data-tab="settings"]').addEventListener("click", ()
 // Backed by /api/tunnel (start/stop/status) which runs cloudflared as a sibling
 // container. Status reflects reality (container + edge probe), never a flag.
 let _tunnelPoll = null;
+let _tunnelPollTicks = 0;
+
+function _stopTunnelPoll() {
+  if (_tunnelPoll) { clearInterval(_tunnelPoll); _tunnelPoll = null; }
+  _tunnelPollTicks = 0;
+}
 
 function _setTunnelChip(state, label) {
   const chip = document.getElementById("tunnel-chip");
@@ -885,6 +891,8 @@ function renderTunnel(s) {
     _setTunnelChip("down", s.error ? "error" : "down");
   } else if (!s.url) {
     _setTunnelChip("connecting", "connecting…");
+  } else if (s._dud) {
+    _setTunnelChip("down", "up but unreachable — re-roll");
   } else if (s.reachable === false) {
     _setTunnelChip("connecting", "edge warming up…");
   } else {
@@ -897,24 +905,31 @@ function renderTunnel(s) {
 async function loadTunnelStatus(probe = false) {
   try {
     const res = await fetch(`${API}/tunnel/status${probe ? "?probe=1" : ""}`);
-    if (!res.ok) { _setTunnelChip("down", "status error"); return null; }
+    if (!res.ok) { _setTunnelChip("down", "status error"); _stopTunnelPoll(); return null; }
     const s = await res.json();
+    // Cap the "edge warming up" window: after ~12 gated ticks (~60s) of
+    // running-but-unreachable, call it a dud (a dead quick-tunnel that came up
+    // but never routes) so the chip goes terminal-red and the poller stops,
+    // instead of spinning yellow forever.
+    if (s.running && s.url && s.reachable === false && _tunnelPollTicks >= 12) s._dud = true;
     renderTunnel(s);
-    // Gated poller: keep polling only while the tunnel is mid-connect.
-    const connecting = s.running && (!s.url || s.reachable === false);
-    if (connecting && document.getElementById("panel-settings").classList.contains("active")) {
+    const connecting = s.running && (!s.url || s.reachable === false) && !s._dud;
+    const onSettings = document.getElementById("panel-settings").classList.contains("active");
+    if (connecting && onSettings) {
+      _tunnelPollTicks++;
       if (!_tunnelPoll) _tunnelPoll = setInterval(() => loadTunnelStatus(true), 5000);
-    } else if (_tunnelPoll) {
-      clearInterval(_tunnelPoll); _tunnelPoll = null;
+    } else {
+      _stopTunnelPoll();
     }
     return s;
   } catch (_) {
-    _setTunnelChip("down", "unreachable"); return null;
+    _setTunnelChip("down", "unreachable"); _stopTunnelPoll(); return null;
   }
 }
 
 document.getElementById("tunnel-activate").addEventListener("click", async (e) => {
   const btn = e.target; btn.disabled = true;
+  _stopTunnelPoll();
   _setTunnelChip("connecting", "starting…");
   const txt = document.getElementById("tunnel-status-text");
   if (txt) txt.textContent = "spawning cloudflared + waiting for public URL (up to ~30s)…";
@@ -922,8 +937,11 @@ document.getElementById("tunnel-activate").addEventListener("click", async (e) =
     const res = await fetch(`${API}/tunnel/start`, { method: "POST" });
     const s = await res.json();
     renderTunnel(s);
-    if (!s.ok && s.error && txt) txt.textContent = s.error;
-    loadTunnelStatus(true);
+    if (s.ok) {
+      loadTunnelStatus(true);   // re-check reachability (does NOT clobber an error)
+    } else if (txt) {
+      txt.textContent = s.error || s.detail || "start failed";  // keep it visible
+    }
   } catch (err) {
     if (txt) txt.textContent = `start failed: ${err}`;
     _setTunnelChip("down", "error");
@@ -934,6 +952,7 @@ document.getElementById("tunnel-activate").addEventListener("click", async (e) =
 
 document.getElementById("tunnel-stop").addEventListener("click", async (e) => {
   const btn = e.target; btn.disabled = true;
+  _stopTunnelPoll();
   const txt = document.getElementById("tunnel-status-text");
   if (txt) txt.textContent = "stopping…";
   try {
