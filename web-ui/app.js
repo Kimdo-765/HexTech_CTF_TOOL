@@ -20,11 +20,17 @@ const CLAUDE_MODELS = [
   // long context requests" — billing-tier limited and intentionally
   // not listed here.
   //
-  // Claude 5 family — newest. Fable 5 base + [1m] BOTH verified 2026-07-02 on
-  // the worker's authenticated plan (trivial-prompt round-trip: FABLE_OK /
-  // FABLE1M_OK). Unlike Sonnet/Haiku, Fable 5[1m] is NOT credit-gated here.
+  // Claude 5 family — newest. Fable 5 base + [1m] verified 2026-07-02
+  // (FABLE_OK / FABLE1M_OK); Sonnet 5 base + [1m] verified 2026-07-19
+  // (SONNET5_OK / SONNET51M_OK) — both trivial-prompt round-trips on the
+  // worker's authenticated plan. Unlike Sonnet 4.x, whose [1m] is credit-
+  // gated ("Usage credits are required for long context requests"), Sonnet
+  // 5[1m] and Fable 5[1m] are NOT credit-gated here. (No Opus 5 / Haiku 5
+  // yet — Opus 4.8 remains the flagship.)
   "claude-fable-5",
   "claude-fable-5[1m]",
+  "claude-sonnet-5",
+  "claude-sonnet-5[1m]",
   "claude-opus-4-8",
   "claude-opus-4-8[1m]",
   "claude-opus-4-7",
