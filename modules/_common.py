@@ -1858,9 +1858,16 @@ async def run_report_phase(
         label="report-options", log_fn=log_fn,
     )
 
+    from modules.model_presets import resolve_role_model
+
     options = ClaudeAgentOptions(
         system_prompt=sys_prompt,
-        model=model or REPORT_PHASE_MODEL,
+        # Active model-preset pins the report role; when unset it falls through
+        # to the caller's model (the analyzers pass main's per-job model here,
+        # so report follows main) or REPORT_PHASE_MODEL if neither is given.
+        # NB: the preset must win OVER the caller's model — the analyzers always
+        # pass model=<main>, so `model or resolve(...)` would never consult it.
+        model=resolve_role_model("report", model or REPORT_PHASE_MODEL),
         cwd=str(work_dir),
         allowed_tools=[],
         disallowed_tools=["Agent", "Task", "WebSearch", "WebFetch", "Bash",
@@ -2115,15 +2122,23 @@ def resolve_judge_model(job_id: str | None) -> str:
     LATEST_JUDGE_MODEL constant is kept only as an import-time fallback elsewhere.
     """
     from modules.settings_io import get_setting
+    from modules.model_presets import resolve_role_model
 
+    base: str | None = None
     if job_id:
         m = (read_meta(job_id) or {}).get("model")
         if m and str(m).strip():
-            return str(m).strip()
-    s = get_setting("claude_model")
-    if s and str(s).strip():
-        return str(s).strip()
-    return "claude-opus-4-7"
+            base = str(m).strip()
+    if base is None:
+        s = get_setting("claude_model")
+        if s and str(s).strip():
+            base = str(s).strip()
+    if base is None:
+        base = "claude-opus-4-7"
+    # An active model-preset can pin the judge family (prejudge / postjudge /
+    # supervise / judge-spawned recon / retry reviewer) independently of main;
+    # empty preset entry → falls through to `base` (the follow-main default).
+    return resolve_role_model("judge", base)
 
 
 def make_main_session_options(

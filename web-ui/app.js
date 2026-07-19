@@ -845,7 +845,167 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
 document.getElementById("settings-reload").addEventListener("click", loadSettings);
 
 // Load settings whenever the user clicks the Settings tab
-document.querySelector('.tab[data-tab="settings"]').addEventListener("click", loadSettings);
+document.querySelector('.tab[data-tab="settings"]').addEventListener("click", () => {
+  loadSettings();
+  loadModelPresets();
+});
+
+// --- Model presets ---------------------------------------------------------
+// Named per-role model overrides (judge / report / monitor) the operator can
+// save and switch between. The whole store is edited in memory and PUT as one
+// blob to /api/model-presets. main stays on the per-job / global model.
+let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["judge", "report", "monitor"] };
+
+// Human-readable default a blank role falls back to (shown in the "(inherit)" option).
+const PRESET_ROLE_DEFAULTS = {
+  judge: "follows main model",
+  report: "follows main model",
+  monitor: "claude-sonnet-4-6",
+};
+
+async function loadModelPresets() {
+  try {
+    const res = await fetch(`${API}/model-presets`);
+    if (!res.ok) return;
+    const s = await res.json();
+    if (s && typeof s === "object") {
+      PRESET_STORE = {
+        active: s.active || "",
+        presets: s.presets || {},
+        configurable_roles: (s.configurable_roles && s.configurable_roles.length)
+          ? s.configurable_roles : ["judge", "report", "monitor"],
+      };
+    }
+  } catch (_) { return; }
+  renderPresetControls();
+}
+
+function renderPresetControls() {
+  const sel = document.getElementById("preset-active");
+  if (!sel) return;
+  const names = Object.keys(PRESET_STORE.presets || {}).sort();
+  const active = PRESET_STORE.active || "";
+  sel.innerHTML = "";
+  sel.appendChild(new Option("(none — every agent inherits its default)", ""));
+  for (const n of names) sel.appendChild(new Option(n, n));
+  sel.value = names.includes(active) ? active : "";
+  renderPresetRoles();
+  updatePresetStatus();
+}
+
+function renderPresetRoles() {
+  const wrap = document.getElementById("preset-roles");
+  if (!wrap) return;
+  const active = document.getElementById("preset-active").value;
+  wrap.innerHTML = "";
+  if (!active) {
+    const p = document.createElement("p");
+    p.className = "preset-empty";
+    p.textContent =
+      "No preset active — judge follows the main model; report and monitor run "
+      + "on their cheap default. Click “+ New” to create one.";
+    wrap.appendChild(p);
+    return;
+  }
+  const preset = PRESET_STORE.presets[active] || {};
+  for (const role of PRESET_STORE.configurable_roles) {
+    const cur = preset[role] || "";
+    const lbl = document.createElement("label");
+    lbl.className = "preset-role";
+    const inheritTxt = PRESET_ROLE_DEFAULTS[role] || "inherit";
+    lbl.innerHTML =
+      `<span class="preset-role-name">${role}</span>` +
+      `<select data-preset-role="${role}"></select>`;
+    const s = lbl.querySelector("select");
+    s.appendChild(new Option(`(inherit — ${inheritTxt})`, ""));
+    for (const m of CLAUDE_MODELS) s.appendChild(new Option(m, m));
+    // A saved custom model that isn't in the catalog: surface it so it's editable.
+    if (cur && !CLAUDE_MODELS.includes(cur)) s.appendChild(new Option(`${cur} (custom)`, cur));
+    s.value = cur;
+    s.addEventListener("change", () => {
+      if (!PRESET_STORE.presets[active]) PRESET_STORE.presets[active] = {};
+      PRESET_STORE.presets[active][role] = s.value;
+      updatePresetStatus();
+    });
+    wrap.appendChild(lbl);
+  }
+}
+
+function updatePresetStatus() {
+  const el = document.getElementById("preset-status");
+  if (!el) return;
+  const active = PRESET_STORE.active || "";
+  if (!active || !PRESET_STORE.presets[active]) {
+    el.textContent = "no preset active — defaults in effect. Remember to Save.";
+    return;
+  }
+  const p = PRESET_STORE.presets[active];
+  const parts = PRESET_STORE.configurable_roles.map(
+    (r) => `${r}=${p[r] ? p[r] : "inherit"}`
+  );
+  el.textContent = `active: ${active} · ${parts.join(" · ")} · Save to apply`;
+}
+
+document.getElementById("preset-active").addEventListener("change", (e) => {
+  PRESET_STORE.active = e.target.value;
+  renderPresetRoles();
+  updatePresetStatus();
+});
+
+document.getElementById("preset-new").addEventListener("click", () => {
+  const name = (prompt("New preset name:") || "").trim();
+  if (!name) return;
+  if (PRESET_STORE.presets[name]) { alert(`preset "${name}" already exists`); return; }
+  PRESET_STORE.presets[name] = { judge: "", report: "", monitor: "" };
+  PRESET_STORE.active = name;
+  renderPresetControls();
+});
+
+document.getElementById("preset-rename").addEventListener("click", () => {
+  const cur = document.getElementById("preset-active").value;
+  if (!cur) { alert("select a preset to rename first"); return; }
+  const nn = (prompt("New name:", cur) || "").trim();
+  if (!nn || nn === cur) return;
+  if (PRESET_STORE.presets[nn]) { alert(`preset "${nn}" already exists`); return; }
+  PRESET_STORE.presets[nn] = PRESET_STORE.presets[cur];
+  delete PRESET_STORE.presets[cur];
+  if (PRESET_STORE.active === cur) PRESET_STORE.active = nn;
+  renderPresetControls();
+});
+
+document.getElementById("preset-delete").addEventListener("click", () => {
+  const cur = document.getElementById("preset-active").value;
+  if (!cur) { alert("select a preset to delete first"); return; }
+  if (!confirm(`Delete preset "${cur}"?`)) return;
+  delete PRESET_STORE.presets[cur];
+  if (PRESET_STORE.active === cur) PRESET_STORE.active = "";
+  renderPresetControls();
+});
+
+document.getElementById("preset-save").addEventListener("click", async (e) => {
+  const btn = e.target;
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/model-presets`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: PRESET_STORE.active, presets: PRESET_STORE.presets }),
+    });
+    if (!res.ok) { alert(`save failed: ${res.status} ${await res.text()}`); return; }
+    const saved = await res.json();
+    PRESET_STORE = {
+      active: saved.active || "",
+      presets: saved.presets || {},
+      configurable_roles: (saved.configurable_roles && saved.configurable_roles.length)
+        ? saved.configurable_roles : PRESET_STORE.configurable_roles,
+    };
+    renderPresetControls();
+    const el = document.getElementById("preset-status");
+    if (el) el.textContent = "saved ✓ — applies to the next job";
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // --- Exploit Library -------------------------------------------------------
 // Operator-curated library of past report.md + exploit.py pairs. Future
@@ -3079,6 +3239,7 @@ document.addEventListener("keydown", (e) => {
 
 fillModelSelects();
 fillEffortSelects();
+loadModelPresets();
 refreshJobs();
 refreshStats();
 

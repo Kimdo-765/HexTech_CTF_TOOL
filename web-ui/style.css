@@ -1421,3 +1421,56 @@ body.modal-open { overflow: hidden; }
   border-color: rgba(224, 163, 58, 0.45);
   background: rgba(224, 163, 58, 0.10);
 }
+
+/* --- Model presets (Settings tab) --------------------------------------- */
+.preset-block {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #30363d;
+}
+.preset-block code { color: #e6edf3; background: #161b22; padding: 0 3px; border-radius: 4px; }
+.preset-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin: 0.6rem 0;
+  flex-wrap: wrap;
+}
+.preset-btns { display: flex; gap: 0.4rem; }
+.preset-block select {
+  width: 100%;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  padding: 0.45rem 0.5rem;
+  border-radius: 6px;
+}
+.preset-block button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preset-block button#preset-save { background: #238636; border-color: #2ea043; }
+.preset-block button#preset-delete { color: #f85149; }
+.preset-block button:hover { filter: brightness(1.15); }
+#preset-roles {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+.preset-role {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  align-items: center;
+  gap: 0.6rem;
+}
+.preset-role-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: #d29922;
+}
+.preset-empty { color: #8b949e; font-size: 0.85rem; margin: 0.4rem 0; }

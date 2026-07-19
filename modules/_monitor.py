@@ -285,6 +285,15 @@ def _statefile(job_id: str) -> Path:
 
 
 async def run_monitor(job_id: str, model: str | None = None) -> None:
+    # Active model-preset can override the cheap sonnet default for the
+    # monitor role; empty preset entry → MONITOR_MODEL. An explicit
+    # caller-supplied `model` still wins over both.
+    if model is None:
+        try:
+            from modules.model_presets import resolve_role_model
+            model = resolve_role_model("monitor", MONITOR_MODEL)
+        except Exception:
+            model = MONITOR_MODEL
     model = model or MONITOR_MODEL
     jd = JOBS_DIR / Path(job_id).name
     logp = jd / "run.log"

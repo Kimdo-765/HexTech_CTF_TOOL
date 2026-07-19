@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from api.auth import TokenAuthMiddleware
 from api.routes import jobs as jobs_routes
 from api.routes import settings as settings_routes
+from api.routes import model_presets as model_presets_routes
 from api.routes import collector as collector_routes
 from api.routes import retry as retry_routes
 from api.routes import terminal as terminal_routes
@@ -71,6 +72,7 @@ app.include_router(misc_module.router, prefix="/api/modules/misc", tags=["misc"]
 app.include_router(crypto_module.router, prefix="/api/modules/crypto", tags=["crypto"])
 app.include_router(rev_module.router, prefix="/api/modules/rev", tags=["rev"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
+app.include_router(model_presets_routes.router, prefix="/api/model-presets", tags=["settings"])
 app.include_router(terminal_routes.router, prefix="/api/terminal", tags=["terminal"])
 app.include_router(collector_routes.router, prefix="/api/collector", tags=["collector"])
 app.include_router(retry_routes.router, prefix="/api/jobs", tags=["jobs"])

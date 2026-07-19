@@ -481,6 +481,36 @@
           <button type="button" id="settings-reload" style="background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:0.5rem 1rem;border-radius:6px;cursor:pointer">Reload</button>
         </div>
       </form>
+
+      <div id="model-presets" class="preset-block">
+        <h3 style="margin-bottom:0.25rem">Model presets</h3>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:0">
+          Save named presets that pin the non-main agents — <code>judge</code>
+          (covers prejudge / postjudge / stall-supervise / retry-reviewer),
+          <code>report</code>, and <code>monitor</code> — to specific models, then
+          switch between them. A blank role = <em>inherit</em> (judge and report
+          follow the main model; monitor keeps its cheap default). <code>main</code>
+          stays on the per-job picker / global model above; <code>recon</code> follows
+          its spawner for cache-prefix alignment, so neither is listed here.
+          Stored in <code>/data/model_presets.json</code>; applies to the next job.
+        </p>
+        <div class="preset-row">
+          <label style="flex:1;margin:0">
+            Active preset
+            <select id="preset-active"></select>
+          </label>
+          <div class="preset-btns">
+            <button type="button" id="preset-new">+ New</button>
+            <button type="button" id="preset-rename">Rename</button>
+            <button type="button" id="preset-delete">Delete</button>
+          </div>
+        </div>
+        <div id="preset-roles"></div>
+        <div class="preset-row" style="align-items:center">
+          <button type="button" id="preset-save">Save presets</button>
+          <small id="preset-status" style="color:#8b949e"></small>
+        </div>
+      </div>
     </section>
 
     <section id="jobs">
