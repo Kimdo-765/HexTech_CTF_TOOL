@@ -515,6 +515,34 @@
           <small id="preset-status" style="color:#8b949e"></small>
         </div>
       </div>
+
+      <div id="tunnel-block" class="preset-block">
+        <h3 style="margin-bottom:0.25rem">Cloudflared tunnel <span style="color:#8b949e;font-weight:normal;font-size:0.85rem">— OOB collector</span></h3>
+        <p style="color:#8b949e;font-size:0.85rem;margin-top:0">
+          Opens a public <code>*.trycloudflare.com</code> quick-tunnel to the api and
+          auto-fills the <strong>Callback URL</strong> above, so remote bots (XSS / SSRF /
+          blind RCE) can beacon back to the built-in collector. Runs as a sibling
+          container, so it survives api redeploys and keeps a stable URL. A dead tunnel
+          stays dead — re-roll manually (Cloudflare rate-limits fresh tunnels).
+        </p>
+        <div id="tunnel-warning" class="tunnel-warning" hidden>
+          ⚠ <strong>No auth token set.</strong> This tunnel exposes the ENTIRE api to the
+          public internet — including <code>/api/terminal</code> (an interactive shell / RCE)
+          and settings-write. Anyone who learns the URL gets shell on this host. Set an
+          <em>Auth token</em> above to lock everything except the public collector.
+        </div>
+        <div class="preset-row" style="align-items:center">
+          <span id="tunnel-chip" class="rl-chip">checking…</span>
+          <a id="tunnel-url" href="#" target="_blank" rel="noopener"
+             style="color:#58a6ff;font-size:0.8rem;word-break:break-all" hidden></a>
+        </div>
+        <div class="preset-row">
+          <button type="button" id="tunnel-activate">Activate tunnel</button>
+          <button type="button" id="tunnel-stop">Stop</button>
+          <button type="button" id="tunnel-refresh">Refresh</button>
+          <small id="tunnel-status-text" style="color:#8b949e;align-self:center"></small>
+        </div>
+      </div>
     </section>
 
     <section id="jobs">

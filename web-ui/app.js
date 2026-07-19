@@ -854,7 +854,101 @@ document.getElementById("settings-reload").addEventListener("click", loadSetting
 document.querySelector('.tab[data-tab="settings"]').addEventListener("click", () => {
   loadSettings();
   loadModelPresets();
+  loadTunnelStatus();
 });
+
+// --- Cloudflared tunnel ----------------------------------------------------
+// Activate/stop a cloudflared OOB quick-tunnel and show live connection state.
+// Backed by /api/tunnel (start/stop/status) which runs cloudflared as a sibling
+// container. Status reflects reality (container + edge probe), never a flag.
+let _tunnelPoll = null;
+
+function _setTunnelChip(state, label) {
+  const chip = document.getElementById("tunnel-chip");
+  if (!chip) return;
+  chip.className = "rl-chip " + (
+    state === "connected" ? "rl-chip--ok" :
+    state === "connecting" ? "rl-chip--warn" : "rl-chip--rejected"
+  );
+  chip.textContent = label;
+}
+
+function renderTunnel(s) {
+  const warn = document.getElementById("tunnel-warning");
+  if (warn) warn.hidden = !s.exposure_warning;
+  const urlEl = document.getElementById("tunnel-url");
+  if (urlEl) {
+    if (s.running && s.url) { urlEl.hidden = false; urlEl.textContent = s.url; urlEl.href = s.url; }
+    else { urlEl.hidden = true; urlEl.textContent = ""; urlEl.removeAttribute("href"); }
+  }
+  if (!s.running) {
+    _setTunnelChip("down", s.error ? "error" : "down");
+  } else if (!s.url) {
+    _setTunnelChip("connecting", "connecting…");
+  } else if (s.reachable === false) {
+    _setTunnelChip("connecting", "edge warming up…");
+  } else {
+    _setTunnelChip("connected", s.url_published ? "connected" : "connected (unpublished)");
+  }
+  const txt = document.getElementById("tunnel-status-text");
+  if (txt) txt.textContent = s.error ? s.error : (s.note || "");
+}
+
+async function loadTunnelStatus(probe = false) {
+  try {
+    const res = await fetch(`${API}/tunnel/status${probe ? "?probe=1" : ""}`);
+    if (!res.ok) { _setTunnelChip("down", "status error"); return null; }
+    const s = await res.json();
+    renderTunnel(s);
+    // Gated poller: keep polling only while the tunnel is mid-connect.
+    const connecting = s.running && (!s.url || s.reachable === false);
+    if (connecting && document.getElementById("panel-settings").classList.contains("active")) {
+      if (!_tunnelPoll) _tunnelPoll = setInterval(() => loadTunnelStatus(true), 5000);
+    } else if (_tunnelPoll) {
+      clearInterval(_tunnelPoll); _tunnelPoll = null;
+    }
+    return s;
+  } catch (_) {
+    _setTunnelChip("down", "unreachable"); return null;
+  }
+}
+
+document.getElementById("tunnel-activate").addEventListener("click", async (e) => {
+  const btn = e.target; btn.disabled = true;
+  _setTunnelChip("connecting", "starting…");
+  const txt = document.getElementById("tunnel-status-text");
+  if (txt) txt.textContent = "spawning cloudflared + waiting for public URL (up to ~30s)…";
+  try {
+    const res = await fetch(`${API}/tunnel/start`, { method: "POST" });
+    const s = await res.json();
+    renderTunnel(s);
+    if (!s.ok && s.error && txt) txt.textContent = s.error;
+    loadTunnelStatus(true);
+  } catch (err) {
+    if (txt) txt.textContent = `start failed: ${err}`;
+    _setTunnelChip("down", "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("tunnel-stop").addEventListener("click", async (e) => {
+  const btn = e.target; btn.disabled = true;
+  const txt = document.getElementById("tunnel-status-text");
+  if (txt) txt.textContent = "stopping…";
+  try {
+    const res = await fetch(`${API}/tunnel/stop`, { method: "POST" });
+    const s = await res.json();
+    renderTunnel(s);
+    if (txt) txt.textContent = s.error || s.note || "stopped";
+  } catch (err) {
+    if (txt) txt.textContent = `stop failed: ${err}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("tunnel-refresh").addEventListener("click", () => loadTunnelStatus(true));
 
 // --- Model presets ---------------------------------------------------------
 // Named per-role model overrides (judge / report / monitor) the operator can
@@ -3249,6 +3343,7 @@ document.addEventListener("keydown", (e) => {
 fillModelSelects();
 fillEffortSelects();
 loadModelPresets();
+loadTunnelStatus();
 refreshJobs();
 refreshStats();
 
