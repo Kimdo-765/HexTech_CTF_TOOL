@@ -56,7 +56,7 @@ MODEL_PRESETS_PATH = Path(
 # "main" = the main CTF agent's model; a blank slot inherits the per-job picker /
 # global `claude_model` setting. The remaining roles fold over their own base.
 CONFIGURABLE_ROLES: tuple[str, ...] = (
-    "main", "judge", "recon", "debugger", "triage", "report", "monitor",
+    "main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor",
 )
 
 # Reasoning-effort levels a preset may pin for the MAIN session (mirrors the

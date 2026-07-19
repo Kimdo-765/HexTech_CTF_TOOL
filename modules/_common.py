@@ -2149,8 +2149,9 @@ def resolve_main_model(model_override: str | None) -> str:
 
 def resolve_judge_model(job_id: str | None) -> str:
     """Resolve the model a NON-main phase (prejudge / supervise / postjudge /
-    judge-spawned recon / report / reviewer) should run on so it FOLLOWS the
-    job's main-agent model — NEVER diverging.
+    judge-spawned recon / report) should run on so it FOLLOWS the job's
+    main-agent model — NEVER diverging. (The /retry reviewer has its own
+    ``resolve_reviewer_model``, which folds the ``reviewer`` slot over this.)
 
     Base is derived through ``resolve_main_model`` (per-job ``meta.model``
     override → preset ``main`` → global ``claude_model`` → default), so the
@@ -2164,6 +2165,24 @@ def resolve_judge_model(job_id: str | None) -> str:
     meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
     base = resolve_main_model(meta_model)
     return resolve_role_model("judge", base)
+
+
+def resolve_reviewer_model(job_id: str | None) -> str:
+    """Resolve the /retry REVIEWER's model — configurable INDEPENDENTLY of the
+    judge family.
+
+    Fold order: an active preset's ``reviewer`` slot wins; else it falls back to
+    the ``judge`` slot (which itself follows main); else to the main-derived
+    base. So a blank ``reviewer`` slot is byte-identical to the old behavior
+    (reviewer == resolve_judge_model), and setting ``reviewer`` overrides ONLY
+    the retry reviewer without touching prejudge/postjudge/supervise.
+    """
+    from modules.model_presets import resolve_role_model
+
+    meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
+    base = resolve_main_model(meta_model)
+    judge_base = resolve_role_model("judge", base)   # current reviewer default
+    return resolve_role_model("reviewer", judge_base)
 
 
 def make_main_session_options(

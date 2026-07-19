@@ -488,13 +488,14 @@
           Save named presets that pin per-agent models + reasoning effort, then
           switch between them. Configurable: <code>main</code> (the CTF agent) and
           its <code>effort</code>, plus <code>judge</code> (prejudge / postjudge /
-          stall-supervise / retry-reviewer + judge subagent), <code>recon</code>,
-          <code>debugger</code>, <code>triage</code>, <code>report</code>,
-          <code>monitor</code>. A blank slot = <em>inherit</em>: <code>main</code> +
-          <code>effort</code> fall back to the per-job picker / global Settings values
-          above; judge / report follow main; recon / debugger / triage follow main
-          (cache-aligned); monitor keeps its cheap default. An explicit per-job model
-          or effort still wins over the preset.
+          stall-supervise + judge subagent), <code>reviewer</code> (the /retry hint
+          reviewer, separately overridable), <code>recon</code>, <code>debugger</code>,
+          <code>triage</code>, <code>report</code>, <code>monitor</code>. A blank slot =
+          <em>inherit</em>: <code>main</code> + <code>effort</code> fall back to the
+          per-job picker / global Settings values above; judge / report follow main;
+          <code>reviewer</code> follows the judge slot (then main); recon / debugger /
+          triage follow main (cache-aligned); monitor keeps its cheap default. An
+          explicit per-job model or effort still wins over the preset.
           <strong style="color:#d29922">⚠ recon / debugger / triage</strong> normally
           share the main model for <em>cache-prefix alignment</em> — pinning them to a
           different model works but sacrifices that cache locality (higher cost /

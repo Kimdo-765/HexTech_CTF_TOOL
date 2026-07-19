@@ -975,12 +975,13 @@ document.getElementById("tunnel-refresh").addEventListener("click", () => loadTu
 // Named per-role model overrides (judge / report / monitor) the operator can
 // save and switch between. The whole store is edited in memory and PUT as one
 // blob to /api/model-presets. main stays on the per-job / global model.
-let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["main", "judge", "recon", "debugger", "triage", "report", "monitor"] };
+let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor"] };
 
 // Human-readable default a blank role falls back to (shown in the "(inherit)" option).
 const PRESET_ROLE_DEFAULTS = {
   main: "per-job pick / global Settings model",
   judge: "follows main model",
+  reviewer: "follows judge slot / main",
   recon: "follows main — cache-aligned",
   debugger: "follows main — cache-aligned",
   triage: "follows main — cache-aligned",
@@ -998,7 +999,7 @@ async function loadModelPresets() {
         active: s.active || "",
         presets: s.presets || {},
         configurable_roles: (s.configurable_roles && s.configurable_roles.length)
-          ? s.configurable_roles : ["main", "judge", "recon", "debugger", "triage", "report", "monitor"],
+          ? s.configurable_roles : ["main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor"],
       };
     }
   } catch (_) { return; }

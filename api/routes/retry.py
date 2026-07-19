@@ -49,7 +49,7 @@ from modules._common import (
     LATEST_JUDGE_MODEL,
     classify_agent_error,
     kill_guard_hooks,
-    resolve_judge_model,
+    resolve_reviewer_model,
 )
 from modules.settings_io import apply_to_env, get_setting
 
@@ -1045,7 +1045,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 })
                 return
 
-            _rv_model = resolve_judge_model(job_id)
+            _rv_model = resolve_reviewer_model(job_id)
             yield sse("stage", {"name": "asking", "model": _rv_model})
             try:
                 async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
@@ -1127,7 +1127,7 @@ async def retry_with_hint(job_id: str, request: Request):
         if not context.strip():
             raise HTTPException(status_code=400, detail="no context to review")
         try:
-            hint = await _ask_reviewer(context, model=resolve_judge_model(job_id))
+            hint = await _ask_reviewer(context, model=resolve_reviewer_model(job_id))
         except ReviewerError as e:
             # 502 = upstream (Claude API) failure. The retry never reached
             # the queue, so the client knows nothing new was scheduled.
@@ -1574,7 +1574,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 })
                 return
 
-            _rv_model = resolve_judge_model(job_id)
+            _rv_model = resolve_reviewer_model(job_id)
             yield sse("stage", {"name": "asking", "model": _rv_model})
             try:
                 async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
