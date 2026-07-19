@@ -20,6 +20,7 @@ from modules._common import (
     prior_work_dirs,
     read_meta,
     resolve_effort,
+    resolve_main_model,
     run_main_agent_session,
     run_pre_recon,
     run_report_phase,
@@ -63,7 +64,7 @@ async def _run_agent(
         },
     )
 
-    model = model_override or str(get_setting("claude_model") or "claude-opus-4-7")
+    model = resolve_main_model(model_override)
     resume_sid = read_meta(job_id).get("resume_session_id")
     summary: dict = {"messages": 0, "tool_calls": 0, "model": model}
     options = make_main_session_options(

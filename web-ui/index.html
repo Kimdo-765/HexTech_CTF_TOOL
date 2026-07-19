@@ -485,13 +485,16 @@
       <div id="model-presets" class="preset-block">
         <h3 style="margin-bottom:0.25rem">Model presets</h3>
         <p style="color:#8b949e;font-size:0.85rem;margin-top:0">
-          Save named presets that pin the non-main agents — <code>judge</code>
-          (prejudge / postjudge / stall-supervise / retry-reviewer + judge
-          subagent), <code>recon</code>, <code>debugger</code>, <code>triage</code>,
-          <code>report</code>, <code>monitor</code> — to specific models, then switch
-          between them. A blank role = <em>inherit</em> (recon / debugger / triage /
-          report follow the main model; monitor keeps its cheap default).
-          <code>main</code> stays on the per-job picker / global model above.
+          Save named presets that pin per-agent models + reasoning effort, then
+          switch between them. Configurable: <code>main</code> (the CTF agent) and
+          its <code>effort</code>, plus <code>judge</code> (prejudge / postjudge /
+          stall-supervise / retry-reviewer + judge subagent), <code>recon</code>,
+          <code>debugger</code>, <code>triage</code>, <code>report</code>,
+          <code>monitor</code>. A blank slot = <em>inherit</em>: <code>main</code> +
+          <code>effort</code> fall back to the per-job picker / global Settings values
+          above; judge / report follow main; recon / debugger / triage follow main
+          (cache-aligned); monitor keeps its cheap default. An explicit per-job model
+          or effort still wins over the preset.
           <strong style="color:#d29922">⚠ recon / debugger / triage</strong> normally
           share the main model for <em>cache-prefix alignment</em> — pinning them to a
           different model works but sacrifices that cache locality (higher cost /

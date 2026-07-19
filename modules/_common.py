@@ -2118,39 +2118,51 @@ def resolve_effort(meta_effort: str | None) -> str | None:
     per_job = _norm(meta_effort)
     if per_job is not None:
         return per_job
+    # An active model-preset can pin effort for the main session (overrides the
+    # global claude_effort Setting); a blank preset slot falls through to global.
+    try:
+        from modules.model_presets import get_preset_effort
+        preset_e = _norm(get_preset_effort())
+        if preset_e is not None:
+            return preset_e
+    except Exception:
+        pass
     return _norm(get_setting("claude_effort"))
+
+
+def resolve_main_model(model_override: str | None) -> str:
+    """Resolve the MAIN CTF agent's model.
+
+    Precedence: explicit per-job pick (``model_override``) > active preset's
+    ``main`` slot > global ``claude_model`` Setting > opus-4-7 default. When no
+    preset is active (or its ``main`` slot is blank), this is byte-identical to
+    the historical ``model_override or get_setting("claude_model") or default``.
+    """
+    from modules.settings_io import get_setting
+    from modules.model_presets import resolve_role_model
+
+    if model_override and str(model_override).strip():
+        return str(model_override).strip()
+    global_default = str(get_setting("claude_model") or "claude-opus-4-7")
+    return resolve_role_model("main", global_default)
 
 
 def resolve_judge_model(job_id: str | None) -> str:
     """Resolve the model a NON-main phase (prejudge / supervise / postjudge /
     judge-spawned recon / report / reviewer) should run on so it FOLLOWS the
-    job's main-agent model.
+    job's main-agent model — NEVER diverging.
 
-    Mirrors the analyzers' resolution EXACTLY
-    (``model_override or get_setting("claude_model") or "claude-opus-4-7"``):
-    per-job ``meta.model`` wins, else the global ``claude_model`` Setting,
-    else the opus-4-7 default. Same order/literal as main, so these phases
-    track main for BOTH override jobs and default-model jobs — never diverging
-    (e.g. main on opus-4-8[1m] → judge on opus-4-8[1m] too). The legacy
-    LATEST_JUDGE_MODEL constant is kept only as an import-time fallback elsewhere.
+    Base is derived through ``resolve_main_model`` (per-job ``meta.model``
+    override → preset ``main`` → global ``claude_model`` → default), so the
+    judge family tracks main even when main is pinned by a preset. An active
+    preset's own ``judge`` slot then folds over that base; a blank slot falls
+    through to it. The legacy LATEST_JUDGE_MODEL constant is kept only as an
+    import-time fallback elsewhere.
     """
-    from modules.settings_io import get_setting
     from modules.model_presets import resolve_role_model
 
-    base: str | None = None
-    if job_id:
-        m = (read_meta(job_id) or {}).get("model")
-        if m and str(m).strip():
-            base = str(m).strip()
-    if base is None:
-        s = get_setting("claude_model")
-        if s and str(s).strip():
-            base = str(s).strip()
-    if base is None:
-        base = "claude-opus-4-7"
-    # An active model-preset can pin the judge family (prejudge / postjudge /
-    # supervise / judge-spawned recon / retry reviewer) independently of main;
-    # empty preset entry → falls through to `base` (the follow-main default).
+    meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
+    base = resolve_main_model(meta_model)
     return resolve_role_model("judge", base)
 
 

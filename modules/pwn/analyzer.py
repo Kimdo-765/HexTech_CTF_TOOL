@@ -21,6 +21,7 @@ from modules._common import (
     prior_work_dirs,
     read_meta,
     resolve_effort,
+    resolve_main_model,
     run_main_agent_session,
     run_pre_recon,
     run_report_phase,
@@ -1091,7 +1092,7 @@ async def _run_agent(
         },
     )
 
-    model = model_override or str(get_setting("claude_model") or "claude-opus-4-7")
+    model = resolve_main_model(model_override)
     resume_sid = read_meta(job_id).get("resume_session_id")
     # Heap detection up-front so the orchestrator's scaffold-missing
     # trip-wire (SCAFFOLD_NUDGE in run_main_agent_session) can fire

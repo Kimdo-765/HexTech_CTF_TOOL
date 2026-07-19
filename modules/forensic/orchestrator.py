@@ -29,6 +29,7 @@ from modules._common import (
     log_thinking,
     read_meta,
     resolve_effort,
+    resolve_main_model,
     scan_job_for_flags,
     soft_timeout_watchdog,
     write_meta,
@@ -127,7 +128,7 @@ async def _claude_summary(
     model_override: Optional[str] = None,
 ) -> dict:
     work_dir = _job_dir(job_id)
-    model = model_override or str(get_setting("claude_model") or "claude-opus-4-7")
+    model = resolve_main_model(model_override)
     # Per-job scratch dir (see modules/_common.py make_main_session_options
     # for rationale). Cleanup is implicit via job DELETE rmtree.
     tmp_dir = Path(work_dir) / "tmp"

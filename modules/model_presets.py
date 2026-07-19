@@ -53,9 +53,15 @@ MODEL_PRESETS_PATH = Path(
 )
 
 # Roles the operator may pin to a model. Order = UI display order.
+# "main" = the main CTF agent's model; a blank slot inherits the per-job picker /
+# global `claude_model` setting. The remaining roles fold over their own base.
 CONFIGURABLE_ROLES: tuple[str, ...] = (
-    "judge", "recon", "debugger", "triage", "report", "monitor",
+    "main", "judge", "recon", "debugger", "triage", "report", "monitor",
 )
+
+# Reasoning-effort levels a preset may pin for the MAIN session (mirrors the
+# global `claude_effort` Setting; "" = inherit). Not a model — handled separately.
+VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 _lock = threading.Lock()
 
@@ -85,6 +91,10 @@ def _normalize(data: Any) -> dict[str, Any]:
             for role in CONFIGURABLE_ROLES:
                 v = roles.get(role, "")
                 clean[role] = str(v).strip() if v not in (None, "") else ""
+            # effort is NOT a model — validate against the allowed levels.
+            ev = roles.get("effort", "")
+            evs = str(ev).strip().lower() if ev not in (None, "") else ""
+            clean["effort"] = evs if evs in VALID_EFFORTS else ""
             presets[name.strip()] = clean
     active = str(data.get("active") or "").strip()
     if active and active not in presets:
@@ -127,6 +137,18 @@ def get_role_model(role: str) -> str:
     preset = (store.get("presets") or {}).get(active) or {}
     v = preset.get(role, "")
     return str(v).strip() if v else ""
+
+
+def get_preset_effort() -> str:
+    """Reasoning-effort level pinned by the ACTIVE preset, or "" when there's no
+    active preset / the effort slot is unset. The caller keeps its own default."""
+    store = load_store()
+    active = store.get("active") or ""
+    if not active:
+        return ""
+    preset = (store.get("presets") or {}).get(active) or {}
+    e = str(preset.get("effort", "") or "").strip().lower()
+    return e if e in VALID_EFFORTS else ""
 
 
 def resolve_role_model(role: str, fallback: str) -> str:

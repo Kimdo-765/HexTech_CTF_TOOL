@@ -975,10 +975,11 @@ document.getElementById("tunnel-refresh").addEventListener("click", () => loadTu
 // Named per-role model overrides (judge / report / monitor) the operator can
 // save and switch between. The whole store is edited in memory and PUT as one
 // blob to /api/model-presets. main stays on the per-job / global model.
-let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["judge", "report", "monitor"] };
+let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["main", "judge", "recon", "debugger", "triage", "report", "monitor"] };
 
 // Human-readable default a blank role falls back to (shown in the "(inherit)" option).
 const PRESET_ROLE_DEFAULTS = {
+  main: "per-job pick / global Settings model",
   judge: "follows main model",
   recon: "follows main — cache-aligned",
   debugger: "follows main — cache-aligned",
@@ -997,7 +998,7 @@ async function loadModelPresets() {
         active: s.active || "",
         presets: s.presets || {},
         configurable_roles: (s.configurable_roles && s.configurable_roles.length)
-          ? s.configurable_roles : ["judge", "report", "monitor"],
+          ? s.configurable_roles : ["main", "judge", "recon", "debugger", "triage", "report", "monitor"],
       };
     }
   } catch (_) { return; }
@@ -1026,8 +1027,9 @@ function renderPresetRoles() {
     const p = document.createElement("p");
     p.className = "preset-empty";
     p.textContent =
-      "No preset active — judge follows the main model; report and monitor run "
-      + "on their cheap default. Click “+ New” to create one.";
+      "No preset active — main uses the per-job pick / global Settings model & "
+      + "effort; judge/report follow main; monitor runs cheap. Click “+ New” to "
+      + "create one.";
     wrap.appendChild(p);
     return;
   }
@@ -1053,6 +1055,23 @@ function renderPresetRoles() {
     });
     wrap.appendChild(lbl);
   }
+  // effort row — reasoning effort for the MAIN session (mirrors the global
+  // "Effort" Setting); not a model, so it's a separate control.
+  const elbl = document.createElement("label");
+  elbl.className = "preset-role";
+  elbl.innerHTML =
+    `<span class="preset-role-name">effort</span>` +
+    `<select data-preset-effort></select>`;
+  const es = elbl.querySelector("select");
+  es.appendChild(new Option("(inherit — per-job / global Settings effort)", ""));
+  for (const ef of CLAUDE_EFFORTS) es.appendChild(new Option(ef, ef));
+  es.value = preset.effort || "";
+  es.addEventListener("change", () => {
+    if (!PRESET_STORE.presets[active]) PRESET_STORE.presets[active] = {};
+    PRESET_STORE.presets[active].effort = es.value;
+    updatePresetStatus();
+  });
+  wrap.appendChild(elbl);
 }
 
 function updatePresetStatus() {
@@ -1067,6 +1086,7 @@ function updatePresetStatus() {
   const parts = PRESET_STORE.configurable_roles.map(
     (r) => `${r}=${p[r] ? p[r] : "inherit"}`
   );
+  parts.push(`effort=${p.effort ? p.effort : "inherit"}`);
   el.textContent = `active: ${active} · ${parts.join(" · ")} · Save to apply`;
 }
 
