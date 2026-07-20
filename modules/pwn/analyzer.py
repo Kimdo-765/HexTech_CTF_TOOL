@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import traceback
@@ -890,6 +891,235 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     return elfs
 
 
+def _libc_version(libc: Path | None) -> str | None:
+    """Extract glibc major.minor from a libc.so's version banner via
+    `strings`. Returns None on any failure (best-effort; used only for a
+    diagnostic warning, never for control flow)."""
+    if not libc:
+        return None
+    try:
+        out = subprocess.run(
+            ["strings", str(libc)], capture_output=True, text=True,
+            timeout=30, check=False,
+        ).stdout
+    except Exception:
+        return None
+    m = re.search(r"GNU C Library.*?(?:version|GLIBC)\s*(\d+\.\d+)", out)
+    return m.group(1) if m else None
+
+
+def _safe_extract_tar(tf, dest: Path) -> None:
+    """Extract a tarfile into dest, rejecting members whose resolved path
+    escapes dest (path-traversal guard). Used by the ar/tar .deb fallback
+    instead of tarfile's `filter="data"` — the latter aborts the whole
+    archive on the absolute-path symlinks glibc ships, which we don't
+    need (staging follows the real versioned files, not the symlinks)."""
+    dest = dest.resolve()
+    base = str(dest) + os.sep
+    for m in tf.getmembers():
+        target = (dest / m.name).resolve()
+        if str(target) != str(dest) and not str(target).startswith(base):
+            continue
+        tf.extract(m, dest)
+
+
+def _extract_deb(deb: Path, dest: Path, log_fn) -> bool:
+    """Extract a .deb's data payload into ``dest``. Primary path is
+    ``dpkg-deb -x`` (canonical; handles xz/gz/zst uniformly and preserves
+    the symlinks glibc ships — libc.so.6 -> libc-X.Y.so, ld-linux-*.so.2
+    -> ld-X.Y.so). Falls back to ``ar x`` + tarfile when dpkg-deb is
+    absent. Returns True on success."""
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        res = subprocess.run(
+            ["dpkg-deb", "-x", str(deb), str(dest)],
+            capture_output=True, text=True, timeout=180, check=False,
+        )
+        if res.returncode == 0:
+            return True
+        log_fn(
+            f"[autoboot] dpkg-deb -x {deb.name} exited {res.returncode}: "
+            f"{(res.stderr or '').strip()[:160]}"
+        )
+    except FileNotFoundError:
+        pass  # dpkg-deb not installed — try the ar fallback below.
+    except Exception as e:
+        log_fn(f"[autoboot] dpkg-deb -x {deb.name} failed: {e}")
+
+    # Fallback: unpack the outer `ar` archive, extract its data.tar.* via
+    # tarfile (autodetects gz/bz2/xz). Zstd-compressed payloads are left
+    # to dpkg-deb (present on the worker); this covers the era-relevant
+    # libc debs (2.27/2.31/2.35 = data.tar.xz).
+    try:
+        import glob as _glob
+        import tarfile
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            res = subprocess.run(
+                ["ar", "x", str(deb.resolve())],
+                cwd=td, capture_output=True, text=True, timeout=180,
+                check=False,
+            )
+            if res.returncode != 0:
+                log_fn(
+                    f"[autoboot] ar x {deb.name} failed: "
+                    f"{(res.stderr or '').strip()[:160]}"
+                )
+                return False
+            members = sorted(_glob.glob(os.path.join(td, "data.tar*")))
+            if not members:
+                log_fn(f"[autoboot] {deb.name}: no data.tar.* after ar x")
+                return False
+            # NB: not tarfile's `filter="data"` — it aborts the whole
+            # extraction on the absolute-path symlinks glibc ships
+            # (lib64/ld-linux-*.so.2 -> /lib/.../ld-X.Y.so). We only
+            # follow the real versioned files during staging, so a manual
+            # traversal guard (member-name only) is both sufficient and
+            # tolerant of those symlinks.
+            with tarfile.open(members[0], mode="r:*") as tf:
+                _safe_extract_tar(tf, dest)
+        return True
+    except Exception as e:
+        log_fn(f"[autoboot] .deb ar/tar fallback failed for {deb.name}: {e}")
+        return False
+
+
+def _stage_glibc_from_tree(tree: Path, chal_libs_dir: Path, log_fn) -> list[str]:
+    """Copy the glibc + ld loader + standard aux libs from an extracted
+    .deb tree into ``.chal-libs/``. Only libs ``_is_standard_libname``
+    recognises are staged — libc.so.6, libc-X.Y.so, ld-linux-*.so.*,
+    libm/libdl/libpthread/librt/libresolv/libnsl/libutil/libcrypt/libnss_*
+    — so glibc internals with non-standard names (libmvec, libanl,
+    libBrokenLocale, libSegFault, ld-X.Y.so) are NOT staged and thus can't
+    be misread as chal-author custom libraries by ``_detect_custom_libs``
+    (the OpenSSL/libcrypto misclassification lesson, job 44dd25365173).
+    Follows symlinks (glibc ships libc.so.6 / ld-linux-*.so.2 as symlinks
+    to the real versioned file — ``is_file()`` + ``copy2`` both follow).
+    Never clobbers an already-staged file. Returns new basenames staged."""
+    staged: list[str] = []
+    try:
+        entries = sorted(tree.rglob("*"))
+    except Exception:
+        return staged
+    for f in entries:
+        try:
+            if not f.is_file():  # follows symlinks; skips dirs/broken links
+                continue
+        except OSError:
+            continue
+        n = f.name
+        if ".so" not in n.lower():
+            continue
+        if not _is_standard_libname(n):
+            continue
+        chal_libs_dir.mkdir(parents=True, exist_ok=True)
+        dst = chal_libs_dir / n
+        if dst.exists():
+            continue
+        try:
+            shutil.copy2(f, dst)  # follows the symlink -> real content
+            dst.chmod(0o755)
+            staged.append(n)
+        except Exception as e:
+            log_fn(f"[autoboot] stage {n} from .deb failed: {e}")
+    return staged
+
+
+def _stage_libs_from_debs(work_dir: Path, log_fn) -> list[str]:
+    """Auto-extract any glibc .deb bundled with the challenge and pre-stage
+    the libc + ld loader it ships into ``./.chal-libs/``.
+
+    Dreamhack-style pwn chals often ship the exact deploy glibc as a .deb
+    (e.g. ``libc6_2.27-3ubuntu1.2_amd64.deb``, job a5d51c5b8217). find_pair
+    / chal-libc-fix can only see loose ``libc.so.6`` + ``ld-linux-*`` files
+    — they can't look inside the .deb's ``ar`` archive — so without this
+    the agent has to ``dpkg-deb -x`` by hand before it can get correct
+    heap/FSOP/one_gadget offsets. Runs in autoboot BEFORE ``chal-libc-fix``
+    so its Priority-0 fast path (``.chal-libs/libc.so.6`` +
+    ``ld-linux-*.so.*`` present) short-circuits on the staged libs.
+
+    Best-effort: any failure is logged and swallowed. Returns the list of
+    newly-staged lib basenames."""
+    # Collect glibc .deb files bundled with the chal. Name-prefilter to
+    # libc/glibc so an unrelated package .deb isn't needlessly extracted.
+    seen: set[Path] = set()
+    debs: list[Path] = []
+    for root, recursive in ((work_dir / "bin", True),
+                            (work_dir / "chal", True),
+                            (work_dir, False)):
+        if not root.is_dir():
+            continue
+        try:
+            it = root.rglob("*.deb") if recursive else root.glob("*.deb")
+        except Exception:
+            continue
+        for p in it:
+            try:
+                rp = p.resolve()
+            except Exception:
+                continue
+            if not p.is_file() or rp in seen:
+                continue
+            low = p.name.lower()
+            if "libc" not in low and "glibc" not in low:
+                log_fn(
+                    f"[autoboot] skipping non-glibc .deb {p.name} "
+                    f"(name has no libc/glibc marker)"
+                )
+                continue
+            seen.add(rp)
+            debs.append(p)
+    if not debs:
+        return []
+
+    chal_libs_dir = work_dir / ".chal-libs"
+    pre_existing_libc = chal_libs_dir / "libc.so.6"
+    had_libc = pre_existing_libc.is_file()
+
+    staged: list[str] = []
+    deb_libc: Path | None = None
+    for deb in debs:
+        dest = deb.parent / (deb.stem + "_extracted")
+        already = dest.is_dir() and any(dest.rglob("libc.so.6"))
+        if not already:
+            try:
+                rel = dest.relative_to(work_dir)
+            except ValueError:
+                rel = dest.name
+            log_fn(f"[autoboot] extracting libc from {deb.name} -> ./{rel}/")
+            if not _extract_deb(deb, dest, log_fn):
+                log_fn(f"[autoboot] .deb extraction failed for {deb.name}; skipping")
+                continue
+        staged.extend(_stage_glibc_from_tree(dest, chal_libs_dir, log_fn))
+        if deb_libc is None:
+            deb_libc = next(iter(dest.rglob("libc.so.6")), None) or next(
+                iter(dest.rglob("libc-*.so")), None
+            )
+
+    if staged:
+        log_fn(
+            f"[autoboot] pre-staged from .deb into ./.chal-libs/: "
+            f"{', '.join(staged)}"
+        )
+
+    # A loose libc was already staged (e.g. bundled alongside the .deb) and
+    # we did NOT clobber it. If the .deb — the authoritative deploy libc —
+    # ships a different glibc version, surface it: a wrong-libc silent miss
+    # is the recurring expensive class (remote SIGSEGV, job 8806b284d740).
+    if had_libc and deb_libc is not None:
+        v_staged = _libc_version(pre_existing_libc)
+        v_deb = _libc_version(deb_libc)
+        if v_staged and v_deb and v_staged != v_deb:
+            log_fn(
+                f"[autoboot] WARNING: ./.chal-libs/libc.so.6 was already "
+                f"staged as glibc {v_staged} (kept), but {debs[0].name} "
+                f"ships glibc {v_deb} — the .deb is the deploy libc. If "
+                f"remote offsets look wrong, replace .chal-libs/libc.so.6 "
+                f"with the .deb build."
+            )
+    return staged
+
+
 def _autobootstrap_libc(
     staged_bin: Path,
     work_dir: Path,
@@ -926,6 +1156,15 @@ def _autobootstrap_libc(
     try chal-libc-fix manually from its prompt.
     """
     elf_candidates = _find_elf_or_unzip(staged_bin, work_dir, log_fn)
+    # A chal may ship its deploy glibc as a .deb (Dreamhack style, job
+    # a5d51c5b8217) that find_pair/chal-libc-fix can't see inside. Auto-
+    # extract + pre-stage libc/ld into ./.chal-libs/ HERE — before the
+    # chal-libc-fix subprocess below, whose Priority-0 fast path then
+    # short-circuits on the staged pair. Runs even with no local ELF.
+    try:
+        _stage_libs_from_debs(work_dir, log_fn)
+    except Exception as e:
+        log_fn(f"[autoboot] .deb libc pre-stage failed (non-fatal): {e}")
     if not elf_candidates:
         log_fn("[autoboot] no ELF found in ./bin/ — skipping chal-libc-fix")
         return (None, None)
