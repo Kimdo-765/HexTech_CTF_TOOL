@@ -779,6 +779,20 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
         out: list[Path] = []
         try:
             for f in d.rglob("*"):
+                # Never flatten/stage out of a `*_extracted/` tree — that's
+                # where _stage_libs_from_debs unpacks a glibc .deb (and where
+                # an agent's manual `dpkg-deb -x libc_extracted/` lands). Its
+                # .so files are staged by _stage_libs_from_debs with the
+                # _is_standard_libname filter; scanning them here would let
+                # the UNFILTERED .so → .chal-libs copy below re-stage glibc
+                # internals (libmvec/libanl/...) and reintroduce the
+                # custom-lib Ghidra flood on /retry.
+                try:
+                    rel_parts = f.relative_to(d).parts
+                except ValueError:
+                    rel_parts = ()
+                if any(p.endswith("_extracted") for p in rel_parts):
+                    continue
                 if not f.is_file():
                     continue
                 try:
