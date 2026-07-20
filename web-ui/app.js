@@ -105,6 +105,22 @@ let pollTimer = null;
 // changes or its turn count regresses (= retry/resume forked it).
 const _prevTokens = {};
 
+// In-flight reviewer/retry streams, keyed by the job the retry was
+// launched FROM. streamRetry() runs a POST fetch + ReadableStream with NO
+// AbortController, so navigating to another job (which rebuilds
+// #job-detail.innerHTML and destroys the ephemeral retry-panel) does NOT
+// kill the stream — it keeps running server-side. Without a place to hold
+// the "reviewer in progress" state OUTSIDE the DOM, re-entering the job
+// rebuilds the detail from server data alone and the panel is gone. This
+// map holds each stream's state so renderReviewerPanel() can repaint it
+// after any detail re-render. Entry shape:
+//   { flow, flowEmoji, flowVerb, isManual, stageText, text, firstToken,
+//     status: "running"|"done"|"error", kind, newJobId }
+// Known limit: in-page only — a full page reload (F5) loses it, and the
+// POST stream can't be re-attached after reload anyway. The reported bug
+// is SPA navigation (leave the job window, come back), which this covers.
+const activeReviewers = new Map();
+
 // Live SSE stream state. We keep the 2-second poller as a fallback so
 // the panel still works when the server-side stream is unavailable
 // (older worker image, redis hiccup, browser without EventSource).
@@ -1457,6 +1473,79 @@ async function decideTimeout(jobId, decision, btn) {
   }
 }
 
+// (Re)paint the "reviewer in progress" panel for `jobId` from its
+// activeReviewers entry. Idempotent: creates the panel if absent, updates
+// it in place otherwise (cheap on every streamed token). No-ops when this
+// job's detail isn't the one on screen — the state persists in the map and
+// is restored the next time renderJob() rebuilds the detail (selectJob →
+// this is called just before renderJob returns). This is what makes the
+// panel survive navigating away and back.
+function renderReviewerPanel(jobId) {
+  const detail = document.getElementById("job-detail");
+  if (!detail) return;
+  if (selectedJob !== jobId) return;
+  const st = activeReviewers.get(jobId);
+  let panel = document.getElementById("retry-panel-" + jobId);
+  if (!st) { if (panel) panel.remove(); return; }
+
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.className = "retry-panel";
+    panel.id = "retry-panel-" + jobId;
+    panel.innerHTML =
+      "<h4></h4>"
+      + '<div class="stage"><span class="dot"></span><span class="stage-text"></span></div>'
+      + '<pre class="hint-stream"></pre>';
+    // Same insertion point streamRetry used: above the flag banner /
+    // file-links / first heading in the detail.
+    const refNode = detail.querySelector(".flag-banner")
+      || detail.querySelector(".file-links")
+      || detail.querySelector("h4");
+    if (refNode && refNode.parentNode) refNode.parentNode.insertBefore(panel, refNode);
+    else detail.appendChild(panel);
+  }
+
+  const label = st.flow === "resume" ? "Resume" : "Retry";
+  const headerEl = panel.querySelector("h4");
+  const stageEl = panel.querySelector(".stage-text");
+  const streamEl = panel.querySelector(".hint-stream");
+  const dot = panel.querySelector(".dot");
+
+  panel.classList.toggle("retry-panel-error", st.status === "error");
+  if (st.status === "error") {
+    headerEl.textContent = `${st.flowEmoji} ${label} — error (no new job created)`;
+    dot.style.background = "#f85149";
+    dot.style.animation = "none";
+  } else if (st.status === "done") {
+    headerEl.textContent = `${st.flowEmoji} ${label} — ${st.isManual ? "your hint" : "reviewer"} submitted`;
+    dot.style.background = "#56d364";
+    dot.style.animation = "none";
+  } else {
+    headerEl.textContent = st.isManual
+      ? `${st.flowEmoji} ${label} — your hint`
+      : `${st.flowEmoji} ${label} — reviewer in progress`;
+    dot.style.background = "";
+    dot.style.animation = "";
+  }
+  stageEl.textContent = st.stageText || "";
+
+  const atBottom = streamEl.scrollTop + streamEl.clientHeight >= streamEl.scrollHeight - 8;
+  const newText = (st.text != null && st.text !== "")
+    ? st.text
+    : (st.isManual ? "" : "(awaiting reviewer output…)");
+  if (streamEl.textContent !== newText) streamEl.textContent = newText;
+  if (atBottom) streamEl.scrollTop = streamEl.scrollHeight;
+
+  // While the stream is live, keep every retry path disabled so a second
+  // submit can't race it. A fresh renderJob() rebuilds the buttons enabled;
+  // this re-disables them in the same tick. Terminal/absent entry leaves
+  // them enabled.
+  const running = st.status === "running";
+  detail.querySelectorAll(
+    ".retry-btn, .retry-manual-submit, .stop-resume-submit",
+  ).forEach((b) => { b.disabled = running; });
+}
+
 async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   // Endpoint can be /retry/stream (default) or /resume/stream — same SSE
   // protocol either way, only the stage labels differ.
@@ -1464,14 +1553,6 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   const flow = opts.flow || "retry";   // "retry" | "resume"
   const flowVerb = flow === "resume" ? "resume" : "retry";
   const flowEmoji = flow === "resume" ? "✋" : "↻";
-
-  // Disable every retry button on the detail panel — only one path runs.
-  const allRetryBtns = document.querySelectorAll(
-    `#job-detail .retry-btn, #job-detail .retry-manual-submit, #job-detail .stop-resume-submit`,
-  );
-  allRetryBtns.forEach((b) => (b.disabled = true));
-  const origText = btn.textContent;
-  btn.textContent = `⏳ ${flowVerb}…`;
   const isManual = typeof manualHint === "string" && manualHint.length > 0;
 
   // Stop the regular polling so it doesn't fight our progress panel
@@ -1483,31 +1564,46 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   const resumeForm = document.getElementById("stop-resume-form-" + jobId);
   if (resumeForm) resumeForm.remove();
 
-  // Insert a live progress panel right above the run-log heading
-  const detail = document.getElementById("job-detail");
-  const panel = document.createElement("div");
-  panel.className = "retry-panel";
-  panel.id = "retry-panel-" + jobId;
-  const headerText = isManual
-    ? `${flowEmoji} ${flow === "resume" ? "Resume" : "Retry"} — your hint`
-    : `${flowEmoji} ${flow === "resume" ? "Resume" : "Retry"} — reviewer in progress`;
-  panel.innerHTML = `
-    <h4>${headerText}</h4>
-    <div class="stage"><span class="dot"></span><span class="stage-text">${isManual ? "submitting…" : "starting…"}</span></div>
-    <pre class="hint-stream"></pre>
-  `;
-  // Place panel before the runBlock area (just under the meta line)
-  const flagBanner = detail.querySelector(".flag-banner");
-  const refNode = flagBanner || detail.querySelector(".file-links") || detail.querySelector("h4");
-  if (refNode) refNode.parentNode.insertBefore(panel, refNode);
-  else detail.appendChild(panel);
+  // Seed the PERSISTENT state + paint. From here the panel is rebuilt from
+  // activeReviewers by renderReviewerPanel(), so navigating away and back
+  // restores it instead of losing the "reviewer in progress" UI.
+  activeReviewers.set(jobId, {
+    flow, flowEmoji, flowVerb, isManual,
+    stageText: isManual ? "submitting…" : "starting…",
+    text: isManual ? manualHint : "",
+    firstToken: !isManual,
+    status: "running",
+  });
+  const origText = btn.textContent;
+  btn.textContent = `⏳ ${flowVerb}…`;
+  renderReviewerPanel(jobId);
 
-  const stageEl = panel.querySelector(".stage-text");
-  const streamEl = panel.querySelector(".hint-stream");
-  // Manual hint: show it immediately. Reviewer hint: wait for the first token.
-  let firstToken = !isManual;
-  if (isManual) streamEl.textContent = manualHint;
-  else streamEl.textContent = "(awaiting reviewer output…)";
+  const setError = (kind, message) => {
+    const st = activeReviewers.get(jobId);
+    if (!st) return;
+    st.status = "error";
+    st.kind = kind;
+    const kindLabel = ({
+      api_error: "API error",
+      auth: "auth error",
+      rate_limit: "rate limit",
+      policy_refusal: "usage-policy refusal",
+      timeout: "timeout",
+      empty: "empty response",
+      no_context: "no prior context",
+      gather: "context gather failed",
+      halt: "stop failed",
+      submit: "submit rejected",
+      stream_closed: "stream closed",
+      unknown: "unknown error",
+    })[kind] || kind;
+    st.stageText = `${kindLabel} — ${flowVerb} aborted`;
+    const em = (message || "unknown error").trim();
+    // Keep any partial reviewer text as forensic context above the error.
+    st.text = st.firstToken ? em : `${st.text}\n\n--- ${kindLabel} ---\n${em}`;
+    st.firstToken = false;
+    renderReviewerPanel(jobId);
+  };
 
   // EventSource only supports GET. Use fetch + ReadableStream to POST + stream.
   // Body fields are all optional from the server's POV: hint (manual mode
@@ -1531,15 +1627,13 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   try {
     resp = await fetch(endpoint, fetchOpts);
   } catch (e) {
-    streamEl.textContent = "[err] " + e;
-    allRetryBtns.forEach((b) => (b.disabled = false));
+    setError("error", String(e));
     btn.textContent = origText;
     return;
   }
   if (!resp.ok) {
-    const body = await resp.text();
-    streamEl.textContent = `[err] ${resp.status}: ${body}`;
-    allRetryBtns.forEach((b) => (b.disabled = false));
+    const errBody = await resp.text().catch(() => "");
+    setError("error", `${resp.status}: ${errBody}`);
     btn.textContent = origText;
     return;
   }
@@ -1551,13 +1645,15 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   function handleEvent(name, dataStr) {
     let data = {};
     try { data = JSON.parse(dataStr); } catch (_) {}
+    const st = activeReviewers.get(jobId);
+    if (!st) return;  // entry cleared (e.g. a newer retry replaced it)
     if (name === "stage") {
       const s = data.name;
-      // The backend sends the resolved reviewer model (resolve_judge_model:
+      // The backend sends the resolved reviewer model (resolve_reviewer_model:
       // per-job meta.model → global claude_model → opus-4-7) so this shows the
       // ACTUAL model, not a hardcoded label.
       const reviewerModel = data.model || "reviewer";
-      stageEl.textContent = ({
+      st.stageText = ({
         halting: "halting current job…",
         gathering: "gathering prior job context…",
         asking: `asking reviewer (${reviewerModel})…`,
@@ -1569,75 +1665,66 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
               ? "enqueueing fresh job (carrying ./work/)…"
               : "enqueueing new job…"),
       })[s] || s;
+      renderReviewerPanel(jobId);
     } else if (name === "token") {
-      if (firstToken) { streamEl.textContent = ""; firstToken = false; }
-      streamEl.textContent += data.delta || "";
-      streamEl.scrollTop = streamEl.scrollHeight;
+      if (st.firstToken) { st.text = ""; st.firstToken = false; }
+      st.text += data.delta || "";
+      renderReviewerPanel(jobId);
     } else if (name === "done") {
-      panel.querySelector(".dot").style.animation = "none";
-      panel.querySelector(".dot").style.background = "#56d364";
-      stageEl.textContent = `submitted new job ${data.new_job_id}`;
-      // Switch to the new job after a beat so user can read the hint
-      allRetryBtns.forEach((b) => (b.disabled = false));
+      st.status = "done";
+      st.newJobId = data.new_job_id;
+      st.stageText = `submitted new job ${data.new_job_id}`;
       btn.textContent = origText;
+      renderReviewerPanel(jobId);
+      const newId = data.new_job_id;
+      // Switch to the new job after a beat so user can read the hint — but
+      // only if they're still on the job they launched the retry from; don't
+      // yank them out of a different job they navigated to meanwhile.
       setTimeout(async () => {
+        activeReviewers.delete(jobId);
         await refreshJobs();
-        await selectJob(data.new_job_id);
+        if (selectedJob === jobId && newId) await selectJob(newId);
+        else renderReviewerPanel(jobId);  // clears the now-deleted panel
       }, 800);
     } else if (name === "error") {
-      const dot = panel.querySelector(".dot");
-      dot.style.background = "#f85149";
-      dot.style.animation = "none";
-      panel.classList.add("retry-panel-error");
-      const headerEl = panel.querySelector("h4");
-      if (headerEl) headerEl.textContent =
-        `${flowEmoji} ${flow === "resume" ? "Resume" : "Retry"} — error (no new job created)`;
-      const kind = data.kind || "error";
-      const kindLabel = ({
-        api_error: "API error",
-        auth: "auth error",
-        rate_limit: "rate limit",
-        policy_refusal: "usage-policy refusal",
-        timeout: "timeout",
-        empty: "empty response",
-        no_context: "no prior context",
-        gather: "context gather failed",
-        halt: "stop failed",
-        submit: "submit rejected",
-        unknown: "unknown error",
-      })[kind] || kind;
-      stageEl.textContent = `${kindLabel} — ${flowVerb} aborted`;
-      const errMsg = (data.message || "unknown error").trim();
-      // If the reviewer streamed partial text before erroring, keep it as
-      // forensic context above the error block. Otherwise just show error.
-      if (firstToken) {
-        streamEl.textContent = errMsg;
-      } else {
-        streamEl.textContent += `\n\n--- ${kindLabel} ---\n${errMsg}`;
-      }
-      streamEl.scrollTop = streamEl.scrollHeight;
-      allRetryBtns.forEach((b) => (b.disabled = false));
+      setError(data.kind || "error", data.message);
       btn.textContent = origText;
     }
   }
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    // SSE frames are separated by blank lines
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) !== -1) {
-      const frame = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      let evName = "message";
-      let dataLines = [];
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event: ")) evName = line.slice(7).trim();
-        else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+  // Converge EVERY loop-exit path to a terminal state. A stream that dies
+  // WITHOUT delivering a done/error frame (api redeploy mid-stream, dropped
+  // connection — the 73d78c failure) would otherwise leave a "running"
+  // entry that the map now PERSISTS as a perpetual spinner on every
+  // re-entry — strictly worse than the original disappearing-panel bug.
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // SSE frames are separated by blank lines
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let evName = "message";
+        let dataLines = [];
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event: ")) evName = line.slice(7).trim();
+          else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+        }
+        if (dataLines.length) handleEvent(evName, dataLines.join("\n"));
       }
-      if (dataLines.length) handleEvent(evName, dataLines.join("\n"));
     }
+  } catch (_) {
+    // network / stream error — fall through to the terminal-state check.
+  }
+  // Stream closed with no done/error event → mark it terminal so it can't
+  // re-render as an eternal spinner.
+  const tail = activeReviewers.get(jobId);
+  if (tail && tail.status === "running") {
+    setError("stream_closed", "stream ended without completion");
+    btn.textContent = origText;
   }
 }
 
@@ -2043,6 +2130,14 @@ async function renderJob(id, opts = {}) {
     !opts.force
     && detail.querySelector(".retry-manual-form, .stop-resume-form")
   ) {
+    return null;
+  }
+  // While a reviewer/retry stream is live for THIS job, skip the 2s poll
+  // re-render — it would tear down and rebuild the retry-panel every cycle
+  // (flicker) and fight the live token updates written by streamRetry.
+  // selectJob() passes {force:true}, so explicit (re-)entry still rebuilds
+  // the detail and restores the panel via renderReviewerPanel() below.
+  if (!opts.force && activeReviewers.get(id)?.status === "running") {
     return null;
   }
   // Same idea for an active selection inside the run log: the polling
@@ -2956,6 +3051,11 @@ async function renderJob(id, opts = {}) {
       }
     });
   }
+  // Restore the "reviewer in progress" panel after a full detail rebuild.
+  // The stream state lives in activeReviewers (not the DOM), so this brings
+  // the panel back when the operator navigates away from an in-flight retry
+  // and returns — the disappearing-panel bug this fixes.
+  renderReviewerPanel(id);
   return job;
 }
 
