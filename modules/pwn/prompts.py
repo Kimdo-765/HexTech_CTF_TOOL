@@ -328,20 +328,30 @@ kernel behaviour either.
   → KERNEL fidelity — decide by ONE question: does the chal SHIP its own
     kernel image (bzImage / vmlinuz + a rootfs/initramfs + a run/launch
     script)?
-    • YES (a kernel-pwn chal) → boot it LOCALLY under KVM. Mirror the
-      chal's own run script's flags, e.g.:
+    • YES (a kernel-pwn chal) → boot it LOCALLY under KVM. COPY the chal's
+      own run script's flags VERBATIM — especially `-cpu` and `-append`:
+      SMEP/SMAP/KPTI/pti and the mitigation set live there, and a weaker
+      local boot yields exploits that pass locally and FAIL remotely.
+      Typical shape (adapt to the chal's launcher, don't blindly reuse):
         `qemu-system-x86_64 -enable-kvm -m 256 -kernel ./bzImage \
            -initrd ./rootfs.cpio.gz -append "console=ttyS0 quiet ..." \
-           -nographic -no-reboot -s -S`
+           -cpu kvm64,+smep,+smap -nographic -no-reboot -s -S`
       This runs the CHALLENGE'S REAL kernel under KVM (host /dev/kvm is
       passed into the worker) at near-native speed, with a gdb stub on
       :1234 (`-s`) halted at boot (`-S`). So ret2usr / kROP / modprobe_path
       / cred-struct primitives ARE testable here — true fidelity for THAT
-      kernel. Repack the rootfs (`cpio`, gzip, or `qemu-img` for a disk) to
-      inject your exploit binary, then iterate boot → gdb-attach → refine.
-      RESIDUAL caveat: `-cpu host` exposes THIS box's CPU features (which
-      may differ from the remote's), so still derive final RUNTIME
-      addresses LEAK-FIRST rather than hardcoding from the local boot.
+      kernel. If the chal ships a DISK image (rootfs.img / *.qcow2) rather
+      than an initramfs, mount it via `-hda <img>` / `-drive` (NOT `-initrd`)
+      and repack with `qemu-img`; for a cpio initramfs repack with `cpio` +
+      gzip. Iterate boot → gdb-attach → refine.
+      RESIDUAL caveat: a local boot randomizes KASLR independently of the
+      remote, and `-cpu host`/host-feature differences can shift behaviour,
+      so still derive final RUNTIME addresses LEAK-FIRST — do not hardcode
+      from the local boot.
+      DEGRADE GRACEFULLY: if the local boot can't run (qemu-system missing,
+      no /dev/kvm on this host, or a disk-image shape you can't drive), do
+      NOT block on it — fall back to the SAME discipline as the NO branch:
+      record verified=false with the reason and ship a leak-first fallback.
     • NO (a userspace chal whose behaviour depends on the REMOTE's kernel —
       vsyscall present/absent, CET/SHSTK enforcement — with no kernel image
       to boot) → this is STILL IMPOSSIBLE locally: a container shares the
