@@ -3116,17 +3116,20 @@ one line and proceed — this fires once per job and won't nag again.
 # ---- Cost / framing circuit-breaker configuration ----
 # Framing-INDEPENDENT hard ceiling on TOTAL spend (main's cumulative cost +
 # the subagent sum — see _total_spend / the cost-cap note for why the two
-# are disjoint). A backstop against runaway grinding when an anchored model
-# won't abandon a disconfirmed frame (job 78bd896e0f3c: 51 turns / ~5h,
-# ~$27 all-in, with no stop mechanism). Deliberately GENEROUS: a legit hard
-# multi-debugger heap solve can run $30+ all-in, so this must NOT clip it —
-# it catches only the extreme tail, and the halt is RECOVERABLE
-# (write_why_stopped → operator /retry). CONSEQUENCE: at $40 this would NOT
-# have stopped 78bd (~$27); a total cap low enough to catch it would clip
-# legit solves. The targeted anti-anchoring lever is therefore the
-# contrarian breaker (Tooth 1), NOT this ceiling. Override with COST_CAP_USD
-# (0 disables).
-DEFAULT_COST_CAP_USD = 40.0
+# are disjoint). Historically a backstop against runaway grinding when an
+# anchored model won't abandon a disconfirmed frame (job 78bd896e0f3c: 51
+# turns / ~5h, ~$27 all-in, with no stop mechanism).
+#
+# DISABLED BY DEFAULT (0) per operator decision — no COST_CAP ceiling fires
+# on any module. The mechanism is fully preserved: set COST_CAP_USD=<dollars>
+# in the worker .env to RE-ENABLE a ceiling (any value ≤ 0 keeps it off).
+# `_maybe_cost_cap` short-circuits on `cap <= 0`, so with this default the cap
+# never arms. NOTE the safety trade-off this removes: a legit hard multi-
+# debugger heap solve can run $30+ all-in (which is why the old ceiling was a
+# generous $40 that would NOT even have stopped 78bd), but an anchored model
+# can now grind without a spend backstop — the remaining anti-anchoring lever
+# is the contrarian breaker (Tooth 1), which is framing-based, not a $ cap.
+DEFAULT_COST_CAP_USD = 0.0
 # Minimum TOTAL spend before a subagent dead-end signal is allowed to arm
 # the contrarian reframe (Tooth 1). The forensic point-of-no-return on job
 # 78bd896e0f3c was ~$7 all-in — below this, a "no primitive yet" reply is
@@ -5366,8 +5369,9 @@ async def run_main_agent_session(
     # self-loop) entirely. On breach we HALT with a RECOVERABLE
     # write_why_stopped so the operator can /retry (ideally fresh-start)
     # rather than pay for more of the same. Un-dismissible by the anchored
-    # model — pure orchestrator arithmetic on the shared summary. See
-    # DEFAULT_COST_CAP_USD for why the default is deliberately generous.
+    # model — pure orchestrator arithmetic on the shared summary. NB the cap
+    # is DISABLED BY DEFAULT (DEFAULT_COST_CAP_USD = 0); _total_spend still
+    # runs but _maybe_cost_cap short-circuits unless COST_CAP_USD>0 re-arms it.
     def _total_spend() -> float:
         sub = 0.0
         main = 0.0
