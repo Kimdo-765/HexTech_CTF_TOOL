@@ -20,6 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # decompiler sibling image already has Ghidra.)
     gdb gdb-multiarch strace ltrace patchelf \
     qemu-user-static \
+    # Full-system QEMU for KERNEL pwn: boot a challenge's own bzImage /
+    # vmlinuz + rootfs under qemu-system-x86_64. With `-enable-kvm` (host
+    # /dev/kvm passed through by start.sh's generated compose override) the
+    # guest runs the CHALLENGE's real kernel at near-native speed with
+    # `-s -S` gdb-attach — true fidelity for that chal's kernel, unlike the
+    # shared host kernel a container sees. qemu-utils = qemu-img for
+    # building / converting the rootfs image. (aarch64 full-system would run
+    # under TCG only on this x86 host, so we ship the x86 system target.)
+    qemu-system-x86 qemu-utils \
     # UPX unpacker (Tier A) — the single most common PE/ELF packer in
     # CTF; `upx -d` restores the original image before any static pass.
     upx-ucl \

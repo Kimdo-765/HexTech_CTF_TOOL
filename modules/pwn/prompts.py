@@ -38,6 +38,14 @@ PWN-SPECIFIC TOOLS (full catalogue is in the BASH CLIs block above):
 - `qemu-aarch64-static` / `qemu-arm-static`
                                       run + `-g <port>` for gdb-attach
                                       to foreign-arch ELFs.
+- `qemu-system-x86_64 -enable-kvm`    FULL-SYSTEM boot for KERNEL pwn.
+                                      Boot a chal's own bzImage/vmlinuz +
+                                      rootfs; `-enable-kvm` uses the host
+                                      /dev/kvm (present on this worker) for
+                                      near-native speed; `-s -S` exposes a
+                                      gdb stub on :1234. Only usable when
+                                      the chal SHIPS its kernel image — see
+                                      the KERNEL fidelity note below.
 
 WORKFLOW
 --------
@@ -317,16 +325,35 @@ kernel behaviour either.
     (`docker build` its Dockerfile, `docker run`, connect over the socket)
     — it gives the native ubuntu image's real ld/TLS/DSO layout, unlike
     the patchelf'd ./prob. (docker.sock is mounted; HOST_DATA_DIR is set.)
-  → KERNEL fidelity is IMPOSSIBLE locally: a container shares the WSL2
-    host kernel (vsyscall absent, CET/SHSTK enforced), and there is no
-    /dev/kvm for a matching-kernel VM. So a vsyscall/CET-dependent step
-    CANNOT be validated here — the remote is the only test. In that case:
-    (a) record the primitive as verified=false with reason "untestable
-    locally — <why>; confirmed by sandbox/remote" (this is now ALLOWED to
-    ship as a remote probe, not blocked), AND (b) build a FALLBACK path
-    that does NOT depend on the unverifiable feature (e.g. a leak-first
-    libc-gadget syscall) so one of the two lands. Do not ship a single
-    unverifiable kernel assumption with no fallback.
+  → KERNEL fidelity — decide by ONE question: does the chal SHIP its own
+    kernel image (bzImage / vmlinuz + a rootfs/initramfs + a run/launch
+    script)?
+    • YES (a kernel-pwn chal) → boot it LOCALLY under KVM. Mirror the
+      chal's own run script's flags, e.g.:
+        `qemu-system-x86_64 -enable-kvm -m 256 -kernel ./bzImage \
+           -initrd ./rootfs.cpio.gz -append "console=ttyS0 quiet ..." \
+           -nographic -no-reboot -s -S`
+      This runs the CHALLENGE'S REAL kernel under KVM (host /dev/kvm is
+      passed into the worker) at near-native speed, with a gdb stub on
+      :1234 (`-s`) halted at boot (`-S`). So ret2usr / kROP / modprobe_path
+      / cred-struct primitives ARE testable here — true fidelity for THAT
+      kernel. Repack the rootfs (`cpio`, gzip, or `qemu-img` for a disk) to
+      inject your exploit binary, then iterate boot → gdb-attach → refine.
+      RESIDUAL caveat: `-cpu host` exposes THIS box's CPU features (which
+      may differ from the remote's), so still derive final RUNTIME
+      addresses LEAK-FIRST rather than hardcoding from the local boot.
+    • NO (a userspace chal whose behaviour depends on the REMOTE's kernel —
+      vsyscall present/absent, CET/SHSTK enforcement — with no kernel image
+      to boot) → this is STILL IMPOSSIBLE locally: a container shares the
+      WSL2 host kernel and KVM cannot conjure the remote's kernel. So a
+      vsyscall/CET-dependent step CANNOT be validated here — the remote is
+      the only test. In that case: (a) record the primitive as
+      verified=false with reason "untestable locally — <why>; confirmed by
+      sandbox/remote" (this is now ALLOWED to ship as a remote probe, not
+      blocked), AND (b) build a FALLBACK path that does NOT depend on the
+      unverifiable feature (e.g. a leak-first libc-gadget syscall) so one of
+      the two lands. Do not ship a single unverifiable kernel assumption
+      with no fallback.
 
 INVOCATION — the team uses an isolated subagent pattern. main calls
 the MCP tool `mcp__team__spawn_subagent(subagent_type, prompt)` which
