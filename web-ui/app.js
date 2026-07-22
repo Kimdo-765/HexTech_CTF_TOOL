@@ -2859,11 +2859,26 @@ async function renderJob(id, opts = {}) {
   const runBtn = detail.querySelector('.run-now-btn[data-action="run"]');
   if (runBtn) {
     runBtn.addEventListener("click", async () => {
+      // dreamhack-style instances expire fast, so the stored target is often
+      // stale by re-run time — and this button used to silently reuse it,
+      // which made "Run in sandbox" appear to ignore a fresh target. Prompt
+      // (prefilled with the job's current target) so the operator confirms or
+      // overrides it; the override is passed as ?target= and persisted to
+      // meta server-side BEFORE the run (else the runner's proactive
+      // meta-refresh would clobber it back to the stale value).
+      const curTgt = job.target_url || "";
+      const tgt = prompt(
+        "Run against target (host:port or URL).\n"
+        + "Edit to point at a fresh instance, or keep as-is:",
+        curTgt,
+      );
+      if (tgt === null) return;  // cancelled — don't run
+      const q = tgt.trim() ? `?target=${encodeURIComponent(tgt.trim())}` : "";
       runBtn.disabled = true;
       const origText = runBtn.textContent;
       runBtn.textContent = "⏳ running…";
       try {
-        const res = await fetch(`${API}/jobs/${id}/run`, { method: "POST" });
+        const res = await fetch(`${API}/jobs/${id}/run${q}`, { method: "POST" });
         const body = await res.json();
         if (!res.ok) {
           alert(`run failed: ${res.status} ${JSON.stringify(body)}`);

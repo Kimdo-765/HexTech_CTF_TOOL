@@ -747,12 +747,26 @@ def post_run_script(job_id: str, target: str | None = None):
             detail="no exploit.py / solver.py / solver.sage in this job",
         )
     use_sage = script.endswith(".sage")
-    target = (target or meta.get("target_url") or "").strip() or None
+    # An explicit ?target= override is PERSISTED to meta before the run
+    # (below, right after the write_meta import). attempt_sandbox_run
+    # proactively prefers meta.target_url over the argv target we hand it
+    # (see modules/_runner._refresh_target_from_meta), so an un-persisted
+    # override would be clobbered straight back to the STALE stored value —
+    # exactly why "Run in sandbox" appeared to ignore a fresh target on
+    # dreamhack-style jobs whose instance had rotated. Mirrors PATCH /target.
+    _override = (target or "").strip()
+    target = (_override or meta.get("target_url") or "").strip() or None
 
     # Sandbox runner spawn (same path the orchestrators use)
     from modules._common import scan_job_for_flags, write_meta
     from modules._runner import attempt_sandbox_run
     from modules.settings_io import apply_to_env
+
+    # Persist an operator-supplied target override so the proactive
+    # meta-refresh inside attempt_sandbox_run keeps it instead of reverting
+    # to the stale stored value (see the _override note above).
+    if _override and _override != (meta.get("target_url") or "").strip():
+        write_meta(safe, target_url=_override)
 
     # Pull settings (CALLBACK_URL etc.) into this process's env so the
     # runner spawn picks them up, mirroring what worker run_job() does.
