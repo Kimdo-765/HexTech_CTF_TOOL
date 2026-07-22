@@ -427,8 +427,8 @@ def _build_pre_recon_prompt(
             "multi-GB region → no fault. Mechanically this is "
             "int-overflow + fastbin dup + FSOP — some chal authors "
             "call it 'house of pumpkin' colloquially, but that "
-            "phrase is NOT a recognized technique in the heap "
-            "exploit catalog (do not search for it as if it were).\n"
+            "phrase is NOT a recognized named technique — don't chase "
+            "the label; the mechanism above is the real thing.\n"
             "  - If the target env knob state is unknown OR "
             "matches the wrap-success premise (overcommit=1), "
             "mark int-edge × R4/R5 cells as ENV-UNTESTED (NOT "
@@ -508,9 +508,10 @@ def _build_pre_recon_prompt(
             "  viable but mmap_threshold trick is shorter and more\n"
             "  reliable across libc versions."
         )
-        # FSOP magic / leak-via-buffered-output note. Web research is
-        # disabled (anti-writeup), so this magic comes from the local
-        # catalog / the target's own libc, never a blog.
+        # FSOP magic / leak-via-buffered-output note. This magic comes
+        # from the local catalog / the target's own libc (exact + version-
+        # matched); web research is available to supplement but local is
+        # authoritative.
         parts.append(
             "FSOP-LEAK NOTE:\n"
             "  If chal source calls `setvbuf(stdout, NULL, _IONBF, 0)`\n"

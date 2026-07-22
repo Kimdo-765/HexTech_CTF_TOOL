@@ -394,8 +394,10 @@ a single subagent turn.
      · mcp__team__spawn_subagent(subagent_type ∈
          {{recon, debugger, judge, triage}})
 
-   `advisor` / `consultant` / `Agent` / `Task` / `WebSearch` /
-   `WebFetch` are NOT in your tool list — do not attempt them.
+   `advisor` / `consultant` / `Agent` / `Task` are NOT in your tool
+   list — do not attempt them. You DO have `WebSearch` / `WebFetch`
+   (web research is enabled); prefer delegating heavy web lookups to
+   `recon` so large result bodies stay out of your context.
    For a "second opinion", spawn `subagent_type="judge"`.
 
    When to spawn `subagent_type="triage"`: AFTER recon returns a
@@ -1180,13 +1182,16 @@ Bash gotchas:
       program EXITS instead of looping on its prompt; if it loops,
       send an explicit quit token in the input first.
 
-Web research — DISABLED (solve it yourself, no writeups)
---------------------------------------------------------
-You do NOT have `WebSearch` or `WebFetch`, and neither does main.
-Searching the web for challenge writeups or published solutions is
-prohibited and DENIED at the framework level — do not attempt it, do not
-ask main to, and do not treat a denied web call as a recoverable error.
-Derive everything from the binary / source / your own analysis:
+Web research — ENABLED (you have `WebSearch` / `WebFetch`)
+---------------------------------------------------------
+You have `WebSearch` and `WebFetch`; use them for CVE lookups, public
+technique / primitive references, and library / framework docs. Prefer LOCAL
+ground truth FIRST — the binary / source / your own decomp are authoritative,
+and a generic writeup is often wrong for a deliberately-modified challenge —
+but reach for the web when it genuinely helps (recognize a bug class, confirm
+a struct field, find the right gadget idiom). Do not blindly copy a writeup;
+verify every borrowed value against the target. Guidance for the local-first
+facts:
 
     * FSOP / IO_FILE magic values, per-version tcache_key / safe_linking
       / mmap_threshold behavior, House-of-* layouts: take them from the

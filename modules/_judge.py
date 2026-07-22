@@ -351,8 +351,8 @@ async def _run_judge_turn(
         agents=build_judge_agents(_jm),
         resume=resume_sid,
         fork_session=False if resume_sid else None,
-        # Deny WebSearch/WebFetch under bypass (anti-writeup). No job_id in
-        # scope here, so the deny fires without the run.log attempt line.
+        # Bash kill-guard only (the anti-writeup web-research block was removed
+        # 2026-07-22 — kill_guard_hooks no longer denies WebSearch/WebFetch).
         hooks=kill_guard_hooks(),
     )
     parts: list[str] = []

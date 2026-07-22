@@ -288,9 +288,10 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
         allowed_tools=[],
         permission_mode="bypassPermissions",
         env={"MAX_THINKING_TOKENS": _REVIEWER_MAX_THINKING_TOKENS},
-        # Deny WebSearch/WebFetch under bypass (anti-writeup): the reviewer is
-        # diagnostic-only, but bypassPermissions leaves built-in web tools
-        # reachable, so close the hole.
+        # Bash kill-guard only. The anti-writeup web block was removed
+        # 2026-07-22; kill_guard_hooks no longer denies WebSearch/WebFetch, so
+        # the diagnostic-only reviewer could web-search — harmless (it writes a
+        # hint, not the solve), and web research is now enabled project-wide.
         hooks=kill_guard_hooks(),
     )
     hint_parts: list[str] = []
@@ -356,9 +357,10 @@ async def _ask_reviewer_streaming(
         allowed_tools=[],
         permission_mode="bypassPermissions",
         env={"MAX_THINKING_TOKENS": _REVIEWER_MAX_THINKING_TOKENS},
-        # Deny WebSearch/WebFetch under bypass (anti-writeup): the reviewer is
-        # diagnostic-only, but bypassPermissions leaves built-in web tools
-        # reachable, so close the hole.
+        # Bash kill-guard only. The anti-writeup web block was removed
+        # 2026-07-22; kill_guard_hooks no longer denies WebSearch/WebFetch, so
+        # the diagnostic-only reviewer could web-search — harmless (it writes a
+        # hint, not the solve), and web research is now enabled project-wide.
         hooks=kill_guard_hooks(),
     )
     accumulated: list[str] = []

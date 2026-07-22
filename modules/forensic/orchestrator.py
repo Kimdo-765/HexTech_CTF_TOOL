@@ -147,7 +147,8 @@ async def _claude_summary(
             "TEMP":   _tmp_str,
         },
         effort=resolve_effort(read_meta(job_id).get("effort")),
-        # Deny WebSearch/WebFetch under bypass (anti-writeup) + Bash kill-guard.
+        # Bash kill-guard (the anti-writeup web-research block was removed
+        # 2026-07-22 — kill_guard_hooks no longer denies WebSearch/WebFetch).
         hooks=kill_guard_hooks(job_id),
     )
     prompt = build_user_prompt(target_os, kind, description)

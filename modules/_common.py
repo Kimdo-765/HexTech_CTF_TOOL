@@ -130,80 +130,27 @@ async def _bash_kill_guard(input_data, tool_use_id, context):
 
 
 # ---------------------------------------------------------------------------
-# Web-research block (PreToolUse hook on WebSearch / WebFetch) — anti-writeup
-# ---------------------------------------------------------------------------
-# CTF integrity: the solver must derive the exploit from the binary / source /
-# its own analysis, NOT find and copy a published writeup. WebSearch/WebFetch
-# are BUILT-IN tools, so under permission_mode="bypassPermissions" the model
-# can invoke them REGARDLESS of allowed_tools (proven: job d809a5187990 — main
-# called WebSearch 33x while it was absent from its allow list). Omission from
-# an allow list therefore does NOT block them; the only reliable gate is a
-# PreToolUse deny hook — the SAME mechanism the Bash kill-guard uses, which is
-# confirmed to fire under bypass. We deny + LOG the attempt (when a job_id is
-# bound) so writeup-seeking is visible in run.log. There is intentionally no
-# keyword/domain carve-out: a writeup is reachable without ever typing
-# "writeup" and shares domains with legit docs, so the faithful anti-cheat
-# implementation is to remove the capability outright. (Trade-off: legit
-# CVE/technique lookups go too — but libc offsets / gadgets / struct layouts
-# already come from the local libc KB + decomp, not the web.)
-_WEB_BLOCK_MSG = (
-    "BLOCKED: WebSearch / WebFetch are disabled. Searching the web for "
-    "challenge writeups or published solutions is prohibited — solve the "
-    "challenge from the binary / source / your own analysis. Version-specific "
-    "facts (libc offsets, gadgets, one_gadget, struct layouts) come from the "
-    "local libc KB and your own decomp, not a blog. Do NOT retry a web tool — "
-    "it is denied at the framework level, not a transient error."
-)
-
-
-def _web_block_guard_factory(job_id: str | None = None):
-    """Build a PreToolUse hook that denies WebSearch/WebFetch. When `job_id`
-    is bound the denied call (query/url) is logged to that job's run.log."""
-    async def _web_guard(input_data, tool_use_id, context):
-        try:
-            tn = (input_data or {}).get("tool_name")
-            if tn not in ("WebSearch", "WebFetch"):
-                return {}
-            if job_id:
-                try:
-                    ti = input_data.get("tool_input") or {}
-                    q = ti.get("query") or ti.get("url") or ti.get("prompt") or ""
-                    log_line(job_id, f"[web-block] denied {tn}: {str(q)[:200]}")
-                except Exception:
-                    pass
-        except Exception:
-            return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": _WEB_BLOCK_MSG,
-            }
-        }
-    return _web_guard
-
-
-def web_block_matchers(job_id: str | None = None):
-    """HookMatcher list denying WebSearch/WebFetch (anti-writeup). Spread into
-    every session's PreToolUse hooks — it fires under bypassPermissions, where
-    allow-list omission does not. See `_WEB_BLOCK_MSG` for the rationale."""
-    from claude_agent_sdk import HookMatcher
-    guard = _web_block_guard_factory(job_id)
-    return [
-        HookMatcher(matcher="WebSearch", hooks=[guard]),
-        HookMatcher(matcher="WebFetch", hooks=[guard]),
-    ]
+# Web-research block REMOVED 2026-07-22 (operator decision, reversing 9fcf3ab
+# "block web search across all modules"). WebSearch/WebFetch are now ENABLED:
+# recon owns the tools (see _AGENT_TOOLS_BY_TYPE) so main can delegate CVE /
+# technique / doc lookups to it, and the PreToolUse deny hook + _WEB_BLOCK_MSG
+# + web_block_matchers() that used to gate them are gone. Trade-off accepted:
+# no anti-writeup gate — the agent CAN reach published writeups. Re-introduce
+# the deny hook here (spread into kill_guard_hooks / main_session_hooks) if the
+# policy is ever reversed again.
 
 
 def kill_guard_hooks(job_id: str | None = None):
     """Hooks dict for ClaudeAgentOptions(hooks=...) that blocks self-killing
-    Bash commands AND web research (WebSearch/WebFetch) on the agent owning the
-    session (main + isolated subagents). `job_id` is used only to log denied
-    web-tool attempts; the deny fires regardless."""
+    Bash commands on the agent owning the session (main + isolated subagents).
+
+    The web-research block (WebSearch/WebFetch deny) was REMOVED here on
+    2026-07-22 per operator decision — web research is now enabled (recon owns
+    the web tools; see _AGENT_TOOLS_BY_TYPE). `job_id` is retained for
+    signature stability (callers still pass it) though it is no longer used."""
     from claude_agent_sdk import HookMatcher
     return {"PreToolUse": [
         HookMatcher(matcher="Bash", hooks=[_bash_kill_guard]),
-        *web_block_matchers(job_id),
     ]}
 
 
@@ -285,18 +232,19 @@ def _readonly_write_guard(readonly_dirs, work_dir):
 
 
 def main_session_hooks(add_dirs, work_dir, job_id: str | None = None):
-    """PreToolUse hooks for a MAIN agent session: the Bash kill-guard, the
-    web-research block (WebSearch/WebFetch), PLUS a read-only-source guard that
-    denies Write/Edit whose absolute path escapes into the challenge source dir
-    (add_dirs). Subagents keep the bare kill_guard_hooks() — they only READ the
-    source, never write deliverables (but they DO get the same web block)."""
+    """PreToolUse hooks for a MAIN agent session: the Bash kill-guard PLUS a
+    read-only-source guard that denies Write/Edit whose absolute path escapes
+    into the challenge source dir (add_dirs). Subagents keep the bare
+    kill_guard_hooks() — they only READ the source, never write deliverables.
+
+    The web-research block (WebSearch/WebFetch deny) was REMOVED on 2026-07-22
+    per operator decision — web research is now enabled."""
     from claude_agent_sdk import HookMatcher
     guard = _readonly_write_guard(add_dirs, work_dir)
     return {"PreToolUse": [
         HookMatcher(matcher="Bash", hooks=[_bash_kill_guard]),
         HookMatcher(matcher="Write", hooks=[guard]),
         HookMatcher(matcher="Edit", hooks=[guard]),
-        *web_block_matchers(job_id),
     ]}
 
 
@@ -1357,15 +1305,13 @@ _AGENT_PROMPT_BY_TYPE = {
 }
 
 _AGENT_TOOLS_BY_TYPE = {
-    # recon is READ-ONLY, LOCAL only. WebSearch/WebFetch were removed
-    # (anti-writeup): the solver must derive the exploit from the binary /
-    # source / its own analysis, not find a published solution. They're also
-    # DENIED at the framework level by web_block_matchers() (a built-in tool
-    # stays reachable under bypassPermissions regardless of this list — job
-    # d809a5187990 proved omission alone is insufficient), so dropping them
-    # here only removes the tool from the advertised surface; the hook is the
-    # actual gate.
-    "recon": ["Read", "Bash", "Glob", "Grep"],
+    # recon owns WebSearch + WebFetch so main can delegate CVE / technique /
+    # documentation lookups to it (web research is ENABLED — operator decision
+    # 2026-07-22, reversing the 9fcf3ab anti-writeup block). Routing web
+    # research through recon keeps the large result bodies in the subagent's
+    # transient context instead of bloating main's (job d809a5187990: main
+    # called WebSearch 33× directly, ~200 KB of result bodies in-context).
+    "recon": ["Read", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"],
     "debugger": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
     # judge has no Agent tool here — in isolated mode, subagents can't
     # cascade-spawn further subagents (preserves the "ONE level deep"
@@ -2287,16 +2233,14 @@ def make_main_session_options(
             model=model,
             cwd=str(work_dir),
             allowed_tools=[*base_tools, spawn_tool],
-            # Block built-in Agent/Task (would dispatch to a general-
-            # purpose subagent that shares main's Node.js heap). Also
-            # block WebSearch + WebFetch — web research is DISABLED
-            # everywhere (anti-writeup): no role, main or subagent, may
-            # search the web for a published solution. This disallowed
-            # list is belt; the web_block_matchers() PreToolUse hook
-            # (in main_session_hooks below) is the suspenders that also
-            # holds under bypassPermissions (job d809a5187990 proved a
-            # built-in tool stays reachable under bypass despite this list).
-            disallowed_tools=["Agent", "Task", "WebSearch", "WebFetch"],
+            # Block built-in Agent/Task (would dispatch to a general-purpose
+            # subagent that shares main's Node.js heap). WebSearch/WebFetch are
+            # NO LONGER blocked (web research enabled, 2026-07-22): main may
+            # research directly, though the prompt nudges it to delegate heavy
+            # web lookups to recon so the large result bodies land in recon's
+            # transient context, not main's (job d809a5187990: 33 direct
+            # WebSearch calls, ~200 KB in main's context).
+            disallowed_tools=["Agent", "Task"],
             permission_mode="bypassPermissions",
             add_dirs=add_dirs or [],
             env=env,
@@ -2309,7 +2253,7 @@ def make_main_session_options(
         log_fn_local(
             "[orchestrator] subagent isolation: ON "
             f"(tool={spawn_tool}; Agent/Task blocked on main; "
-            "WebSearch/WebFetch blocked on ALL roles — anti-writeup)"
+            "web research ENABLED — recon owns WebSearch/WebFetch, main may too)"
         )
     else:
         env["USE_ISOLATED_SUBAGENTS"] = "0"
