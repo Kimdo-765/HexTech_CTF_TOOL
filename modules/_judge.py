@@ -961,10 +961,20 @@ def postjudge_run(
     # trusted run output is a placeholder (DH{fake_flag} / a local-test seed),
     # the "capture" is fake: job dc981a8c4741's postjudge stopped on the local
     # replica's DH{fake_flag} without ever grabbing the real remote flag.
+    #
     # POSITIVE detection only — gated on there BEING a flag-shape whose entries
     # are ALL placeholders. A real odd-format flag the scanner would miss (no
     # shape, no marker) leaves _run_shapes empty → success stands, so this can
-    # never turn a scan false-negative into an unbounded retry loop.
+    # never turn a scan false-negative into a retry loop.
+    #
+    # Downgrade to a TERMINAL STOP (verdict!=success, next_action=stop, EMPTY
+    # retry_hint), NOT a `continue`: re-running the same exploit against the
+    # same target just re-reads the same placeholder, and with the cost-cap
+    # backstop disabled a `continue`+hint could spin placeholder→continue→…
+    # until the (loose) wall-clock. An empty retry_hint is the auto-retry
+    # loop's "no actionable hint" natural exit (run_main_agent_session's
+    # `if not retry_hint: return`), so this halts deterministically and routes
+    # the operator to fix the target and /retry — exactly dc981's real fix.
     if norm["verdict"] == "success":
         from modules._common import FLAG_RE as _FRE, _is_placeholder_flag as _isph
         _run_shapes = set(_FRE.findall(f"{stdout}\n{stderr}"))
@@ -972,19 +982,19 @@ def postjudge_run(
             not _isph(s, trusted=True) for s in _run_shapes
         ):
             log_fn(
-                "[judge] postjudge SUCCESS->partial: every flag-shape in the "
-                f"run output is a placeholder ({sorted(_run_shapes)}) — not a "
-                "real capture; continuing to hunt the genuine flag"
+                "[judge] postjudge SUCCESS->stop: every flag-shape in the run "
+                f"output is a placeholder ({sorted(_run_shapes)}) — not a real "
+                "capture; halting (remote likely down / wrong target)"
             )
             norm["verdict"] = "partial"
-            norm["next_action"] = "continue"
-            norm["stop_reason"] = ""
-            norm["retry_hint"] = norm.get("retry_hint") or (
-                "The run only produced a PLACEHOLDER flag (e.g. DH{fake_flag}, "
-                "a local-test seed) — not the real challenge flag. Point the "
-                "exploit at the REAL remote target, capture its /flag, and "
-                "print it as `FLAG_CANDIDATE: <flag>`."
+            norm["next_action"] = "stop"
+            norm["stop_reason"] = (
+                "Only a PLACEHOLDER flag (e.g. DH{fake_flag}, a local-test "
+                "seed) was reachable — not the real challenge flag. The remote "
+                "is likely down or the target is wrong; fix the target and "
+                "/retry."
             )
+            norm["retry_hint"] = ""
 
     verdict = norm["verdict"]
     summary = norm["summary"]
