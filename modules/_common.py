@@ -661,7 +661,16 @@ _TRUSTED_FLAG_SOURCES = (
 # as a LAST RESORT when no trusted source produced anything.
 _NARRATIVE_FLAG_SOURCES = (
     "report.md",
-    "run.log",
+    # run.log REMOVED 2026-07-23: it is the raw interleaved firehose of every
+    # tool result (Bash output, WebSearch results, recon/subagent summaries,
+    # chal-source quotes). With web research re-enabled (0cd2c7d) a PUBLISHED
+    # WRITEUP's flag now lands here verbatim — job dc981a8c4741 false-finished
+    # on `DH{0DB34...}` scraped from a recon WebSearch summary that existed
+    # ONLY in run.log (report.md was placeholder-clean). A REAL capture never
+    # depends on run.log: it rides the TRUSTED tier (exploit stdout /
+    # callbacks.jsonl) or the FLAG_CANDIDATE marker — both untouched here. This
+    # also closes the recurring narrative-from-run.log false-positive class
+    # (44dd25365173 sha256 echoes; the stale-log false-success gate).
     "findings.json",         # auto-generated from report.md by REPORT phase
     "log_findings.json",
 )

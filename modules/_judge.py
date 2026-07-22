@@ -954,6 +954,38 @@ def postjudge_run(
     # All verdict/next_action/stop_reason/failure_code + success-collapse
     # invariants live in one place now. See docs/judge_state_machine.md.
     norm = _normalize_verdict(parsed)
+
+    # Placeholder-only success guard — a deterministic override of the LLM
+    # verdict (same philosophy as the prejudge self-defeat / flag_likelihood
+    # gates). If postjudge called this a success but EVERY flag-shape in the
+    # trusted run output is a placeholder (DH{fake_flag} / a local-test seed),
+    # the "capture" is fake: job dc981a8c4741's postjudge stopped on the local
+    # replica's DH{fake_flag} without ever grabbing the real remote flag.
+    # POSITIVE detection only — gated on there BEING a flag-shape whose entries
+    # are ALL placeholders. A real odd-format flag the scanner would miss (no
+    # shape, no marker) leaves _run_shapes empty → success stands, so this can
+    # never turn a scan false-negative into an unbounded retry loop.
+    if norm["verdict"] == "success":
+        from modules._common import FLAG_RE as _FRE, _is_placeholder_flag as _isph
+        _run_shapes = set(_FRE.findall(f"{stdout}\n{stderr}"))
+        if _run_shapes and not any(
+            not _isph(s, trusted=True) for s in _run_shapes
+        ):
+            log_fn(
+                "[judge] postjudge SUCCESS->partial: every flag-shape in the "
+                f"run output is a placeholder ({sorted(_run_shapes)}) — not a "
+                "real capture; continuing to hunt the genuine flag"
+            )
+            norm["verdict"] = "partial"
+            norm["next_action"] = "continue"
+            norm["stop_reason"] = ""
+            norm["retry_hint"] = norm.get("retry_hint") or (
+                "The run only produced a PLACEHOLDER flag (e.g. DH{fake_flag}, "
+                "a local-test seed) — not the real challenge flag. Point the "
+                "exploit at the REAL remote target, capture its /flag, and "
+                "print it as `FLAG_CANDIDATE: <flag>`."
+            )
+
     verdict = norm["verdict"]
     summary = norm["summary"]
     retry_hint = norm["retry_hint"]
