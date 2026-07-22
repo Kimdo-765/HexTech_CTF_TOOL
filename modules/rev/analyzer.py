@@ -79,6 +79,10 @@ async def _run_agent(
     )
     target = (read_meta(job_id).get("target_url") or "").strip() or None
     user_prompt = build_user_prompt(binary_name, description, auto_run, target=target)
+    from modules._prompts import build_target_directive
+    _tgt_block = build_target_directive(target, read_meta(job_id).get("target_urls"))
+    if _tgt_block:
+        user_prompt = user_prompt + "\n\n" + _tgt_block
 
     # ELF/PE detection — the static-triage pre-recon below runs ghiant
     # (Ghidra) + checksec, which only make sense for a NATIVE executable.

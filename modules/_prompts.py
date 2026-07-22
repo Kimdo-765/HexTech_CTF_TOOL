@@ -51,6 +51,69 @@ def build_multi_target_block(targets) -> str:
     )
 
 
+def build_target_directive(
+    primary_target: str | None, target_urls: list[str] | None = None,
+) -> str:
+    """Authoritative TARGET directive appended to every remote job's prompt.
+
+    Supersedes `build_multi_target_block` at the analyzer call sites: it fires
+    for a SINGLE target too (that block only fired for ≥2), so the "drive off
+    argv[1], never hardcode host:port" mandate — the thing that makes an
+    operator's `Change Target` actually take effect — is no longer invisible in
+    the common single-target case.
+
+    Two behaviours it fixes (operator report: a `Change Target` before a remote
+    retry didn't reach the agent's context):
+      1. RETRY CONTAMINATION — a default /retry forks the prior SDK conversation
+         (old "Remote target:" line in history) and carries the prior
+         exploit.py (old host hardcoded/tested). One fresh prompt line competes
+         with all of that. This directive tells the agent THIS target is
+         authoritative and to discard any other host in history / carried code.
+      2. HARDCODE PINNING — only an argv[1]-driven exploit is refresh-safe,
+         because the orchestrator re-reads meta.target_url and rewrites argv[1]
+         on every SANDBOX run (modules/_runner._refresh_target_from_meta). A
+         hardcoded host:port is NOT refreshed, and the agent's own ad-hoc
+         remote() Bash tests are never auto-refreshed either.
+
+    Returns "" when there is no target (local-only job) so the caller's
+    `if block:` guard drops it cleanly. Deliberately does NOT compute a
+    "was X → now Y" diff: `Change Target` mutates the same job's meta, so the
+    prior job's target_url already equals the new value — a diff would show
+    nothing. "This is authoritative, discard others" is behaviourally
+    sufficient without the old value.
+    """
+    ts = [t for t in (target_urls or []) if t]
+    primary = (primary_target or "").strip() or (ts[0] if ts else "")
+    if not primary:
+        return ""
+    lines = [
+        f"TARGET DIRECTIVE — the remote target for THIS run is `{primary}`.",
+        "• AUTHORITATIVE: if you are resuming / retrying a prior attempt, the "
+        "target may have CHANGED since then (the operator can update it between "
+        "runs). Trust THIS value — discard any different host:port in your "
+        "conversation history AND in any carried exploit.py / solver.py, and "
+        "re-point every remote() / connection at it before you test.",
+        "• DRIVE OFF sys.argv[1] (and the `TARGETS` env var if it is set), "
+        "NEVER a hardcoded host:port literal. The orchestrator re-reads the "
+        "live target and rewrites argv[1] on every SANDBOX run, so an "
+        "argv-driven exploit picks up a target change with NO code edit — a "
+        "hardcoded one silently keeps hitting the old host. (Your own ad-hoc "
+        "remote() Bash smoke tests are NOT auto-refreshed — use the value "
+        "above for those.)",
+    ]
+    if len(ts) >= 2:
+        listed = "\n".join(f"    {i + 1}) {t}" for i, t in enumerate(ts))
+        lines.append(
+            f"• MULTIPLE TARGETS ({len(ts)}) — full list (primary first) is in "
+            f"the `TARGETS` env var, one per line:\n{listed}\n"
+            "  If they mirror ONE service across instances, try each and use "
+            "the FIRST that responds (instances expire fast). If they are "
+            "DISTINCT roles in one chain (e.g. app + an out-of-band/callback "
+            "host), use each for its role."
+        )
+    return "\n".join(lines)
+
+
 def mission_block(deliverables: str, deliverables_short: str = "") -> str:
     """One concise stanza for the top of every module SYSTEM_PROMPT.
 

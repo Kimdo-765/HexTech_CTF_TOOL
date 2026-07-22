@@ -852,11 +852,41 @@ async def patch_target(job_id: str, request: Request):
     except OSError:
         pass
 
+    # Status-aware guidance. A RUNNING/queued job's live agent has its target
+    # baked into the spawn-time prompt and never re-reads meta mid-run, so this
+    # PATCH does NOT reach the in-flight agent — it only affects the next
+    # /retry|/resume and the orchestrator's final sandbox run (and that run only
+    # if the exploit reads argv[1] — a hardcoded host stays stale). Surface that
+    # so the operator isn't misled into thinking a running job just switched
+    # targets. (Operator report: "Change Target before a remote test didn't
+    # reflect in context.")
+    status = (meta.get("status") or "").lower()
+    live = status in ("running", "queued", "analyzing", "analyze")
+    if new_target is None:
+        note = "Target cleared."
+    elif live:
+        note = (
+            f"Target set to {new_target} in meta — but this job is {status}: "
+            "the in-flight agent will NOT pick it up mid-run. It applies to the "
+            "next /retry or /resume, and to the final sandbox run only if the "
+            "exploit reads argv[1]. To apply it now, use Retry (ideally with "
+            "'fresh start' to shed the old target from the forked conversation)."
+        )
+    else:
+        note = (
+            f"Target set to {new_target}. The next /retry or /resume picks it "
+            "up; 'fresh start' avoids re-inheriting the old target from the "
+            "prior conversation."
+        )
+
     return {
         "ok": True,
         "target_url": new_target,
         "target_urls": new_targets,
         "prior": prior,
+        "job_status": status,
+        "applies_live": not live,
+        "note": note,
     }
 
 

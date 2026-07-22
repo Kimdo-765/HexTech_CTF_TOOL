@@ -2838,6 +2838,11 @@ async function renderJob(id, opts = {}) {
           }
           close();
           await renderJob(id, { force: true });
+          // A running/queued job's live agent won't pick up a mid-run target
+          // change (it's baked into the spawn-time prompt) — warn so the
+          // operator doesn't think the running remote test just switched
+          // targets. Benign finished-job case (applies_live=true) stays quiet.
+          if (body.applies_live === false && body.note) alert(body.note);
         } catch (e) {
           alert(`change-target error: ${e}`);
         }
