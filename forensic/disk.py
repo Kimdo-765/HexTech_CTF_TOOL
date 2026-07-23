@@ -77,10 +77,19 @@ WINDOWS_PATTERNS = [
 ]
 
 
-def _run(cmd: list[str], log_fn: Callable[[str], None]) -> tuple[int, str, str]:
+def _run(cmd: list[str], log_fn: Callable[[str], None], timeout: int = 300) -> tuple[int, str, str]:
     log_fn(f"$ {' '.join(cmd)}")
-    cp = subprocess.run(cmd, capture_output=True, text=True)
-    return cp.returncode, cp.stdout, cp.stderr
+    # Per-op timeout: one hung sleuthkit/qemu-img op must not block until the
+    # whole-container wall fires and takes the job + all later ops down with it.
+    try:
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return cp.returncode, cp.stdout, cp.stderr
+    except subprocess.TimeoutExpired:
+        log_fn(f"[timeout] {cmd[0]} …{cmd[-1]} exceeded {timeout}s — skipping")
+        return 124, "", f"timed out after {timeout}s"
+    except Exception as e:  # tool missing / spawn failure — record + continue
+        log_fn(f"[error] {cmd[0]} …{cmd[-1]}: {e!r}")
+        return 1, "", str(e)
 
 
 def _convert_to_raw(src: Path, kind: str, log_fn) -> Path:
@@ -191,7 +200,11 @@ def _icat_binary(image: Path, offset_sectors: int, inode_id: str, dst: Path, log
     dst.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["icat", "-o", str(offset_sectors), str(image), inode_id]
     log_fn(f"$ {' '.join(cmd)} > {dst}")
-    cp = subprocess.run(cmd, capture_output=True)
+    try:
+        cp = subprocess.run(cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        log_fn(f"[timeout] icat {inode_id} exceeded 180s — skipping")
+        return False
     if cp.returncode != 0 or not cp.stdout:
         return False
     dst.write_bytes(cp.stdout)

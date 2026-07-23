@@ -23,6 +23,8 @@ WIN_PLUGINS = [
     "windows.lsadump",
     "windows.registry.hivelist",
     "windows.registry.userassist",
+    "windows.consoles",   # console screen BUFFERS (command output) — classic flag spot
+    "windows.cmdscan",    # COMMAND_HISTORY (typed commands) — classic flag spot
 ]
 
 LINUX_PLUGINS = [
@@ -38,10 +40,22 @@ LINUX_PLUGINS = [
 ]
 
 
-def _run(cmd: list[str], log_fn: Callable[[str], None]) -> tuple[int, str, str]:
+def _run(cmd: list[str], log_fn: Callable[[str], None], timeout: int = 300) -> tuple[int, str, str]:
     log_fn(f"$ {' '.join(cmd)}")
-    cp = subprocess.run(cmd, capture_output=True, text=True)
-    return cp.returncode, cp.stdout, cp.stderr
+    # Per-op timeout so ONE hung/pathological plugin (a corrupt dump, an
+    # unresolved PDB fetch) can't block until the whole-container wall
+    # (FORENSIC_TIMEOUT_S) fires and kills the job + every remaining plugin.
+    # rc=124 flows into the caller's existing rc!=0 branch → recorded + SKIPPED,
+    # and each completed plugin's JSON is already written to disk incrementally.
+    try:
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return cp.returncode, cp.stdout, cp.stderr
+    except subprocess.TimeoutExpired:
+        log_fn(f"[timeout] {cmd[0]} …{cmd[-1]} exceeded {timeout}s — skipping")
+        return 124, "", f"timed out after {timeout}s"
+    except Exception as e:  # tool missing / spawn failure — record + continue
+        log_fn(f"[error] {cmd[0]} …{cmd[-1]}: {e!r}")
+        return 1, "", str(e)
 
 
 def _detect_os(image: Path, log_fn) -> str:

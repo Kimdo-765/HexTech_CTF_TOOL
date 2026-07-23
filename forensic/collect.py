@@ -21,12 +21,38 @@ extracted into artifacts/logs/ first.
 import argparse
 import gzip
 import json
+import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
+
+# Prefix-anchored flag shapes (mirrors the orchestrator's FLAG_RE prefixes) —
+# kept high-signal so a raw binary sweep doesn't flood the summary with noise.
+_RAW_FLAG_ERE = r'(FLAG|flag|Flag|CTF|ctf|DH|dreamhack|HTB|htb|KEY|key)\{[ -~]{1,200}\}'
+
+
+def _scan_raw_image(image: Path, log_fn, timeout: int = 240) -> list[str]:
+    """Deterministic strings|grep flag sweep of the RAW image itself.
+
+    A flag that lives in the dump but is NOT surfaced by a curated extractor
+    (a specific Volatility plugin, a sleuthkit-recovered artifact) would
+    otherwise be silently missed. Hard-bounded via shell `timeout`; returns
+    CANDIDATES only (the agent/operator curates — this never auto-captures).
+    """
+    cmd = ["bash", "-c",
+           f"timeout {timeout} strings -a -n 6 {shlex.quote(str(image))} "
+           f"| grep -aoE {shlex.quote(_RAW_FLAG_ERE)} | sort -u | head -300"]
+    try:
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+        hits = [ln for ln in cp.stdout.splitlines() if ln.strip()]
+    except Exception as e:
+        log_fn(f"[raw-scan] failed (non-fatal): {e!r}")
+        hits = []
+    log_fn(f"[raw-scan] {len(hits)} flag-shaped candidate(s) in the raw image")
+    return hits
 
 from disk import process_disk
 from log_miner import scan_logs
@@ -39,7 +65,10 @@ _LOG_ARCHIVE_SUFFIXES = (".gz", ".tar", ".zip", ".tgz")
 
 def detect_kind(image: Path) -> str:
     """Return one of: qcow2, vmdk, vhd, vhdx, e01, raw_disk, memory, log."""
-    out = subprocess.run(["file", "-b", str(image)], capture_output=True, text=True).stdout.lower()
+    try:
+        out = subprocess.run(["file", "-b", str(image)], capture_output=True, text=True, timeout=60).stdout.lower()
+    except Exception:
+        out = ""
     suffix = image.suffix.lower()
     if "qcow" in out:
         return "qcow2"
@@ -62,9 +91,12 @@ def detect_kind(image: Path) -> str:
     if "ascii text" in out or "utf-8 unicode text" in out or "log file" in out:
         return "log"
     # Try mmls — if succeeds, it's a disk image with a partition table
-    rc = subprocess.run(
-        ["mmls", str(image)], capture_output=True, text=True
-    ).returncode
+    try:
+        rc = subprocess.run(
+            ["mmls", str(image)], capture_output=True, text=True, timeout=120
+        ).returncode
+    except Exception:
+        rc = 1
     if rc == 0:
         return "raw_disk"
     return "memory"
@@ -164,6 +196,19 @@ def main() -> int:
         summary["error"] = str(e)
         (out / "summary.json").write_text(json.dumps(summary, indent=2))
         return 1
+
+    # Deterministic flag sweep of the RAW image itself — catches a flag that
+    # lives in the dump but wasn't surfaced by a curated extractor. Skip
+    # kind=='log' (already text-mined above). Non-fatal. The agent is told to
+    # read summary.json first, so these candidates + the raw image name reach it.
+    summary["raw_image"] = image.name
+    if kind != "log":
+        try:
+            raw_hits = _scan_raw_image(image, log_fn=L)
+            if raw_hits:
+                summary["raw_flag_candidates"] = raw_hits
+        except Exception as e:
+            L(f"raw-scan failed (non-fatal): {e!r}")
 
     # Mine extracted text artifacts (logs, bash_history, browser history,
     # volatility plugin output) for credentials, web-attack signatures

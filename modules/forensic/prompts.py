@@ -20,6 +20,12 @@ Inputs (in your cwd):
                                           lookups.
 - artifacts/       — extracted files, paths preserved (read-only).
 - volatility/      — per-plugin JSON output (memory dumps only).
+- summary.json may include `raw_flag_candidates` — a deterministic
+  strings|grep of the RAW image (flag-shaped strings the curated
+  extractors may have MISSED). Treat as leads to verify, not answers.
+  The raw image itself is present in CWD as `summary.raw_image`; if the
+  flag has a non-standard format the sweep won't have caught, `strings -a
+  <raw_image> | grep -aiE '<your_pattern>'` it directly.
 - log_findings.json — pre-mined credentials, SQLi/XSS/LFI/RCE
                      attempts, auth events, flag candidates pulled
                      out of every log/history file. Each entry has
