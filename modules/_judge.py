@@ -161,7 +161,27 @@ markdown:
  "what_worked": ["<=80 chars each, up to 3 items: parts of the chain that demonstrably succeeded — libc leak got a non-zero address, fastbin alloc returned, etc.>"],
  "what_failed": ["<=80 chars each, up to 3 items: the specific step that failed, with the observed signal (SIGSEGV at addr X, recvuntil timeout on 'Size:', abort msg, etc.)>"],
  "specific_diagnosis": "<=300 chars; one sentence pinpointing the failed line + the observed signal (e.g. 'exploit.py:42 sendlineafter waited for b\"> \" but service emits b\"> \\x1b[0m\" with ANSI; recv blocks then SDK timeout')",
- "alternative_paths": ["<=120 chars each, up to 3: techniques NOT yet tried that the observed state evidences could work (e.g. 'unsorted-bin attack on _IO_list_all', 'House of Orange via FILE struct overflow'). Empty list if exhaustively tried."]}}
+ "alternative_paths": ["<=120 chars each, up to 3: techniques NOT yet tried that the observed state evidences could work (e.g. 'unsorted-bin attack on _IO_list_all', 'House of Orange via FILE struct overflow'). Empty list if exhaustively tried."],
+ "retry_worthwhile": false}}
+
+retry_worthwhile — set TRUE only ALONGSIDE next_action==stop, and ONLY
+when you are halting the CURRENT approach because it is structurally
+wrong, BUT a concrete DIFFERENT method (named in alternative_paths /
+retry_hint) is plausibly IN-BUDGET and worth exactly ONE automated
+method-change retry that swaps the decisive step. This authorizes a
+SINGLE re-attempt, not an open loop (the orchestrator hard-caps it at
+one per job). Default FALSE. It MUST stay false for:
+  - verdict==success (nothing to retry),
+  - a dead / unreachable / rotated remote (network_error) — a method
+    change fixes nothing when the target is down,
+  - env-limits / untestable-locally (vsyscall / CET / kernel),
+  - a true-negative (no viable method exists — the chal may be
+    unsolvable by analysis; do NOT burn a retry on false hope),
+  - same-method-with-a-tweak — a new offset / timeout / alarm / retry
+    count is NOT a method change; those go through `continue`, not here.
+Concretely: a Sage Gröbner that blows the per-round time budget, where a
+linearization / support-minors / FGLM / reduced-variable model is the
+in-budget alternative, IS retry_worthwhile=true (stop + name the method).
 
 next_action — judge's call on whether to feed retry_hint back to
 main or halt the job. STOP is the AGGRESSIVE default whenever the
@@ -876,6 +896,20 @@ def _normalize_verdict(parsed: dict) -> dict:
     elif is_success and not stop_reason:
         stop_reason = "flag captured"
 
+    # retry_worthwhile — judge opt-in for ONE automated method-change retry.
+    # Meaningful ONLY alongside a non-success STOP: the judge is halting the
+    # CURRENT approach as structurally doomed, but a concrete DIFFERENT method
+    # (named in alternative_paths / retry_hint) is plausibly in-budget and
+    # worth exactly one automated attempt that swaps the decisive step. Default
+    # False so its ABSENCE == today's terminal-stop behavior (no regression);
+    # forced False on success and on any next_action != stop. The orchestrator
+    # caps this at one method-change retry per job (see the auto-retry loop).
+    retry_worthwhile = (
+        bool(parsed.get("retry_worthwhile"))
+        and next_action == "stop"
+        and not is_success
+    )
+
     # Heap failure code is optional. Reject anything outside the known set
     # so a model-typoed code can't leak into the prescriptive-hint lookup.
     raw_code = parsed.get("failure_code")
@@ -911,6 +945,7 @@ def _normalize_verdict(parsed: dict) -> dict:
         "what_failed": what_failed,
         "specific_diagnosis": specific_diagnosis,
         "alternative_paths": alternative_paths,
+        "retry_worthwhile": retry_worthwhile,
     }
 
 
@@ -1006,6 +1041,7 @@ def postjudge_run(
     what_failed = norm["what_failed"]
     alternative_paths = norm["alternative_paths"]
     specific_diagnosis = norm["specific_diagnosis"]
+    retry_worthwhile = norm["retry_worthwhile"]
 
     log_fn(
         f"[judge] postjudge verdict={verdict} next_action={next_action} "
@@ -1034,5 +1070,6 @@ def postjudge_run(
         "what_failed": what_failed,
         "specific_diagnosis": specific_diagnosis,
         "alternative_paths": alternative_paths,
+        "retry_worthwhile": retry_worthwhile,
         "raw": raw,
     }

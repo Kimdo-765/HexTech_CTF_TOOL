@@ -1373,6 +1373,89 @@ def sanitize_for_argv(s: str | None, *, label: str = "", log_fn=None) -> str:
     return cleaned
 
 
+# Module-specialized RECON web-research guidance. The base RECON_AGENT_PROMPT
+# "Web research — ENABLED" section is pwn/heap-flavored (FSOP / tcache /
+# House-of-* / libc-struct / gadget examples); a crypto/rev/web/forensic recon
+# inherits pwn framing for what "local ground truth first" and "what the web is
+# good for" mean. This appends a domain-correct reframe for NON-pwn recon
+# subagents (pwn → "" so its prompt stays byte-identical), keyed off the job's
+# module. Continuous with the MODULE-SCOPE note prepended in
+# make_standalone_options: that note says the pwn framing below is reference-
+# only; this supplies the positive per-domain guidance. Recon-only (the
+# debugger prompt is separate and not web-research-shaped).
+_RECON_WEB_ADDENDUM = {
+    "crypto": (
+        "WEB RESEARCH FOR THIS crypto JOB (overrides the pwn-flavored web "
+        "examples above)\n"
+        "-----------------------------------------------------------------\n"
+        "Local ground truth = the challenge's OWN source + the exact "
+        "parameters you extract from it; a generic writeup is usually wrong "
+        "for a modified scheme and its constants won't match. Use the web to: "
+        "NAME the primitive/scheme (e.g. a named curve, 'Paillier', "
+        "'McNie rank-metric'), find the CONCRETE attack ALGORITHM (Coppersmith "
+        "bound + polynomial, HNP/biased-nonce lattice construction, a specific "
+        "decoding / linearization / lattice recipe, a CVE), and locate "
+        "reference code to adapt. When an academic PDF (arXiv / "
+        "eprint.iacr.org / HAL / IEEE) fails to fetch or renders as garbage, "
+        "RETRY THE HTML MIRROR (ar5iv.labs.arxiv.org/html/<id>, "
+        "arxiv.org/abs/<id>, the eprint HTML page) before giving up — do not "
+        "silently drop the algorithm you need. Then RE-DERIVE the math from "
+        "the paper and VERIFY it against a local test vector; never trust a "
+        "writeup's numbers."
+    ),
+    "rev": (
+        "WEB RESEARCH FOR THIS rev JOB (overrides the pwn-flavored web "
+        "examples above)\n"
+        "--------------------------------------------------------------\n"
+        "Local ground truth = the disassembly / decompilation / a dynamic "
+        "trace of the binary in front of you. Use the web to: RECOGNIZE a "
+        "library / algorithm / packer signature (a known magic constant, hash "
+        "IV, VM-handler pattern, obfuscator, known crypto S-box), and find "
+        "file-format / instruction-set / ABI specs. Recover ACTUAL behavior by "
+        "running / tracing (gdb / qemu / ltrace / strace), not by trusting a "
+        "blog — a deliberately-modified binary won't match the reference."
+    ),
+    "web": (
+        "WEB RESEARCH FOR THIS web JOB (overrides the pwn-flavored web "
+        "examples above)\n"
+        "--------------------------------------------------------------\n"
+        "Local ground truth = the app's OWN source / routes / config / the "
+        "installed dependency VERSIONS. Use the web to: find framework & "
+        "library CVEs and version-specific bypasses, and known gadget chains "
+        "(deserialization, SSTI, prototype-pollution, auth bypass, SSRF) for "
+        "the DETECTED stack. VERIFY every payload against the running app — a "
+        "public PoC rarely fits an unmodified copy of the challenge, and a "
+        "borrowed gadget must be checked against the actual dependency version."
+    ),
+    "forensic": (
+        "WEB RESEARCH FOR THIS forensic JOB (overrides the pwn-flavored web "
+        "examples above)\n"
+        "-------------------------------------------------------------------\n"
+        "Local ground truth = the artifact itself (file carving, headers, "
+        "metadata, packet/memory image). Use the web to: look up file-format / "
+        "magic-byte specs, tool usage, and known malware / stego / filesystem / "
+        "protocol signatures. Confirm every finding against the bytes you can "
+        "actually see."
+    ),
+    "misc": (
+        "WEB RESEARCH FOR THIS misc JOB (overrides the pwn-flavored web "
+        "examples above)\n"
+        "---------------------------------------------------------------\n"
+        "Identify the domain first from the material you have, then use the web "
+        "for the relevant format / protocol specs, known techniques, and "
+        "reference implementations. Prefer local ground truth and verify "
+        "anything borrowed against the challenge's own data. When an academic "
+        "PDF fails to fetch, retry an HTML mirror (ar5iv / arxiv.org/abs / "
+        "publisher HTML) before dropping it."
+    ),
+}
+
+
+def _recon_web_research_addendum(module: str) -> str:
+    """Per-module RECON web-research reframe; '' for pwn/unknown (no change)."""
+    return _RECON_WEB_ADDENDUM.get((module or "").lower(), "")
+
+
 def make_standalone_options(
     agent_type: str,
     model: str | None,
@@ -1432,6 +1515,14 @@ def make_standalone_options(
             "challenge family from disassembly / source evidence, never from "
             "the technique vocabulary below.\n\n"
         ) + prompt
+
+    # Module-specialized web-research reframe for recon (pwn → no-op, stays
+    # byte-identical). Appended so it directly follows / overrides the
+    # pwn-flavored "Web research — ENABLED" examples in the base prompt.
+    if agent_type == "recon":
+        _wr = _recon_web_research_addendum(module)
+        if _wr:
+            prompt = prompt + "\n\n" + _wr
 
     tools = list(_AGENT_TOOLS_BY_TYPE[agent_type])
     # Base = existing behavior: judge pinned to LATEST_JUDGE_MODEL, everyone
@@ -3479,6 +3570,7 @@ def module_autoboot(
         parts.append("- pycryptodome / gmpy2 / sympy / z3-solver / ecdsa available")
         parts.append("- fpylll available (LLL/BKZ/GSO/enum) — Coppersmith / HNP biased-nonce / LWE without a Sage round-trip")
         parts.append("- sage NOT in THIS container, but a separate Sage sandbox (image pre-pulled) runs solver.sage for EC ops / small_roots / discrete_log")
+        parts.append("- BENCH a .sage BEFORE ship (its decisive Gröbner/variety/resultant/small_roots is otherwise UNMEASURED): `python3 -m worker.sage_smoke <script.sage> [args] --timeout N` times ONE run in that sandbox; for a remote/multi-stage oracle build a local synthetic bench.sage (don't burn the one-shot target). Never claim 'sub-second' from the literature — measure. alarm()-guard EVERY solve incl. the variety() fallback")
         parts.append("- a deterministic pre-analysis (param extraction + RSA auto-factor) may already be in your prompt — check it first")
         parts.append("- before deep math: encrypt a known plaintext through the oracle and OBSERVE patterns")
     elif module == "rev":
@@ -5909,29 +6001,78 @@ async def run_main_agent_session(
             # even if max_retries would have allowed more attempts.
             next_action = (judge_out.get("next_action") or "continue").lower()
             stop_reason = (judge_out.get("stop_reason") or "").strip()
+            # P2 — bounded ONE-shot method-change retry. Default OFF: unless the
+            # judge explicitly sets retry_worthwhile=True on a STOP, this whole
+            # branch is byte-identical to the historical terminal stop.
+            _method_change_convert = False
             if next_action == "stop":
-                summary["judge_stop_reason"] = stop_reason or "judge requested stop"
-                write_meta(
-                    job_id,
-                    judge_next_action="stop",
-                    judge_stop_reason=summary["judge_stop_reason"],
-                )
-                log_fn(
-                    f"[orchestrator] judge requested STOP "
-                    f"(verdict={verdict}, reason={stop_reason or '(none)'}) — "
-                    f"halting auto-retry loop"
-                )
-                write_why_stopped(
-                    work_dir,
-                    stop_kind="judge_stop",
-                    attempt_idx=attempt,
-                    max_attempts=max_retries,
-                    judge_out=judge_out,
-                    sandbox_result=last_sandbox,
-                    summary=summary,
-                    log_fn=log_fn,
-                )
-                return last_sandbox
+                # When the judge STOPs the current approach as structurally
+                # doomed BUT flags a concrete DIFFERENT in-budget method
+                # (retry_worthwhile=True), spend exactly ONE automated retry
+                # that swaps the decisive step instead of halting — the
+                # corrective method hint (e.g. McNie c1edf9e91910: "GB over
+                # GF(2^19) too slow → Kipnis-Shamir linearization / FGLM /
+                # reduced-var XL") otherwise dies with the STOP and needs a
+                # human /retry. Capped at ONE per job; the judge prompt
+                # excludes dead-remote / env-limit / true-negative /
+                # same-method-tweak, so network_error or an unsolvable
+                # true-negative never qualifies. Mirrors the prejudge-block
+                # redirect pattern (synthesize continue + retry_hint, fall
+                # through to the shared inject path). See [[concede_unsolvable_gate]].
+                _mc_n = summary.get("method_change_retries", 0)
+                _mc_hint = (judge_out.get("retry_hint") or "").strip()
+                _mc_alt = judge_out.get("alternative_paths") or []
+                if (judge_out.get("retry_worthwhile")
+                        and _mc_n < 1 and (_mc_hint or _mc_alt)):
+                    _body = _mc_hint or stop_reason
+                    if _mc_alt:
+                        _body += (
+                            "\n\nAlternative methods the judge flagged — pick ONE "
+                            "and REBUILD the decisive step around it (do NOT merely "
+                            "add a timeout / alarm / offset tweak to the SAME "
+                            "method):\n- " + "\n- ".join(str(a) for a in _mc_alt[:3])
+                        )
+                    # Mutate judge_out in place — it IS last_sandbox["judge"]
+                    # (same object; the key exists because we're in the stop
+                    # branch), so the downstream inject path reads the new hint.
+                    judge_out["retry_hint"] = (
+                        "METHOD CHANGE REQUIRED (automated one-shot — you will NOT "
+                        "get another auto-retry). The judge ruled the CURRENT "
+                        "approach structurally cannot succeed within budget, but a "
+                        "DIFFERENT method is viable. REPLACE the decisive step; do "
+                        "NOT re-ship the same approach:\n\n" + _body
+                    )
+                    judge_out["next_action"] = "continue"
+                    next_action = "continue"  # keep local in sync (logs + gates)
+                    _method_change_convert = True
+                    log_fn(
+                        f"[orchestrator] judge STOP but retry_worthwhile=True — "
+                        f"spending the ONE method-change retry (verdict={verdict}); "
+                        f"injecting the alternative-method hint instead of halting"
+                    )
+                else:
+                    summary["judge_stop_reason"] = stop_reason or "judge requested stop"
+                    write_meta(
+                        job_id,
+                        judge_next_action="stop",
+                        judge_stop_reason=summary["judge_stop_reason"],
+                    )
+                    log_fn(
+                        f"[orchestrator] judge requested STOP "
+                        f"(verdict={verdict}, reason={stop_reason or '(none)'}) — "
+                        f"halting auto-retry loop"
+                    )
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="judge_stop",
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out=judge_out,
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
+                    return last_sandbox
 
             # Out of retries? Stop. Negative max_retries means unlimited
             # — only natural exit conditions (flag / verdict==success /
@@ -6122,6 +6263,14 @@ async def run_main_agent_session(
 
             # Inject postjudge feedback as next user turn and loop.
             attempt += 1
+            # Charge the ONE method-change retry only now that every stop/cap
+            # gate above has been cleared and we are definitely re-querying —
+            # so a budget_exhausted return never silently burns the allowance
+            # without an actual retry.
+            if _method_change_convert:
+                summary["method_change_retries"] = (
+                    summary.get("method_change_retries", 0) + 1
+                )
             write_meta(job_id, stage=f"auto-retry-{attempt}")
             feedback = _format_postjudge_user_turn(
                 attempt_idx=attempt,
