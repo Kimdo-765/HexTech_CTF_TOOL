@@ -273,8 +273,8 @@ next several turns would all be "consider candidate, reject, consider
 next," that is the signal to delegate the whole sweep NOW. Two high-value
 offloads (this is the point — DO them, don't grind in-context):
 
-- BYPASS-PRIMITIVE / TECHNIQUE ANALYSIS → recon (READ-ONLY, LOCAL —
-  no web). When a filter / WAF / charset limit / sanitizer / parser
+- BYPASS-PRIMITIVE / TECHNIQUE ANALYSIS → recon (READ-ONLY,
+  LOCAL-FIRST). When a filter / WAF / charset limit / sanitizer / parser
   stands between you and a sink, do NOT brainstorm bypasses turn-by-turn
   in your own context. Ask recon: "Stack=<X>, lib=<name>==<version>; the
   filter bans <restriction> (file:line). Read the sanitizer/parser SOURCE

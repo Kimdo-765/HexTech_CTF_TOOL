@@ -68,36 +68,54 @@ def main(argv: list[str]) -> int:
         flush=True,
     )
     try:
-        out = client.containers.run(
+        container = client.containers.run(
             image=MISC_IMAGE,
             entrypoint=[tool],
             command=tool_args,
             volumes={host_job: {"bind": "/job", "mode": "rw"}},
             network_mode="none",
             mem_limit="2g",
-            remove=True,
-            stdout=True,
-            stderr=True,
+            # Label so the job STOP/DELETE reaper catches an orphan if the tool
+            # hangs (mirrors the misc collector's labels — an unlabeled 2g
+            # container would otherwise survive job teardown).
+            labels={"hextech_ctf_tool_job_id": job_id,
+                    "hextech_ctf_tool_role": "misc-recarve"},
+            detach=True,
         )
-        if isinstance(out, bytes):
-            sys.stdout.buffer.write(out)
-            sys.stdout.buffer.flush()
-        else:
-            print(out)
-        return 0
-    except docker.errors.ContainerError as e:
-        # Non-zero tool exit — still surface stdout/stderr so the agent sees why.
-        blob = e.stderr if isinstance(e.stderr, bytes) else (e.stderr or "").encode()
-        if blob:
-            sys.stdout.buffer.write(blob)
-            sys.stdout.buffer.flush()
-        print(f"[misc_recarve] {tool} exited {e.exit_status}", file=sys.stderr)
-        return e.exit_status or 1
     except docker.errors.ImageNotFound:
         return _usage(f"{MISC_IMAGE} image not found — build it (start.sh) first")
     except Exception as e:
-        print(f"[misc_recarve] failed: {e!r}", file=sys.stderr)
+        print(f"[misc_recarve] failed to spawn: {e!r}", file=sys.stderr)
         return 1
+
+    try:
+        try:
+            sc = container.wait(timeout=300).get("StatusCode", 1)
+        except Exception as e:
+            print(f"[misc_recarve] {tool} exceeded 300s / wait failed ({e!r}) — killing",
+                  file=sys.stderr)
+            try:
+                container.kill()
+            except Exception:
+                pass
+            sc = 124
+        # Capture BOTH streams regardless of exit code, so a failing-but-useful
+        # tool's stdout still reaches the agent.
+        try:
+            logs = container.logs(stdout=True, stderr=True)
+            if logs:
+                sys.stdout.buffer.write(logs)
+                sys.stdout.buffer.flush()
+        except Exception:
+            pass
+        if sc != 0:
+            print(f"[misc_recarve] {tool} exited {sc}", file=sys.stderr)
+        return sc
+    finally:
+        try:
+            container.remove(force=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

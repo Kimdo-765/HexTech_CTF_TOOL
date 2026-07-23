@@ -77,6 +77,13 @@ WINDOWS_PATTERNS = [
 ]
 
 
+# Whole-image conversion (qemu-img / ewfexport) is the single heaviest op and,
+# unlike the per-artifact tools, a timeout there RAISES (fatal to the job) — so
+# it gets a much larger dedicated budget than the 300s per-probe default; the
+# container wall (FORENSIC_TIMEOUT_S) still backstops it.
+CONVERT_TIMEOUT = 1500
+
+
 def _run(cmd: list[str], log_fn: Callable[[str], None], timeout: int = 300) -> tuple[int, str, str]:
     log_fn(f"$ {' '.join(cmd)}")
     # Per-op timeout: one hung sleuthkit/qemu-img op must not block until the
@@ -101,7 +108,8 @@ def _convert_to_raw(src: Path, kind: str, log_fn) -> Path:
         # Simplest: ewfexport with -t and rely on the .raw output.
         prefix = str(dst.with_suffix(""))
         rc, out, err = _run(
-            ["ewfexport", "-t", prefix, "-f", "raw", "-q", "-u", str(src)], log_fn
+            ["ewfexport", "-t", prefix, "-f", "raw", "-q", "-u", str(src)], log_fn,
+            timeout=CONVERT_TIMEOUT,
         )
         # ewfexport actual output is `<prefix>.raw` (single chunk) when -B is not set
         candidates = [Path(prefix + ".raw"), dst]
@@ -117,7 +125,8 @@ def _convert_to_raw(src: Path, kind: str, log_fn) -> Path:
             return dst
         raise RuntimeError(f"ewfexport produced no raw output: {err[-500:]}")
     # qemu-img handles qcow2 / vmdk / vhd / vhdx natively
-    rc, out, err = _run(["qemu-img", "convert", "-O", "raw", str(src), str(dst)], log_fn)
+    rc, out, err = _run(["qemu-img", "convert", "-O", "raw", str(src), str(dst)], log_fn,
+                        timeout=CONVERT_TIMEOUT)
     if rc != 0:
         raise RuntimeError(f"qemu-img convert failed ({kind}): {err}")
     return dst

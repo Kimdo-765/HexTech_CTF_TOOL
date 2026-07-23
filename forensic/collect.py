@@ -42,6 +42,11 @@ def _scan_raw_image(image: Path, log_fn, timeout: int = 240) -> list[str]:
     otherwise be silently missed. Hard-bounded via shell `timeout`; returns
     CANDIDATES only (the agent/operator curates — this never auto-captures).
     """
+    if shutil.which("strings") is None:
+        # `strings` (binutils) must be in the image — otherwise the pipe's tail
+        # (head) exits 0 and this looks IDENTICAL to a genuine no-match. Fail LOUD.
+        log_fn("[raw-scan] SKIP — `strings` not found (add binutils to forensic/Dockerfile + rebuild)")
+        return []
     cmd = ["bash", "-c",
            f"timeout {timeout} strings -a -n 6 {shlex.quote(str(image))} "
            f"| grep -aoE {shlex.quote(_RAW_FLAG_ERE)} | sort -u | head -300"]
