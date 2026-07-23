@@ -300,7 +300,6 @@ def run_job(
     target: Optional[str],
     description: Optional[str],
     auto_run: bool,
-    use_sage: bool = False,
     model_override: Optional[str] = None,
 ) -> dict:
     apply_to_env()
@@ -327,7 +326,6 @@ def run_job(
             "agent": agent_summary,
             "cost_usd": cost,
             "sandbox": sandbox_result,
-            "use_sage": use_sage,
             "flags": flags,
             "agent_error": agent_err,
             "agent_error_kind": agent_err_kind,

@@ -698,7 +698,6 @@ def _resubmit(
     auto_run = bool(prev_meta.get("auto_run"))
     job_timeout = resolve_timeout(prev_meta.get("job_timeout"))
     model = prev_meta.get("model")  # honor prior choice; user can override
-    use_sage = bool(prev_meta.get("use_sage"))
 
     # If the prior job ended with judge explicitly saying "stop —
     # this approach is structurally blocked", forking its 60M-token
@@ -788,7 +787,7 @@ def _resubmit(
         else:
             q.enqueue(
                 "modules.crypto.analyzer.run_job",
-                new_id, new_src_root, target, description, auto_run, use_sage, model,
+                new_id, new_src_root, target, description, auto_run, model,
                 job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
             )
     else:  # pwn / rev
@@ -885,7 +884,6 @@ def _continue_in_place(prev_meta: dict, comment: str,
     auto_run = bool(prev_meta.get("auto_run"))
     job_timeout = resolve_timeout(prev_meta.get("job_timeout"))
     model = prev_meta.get("model")
-    use_sage = bool(prev_meta.get("use_sage"))
 
     write_job_meta(job_id, {
         **prev_meta,
@@ -915,7 +913,7 @@ def _continue_in_place(prev_meta: dict, comment: str,
                   job_id=rq_id, job_timeout=ht)
     elif module == "crypto":
         q.enqueue("modules.crypto.analyzer.run_job",
-                  job_id, prev_meta.get("src_root"), target, description, auto_run, use_sage, model,
+                  job_id, prev_meta.get("src_root"), target, description, auto_run, model,
                   job_id=rq_id, job_timeout=ht)
     elif module == "pwn":
         q.enqueue("modules.pwn.analyzer.run_job",
