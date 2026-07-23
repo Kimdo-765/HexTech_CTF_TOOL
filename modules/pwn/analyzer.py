@@ -524,8 +524,9 @@ def _build_pre_recon_prompt(
             "  per-version main_arena→stdout offset from the pre-recon\n"
             "  FSOP-AS-LEAK TABLE / local libc KB; if the version isn't\n"
             "  covered, read the `_IO_FILE` layout straight out of the\n"
-            "  target's own libc with gdb / readelf. Do NOT search the\n"
-            "  web — writeup lookups are disabled at the framework level."
+            "  target's own libc with gdb / readelf. The local libc + this\n"
+            "  table are authoritative; web research is available but is\n"
+            "  rarely needed for a version-keyed offset."
         )
     if custom_libs:
         # Chal author shipped non-standard .so files. THIS IS THE FIRST

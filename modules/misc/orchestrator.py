@@ -31,6 +31,7 @@ from modules._common import (
     resolve_effort,
     resolve_main_model,
     scan_job_for_flags,
+    _is_placeholder_flag,
     soft_timeout_watchdog,
     write_meta,
 )
@@ -226,8 +227,15 @@ def run_job(
         # Combine flags from misc tool sweep + general scan of report.md etc.
         candidates = (findings.get("strings") or {}).get("flag_candidates", [])
         embedded = [h.get("flag") for h in (findings.get("embedded_flag_hits") or [])]
+        # candidates + embedded are RAW analyzer output — filter placeholders
+        # (CTF{example} / FLAG{your_flag_here} planted in the input) so a sample
+        # flag can't false-"finished" the job. Do NOT re-filter `scanned`:
+        # scan_job_for_flags already applied the trusted-tier filter, and
+        # re-running the untrusted heuristic here could drop a real DH{<64hex>}
+        # (see memory real_flag_dropped_as_placeholder).
+        raw = [f for f in candidates + embedded if f and not _is_placeholder_flag(f)]
         scanned = scan_job_for_flags(job_id)
-        flags = sorted(set([f for f in candidates + embedded + scanned if f]))
+        flags = sorted(set(raw + scanned))
         result["flags"] = flags
 
         cost = extract_cost(result.get("claude"))

@@ -1516,6 +1516,21 @@ def make_standalone_options(
             "the technique vocabulary below.\n\n"
         ) + prompt
 
+    # ENV SCOPE for the non-pwn DEBUGGER: the debugger prompt asserts the pwn
+    # autoboot already ran chal-libc-fix (./.chal-libs staged, libc_profile.json
+    # emitted, "do NOT re-run"). That is FALSE for rev/web/crypto/etc. — correct
+    # the premise so the debugger doesn't trust a bootstrap that never happened.
+    if agent_type == "debugger" and module and module != "pwn":
+        prompt = (
+            f"ENV SCOPE — this is a `{module}` job: `chal-libc-fix` was NOT "
+            "auto-run for you (it runs only in the pwn autoboot). So any claim "
+            "below that the environment is already bootstrapped — `./.chal-libs/` "
+            "staged, `libc_profile.json` emitted, 'chal-libc-fix already ran / do "
+            "NOT re-run' — is PWN-ONLY and does NOT describe your environment. If "
+            "you actually need a patched binary or staged libs, set them up "
+            "yourself; otherwise ignore that framing.\n\n"
+        ) + prompt
+
     # Module-specialized web-research reframe for recon (pwn → no-op, stays
     # byte-identical). Appended so it directly follows / overrides the
     # pwn-flavored "Web research — ENABLED" examples in the base prompt.

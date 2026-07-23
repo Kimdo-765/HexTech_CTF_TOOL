@@ -281,8 +281,10 @@ offloads (this is the point — DO them, don't grind in-context):
   and enumerate what it actually fails to cover — bypass primitives
   ranked by applicability, each verified against the REAL predicate in
   the code, plus the viable exfil channel." recon derives the menu from
-  the code in front of it (NOT from web writeups — web research is
-  disabled); you pick one and CRAFT. (A charset/word ban limits what you
+  the code in front of it (from the sanitizer/parser SOURCE, not a
+  generic web writeup — those are usually wrong for a MODIFIED challenge;
+  web research IS available for CVE/framework lookups, but verify every
+  borrowed value against the code); you pick one and CRAFT. (A charset/word ban limits what you
   can REPRESENT, not what you can EXECUTE once a sink fires; recon
   enumerates the channels so you don't rediscover them turn by turn.)
 
