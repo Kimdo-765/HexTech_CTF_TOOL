@@ -5,12 +5,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgmp-dev libmpfr-dev libmpc-dev \
     binutils file curl \
     gcc cpp \
+    gdb qemu-user-static ltrace strace \
     bash less vim-tiny nano \
  && rm -rf /var/lib/apt/lists/*
 # gcc/cpp: pwntools asm()/shellcraft shells out to `cpp` (preprocess) then `as`.
 # Without cpp, asm() raises FileNotFoundError before the exploit ever connects —
 # job a15ff70a6ed5 captured the real flag from work/ but its auto-run crashed here
 # (cpp missing), so the genuine flag never reached the trusted exploit.py.stdout.
+# gdb/qemu-user-static/ltrace/strace: rev (and some pwn) solvers dynamically
+# TRACE or EMULATE the target at auto-run — the worker has these but the runner
+# didn't, so a solver validated in the worker crashed here on FileNotFoundError
+# and the job ended no_flag (job bedf6b58bfd2: a VM-rev solver shelled out to
+# `gdb`, absent → 2.6s crash → judge STOP). Same dev/run-parity rationale as the
+# fpylll block below. (unicorn/capstone come in via the pip deps.)
 
 RUN pip install --no-cache-dir \
     pwntools==4.13.0 \

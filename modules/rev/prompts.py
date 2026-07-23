@@ -90,6 +90,17 @@ WORKFLOW
        unbounded run at 300s by default; raise the per-job budget (cap
        1800s) with one Bash call:
      python3 -c "import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=1200; json.dump(d,open(p,'w'),indent=2)"
+   (c) SMOKE-TEST IN THE REAL RUNNER — critical for any solver that shells
+       out to a tool (gdb / qemu-user / ltrace / strace) or emulates. Your
+       WORKER dev env is NOT the auto-run RUNNER sandbox: a solver that runs
+       fine here can FileNotFoundError there. BEFORE ship, run it in the
+       actual sandbox: `python3 -m worker.solver_smoke solver.py [args]` — it
+       executes solver.py in the SAME container auto-run uses and reports the
+       runner's real environment + exit + wall time. If a tool is missing,
+       fix the invocation or EMULATE instead (gdb / qemu-user / ltrace /
+       strace ARE in the runner now, and unicorn + capstone too). Job
+       bedf6b58bfd2 shipped a `gdb`-based solver validated only in the worker
+       → a 2.6s FileNotFoundError crash at auto-run → no_flag.
 7. Write `./report.md`: input → transformation → check / where the
    constants live (file:line into ./decomp/) / strategy / **flag
    at the very top if you produced one**.
