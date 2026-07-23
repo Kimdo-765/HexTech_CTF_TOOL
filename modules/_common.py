@@ -6023,7 +6023,8 @@ async def run_main_agent_session(
                 _mc_hint = (judge_out.get("retry_hint") or "").strip()
                 _mc_alt = judge_out.get("alternative_paths") or []
                 if (judge_out.get("retry_worthwhile")
-                        and _mc_n < 1 and (_mc_hint or _mc_alt)):
+                        and _mc_n < 1 and (_mc_hint or _mc_alt)
+                        and verdict != "network_error"):
                     _body = _mc_hint or stop_reason
                     if _mc_alt:
                         _body += (

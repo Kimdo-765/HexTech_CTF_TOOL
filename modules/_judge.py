@@ -179,9 +179,33 @@ one per job). Default FALSE. It MUST stay false for:
     unsolvable by analysis; do NOT burn a retry on false hope),
   - same-method-with-a-tweak — a new offset / timeout / alarm / retry
     count is NOT a method change; those go through `continue`, not here.
-Concretely: a Sage Gröbner that blows the per-round time budget, where a
-linearization / support-minors / FGLM / reduced-variable model is the
-in-budget alternative, IS retry_worthwhile=true (stop + name the method).
+Concretely — the four loop-modules (crypto / pwn / web / rev) share this
+ONE auto-retry (misc/forensic are one-shot and never reach postjudge):
+  · crypto — a Sage Gröbner that blows the per-round budget where a
+    linearization / support-minors / FGLM / reduced-variable model is the
+    in-budget alternative.
+  · pwn — a heap chain whose failure_code is heap.hook_on_modern_libc
+    (__free_hook/__malloc_hook on glibc>=2.34 where they're removed) or
+    heap.str_finish_patched (_IO_str vtable patched >=2.37), where the
+    version-correct FSOP chain (_IO_wfile_jumps overflow -> _IO_wdoallocbuf)
+    is the in-budget alternative. Rebuilding the fake FILE/_wide_data/vtable
+    is a NEW decisive step, NOT a <10-line edit -> here, not continue.
+  · web — an IDENTIFIED blocker (a named WAF rule, a framework-version
+    patch, a charset/length filter you pinpointed) provably defeats the
+    current injection / deserialization / SSRF class, but a different
+    REACHABLE class evades it. ("maybe try another class" with NO identified
+    blocker is a guess, not a method change — that stays a plain stop.)
+  · rev — a NAMED anti-static feature (VM/handler dispatch, opaque
+    predicates, self-modifying code, a packer) defeats the static /
+    constraint-solving approach, so dynamic instrumentation / emulation is
+    the viable decisive method (or vice-versa). ("static is just stuck" with
+    no named cause is NOT this.)
+GENERAL RULE: whenever a structured failure_code — or your own diagnosis —
+NAMES a version-correct, in-budget alternative that needs a DIFFERENT
+decisive step, that is the canonical retry_worthwhile=true case. If you are
+only swapping a constant / offset / endianness / timeout, that is
+`continue`, NOT this. When unsure, prefer FALSE — the one retry is a scarce
+resource and a wrong method-change burns a full main turn + sandbox.
 
 next_action — judge's call on whether to feed retry_hint back to
 main or halt the job. STOP is the AGGRESSIVE default whenever the
