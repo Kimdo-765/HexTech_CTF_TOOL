@@ -576,16 +576,16 @@ Pwn-specific:
                      alignment math is just modular arithmetic)
   - GDB Python API : every `gdb` call accepts `-x script.py` — full
                      Python automation inside one gdb session:
-                       cat > /tmp/probe.py <<'PY'
+                       cat > $TMPDIR/probe.py <<'PY'
                        import gdb, json
                        gdb.execute("file ./prob")
-                       gdb.execute("b *vuln+0x42"); gdb.execute("r < /tmp/in")
+                       gdb.execute("b *vuln+0x42"); gdb.execute("r < $TMPDIR/in")
                        rax = int(gdb.parse_and_eval("$rax")) & ((1<<64)-1)
                        chunks = gdb.execute("heap chunks", to_string=True)
                        print(json.dumps({{"rax": hex(rax),
                                           "chunks_lines": chunks.count('\\n')}}))
                        PY
-                       gdb -batch -x /tmp/probe.py
+                       gdb -batch -x $TMPDIR/probe.py
                      The debugger subagent prefers this pattern over
                      `-ex` chains for any non-trivial probe.
 """

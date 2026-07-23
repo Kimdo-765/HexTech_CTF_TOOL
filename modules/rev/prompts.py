@@ -77,8 +77,18 @@ WORKFLOW
       in Python or symbolic-execute.
 6. Write `./solver.py` (RELATIVE path; orchestrator collects from cwd).
    If the solver does SLOW work — angr exploration, a large z3 model, a
-   keyspace brute — the auto-run cuts it at 300s by default; BEFORE writing
-   solver.py raise the per-job budget (cap 1800s) with one Bash call:
+   keyspace brute — do BOTH of these, not just the budget bump:
+   (a) BOUND THE HEAVY CALL IN-SCRIPT so a bad model can't hang to a hard
+       kill: angr → an explore step/state cap + `signal.alarm(N)`; z3 →
+       `solver.set("timeout", <ms>)`; brute → an explicit iteration cap +
+       a periodic progress print. An unbounded angr `.explore()` / z3
+       solve can OOM-SIGKILL the container with zero output.
+   (b) MEASURE before you raise the budget — `timeout 60 python3 solver.py`
+       on a reduced bound / one candidate, then set exploit_timeout_seconds
+       from the MEASURED rate, NOT a blind 1200 (a confident-wrong estimate
+       is exactly how a solver ships too-slow). The auto-run cuts an
+       unbounded run at 300s by default; raise the per-job budget (cap
+       1800s) with one Bash call:
      python3 -c "import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=1200; json.dump(d,open(p,'w'),indent=2)"
 7. Write `./report.md`: input → transformation → check / where the
    constants live (file:line into ./decomp/) / strategy / **flag

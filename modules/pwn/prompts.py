@@ -203,7 +203,11 @@ WORKFLOW
      and N × est > 240s (e.g. 18 ASLR-retry attempts at ~25s/attempt
      ≈ 7.5 min, or any heap chain doing brk extension that costs
      ≥30s/attempt), write a per-job override into meta.json BEFORE
-     you write exploit.py — via a SEPARATE Bash tool call:
+     you write exploit.py — via a SEPARATE Bash tool call.
+     MEASURE est_seconds_per_attempt, don't guess it: `time` one reconnect
+     (or one alloc batch) against `./prob` locally first, then multiply by
+     N and add margin — a confident-wrong self-estimate is how a long chain
+     silently blows the wall.
        Bash(command="python3 -c \"import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=900; json.dump(d,open(p,'w'),indent=2)\"",
             description="raise exploit timeout to 900s for long heap chain")
      Cap is 1800s (runner clamps higher values). Default 300s is fine

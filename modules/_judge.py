@@ -161,7 +161,7 @@ markdown:
  "what_worked": ["<=80 chars each, up to 3 items: parts of the chain that demonstrably succeeded — libc leak got a non-zero address, fastbin alloc returned, etc.>"],
  "what_failed": ["<=80 chars each, up to 3 items: the specific step that failed, with the observed signal (SIGSEGV at addr X, recvuntil timeout on 'Size:', abort msg, etc.)>"],
  "specific_diagnosis": "<=300 chars; one sentence pinpointing the failed line + the observed signal (e.g. 'exploit.py:42 sendlineafter waited for b\"> \" but service emits b\"> \\x1b[0m\" with ANSI; recv blocks then SDK timeout')",
- "alternative_paths": ["<=120 chars each, up to 3: techniques NOT yet tried that the observed state evidences could work (e.g. 'unsorted-bin attack on _IO_list_all', 'House of Orange via FILE struct overflow'). Empty list if exhaustively tried."],
+ "alternative_paths": ["<=120 chars each, up to 3: techniques NOT yet tried that the observed state evidences could work — pwn e.g. 'unsorted-bin attack on _IO_list_all' / 'House of Orange via FILE overflow'; rev e.g. 'emulate the check with Unicorn instead of static z3' / 'constant is XOR-obfuscated — trace it dynamically'; web e.g. 'the filter blocks <script> — try an SVG/onerror vector'; crypto e.g. 'switch the decode from Gröbner to a linear support-minors solve'. Empty list if exhaustively tried."],
  "retry_worthwhile": false}}
 
 retry_worthwhile — set TRUE only ALONGSIDE next_action==stop, and ONLY
