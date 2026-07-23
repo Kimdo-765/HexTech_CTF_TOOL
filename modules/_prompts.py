@@ -302,6 +302,33 @@ not gate the run, you do:
       script and skips the runner, marking the job no_flag /
       failed.
 
+      (c) IS NOT "THE CHALLENGE IS UNSOLVABLE." It only means "this
+      SCRIPT would crash/hang, don't waste a runner cycle." Deleting a
+      broken script does NOT license concluding the job is done or the
+      flag is unrecoverable. If your OWN analysis/report NAMES a viable
+      path you simply didn't finish (e.g. "flag = perm⁻¹(target)",
+      "invert this GF(2) system", "finish the byte-accurate emulator"),
+      the job is UNFINISHED, not solved and not a true-negative — that
+      distinction is the difference between honest and a premature
+      concede. A true-negative is legitimate ONLY when PROVEN by
+      enumeration (no viable path exists), never when a path exists but
+      ran out of budget.
+
+      ESPECIALLY FOR AN OFFLINE CHALLENGE (no remote target given):
+      there is NO external clock — no rate limit, no rotating instance,
+      no ticking remote — and the answer is unique by construction
+      (a wargame HAS an accepting input). "Exceeded the investigation
+      budget" is NOT a reason to stop with a viable path on the table.
+      Do ONE of: (1) EXECUTE the path you named (build the emulator,
+      run the inversion, do the constraint solve) even if it takes many
+      more turns; or (2) if you genuinely must stop, ship your BEST
+      PARTIAL solver that encodes the mechanism and your best candidate
+      — NOT a placeholder like b"A"*64, and NOT report-only. Report-only
+      on a solvable offline challenge with a named unfinished path is
+      the ONE outcome to avoid. (For a REMOTE challenge a dead/rotated
+      target IS a legit reason to stop — this offline emphasis does not
+      apply there.)
+
 DO NOT skip the judge call thinking your draft is obviously
 correct. The recvuntil-without-timeout class of bugs is invisible
 in source review — judge specifically checks for it. The cost is
