@@ -904,8 +904,13 @@ def _normalize_verdict(parsed: dict) -> dict:
     # False so its ABSENCE == today's terminal-stop behavior (no regression);
     # forced False on success and on any next_action != stop. The orchestrator
     # caps this at one method-change retry per job (see the auto-retry loop).
+    # Strict `is True` (not bool()): matches the membership-checked validation
+    # of verdict / next_action / failure_code above, and fails SAFE — a
+    # stringified-truthy model value ("false" / "no" / "0", which json.loads
+    # leaves as a truthy str) must NOT flip this opt-in on. Only a real JSON
+    # `true` qualifies.
     retry_worthwhile = (
-        bool(parsed.get("retry_worthwhile"))
+        parsed.get("retry_worthwhile") is True
         and next_action == "stop"
         and not is_success
     )

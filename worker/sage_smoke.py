@@ -94,6 +94,16 @@ def main(argv: list[str]) -> int:
     if not job_id:
         return _usage("JOB_ID env not set — run this from the job's agent Bash")
 
+    # `python3 -m worker.sage_smoke` (the mandated invocation) puts the agent's
+    # cwd — the job WORK DIR — on sys.path[0]. If a challenge's extracted source
+    # ships a top-level `modules/` package it would shadow the real /app/modules
+    # and break `import modules._runner`. Pin the repo root (this file's
+    # grandparent, e.g. /app) AHEAD of cwd so the import always resolves to the
+    # runner, never to challenge source.
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if not sys.path or sys.path[0] != _repo_root:
+        sys.path.insert(0, _repo_root)
+
     try:
         from modules._runner import run_in_sandbox, SAGE_IMAGE
     except Exception as e:  # pragma: no cover - import wiring
