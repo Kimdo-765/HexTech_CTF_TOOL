@@ -25,8 +25,9 @@ WORKFLOW
    PDFs with hidden streams, archives with extra entries).
 4. List the top suspicious leads:
    - Embedded files of unusual type
-   - Anomalous LSB / channel-XOR output (zsteg already tried common
-     bits — only re-run with --all if findings.json suggests it)
+   - Anomalous LSB / channel-XOR output (the sweep tried common bits; if
+     findings.json hints at a specific plane/channel, re-run it TARGETED
+     via `python3 -m worker.misc_recarve zsteg …` — see Constraints)
    - exif fields with hidden text
    - Append-after-EOF data
 5. Produce `./report.md`:
@@ -38,16 +39,29 @@ WORKFLOW
 Constraints
 -----------
 - Quote a line or two per finding, NOT full dumps.
-- Don't re-run the heavy tools (binwalk / steghide / zsteg / qpdf)
-  — they already produced findings.json.
+- Don't BLINDLY re-run the whole sweep (findings.json already has it),
+  but a TARGETED re-run the sweep DIDN'T do IS available: the heavy tools
+  (zsteg / steghide / binwalk / foremost / stegseek / outguess / 7z /
+  pdftotext) are NOT in your container but ARE in the sibling misc image —
+    python3 -m worker.misc_recarve <tool> [args...]   # files at /job/<name>
+  Use it for a specific zsteg bit-plane, `steghide extract -p <passphrase
+  you discovered>`, an offset/format-specific binwalk, etc.
 - After ~10 tool calls without a draft report, write what you have
   and iterate.
 """
 
 
-def build_user_prompt(filename: str | None, description: str | None) -> str:
+def build_user_prompt(filename: str | None, description: str | None, flag_format: str | None = None) -> str:
     base_desc, retry_hint = split_retry_hint(description)
     parts: list[str] = []
+    if (flag_format or "").strip():
+        parts.append(
+            f"Expected flag format: {flag_format.strip()} — the flag matches "
+            "this shape. The deterministic sweep's flag_candidates use the "
+            "standard prefixes and may MISS this format, so hunt for it "
+            "specifically in findings.json / extracted/, then print it as "
+            "`FLAG_CANDIDATE: <flag>`."
+        )
     if retry_hint:
         parts.append(
             "⚠ PRIORITY GUIDANCE (from prior-attempt review — read first):\n"

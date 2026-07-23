@@ -168,6 +168,13 @@ def main() -> int:
         return 2
 
     findings: dict[str, Any] = {"input": str(in_path), "size": in_path.stat().st_size}
+
+    def flush():
+        # Write findings.json INCREMENTALLY so a mid-sweep container wall-kill
+        # (the sum of per-tool timeouts can exceed MISC_TIMEOUT_S=600s) still
+        # leaves the partial results on disk instead of losing everything.
+        (out / "findings.json").write_text(json.dumps(findings, indent=2, default=str))
+
     L(f"=== file ===")
     findings["filetype"] = collect_filetype(in_path)
     L(json.dumps(findings["filetype"]))
@@ -178,6 +185,7 @@ def main() -> int:
     L("=== strings ===")
     findings["strings"] = collect_strings(in_path)
     L(f"flag candidates: {findings['strings'].get('flag_candidates')}")
+    flush()
 
     desc = (findings["filetype"].get("description") or "").lower()
     mime = (findings["filetype"].get("mime") or "").lower()
@@ -203,19 +211,31 @@ def main() -> int:
     if is_archive:
         L("=== archive ===")
         findings["archive"] = collect_archive_listing(in_path)
+    flush()
 
     L("=== binwalk ===")
     findings["binwalk"] = collect_binwalk(in_path, extracted)
+    flush()
 
-    # Recursive flag search in extracted contents
+    # Recursive flag search in extracted contents. binwalk --matryoshka -e can
+    # produce THOUSANDS of files (a recursive decompression bomb), so cap both
+    # the file count and cumulative bytes read — an unbounded rglob over all
+    # carved output can hang the whole sweep.
     embedded_flag_hits = []
-    for p in extracted.rglob("*"):
+    _scanned = 0
+    _bytes_left = 512 * 1024 * 1024  # 512 MB cumulative read budget
+    for p in sorted(extracted.rglob("*")):
+        if _scanned >= 5000 or _bytes_left <= 0:
+            L(f"[cap] embedded-flag scan stopped after {_scanned} files / budget")
+            break
         if not p.is_file() or p.stat().st_size == 0:
             continue
+        _scanned += 1
         try:
             data = p.read_bytes()[: 5 * 1024 * 1024]
         except Exception:
             continue
+        _bytes_left -= len(data)
         text = data.decode("utf-8", errors="replace")
         for m in FLAG_RE.findall(text):
             embedded_flag_hits.append({"file": str(p.relative_to(out)), "flag": m})

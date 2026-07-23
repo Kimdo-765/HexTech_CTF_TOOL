@@ -141,7 +141,9 @@ async def _claude_summary(
         # 2026-07-22 — kill_guard_hooks no longer denies WebSearch/WebFetch).
         hooks=kill_guard_hooks(job_id),
     )
-    prompt = build_user_prompt(filename, description)
+    prompt = build_user_prompt(
+        filename, description, flag_format=read_meta(job_id).get("flag_format")
+    )
     from modules._common import build_exploit_library_hint
     _lib_hint = build_exploit_library_hint("misc")
     if _lib_hint:
