@@ -407,6 +407,16 @@ def run_in_sandbox(
         stdout=True,
         stderr=True,
         detach=True,
+        # Dev/run parity with the worker's seccomp relaxation: a rev solver
+        # validated in the worker under gdb with ASLR disabled
+        # (personality(ADDR_NO_RANDOMIZE)) would SILENTLY behave differently at
+        # auto-run if the runner kept the default seccomp profile — ASLR back
+        # on → addresses move → a fixed-address gdb/setarch oracle fails or
+        # returns the wrong answer. Same warning-not-crash class as the
+        # gdb-absent parity fix (see rev_runner_devrun_parity). Empirically
+        # only seccomp matters (not SYS_PTRACE). The runner already executes
+        # agent-authored code as root, so this is not a new trust boundary.
+        security_opt=["seccomp=unconfined"],
         labels={"hextech_ctf_tool_job_id": job_id, "hextech_ctf_tool_role": "runner"},
         # Only the sage path sets a user (uid 0, so preparse can write the
         # root:root 0755 work dir). When run_user is None (python3 path) no

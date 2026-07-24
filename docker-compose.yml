@@ -115,6 +115,23 @@ services:
       # worker uses your existing claude.ai OAuth token (no API key needed).
       # Run `claude login` once on the host to populate ~/.claude/.
       - ${HOST_CLAUDE_HOME:-${HOME}/.claude}:/root/.claude
+    # Relax seccomp so gdb/dynamic-analysis in the rev `debugger` subagent can
+    # disable ASLR. gdb turns off per-inferior randomization via
+    # personality(ADDR_NO_RANDOMIZE = 0x40000), which the DEFAULT Docker seccomp
+    # profile rejects with EPERM. Concrete cost (job c70160244e53, rev
+    # "damnida"): gdb printed `Error disabling address space randomization:
+    # Operation not permitted`, so the stack pointer moved run-to-run, the
+    # gdb-based per-gate oracle was unreadable, and the solve had to pivot to a
+    # from-scratch fixed-base Unicorn emulation (~1h43 extra). Verified
+    # empirically that ONLY the seccomp relaxation matters here — `cap_add:
+    # SYS_PTRACE` does NOT affect the personality() call (that cap is for
+    # ptrace-attach / yama scope, a different need). Docker has no "default +
+    # allow personality" append, so we drop the profile wholesale; acceptable
+    # because this container already runs as root with docker.sock mounted and
+    # executes arbitrary agent-authored code — seccomp is not the security
+    # boundary here.
+    security_opt:
+      - seccomp=unconfined
     depends_on:
       - redis
     restart: unless-stopped
