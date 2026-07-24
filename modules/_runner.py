@@ -67,6 +67,28 @@ CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
 WEB_TIMEOUT_S = 3000
 DEFAULT_MEM = "2g"
 
+# Targeted seccomp profile = the Docker default + one addition: personality()
+# with ADDR_NO_RANDOMIZE (0x40000, and its |base combinations) so gdb /
+# `setarch -R` can disable per-inferior ASLR for rev dynamic-analysis solvers.
+# The default profile EPERMs that personality() arg, which silently breaks a
+# fixed-address gdb/setarch oracle validated in the worker (dev/run parity —
+# see rev_runner_devrun_parity). This REPLACES an earlier seccomp=unconfined
+# (f829f4b): an adversarial test showed unconfined re-exposed unprivileged
+# user namespaces (unshare(NEWUSER) — the classic kernel-LPE amplifier) to the
+# agent-authored code the runner executes as root, and the runner — unlike the
+# worker — mounts NO docker.sock, so it is the isolation-relevant container.
+# This profile keeps unshare(NEWUSER)/keyctl/bpf/userfaultfd BLOCKED while
+# still allowing the one personality() value gdb needs (empirically verified).
+# docker-py sends the profile CONTENT (not a path) to the daemon, so read it
+# here; if it is somehow missing we fall back to the daemon DEFAULT profile
+# (None) — safe (gdb-ASLR-off silently reverts to broken) rather than
+# unconfined.
+_SECCOMP_GDB_ASLR_PATH = Path(__file__).resolve().parent / "seccomp_gdb_aslr.json"
+try:
+    _SECCOMP_GDB_ASLR = _SECCOMP_GDB_ASLR_PATH.read_text()
+except OSError:
+    _SECCOMP_GDB_ASLR = None
+
 
 def _resolve_sandbox_timeout(module, use_sage, override, has_target) -> int:
     """Resolve the sandbox HARD-timeout (seconds) for one run.
@@ -407,16 +429,19 @@ def run_in_sandbox(
         stdout=True,
         stderr=True,
         detach=True,
-        # Dev/run parity with the worker's seccomp relaxation: a rev solver
-        # validated in the worker under gdb with ASLR disabled
-        # (personality(ADDR_NO_RANDOMIZE)) would SILENTLY behave differently at
-        # auto-run if the runner kept the default seccomp profile — ASLR back
+        # Dev/run parity: a rev solver validated in the worker under gdb with
+        # ASLR disabled (personality(ADDR_NO_RANDOMIZE)) would SILENTLY diverge
+        # at auto-run if the runner kept the stock seccomp profile — ASLR back
         # on → addresses move → a fixed-address gdb/setarch oracle fails or
-        # returns the wrong answer. Same warning-not-crash class as the
-        # gdb-absent parity fix (see rev_runner_devrun_parity). Empirically
-        # only seccomp matters (not SYS_PTRACE). The runner already executes
-        # agent-authored code as root, so this is not a new trust boundary.
-        security_opt=["seccomp=unconfined"],
+        # returns the wrong answer. We grant EXACTLY that one personality()
+        # value via the targeted _SECCOMP_GDB_ASLR profile (Docker default +
+        # ADDR_NO_RANDOMIZE), NOT seccomp=unconfined — the latter re-exposed
+        # unprivileged user namespaces to agent-authored code on the
+        # docker.sock-less isolation container (see the profile comment above).
+        # Fall back to the daemon default (None) if the profile file is missing.
+        security_opt=(
+            ["seccomp=" + _SECCOMP_GDB_ASLR] if _SECCOMP_GDB_ASLR else None
+        ),
         labels={"hextech_ctf_tool_job_id": job_id, "hextech_ctf_tool_role": "runner"},
         # Only the sage path sets a user (uid 0, so preparse can write the
         # root:root 0755 work dir). When run_user is None (python3 path) no
