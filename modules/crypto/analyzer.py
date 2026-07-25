@@ -8,9 +8,11 @@ import anyio
 from modules._common import (
     cleanup_job_processes,
     collect_outputs,
+    docker_challenge_block,
     extract_cost,
     job_dir,
     log_line,
+    reap_chal_containers,
     make_main_session_options,
     REPORT_SCHEMA_CRYPTO,
     load_cached_pre_recon,
@@ -72,6 +74,11 @@ async def _run_agent(
     _mt_block = build_target_directive(target, read_meta(job_id).get("target_urls"))
     if _mt_block:
         user_prompt = user_prompt + "\n\n" + _mt_block
+    # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose under ./bin/
+    # and instruct the agent to build+run it. Returns "" (no-op) when unticked.
+    _docker_block = docker_challenge_block(job_id)
+    if _docker_block:
+        user_prompt = user_prompt + "\n\n" + _docker_block
 
     # Deterministic remote-banner pre-probe (no LLM). When a remote oracle is
     # the target, capture the FIRST bytes it emits on connect and inject them so
@@ -303,6 +310,14 @@ def run_job(
     model_override: Optional[str] = None,
 ) -> dict:
     apply_to_env()
+    # 'Docker challenge' opt-in → the agent may `docker build`/`docker run` the
+    # bundled Dockerfile. Sweep stale chal containers from a prior crashed run
+    # of this id, then reap in finally so nothing orphans (hextech_job=<id>).
+    _dc = bool(read_meta(job_id).get("docker_challenge"))
+    if _dc:
+        reap_chal_containers(
+            job_id, lambda s: log_line(job_id, s), reason="startup sweep",
+        )
     write_meta(job_id, status="running", stage="analyze")
     try:
         agent_summary = anyio.run(
@@ -342,3 +357,10 @@ def run_job(
         log_line(job_id, f"ERROR: {e}\n{traceback.format_exc()}")
         write_meta(job_id, status="failed", error=str(e))
         raise
+    finally:
+        # Reap any local challenge containers the agent spun up for the
+        # docker-challenge opt-in (label hextech_job=<id>). Best-effort.
+        if _dc:
+            reap_chal_containers(
+                job_id, lambda s: log_line(job_id, s), reason="job complete",
+            )

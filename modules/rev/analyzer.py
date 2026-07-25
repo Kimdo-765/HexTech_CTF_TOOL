@@ -10,9 +10,11 @@ import anyio
 from modules._common import (
     cleanup_job_processes,
     collect_outputs,
+    docker_challenge_block,
     extract_cost,
     job_dir,
     log_line,
+    reap_chal_containers,
     REPORT_SCHEMA_REV,
     load_cached_pre_recon,
     make_main_session_options,
@@ -83,6 +85,12 @@ async def _run_agent(
     _tgt_block = build_target_directive(target, read_meta(job_id).get("target_urls"))
     if _tgt_block:
         user_prompt = user_prompt + "\n\n" + _tgt_block
+    # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose under ./bin/
+    # and instruct the agent to build+run it as the real runtime + dynamic
+    # oracle. Returns "" (no-op) when the box is unticked.
+    _docker_block = docker_challenge_block(job_id)
+    if _docker_block:
+        user_prompt = user_prompt + "\n\n" + _docker_block
 
     # ELF/PE detection — the static-triage pre-recon below runs ghiant
     # (Ghidra) + checksec, which only make sense for a NATIVE executable.
@@ -270,6 +278,15 @@ def run_job(
     binary_name = Path(binary_rel).name if binary_rel else None
 
     apply_to_env()
+    # 'Docker challenge' opt-in → the agent may `docker build`/`docker run` the
+    # bundled Dockerfile. Sweep stale chal containers a prior crashed run of
+    # this id left behind (SIGKILL/OOM skips the finally), then reap in finally
+    # so nothing orphans (label hextech_job=<id>; see reap_chal_containers).
+    _dc = bool(read_meta(job_id).get("docker_challenge"))
+    if _dc:
+        reap_chal_containers(
+            job_id, lambda s: log_line(job_id, s), reason="startup sweep",
+        )
     write_meta(job_id, status="running", stage="analyze")
     try:
         agent_summary = anyio.run(
@@ -310,3 +327,11 @@ def run_job(
         log_line(job_id, f"ERROR: {e}\n{traceback.format_exc()}")
         write_meta(job_id, status="failed", error=str(e))
         raise
+    finally:
+        # Reap any local challenge containers/networks the agent spun up for the
+        # docker-challenge opt-in (label hextech_job=<id>). Best-effort; runs on
+        # success, failure, and _Stop/agent-error paths without masking results.
+        if _dc:
+            reap_chal_containers(
+                job_id, lambda s: log_line(job_id, s), reason="job complete",
+            )

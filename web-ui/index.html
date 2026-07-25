@@ -186,6 +186,10 @@
           <input type="checkbox" name="skip_claude" />
           Skip Claude summary (collection only)
         </label>
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain disk/memory-image triage pass. Web & Pwn already do this by default.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
+        </label>
         <label>
           Flag format (optional)
           <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
@@ -230,6 +234,10 @@
         <label class="checkbox">
           <input type="checkbox" name="skip_claude" />
           Skip Claude summary (raw findings only)
+        </label>
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain file-triage pass. Web & Pwn already do this by default.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
         <label>
           Flag format (optional)
@@ -282,6 +290,10 @@
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
+        </label>
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (stand up the challenge service/binary in its intended container). Leave off for a plain static/dynamic solve. Web & Pwn already do this by default.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
         <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when the solver captures the REAL flag from the remote target/oracle. Local-only validation will NOT pass.">
           <input type="checkbox" class="capture-remote-flag-cb" />
@@ -338,6 +350,10 @@
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
+        </label>
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (e.g. run the crackme in its intended container instead of a static-only solve). Leave off for a plain static/dynamic solve. Web & Pwn already do this by default.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
         <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when solver.py captures the REAL flag from the remote target. A local-only derivation that never touches the service will NOT pass.">
           <input type="checkbox" class="capture-remote-flag-cb" />

@@ -3624,6 +3624,114 @@ def module_autoboot(
     }
 
 
+def docker_challenge_block(job_id: str) -> str:
+    """Prompt stanza injected ONLY when the operator ticked the 'Docker
+    challenge' box (``meta.docker_challenge``). Deterministically DETECTS a
+    bundled Dockerfile / compose file under ``./bin/`` and instructs the agent
+    to BUILD + RUN it as the real runtime and dynamic oracle.
+
+    Design (opt-in, additive):
+      - Returns "" when the box is unticked, so the caller's ``if block:``
+        guard drops it cleanly and pre-existing / non-docker jobs are wholly
+        unaffected.
+      - Wired ONLY into the modules that had NO docker guidance before
+        (rev/crypto/misc/forensic). web and pwn already build+run challenge
+        Dockerfiles unconditionally in their own prompts — this does NOT touch
+        them (no double-inject / no regression).
+      - DETECTION is deterministic (scan ./bin/); RUNNING is agent-driven — a
+        CTF ENTRYPOINT almost always needs the right input (e.g. ``main
+        flag.png``), so the flag comes from the agent using the container
+        interactively, not a blind system auto-run.
+      - Cleanup is handled by ``reap_chal_containers`` (label
+        ``hextech_job=<id>``), which the SAME modules now call at start+finally
+        whenever this box is set — so a container the agent spins up here can't
+        orphan (see the WSL2-orphan-shadows-port class).
+    """
+    if not (read_meta(job_id) or {}).get("docker_challenge"):
+        return ""
+    # Uploaded challenge files land in DIFFERENT roots per module — rev/pwn use
+    # ./bin/, crypto/web use ./src/ (extracted), misc/forensic drop the file at
+    # the job-dir root. So scan the WHOLE job dir, but SKIP the agent's ./work/
+    # scratch (a Dockerfile the agent itself writes there is not the challenge's)
+    # and obvious noise. Paths are reported relative to the job dir.
+    job_root = JOBS_DIR / job_id
+    _skip_top = {"work", "__pycache__", ".git", ".ghidra_proj", "decomp"}
+    _targets = {
+        "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+        "compose.yml", "compose.yaml",
+    }
+    found: list[str] = []
+    try:
+        for p in sorted(job_root.rglob("*")):
+            rel = p.relative_to(job_root)
+            if rel.parts and rel.parts[0] in _skip_top:
+                continue
+            if p.is_file() and p.name.lower() in _targets:
+                found.append(rel.as_posix())
+                if len(found) >= 12:
+                    break
+    except OSError:
+        pass
+
+    header = (
+        "DOCKER CHALLENGE (you opted in via the 'Docker challenge' box)\n"
+        "--------------------------------------------------------------\n"
+    )
+    if not found:
+        return (
+            header
+            + "You ticked 'Docker challenge' but I found NO Dockerfile / compose "
+            "file anywhere in the challenge bundle (searched /data/jobs/$JOB_ID "
+            "outside ./work/). Run `ls -R /data/jobs/$JOB_ID/bin /data/jobs/"
+            "$JOB_ID/src 2>/dev/null` to confirm. If the challenge genuinely "
+            "needs a container, locate its build file first; otherwise just "
+            "proceed with normal static/dynamic analysis — this note is not a "
+            "blocker."
+        )
+    # Build context = the dir holding the first plain Dockerfile (else the first
+    # detected file's dir; a file at the job root → the job dir itself). Absolute
+    # /data/... paths so it works from ANY module's cwd (rev=./bin, crypto=./src,
+    # misc/forensic=job root) — the worker mounts /data and a build context from
+    # a worker-local path is fine (the CLI tars+sends it).
+    _df = next((f for f in found if f.lower().endswith("dockerfile")), found[0])
+    _ctx_rel = _df.rsplit("/", 1)[0] if "/" in _df else ""
+    ctx = "/data/jobs/$JOB_ID" + (f"/{_ctx_rel}" if _ctx_rel else "")
+    listed = ", ".join(f"/data/jobs/$JOB_ID/{f}" for f in found)
+    return (
+        header
+        + f"Detected in the challenge bundle: {listed}. This challenge is meant "
+        "to run INSIDE its own container — BUILD IT AND RUN IT, and use the "
+        "running container as the real runtime and the dynamic oracle. This "
+        "worker has the docker CLI and the host docker socket mounted.\n"
+        "Mechanics (the orchestrator reaps by label when the job ends — you do "
+        "NOT tear down, but you MUST tag or cleanup misses it):\n"
+        f"- Build:  `docker build -t chal_$JOB_ID {ctx}`  (build context = the "
+        "dir holding the Dockerfile; the CLI tars+sends it, so this worker-local "
+        "path is fine here).\n"
+        "- Run:    `docker run --rm --label hextech_job=$JOB_ID --name "
+        "chal_$JOB_ID chal_$JOB_ID <args>`  — pass the input file / args the "
+        "ENTRYPOINT+CMD expect; add `-i`/`-t` or pipe stdin as needed.\n"
+        "- INTERACT: the flag rarely falls out of a blind run — a CTF ENTRYPOINT "
+        "usually needs the RIGHT input (e.g. `main flag.png`). Drive the "
+        "container the way the challenge expects: feed candidate inputs, read "
+        "its verdict (Correct!/Wrong!/output), iterate. For a shell inside the "
+        "intended env use `docker run -it --label hextech_job=$JOB_ID "
+        "chal_$JOB_ID bash` (override the entrypoint with `--entrypoint bash` if "
+        "needed) or `docker exec`.\n"
+        "- VERIFY, DON'T ASSUME: a static reconstruction / offline derivation is "
+        "NOT a confirmation — run it against THIS container and confirm the "
+        "binary actually accepts it (prints the success path) before you claim "
+        "the flag.\n"
+        "- compose: `docker compose` is NOT installed here; if only a compose "
+        "file ships, read it and translate each service to `docker build` / "
+        "`docker run` (label every container `hextech_job=$JOB_ID`, join them on "
+        "a `chal_${JOB_ID}_net` network if they must talk).\n"
+        "- HOST-PATH gotcha: the daemon is the HOST's, so any `-v` volume path "
+        "must be a HOST path — use `$HOST_DATA_DIR/jobs/$JOB_ID/...`, NOT the "
+        "container-local `/data/...` (the `docker build <dir>` context is exempt)."
+    )
+
+
 def reap_chal_containers(job_id: str, log_fn=None, *, reason: str = "") -> int:
     """Tear down any LOCAL challenge containers/networks a job spun up.
 

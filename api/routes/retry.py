@@ -696,6 +696,10 @@ def _resubmit(
         description = description[:cut].rstrip()
     description = (description + "\n\n[retry-hint]\n" + hint).strip()
     auto_run = bool(prev_meta.get("auto_run"))
+    # Carry the 'Docker challenge' opt-in forward (mirrors auto_run) — a retry of
+    # a docker-challenge job must keep detecting+running the bundled Dockerfile,
+    # else the retry silently reverts to a static-only solve.
+    docker_challenge = bool(prev_meta.get("docker_challenge"))
     job_timeout = resolve_timeout(prev_meta.get("job_timeout"))
     model = prev_meta.get("model")  # honor prior choice; user can override
 
@@ -742,6 +746,7 @@ def _resubmit(
         "target_urls": target_urls,
         "description": description,
         "auto_run": auto_run,
+        "docker_challenge": docker_challenge,
         "job_timeout": job_timeout,
         "model": model,
         "retry_of": prev_meta.get("id"),

@@ -28,6 +28,7 @@ from modules._common import (
     kill_guard_hooks,
     log_thinking,
     read_meta,
+    reap_chal_containers,
     resolve_effort,
     resolve_main_model,
     scan_job_for_flags,
@@ -156,6 +157,12 @@ async def _claude_summary(
     _lib_hint = build_exploit_library_hint("forensic")
     if _lib_hint:
         prompt = _lib_hint + "\n\n" + prompt
+    # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose and instruct
+    # the agent to build+run it. Returns "" (no-op) when the box is unticked.
+    from modules._common import docker_challenge_block
+    _docker_block = docker_challenge_block(job_id)
+    if _docker_block:
+        prompt = prompt + "\n\n" + _docker_block
     _log(job_id, f"Launching Claude summary agent (model={model})")
     summary: dict = {"messages": 0, "tool_calls": 0}
 
@@ -214,6 +221,12 @@ def run_job(
 ) -> dict:
     """RQ entrypoint."""
     apply_to_env()
+    # 'Docker challenge' opt-in → the agent may `docker build`/`docker run` the
+    # bundled Dockerfile. Sweep stale chal containers from a prior crashed run
+    # of this id, then reap in finally so nothing orphans (hextech_job=<id>).
+    _dc = bool(read_meta(job_id).get("docker_challenge"))
+    if _dc:
+        reap_chal_containers(job_id, lambda s: _log(job_id, s), reason="startup sweep")
     _write_meta(job_id, status="running", stage="collect")
     try:
         _log(job_id, f"Spawning forensic collector (image={image_rel}, type={image_type}, os={target_os}, BE={bulk_extractor})")
@@ -268,3 +281,8 @@ def run_job(
         _log(job_id, f"ERROR: {e}\n{traceback.format_exc()}")
         _write_meta(job_id, status="failed", error=str(e))
         raise
+    finally:
+        # Reap any local challenge containers the agent spun up for the
+        # docker-challenge opt-in (label hextech_job=<id>). Best-effort.
+        if _dc:
+            reap_chal_containers(job_id, lambda s: _log(job_id, s), reason="job complete")
