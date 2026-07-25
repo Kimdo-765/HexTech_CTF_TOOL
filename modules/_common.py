@@ -4825,6 +4825,41 @@ def write_why_stopped(
             "",
         ]
 
+        # UNREPRODUCED FLAG CANDIDATES — lead with these when they exist.
+        # A job can END as no_flag while the REAL flag is already sitting in
+        # meta.flag_candidates: the two-tier scan only promotes a flag seen in a
+        # TRUSTED source (runner stdout/stderr, OOB collector), and a sandbox run
+        # that failed for an ENVIRONMENT reason never produces one — so a genuine
+        # capture made by the agent's own testing stays a candidate. Job
+        # e1b933afc137 lost a confirmed-correct flag that way (runner could not
+        # compile the decrypt harness), and gdb/sage parity jobs did the same.
+        # This does NOT promote anything — flag curation stays MANUAL (📌/🗑️ UI);
+        # it only stops the candidate from being invisible in a wall of failure.
+        # job_id is derived from the work dir (…/jobs/<id>/work) so the signature
+        # and every call site stay untouched.
+        try:
+            _cands = (read_meta(Path(work_dir).parent.name) or {}).get(
+                "flag_candidates"
+            ) or []
+        except Exception:
+            _cands = []
+        if _cands and not (summary.get("flags") or []):
+            out += [
+                "## ⚑ Unreproduced flag candidate(s) — CHECK THESE FIRST",
+                "",
+                "The agent observed the following flag-shaped string(s) during the "
+                "run, but the sandbox never re-produced them from a TRUSTED source, "
+                "so they were NOT promoted and the job reads as no_flag:",
+                "",
+            ] + [f"- `{c}`" for c in _cands[:5]] + [
+                "",
+                "These are MACHINE-UNVERIFIED. One may be the real flag (confirm it "
+                "against the challenge and pin it in the UI), or a decoy/sample the "
+                "challenge planted. Do NOT hand a candidate to a solver to print "
+                "back — only a fresh capture through the real chain counts.",
+                "",
+            ]
+
         if stop_reason:
             out += [
                 "## Judge's stop reason (verbatim)",

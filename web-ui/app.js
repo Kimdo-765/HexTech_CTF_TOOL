@@ -2067,8 +2067,20 @@ async function refreshJobs() {
     const cost = job.cost_usd ? `· $${Number(job.cost_usd).toFixed(3)}` : "";
     const flagPill = (job.flags && job.flags.length)
       ? `<span class="flag-pill" title="${escapeHtml(job.flags.join('\n'))}">🚩 ${job.flags.length}</span>` : "";
+    // Unreproduced candidate badge. A job can end no_flag while the REAL flag is
+    // already in flag_candidates: only a TRUSTED source (runner stdout / OOB
+    // collector) promotes a flag, so a sandbox run that died for an ENVIRONMENT
+    // reason leaves a genuine capture stranded (job e1b933afc137 — confirmed-
+    // correct flag, status no_flag). Shown ONLY when flags is empty: `finished`
+    // jobs routinely carry decoy candidates too (DH{**fake_flag**},
+    // DH{32alphanumeric}), so badging them would be pure noise. This promotes
+    // nothing — curation stays MANUAL — it just makes the candidate visible.
+    const candPill = (!(job.flags && job.flags.length) && job.flag_candidates && job.flag_candidates.length)
+      ? `<span class="flag-pill" style="background:#7a5a00;color:#ffd479"
+           title="${escapeHtml(job.flag_candidates.join('\n'))}\n\nUNVERIFIED — the sandbox never reproduced these. Confirm against the challenge, then pin in the UI.">⚑ ${job.flag_candidates.length}</span>`
+      : "";
     li.innerHTML = `<strong>${job.module}</strong> · ${escapeHtml(job.filename || "")}
-      <span class="status ${job.status}">${job.status}</span>${flagPill}
+      <span class="status ${job.status}">${job.status}</span>${flagPill}${candPill}
       <button class="delete-btn">×</button>
       <div style="font-size:0.75rem;color:#8b949e;"><span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button> ${cost}</div>`;
     li.addEventListener("click", () => selectJob(job.id));

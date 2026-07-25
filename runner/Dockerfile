@@ -4,11 +4,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgmp-dev libmpfr-dev libmpc-dev \
     binutils file curl \
-    gcc cpp \
+    build-essential cpp \
     gdb qemu-user-static ltrace strace \
     bash less vim-tiny nano \
  && rm -rf /var/lib/apt/lists/*
-# gcc/cpp: pwntools asm()/shellcraft shells out to `cpp` (preprocess) then `as`.
+# build-essential (was bare `gcc`): the gcc DRIVER alone cannot compile anything
+# here. Debian's gcc only *Recommends* libc6-dev, and this apt line uses
+# --no-install-recommends, so the stock image had /usr/bin/gcc but NO
+# /usr/include/stdio.h and no Scrt1.o/crti.o — `which gcc` SUCCEEDS while the
+# smallest hello-world dies on "stdio.h: No such file or directory" (and even an
+# include-free main() fails at link). Job e1b933afc137 (web+rev hybrid) lost an
+# already-captured flag to exactly this: main built a native decrypt harness with
+# gcc in the WORKER (which has the headers), the auto-run recompile in the RUNNER
+# failed, exploit.py exited 1, and the job ended no_flag with the REAL flag
+# stranded in meta.flag_candidates. Verified counterfactual: installing the
+# toolchain in an ephemeral runner and rebuilding that job's own harness.c against
+# its own ciphertext yields decrypt_ret=1 and the correct DH{...}. build-essential
+# also brings g++ and make, which were BOTH absent — the same bug was one C++
+# harness away from recurring with a different symptom (FileNotFoundError).
+# cpp stays explicit: pwntools asm()/shellcraft shells out to `cpp` (preprocess) then `as`.
 # Without cpp, asm() raises FileNotFoundError before the exploit ever connects —
 # job a15ff70a6ed5 captured the real flag from work/ but its auto-run crashed here
 # (cpp missing), so the genuine flag never reached the trusted exploit.py.stdout.

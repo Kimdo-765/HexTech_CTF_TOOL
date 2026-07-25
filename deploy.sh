@@ -111,6 +111,37 @@ if [ "$CHANGED" = 1 ]; then
     exit 0
   else
     changed_paths="$(git diff --name-only "$base" "$head" 2>/dev/null)"
+
+    # --- IMAGE-REBUILD GUARD --------------------------------------------------
+    # deploy.sh only RESTARTS bind-mounted code (api/, modules/, web-ui/,
+    # worker/). Anything BAKED INTO AN IMAGE — runner/, forensic/, misc/,
+    # decompiler/, any Dockerfile, any requirements*.txt — needs a real BUILD,
+    # which this script never performs. Worse, a change confined to those paths
+    # matches NEITHER restart pattern below, so it fell into the "changed paths
+    # touch no mounted backend code" early-exit: the fix silently did nothing AND
+    # the deploy baseline advanced, hiding it from the next --changed run too.
+    # That is how a runner/Dockerfile fix can look deployed while the live image
+    # is still stale, so warn LOUDLY and, for the runner, probe the LIVE image
+    # instead of trusting the file (memory: deploy_after_merge_habit).
+    img_changed="$(echo "$changed_paths" | grep -E '(^|/)Dockerfile$|^(runner|forensic|misc|decompiler)/|requirements[^/]*\.txt$' || true)"
+    if [ -n "$img_changed" ]; then
+      warn "IMAGE REBUILD REQUIRED — these changed paths are BAKED INTO IMAGES:"
+      echo "$img_changed" | sed 's/^/    /' >&2
+      warn "deploy.sh restarts bind-mounted code only; it will NOT rebuild them."
+      warn "run:  ./start.sh --rebuild     (or: docker compose -p $PROJECT --profile tools build <svc>)"
+      # Cheap liveness probe (~0.3s) so the operator sees LIVE-vs-STALE rather
+      # than a Dockerfile diff. Best-effort: any docker hiccup degrades to a note.
+      if echo "$img_changed" | grep -q '^runner/'; then
+        if probe_out="$(docker run --rm --network none "${PROJECT}-runner" \
+              sh -c 'printf "int main(void){return 0;}" > /tmp/_p.c && gcc /tmp/_p.c -o /tmp/_p' 2>&1)"; then
+          ok  "live runner image: toolchain OK (already rebuilt)"
+        else
+          warn "live runner image is STALE — a compile probe FAILED in it:"
+          echo "$probe_out" | head -3 | sed 's/^/    /' >&2
+        fi
+      fi
+    fi
+
     echo "$changed_paths" | grep -qE '^(api/|modules/|web-ui/)' && WANT[api]=1
     echo "$changed_paths" | grep -qE '^(worker/|modules/)'      && WANT[worker]=1
     [ ${#WANT[@]} -eq 0 ] && { ok "changed paths touch no mounted backend code — nothing to restart."; echo "$head" > "$LAST_DEPLOY_FILE" 2>/dev/null || true; exit 0; }
