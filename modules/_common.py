@@ -3638,10 +3638,10 @@ def docker_challenge_block(job_id: str) -> str:
         (rev/crypto/misc/forensic). web and pwn already build+run challenge
         Dockerfiles unconditionally in their own prompts — this does NOT touch
         them (no double-inject / no regression).
-      - DETECTION is deterministic (scan ./bin/); RUNNING is agent-driven — a
-        CTF ENTRYPOINT almost always needs the right input (e.g. ``main
-        flag.png``), so the flag comes from the agent using the container
-        interactively, not a blind system auto-run.
+      - DETECTION is deterministic (scan the OPERATOR-SUPPLIED upload roots);
+        RUNNING is agent-driven — a CTF ENTRYPOINT almost always needs the right
+        input (e.g. ``main flag.png``), so the flag comes from the agent using
+        the container interactively, not a blind system auto-run.
       - Cleanup is handled by ``reap_chal_containers`` (label
         ``hextech_job=<id>``), which the SAME modules now call at start+finally
         whenever this box is set — so a container the agent spins up here can't
@@ -3649,29 +3649,71 @@ def docker_challenge_block(job_id: str) -> str:
     """
     if not (read_meta(job_id) or {}).get("docker_challenge"):
         return ""
-    # Uploaded challenge files land in DIFFERENT roots per module — rev/pwn use
-    # ./bin/, crypto/web use ./src/ (extracted), misc/forensic drop the file at
-    # the job-dir root. So scan the WHOLE job dir, but SKIP the agent's ./work/
-    # scratch (a Dockerfile the agent itself writes there is not the challenge's)
-    # and obvious noise. Paths are reported relative to the job dir.
     job_root = JOBS_DIR / job_id
-    _skip_top = {"work", "__pycache__", ".git", ".ghidra_proj", "decomp"}
-    _targets = {
-        "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    # WHERE OPERATOR-SUPPLIED challenge files land, per module:
+    #   rev/pwn -> ./bin/ , crypto/web -> ./src/ (extracted) , misc/forensic ->
+    #   the job-dir root itself.
+    # This deliberately does NOT recursively scan the whole job dir. misc and
+    # forensic run their collector with `--out /job` (= the job ROOT) BEFORE
+    # this prompt is built, so a recursive scan walks CARVE/EXTRACT OUTPUT and
+    # would happily present a Dockerfile recovered FROM THE EVIDENCE IMAGE as
+    # "the challenge bundle" — i.e. instruct the agent to build+run untrusted
+    # carved content. (It also made the walk unbounded: a forensic job dir is
+    # multi-GB, and `sorted(rglob("*"))` materialised the whole tree before the
+    # result cap could bound anything.) So: job-root TOP-LEVEL files only, plus
+    # bin/ and src/ recursively with scratch/noise dirs PRUNED at every level.
+    _noise = {"work", "__pycache__", ".git", ".ghidra_proj", "decomp",
+              "node_modules", ".venv", "tmp", ".scratch"}
+    _compose = {
+        "docker-compose.yml", "docker-compose.yaml",
         "compose.yml", "compose.yaml",
     }
+
+    def _is_target(name: str) -> bool:
+        # Match suffixed variants too (`Dockerfile.challenge`, `chal.dockerfile`)
+        # — matching only the bare name produced a confident "found NOTHING" on
+        # a bundle that clearly shipped one.
+        n = name.lower()
+        return (
+            n == "dockerfile" or n.startswith("dockerfile.")
+            or n.endswith(".dockerfile") or n in _compose
+        )
+
     found: list[str] = []
+    truncated = 0
+    _MAX = 12
+
+    def _add(p: Path) -> None:
+        nonlocal truncated
+        try:
+            rel = p.relative_to(job_root).as_posix()
+        except ValueError:
+            return
+        if rel in found:
+            return
+        if len(found) >= _MAX:
+            truncated += 1
+            return
+        found.append(rel)
+
     try:
-        for p in sorted(job_root.rglob("*")):
-            rel = p.relative_to(job_root)
-            if rel.parts and rel.parts[0] in _skip_top:
-                continue
-            if p.is_file() and p.name.lower() in _targets:
-                found.append(rel.as_posix())
-                if len(found) >= 12:
-                    break
+        for p in sorted(job_root.iterdir()):
+            if p.is_file() and _is_target(p.name):
+                _add(p)
     except OSError:
         pass
+    for top in ("bin", "src"):
+        base = job_root / top
+        if not base.is_dir():
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(base):
+                dirnames[:] = [d for d in dirnames if d not in _noise]
+                for fn in sorted(filenames):
+                    if _is_target(fn):
+                        _add(Path(dirpath) / fn)
+        except OSError:
+            pass
 
     header = (
         "DOCKER CHALLENGE (you opted in via the 'Docker challenge' box)\n"
@@ -3681,33 +3723,57 @@ def docker_challenge_block(job_id: str) -> str:
         return (
             header
             + "You ticked 'Docker challenge' but I found NO Dockerfile / compose "
-            "file anywhere in the challenge bundle (searched /data/jobs/$JOB_ID "
-            "outside ./work/). Run `ls -R /data/jobs/$JOB_ID/bin /data/jobs/"
-            "$JOB_ID/src 2>/dev/null` to confirm. If the challenge genuinely "
-            "needs a container, locate its build file first; otherwise just "
-            "proceed with normal static/dynamic analysis — this note is not a "
+            "file in the operator-supplied bundle (searched /data/jobs/$JOB_ID "
+            "top level plus ./bin/ and ./src/ recursively). Run `ls -R "
+            "/data/jobs/$JOB_ID/bin /data/jobs/$JOB_ID/src 2>/dev/null; ls "
+            "/data/jobs/$JOB_ID` to confirm. If the challenge genuinely needs a "
+            "container, locate its build file yourself and proceed; otherwise "
+            "just do normal static/dynamic analysis — this note is not a "
             "blocker."
         )
     # Build context = the dir holding the first plain Dockerfile (else the first
     # detected file's dir; a file at the job root → the job dir itself). Absolute
     # /data/... paths so it works from ANY module's cwd (rev=./bin, crypto=./src,
     # misc/forensic=job root) — the worker mounts /data and a build context from
-    # a worker-local path is fine (the CLI tars+sends it).
+    # a worker-local path is fine (the CLI tars+sends it). QUOTED in the emitted
+    # command: an extracted dir name with a space would otherwise produce a
+    # syntactically broken line the agent has been told to run.
     _df = next((f for f in found if f.lower().endswith("dockerfile")), found[0])
     _ctx_rel = _df.rsplit("/", 1)[0] if "/" in _df else ""
     ctx = "/data/jobs/$JOB_ID" + (f"/{_ctx_rel}" if _ctx_rel else "")
     listed = ", ".join(f"/data/jobs/$JOB_ID/{f}" for f in found)
+    if truncated:
+        listed += f" (+{truncated} more not listed — `ls -R` to see them all)"
+    # Never claim more coverage than the reaper actually has, and never let a
+    # job-root build context read as safe: for misc/forensic the job root also
+    # holds the uploaded evidence/artifact AND the collector's carve output, so
+    # `docker build` there would tar gigabytes, and anything recovered FROM an
+    # evidence image is untrusted input, not a challenge bundle.
+    ctx_note = ""
+    if not _ctx_rel:
+        ctx_note = (
+            "\n- ⚠ CONTEXT IS THE JOB ROOT: it also holds the uploaded "
+            "artifact/image and (misc/forensic) the collector's extract/carve "
+            "output, so `docker build` would tar ALL of it. Copy the Dockerfile "
+            "plus only the files it COPYs into a small dir first (e.g. `mkdir "
+            "-p /tmp/ctx && cp ... /tmp/ctx`) and build from there.\n"
+            "- ⚠ PROVENANCE: confirm this file is the OPERATOR-SUPPLIED "
+            "challenge bundle, not something recovered from the evidence image "
+            "you are analysing. NEVER build+run carved/extracted content — "
+            "treat it as untrusted data and analyse it statically instead."
+        )
     return (
         header
         + f"Detected in the challenge bundle: {listed}. This challenge is meant "
         "to run INSIDE its own container — BUILD IT AND RUN IT, and use the "
         "running container as the real runtime and the dynamic oracle. This "
         "worker has the docker CLI and the host docker socket mounted.\n"
-        "Mechanics (the orchestrator reaps by label when the job ends — you do "
-        "NOT tear down, but you MUST tag or cleanup misses it):\n"
-        f"- Build:  `docker build -t chal_$JOB_ID {ctx}`  (build context = the "
+        "Mechanics — ALWAYS pass `--label hextech_job=$JOB_ID`: the orchestrator "
+        "reaps by that label at job end, but a hard kill/timeout can skip it, so "
+        "also prefer `--rm` and stop anything you no longer need:\n"
+        f'- Build:  `docker build -t chal_$JOB_ID "{ctx}"`  (build context = the '
         "dir holding the Dockerfile; the CLI tars+sends it, so this worker-local "
-        "path is fine here).\n"
+        f"path is fine here).{ctx_note}\n"
         "- Run:    `docker run --rm --label hextech_job=$JOB_ID --name "
         "chal_$JOB_ID chal_$JOB_ID <args>`  — pass the input file / args the "
         "ENTRYPOINT+CMD expect; add `-i`/`-t` or pipe stdin as needed.\n"
