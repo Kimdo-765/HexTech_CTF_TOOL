@@ -25,8 +25,14 @@ const CLAUDE_MODELS = [
   // (SONNET5_OK / SONNET51M_OK) — both trivial-prompt round-trips on the
   // worker's authenticated plan. Unlike Sonnet 4.x, whose [1m] is credit-
   // gated ("Usage credits are required for long context requests"), Sonnet
-  // 5[1m] and Fable 5[1m] are NOT credit-gated here. (No Opus 5 / Haiku 5
-  // yet — Opus 4.8 remains the flagship.)
+  // 5[1m] and Fable 5[1m] are NOT credit-gated here.
+  // Opus 5 base + [1m] added 2026-07-24, same way — verified by trivial
+  // round-trip IN THE WORKER (OPUS5_OK / OPUS51M_OK) on the authenticated
+  // plan, so it is the new flagship Opus and leads the list. (Still no
+  // Haiku 5.) NOTE: this only ADDS choices — the global default stays
+  // whatever Settings says; nothing here changes a running job's model.
+  "claude-opus-5",
+  "claude-opus-5[1m]",
   "claude-fable-5",
   "claude-fable-5[1m]",
   "claude-sonnet-5",
