@@ -7,10 +7,14 @@ flag, and generates a runnable exploit/solver script.
 
 Seven Claude-driven roles split by responsibility:
 
-- **reviewer** — Opus 4.7, no tools. Lives in the api container. Reads
-  the prior job's `run.log` / exploit / stdout-stderr / source on
-  `/retry` and `/resume` and writes ONE 1500-char paragraph hint that
-  is hoisted to the next agent's prompt as `⚠ PRIORITY GUIDANCE`.
+- **reviewer** — no tools, always max extended thinking. Lives in the api
+  container. Reads the prior job's `run.log` / exploit / stdout-stderr /
+  source on `/retry` and `/resume` and writes ONE 1500-char paragraph hint
+  that is hoisted to the next agent's prompt as `⚠ PRIORITY GUIDANCE`.
+  Its model is resolved per job (`resolve_reviewer_model`): preset
+  `reviewer` slot > preset `judge` slot > the job's main-derived model —
+  a blank `reviewer` slot behaves exactly like the old "reviewer follows
+  judge". See [Model presets](#model-presets-datamodel_presetsjson).
 - **main worker** — RQ process in the worker container. Drives the
   module pipeline and runs the main Claude agent (writer) that
   produces `exploit.py` / `solver.py` / `report.md`. Hosted in a
@@ -223,7 +227,8 @@ conversation history.
   recon's severity alone.
 - **judge** — Quality gate. Used by main pre-finalize for hang/parse
   review, by the orchestrator around every `auto_run` execution.
-  Pinned to `LATEST_JUDGE_MODEL`. Read-only; cannot cascade-spawn
+  Defaults to `LATEST_JUDGE_MODEL`, overridden by an active preset's
+  `judge` slot. Read-only; cannot cascade-spawn
   further subagents in isolated mode (preserves the "ONE level deep"
   invariant). Free-form text reply.
 - **debugger** — Dynamic analysis. `gdb -batch` (GEF auto-loaded) /
@@ -347,11 +352,77 @@ applies if you've set `SUBAGENT_SPAWN_CAP` to a positive int.
 never started by `compose up`. The worker `docker run`s them per job
 and removes them when done.
 
+### dev/run parity — the runner is NOT the worker
+
+The agent develops in the **worker** container but its deliverable auto-runs
+in a **separate, ephemeral runner** container (`.sage` files run in the
+`sagemath/sagemath` image instead). A tool present in one and missing in the
+other is invisible during development and kills the job at auto-run — often
+after the flag has already been found by hand. This class has fired four
+times, each with a DIFFERENT tool; `runner/Dockerfile` records each one in a
+comment next to the package that fixed it:
+
+| Job | Tool | Symptom |
+|---|---|---|
+| `a15ff70a6ed5` | `cpp` | pwntools `asm()` → `FileNotFoundError` before the exploit ever connected |
+| `bedf6b58bfd2` | `gdb` | rev solver shelled out to gdb → 2.6 s crash → judge STOP → `no_flag` |
+| `c1edf9e91910` | `sage` | decisive Gröbner step shipped UNTESTED (the worker has no sage at all) |
+| `e1b933afc137` | `libc6-dev` | **`which gcc` SUCCEEDS while every compile fails** |
+
+The last shape is the nastiest and worth internalizing: Debian's `gcc` only
+*Recommends* `libc6-dev` and the runner's apt line uses
+`--no-install-recommends`, so the image had `/usr/bin/gcc` but no
+`/usr/include/stdio.h` and no `crt1.o`. A presence check passes; the compile
+dies. The runner now installs **`build-essential`** (which also brings `g++`
+and `make`, both previously absent) plus `gdb qemu-user-static ltrace strace
+binutils`.
+
+**Smoke-test in the REAL runner before shipping** — the general defence,
+because the package list will always lag:
+
+```bash
+python3 -m worker.solver_smoke solver.py [args] [--timeout N]   # any module
+python3 -m worker.sage_smoke   solver.sage [args] [--timeout N] # crypto/.sage
+```
+
+Both run the script through the SAME `run_in_sandbox` path auto-run uses
+(judge disabled, image auto-selected by extension) and print exit code, wall
+time and clipped stdout/stderr — so a missing tool surfaces as a
+`FileNotFoundError` you can still fix. Honest caveat: only `rev`'s prompt
+MANDATES `solver_smoke` and only `crypto`'s mandates `sage_smoke`; elsewhere
+they are available but not enforced.
+
+**Changing the runner needs a real image build** — `deploy.sh` restarts
+bind-mounted code only and will say so; see
+[Operational commands](#operational-commands).
+
+### gdb + ASLR (targeted seccomp profile)
+
+gdb disables per-inferior ASLR via `personality(ADDR_NO_RANDOMIZE)`, which
+Docker's DEFAULT seccomp profile rejects with `EPERM` — so gdb printed
+`Error disabling address space randomization` and every run moved its
+addresses, defeating a fixed-address oracle (job `c70160244e53` had to pivot
+to a from-scratch Unicorn emulation, ~1h43 of extra work).
+
+`modules/seccomp_gdb_aslr.json` is the Docker default profile **plus** the
+one `personality` argument gdb needs. It is applied to the worker
+(`docker-compose.yml` `security_opt`) and to every runner spawn
+(`modules/_runner.py`). `seccomp=unconfined` was the first fix and was
+deliberately replaced: unconfined also re-enabled unprivileged user
+namespaces on the runner — the container that executes agent-authored code
+and, unlike the worker, mounts no docker socket. Under the targeted profile
+`setarch -R` succeeds while `unshare -U` and `keyctl` stay blocked.
+
+> `security_opt` applies at container CREATE. `docker compose restart` will
+> NOT pick it up — the worker needs `docker compose up -d worker`.
+
 ### judge (`modules/_judge.py`)
 
 Quality-gate agent around every `auto_run` exploit/solver execution.
-Pinned to `LATEST_JUDGE_MODEL` (currently `claude-opus-4-7` — shared
-with the retry reviewer). Judge is a peer to recon: same read-only
+Model: the orchestrator stages (`resolve_judge_model`) derive a base from
+the job's main model and fold the preset `judge` slot over it; the judge
+SUBAGENT defaults to `LATEST_JUDGE_MODEL` and the same slot overrides it.
+Judge is a peer to recon: same read-only
 tool set (`Read` / `Bash` / `Glob` / `Grep`) plus `Agent` so it can
 delegate heavy investigation to recon. **No `Write` / `Edit`** —
 judge cannot patch the script.
@@ -362,7 +433,7 @@ judge cannot patch the script.
    ┌──────────────────── main (writer, Node #1) ─────────────────┐
    │  Read · Write · Edit · Bash · Glob · Grep                   │
    │  + mcp__team__spawn_subagent(subagent_type=…, prompt=…)     │
-   │  (Agent/Task/WebSearch/WebFetch: explicitly disallowed)     │
+   │  (Agent/Task disallowed — WebSearch/WebFetch ARE allowed)   │
    └─┬───────────────┬──────────────┬──────────────┬─────────────┘
      │ spawn         │ spawn        │ spawn        │ spawn
      ▼               ▼              ▼              ▼
@@ -465,6 +536,25 @@ and ends the turn again. Cache prefix preserved across the loop.
     └───── new user turn (retry_hint) ◄── postjudge!=success ──┘
 ```
 
+**One method-change retry on a STOP (`retry_worthwhile`).** A postjudge
+`stop` is no longer unconditionally final. Postjudge may set
+`retry_worthwhile: true` — *"this SCRIPT is finished, but a DIFFERENT method
+is worth one shot"* — and the orchestrator converts that STOP into one more
+`continue`, prefixing the hint with a `METHOD CHANGE REQUIRED` preamble.
+Gates, all of which must hold:
+
+- postjudge set `retry_worthwhile` to a real boolean `true` (parsed with a
+  strict `is True`, so a stringified `"false"` does NOT count);
+- it has fired **at most once** in this job;
+- there is an actionable `retry_hint` or `alternative_paths`;
+- the verdict is not `network_error` (a dead remote is not a method problem).
+
+Applies to the four loop modules (crypto / pwn / web / rev); `misc` and
+`forensic` are one-shot pipelines with no retry loop. The judge prompt lists
+explicit exclusions — success, a dead remote, environment limits, a proven
+true-negative, and "same method, tweaked" — so this stays a genuine change of
+approach rather than a free extra attempt.
+
 Loop terminates on the FIRST hit among:
 - flag captured / postjudge `verdict == "success"`
 - judge emitted `next_action: "stop"` (explicit "this approach is
@@ -483,6 +573,23 @@ orchestrator writes a human-readable `WHY_STOPPED.md` into the work
 tree (carried to the job dir alongside `report.md` / `findings.json`
 / `THREAT_MODEL.md`). One of several reason classes is recorded — each
 maps to a different operator playbook the file spells out:
+
+#### Unreproduced flag candidates
+
+When `meta.flag_candidates` is non-empty but nothing was promoted,
+`WHY_STOPPED.md` **leads** with a `⚑ Unreproduced flag candidate(s) — CHECK
+THESE FIRST` section, and the job-list card shows an amber `⚑ N` badge (only
+when `flags` is empty — `finished` jobs routinely carry decoy candidates like
+`DH{**fake_flag**}`, so badging them would be noise).
+
+This is a VISIBILITY layer and **promotes nothing** — flag curation stays
+manual (📌 / 🗑️). It exists because a genuine capture can be stranded: the
+agent reads the real flag during its own testing, the auto-run then fails for
+an ENVIRONMENT reason, and since only a TRUSTED source promotes a flag the
+job renders as a total failure with the answer sitting in its metadata (job
+`e1b933afc137`, an operator-confirmed flag). The text labels candidates
+machine-unverified and warns against handing one to a solver to print back —
+a decoy echoed by a later run would look like a capture.
 
 | `stop_kind` | Trigger | Operator playbook the doc suggests |
 |---|---|---|
@@ -512,12 +619,16 @@ solution, then modifies one line so it no longer applies). Two mechanical
 teeth in `run_main_agent_session`, both operating on the shared running
 cost meter (main + every subagent):
 
-- **Cost cap (framing-independent backstop).** When total spend crosses
-  `COST_CAP_USD` (default **40**, `0` disables), the loop HALTS with a
+- **Cost cap (framing-independent backstop) — DISABLED BY DEFAULT.**
+  `DEFAULT_COST_CAP_USD = 0.0` and `COST_CAP_USD` is set in neither `.env`
+  nor `docker-compose.yml`, so on a stock deployment `_maybe_cost_cap`
+  returns immediately and **there is no spend ceiling** (4655a94 — an
+  operator decision: a legitimately hard heap/kernel solve can run $30+
+  all-in, and halting mid-chain costs more than it saves). The mechanism is
+  intact but unarmed — set `COST_CAP_USD` to a positive dollar amount in
+  `.env` to re-arm it. When armed, crossing it HALTS the loop with a
   recoverable `WHY_STOPPED.md` (`stop_kind=cost_cap`) so the operator can
-  `/retry` — ideally fresh-start — instead of paying for more of the same.
-  Deliberately generous: a legit hard multi-debugger heap solve can run
-  $30+ all-in, so this catches only the extreme tail.
+  `/retry`, ideally fresh-start, instead of paying for more of the same.
 - **Contrarian reframe (targeted).** When an isolated subagent returns a
   premise-refuted / dead-end signal AND the job is *easy-/shortcut-framed*
   (the operator description leans on difficulty-minimizing words) AND
@@ -526,9 +637,11 @@ cost meter (main + every subagent):
   frame and points it at a genuinely independent subagent or a
   reframe/concede. One-shot per job.
 
-Both are env-overridable; the cost cap is the un-dismissible bound, the
-contrarian turn is what actually targets the anchoring. Neither guarantees
-a solve — the value is *bound-the-loss-or-reframe*, not a fix.
+Both are env-overridable. With the cap disabled by default, the contrarian
+reframe is the tooth that actually fires on a stock deployment — and it is
+advisory (one injected turn), not a bound. Neither guarantees a solve; the
+value is *reframe-or-bound-the-loss*, not a fix. If you want a hard ceiling
+back, arm `COST_CAP_USD`.
 
 ### Fallback artifact safety net
 
@@ -736,7 +849,7 @@ its context window with `Prompt is too long`. Set
 `INVESTIGATION_BUDGET=<positive int>` in `.env` to enable.
 
 Each module's SYSTEM_PROMPT opens with the **MISSION** stanza
-(`mission_block()` in `modules/_common.py`) that tells the model up
+(`mission_block()` in `modules/_prompts.py`) that tells the model up
 front: write the deliverables to cwd, delegate STATIC investigation
 to recon and DYNAMIC analysis to debugger, mandatory JUDGE GATE
 before finalize, write a draft within ~10 tool calls, never
@@ -845,10 +958,64 @@ All knobs live in two places:
 
 2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides `.env`
    without restart for: Anthropic API key, Claude model, Auth token, Job TTL,
-   Job timeout, Worker concurrency, Callback URL, **Enable judge**, **Use Exploit Library hints**.
+   Job timeout, Worker concurrency, Callback URL, **Spend budget (USD)**,
+   **Enable judge**, **Use Exploit Library hints**. It also hosts the
+   **Model presets** and **Cloudflared tunnel** panels (below).
    (Concurrency change requires `docker compose restart worker`.)
 
 Precedence: `settings.json` > `.env` > defaults.
+
+### Model presets (`/data/model_presets.json`)
+
+**Settings → Model presets** stores several NAMED per-agent presets and
+activates one at a time. They live outside `settings.json` because the flat
+`(key, env, type, default)` SCHEMA in `modules/settings_io.py` cannot hold a
+nested structure. Configurable slots, in UI order:
+
+| Slot | Drives | Blank = inherit |
+|---|---|---|
+| `main` | the CTF agent itself | per-job pick → global `claude_model` → `claude-opus-4-7` |
+| `judge` | prejudge / stall-supervise / postjudge, **and** the `judge` peer subagent | orchestrator stages follow main; the subagent falls back to `LATEST_JUDGE_MODEL` |
+| `reviewer` | the `/retry` + `/resume` hint writer ONLY | the `judge` slot, then main |
+| `recon` / `debugger` / `triage` | peer subagents | the spawner's model (main) |
+| `report` | terminal `findings.json` transform | main |
+| `monitor` | live narrator | `MONITOR_MODEL` |
+| `effort` | reasoning effort of the MAIN session — a sibling key, not a role | per-job `effort` → SDK default |
+
+An explicit per-job model/effort still wins over the preset, and with no
+active preset every resolver is byte-identical to the pre-preset behaviour.
+`GET/PUT /api/model-presets`; the PUT REPLACES the whole store (the UI edits
+client-side, then PUTs). Changes apply to the NEXT job.
+
+> The UI warns that pinning `recon`/`debugger`/`triage` off main's model
+> costs prompt-cache alignment. That rationale belongs to the LEGACY
+> in-process path (`USE_ISOLATED_SUBAGENTS=0`); on the default isolated path
+> each subagent is already a separate CLI subprocess with its own system
+> prompt, so there is no shared prefix to lose.
+
+**Model catalog.** Every dropdown is filled from one array, `CLAUDE_MODELS`
+in `web-ui/app.js` — Opus 5 / Fable 5 / Sonnet 5, Opus 4.8/4.7/4.6/4.1,
+Sonnet 4.6/4.5, Haiku 4.5, plus dated snapshots, with `[1m]` long-context
+variants next to their alias. **Adding a model is a one-line edit there;
+there is no server-side allowlist** (the upload routes take `model` as a
+free-form string and Settings filters by key, not value), and a Settings
+free-text field accepts a custom id. Entries are added only after a real
+round-trip on this deployment's plan — Sonnet 4.x / Haiku `[1m]` are
+deliberately absent because they answer *"Usage credits are required for
+long context requests"* here.
+
+### Usage widgets
+
+The top bar shows two chips, both best-effort:
+
+- **Budget pill** — `budget_usd` from Settings vs summed job spend
+  (`GET /api/jobs/usage`). Purely informational: **nothing enforces it**
+  (the cost cap is a separate mechanism, disabled by default).
+- **Rate-limit chip** — the SDK's `RateLimitEvent` (five-hour / seven-day
+  utilization + reset time), persisted account-globally to
+  `/data/rate_limit.json` by `record_rate_limit_event`. It appears only
+  after a job has produced an API response, and a true account
+  "remaining %" is NOT retrievable on the headless OAuth path.
 
 ## Authentication options
 
@@ -989,6 +1156,35 @@ HexTech_CTF_TOOL/
 ```
 
 ## Module-specific notes
+
+### 🐳 Docker challenge (opt-in: rev / crypto / misc / forensic)
+
+Some challenges ship their own `Dockerfile` and only behave correctly inside
+it. Job `d8c717ba5b03` shipped one plus a README saying *"This binary must be
+executed in a Docker container"* — and the agent never ran it: it did a
+static-only reconstruction, called it *provably correct* from PNG chunk CRCs,
+and conceded. Running the challenge's own container shows the binary REJECTS
+that reconstruction.
+
+Ticking **🐳 Docker challenge** on the rev / crypto / misc / forensic form
+sets `meta.docker_challenge`, which:
+
+1. **deterministically detects** a bundled `Dockerfile` / compose file —
+   scanning the job-dir top level plus `bin/` and `src/`, with scratch dirs
+   pruned. The scope is deliberate: misc/forensic run their collector with
+   `--out /job` BEFORE the prompt is built, so a recursive scan would happily
+   present a Dockerfile **carved out of the evidence image** as the challenge
+   bundle;
+2. injects build/run mechanics with the correct build context, an *"ENTRYPOINT
+   usually needs the RIGHT input"* note (running is agent-driven — a blind run
+   rarely yields a flag), and a **VERIFY, DON'T ASSUME** rule: a static
+   derivation is not a confirmation until the container accepts it;
+3. gates `reap_chal_containers` on the same flag at job start **and** in a
+   `finally`, so a container the agent spins up cannot orphan.
+
+Unticked, the helper returns `""` and nothing changes. `web` and `pwn` are
+untouched — their prompts already build and run challenge Dockerfiles
+unconditionally.
 
 ### Web
 - Accepts a zip of source code or a single file.
@@ -1193,8 +1389,14 @@ HexTech_CTF_TOOL/
   the solver parses the REAL wire protocol instead of guessing. Results
   are injected into the prompt; being pure code, this path is also
   AUP-immune (a content-blocked classical chal can still capture the flag).
-- Solver runs in the worker by default; check **Use SageMath sandbox** to
-  execute via the `sagemath/sagemath` image (supports lattice/Coppersmith).
+- Sandbox selection is automatic, by FILE EXTENSION: name the deliverable
+  `solver.sage` and auto-run executes it in the `sagemath/sagemath` image
+  (lattice / Coppersmith / Gröbner); anything else runs `python3` in the
+  standard runner. The old "Use SageMath sandbox" checkbox was vestigial and
+  was removed (34590ab) — `use_sage` is derived, not configured. **The
+  worker has NO sage**, so a `.sage` solver is untestable in the dev
+  environment: benchmark it with `python3 -m worker.sage_smoke solver.sage`
+  before shipping (see [dev/run parity](#devrun-parity-the-runner-is-not-the-worker)).
 - Available libs in the runner sandbox: pycryptodome, gmpy2, sympy, z3-solver,
   ecdsa, pwntools, **fpylll** (LLL / BKZ lattice reduction).
 - **Sandbox timeout** for a `.sage` solver is widened past the 300 s
@@ -1236,6 +1438,10 @@ docker compose ps                 # status
 ./deploy.sh --changed             # restart only the services whose code changed
                                   # (defers the worker restart while a job is
                                   #  live; run ./deploy.sh --worker when idle)
+                                  # ALSO warns + probes the LIVE runner image
+                                  # when you changed a path that is BAKED IN
+                                  # (runner/, forensic/, misc/, decompiler/,
+                                  #  any Dockerfile, any requirements*.txt)
 # ...or restart by hand:
 docker compose restart api        # api/routes/*, api/main.py changes
 docker compose restart worker     # modules/*, worker/runner.py changes
@@ -1258,14 +1464,43 @@ docker compose restart worker     # modules/*, worker/runner.py changes
 # too old to --check modern JS; validate with a modern node image:
 docker run --rm -v "$PWD/web-ui":/w node:20-slim node --check /w/app.js
 
-# Image rebuilds — needed only for Dockerfile, requirements.txt, or
-# tool-image (decompiler/forensic/misc/runner/sage) changes:
+# Image rebuilds — needed for Dockerfile, requirements.txt, or tool-image
+# (decompiler/forensic/misc/runner/sage) changes. deploy.sh does NOT do
+# this; see the rebuild guard below.
 docker compose build api worker
-docker compose --profile tools build  # tool images
+docker compose --profile tools build            # all tool images
+docker compose --profile tools build runner     # just one
 
 # Wipe all jobs (UI also has a Bulk Delete button)
 curl -X DELETE 'http://localhost:8000/api/jobs?all=true'
 ```
+
+### Image-rebuild guard (`deploy.sh --changed`)
+
+`deploy.sh` **restarts bind-mounted code; it never builds an image.** Before
+the guard, a change confined to `runner/` matched neither restart pattern, so
+it hit the *"changed paths touch no mounted backend code"* early-exit — the
+fix silently did nothing **and the deploy baseline advanced**, hiding it from
+the next `--changed` run too. A runner fix could look deployed while the live
+image stayed stale.
+
+Now any changed path under `runner/`, `forensic/`, `misc/`, `decompiler/`,
+any `Dockerfile`, or any `requirements*.txt` prints a loud banner, and for
+`runner/` the guard **probes the LIVE image** with a real ~0.3 s compile
+rather than trusting the file:
+
+```
+[deploy] WARN: IMAGE REBUILD REQUIRED — these changed paths are BAKED INTO IMAGES:
+    runner/Dockerfile
+[deploy] WARN: run:  ./start.sh --rebuild  (or: docker compose -p … --profile tools build <svc>)
+[deploy] WARN: live runner image is STALE — a compile probe FAILED in it:
+    /usr/bin/ld: cannot find Scrt1.o: No such file or directory
+```
+
+Best-effort: any docker hiccup degrades to a log line and never blocks the
+deploy. This pairs with the
+[dev/run parity](#devrun-parity-the-runner-is-not-the-worker) fixes — the
+packages only help if the image is actually rebuilt.
 
 ### Full update (base images + source rebuild)
 
@@ -1592,8 +1827,19 @@ trusted.
    collector: `exploit.py.stdout`, `solver.py.stdout`,
    `callbacks.jsonl`, `summary.json`, `result.json`. If ANY
    non-placeholder flag appears here, return ONLY those.
-3. **Narrative tier** — `report.md`, `run.log`, `findings.json`.
-   Consulted ONLY when the trusted/marker tiers are empty.
+3. **Narrative tier** — `report.md`, `findings.json`. Consulted ONLY when
+   the trusted/marker tiers are empty, and skipped entirely when the sandbox
+   run was blocked/aborted. **`run.log` was REMOVED from this tier
+   (e33e626)**: it is the raw interleaved firehose of every tool result, and
+   with web research re-enabled a PUBLISHED WRITEUP's flag can land there
+   verbatim — job dc981a8c4741 false-finished on a flag scraped from a recon
+   WebSearch summary.
+
+   Consequence worth knowing: a genuine flag the agent captured in its own
+   testing, but which the sandbox never re-produced (e.g. the auto-run died
+   on an environment gap), stays in `meta.flag_candidates` and the job ends
+   `no_flag`. That is deliberate — see
+   [unreproduced candidates](#unreproduced-flag-candidates).
 
 **Operator flag format (optional, per job).** A `Flag format` input on
 every job form (e.g. `DH{...}`) is stored as `meta.flag_format` and
