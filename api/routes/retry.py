@@ -183,22 +183,50 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     """
     parts: list[str] = []
 
-    def _read(name: str, label: str | None = None) -> None:
+    def _read(
+        name: str, label: str | None = None, *, tail_bias: bool = False
+    ) -> None:
         p = jd / name
         if not p.is_file():
             return
         try:
-            text = p.read_text(errors="replace")[:max_per_file]
+            raw = p.read_text(errors="replace")
         except Exception:
             return
+        if len(raw) <= max_per_file:
+            text = raw
+        elif tail_bias:
+            # HEAD+TAIL for run.log. A head-only slice was near-useless: the
+            # first 6 KB of a run.log is autoboot + pre-recon preamble, while
+            # everything the reviewer needs in order to write a hint — the
+            # postjudge verdict / specific_diagnosis / retry_hint /
+            # stop_reason, the sandbox exit code and its error — is written at
+            # the END. Measured keyword coverage over 18 jobs (14 diagnostic
+            # terms): head-only 1.1/14, head+tail 8.3/14. On job
+            # e1b933afc137 (the libc6-dev dev/run-parity loss) it is 1 vs 14.
+            head_n = max_per_file // 4
+            tail_n = max_per_file - head_n
+            text = (
+                raw[:head_n]
+                + f"\n\n…({len(raw) - max_per_file} chars elided from the "
+                  "MIDDLE — head and tail kept)…\n\n"
+                + raw[-tail_n:]
+            )
+        else:
+            text = raw[:max_per_file]
         if not text.strip():
             return
-        if name.endswith("report.md"):
+        # run.log is sanitized for the SAME reason report.md is (see the
+        # docstring): it is the rawest narrative in the tree, and the tail we
+        # now include is the exploit endgame — the most priming-heavy part of
+        # it. Leaving it unsanitized would re-open the reviewer-refusal path
+        # that sanitizing report.md was introduced to close.
+        if name.endswith("report.md") or name == "run.log":
             text = _sanitize_hint(text)
         parts.append(f"=== {label or name} ===\n{text}")
 
     _read("meta.json")
-    _read("run.log")
+    _read("run.log", tail_bias=True)
     _read("report.md")
     _read("exploit.py")
     _read("solver.py")

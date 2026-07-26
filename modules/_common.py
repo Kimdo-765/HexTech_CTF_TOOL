@@ -4087,19 +4087,27 @@ def format_tool_result(content: Any, is_error: bool | None = None) -> str:
         text = str(content)
     text = text.replace("\n", " | ")
     text = text.strip()
-    cap = 300
-    full_len = len(text)
-    if full_len > cap:
-        # Mark truncation with the actual byte counts so a downstream
-        # reader (notably the retry reviewer) can tell that the chars
-        # right before the marker are mid-cut, not a real terminal
-        # token from the tool's output. A bare "…" was previously
-        # being mistaken for evidence of a real short string in the
-        # target binary (e.g. "yo…" when the truth was "your name >").
+    # TOOL_RESULT is logged IN FULL. The old 300-char "preview cut" was
+    # removed 2026-07-26: run.log is now read with a filter/search (and the
+    # curated live view is monitor.jsonl), so a 300-char preview cost more
+    # than it saved. Measured over 17 jobs / 422 truncated lines before
+    # removing it: full logging grows run.log 3.2 MB -> 4.7 MB total (1.4x),
+    # because the SDK already bounds tool output upstream (median cut content
+    # 1.3 KB, p90 10.8 KB, max 28 KB). It also un-hides signal: the monitor
+    # checks its FLAG/ERROR patterns BEFORE discarding tool echo, so a flag or
+    # a connection error past char 300 used to be invisible to it (370 of
+    # those 422 lines showed no flag/error signal in their visible prefix).
+    #
+    # The bound below is a DISASTER VALVE, not a preview: nothing observed
+    # comes close to it, but a pathological single result (a Read of a huge
+    # generated file) must not put a megabyte on one log line.
+    _HARD_MAX = 200_000
+    if len(text) > _HARD_MAX:
+        full_len = len(text)
         text = (
-            text[:cap]
-            + f" …(preview cut: showing {cap}/{full_len} bytes; "
-            "trailing chars are mid-cut, not a complete token)"
+            text[:_HARD_MAX]
+            + f" …(hard cap: {_HARD_MAX}/{full_len} bytes; trailing chars are "
+            "mid-cut, not a complete token)"
         )
     prefix = "TOOL_RESULT"
     if is_error:
