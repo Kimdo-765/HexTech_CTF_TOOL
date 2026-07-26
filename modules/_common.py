@@ -2021,6 +2021,15 @@ async def run_report_phase(
     return True
 
 
+# Ceiling on the pre-recon reply that gets prepended to main's user_prompt.
+# Sized from MEASURED output, not taste: heap-pwn recon emits ~18-19.5 KB when
+# it answers every section the prompt demands, so 32 KB leaves real headroom
+# while still bounding a runaway. ~8 K tokens of opus input (~$0.04), paid once
+# and cached — against ~$1.20 + ~5 min for each respawn the old 8 KB cap
+# provoked. This is a runaway guard, NOT a cost control.
+PRE_RECON_MAX_CHARS = 32000
+
+
 async def run_pre_recon(
     *,
     job_id: str,
@@ -2170,22 +2179,39 @@ async def run_pre_recon(
     # AND the trailing mandatory sections survive; only the least
     # position-critical middle is dropped, with an explicit marker so main
     # knows material is missing. Under the cap this is a no-op.
-    if len(out) > 8000:
+    #
+    # 2026-07-26 — the cap was RAISED 8000 -> PRE_RECON_MAX_CHARS after the
+    # middle-elision logging exposed the real scale: on a heap chal recon
+    # actually emits ~18-19.5 KB (job 98dd2c0a3c58: 19458 and 18274 chars),
+    # i.e. 2.4x the old budget. At that ratio NO truncation strategy can
+    # work — head+tail saved the trailing sections but then killed the
+    # MIDDLE ones (HEAP STATE MATRIX / ENV-AWARE PATHS), and the gate
+    # respawned anyway. 7 of 18 stored replies sat at the old cap.
+    #
+    # The economics are lopsided: 19.5 KB is ~5.1 K tokens = ~$0.026 of opus
+    # input, prepended ONCE and cached thereafter — while a single respawn
+    # costs ~$1.20 and ~5 minutes, i.e. ~47x more, and the loop runs up to 4
+    # times. The cap was never a cost control; it was a tidiness rule that
+    # became a self-inflicted retry loop.
+    if len(out) > PRE_RECON_MAX_CHARS:
         full_len = len(out)
-        head, tail = out[:5600], out[-2200:]
+        head = out[: int(PRE_RECON_MAX_CHARS * 0.7)]
+        tail = out[-(PRE_RECON_MAX_CHARS - len(head)) :]
         dropped = full_len - len(head) - len(tail)
         out = (
             head
-            + f"\n\n…({dropped} chars elided from the MIDDLE to fit the 8 KB "
-              "pre-recon budget — the sections above and below are intact; "
-              "spawn a recon subagent if you need what was cut)…\n\n"
+            + f"\n\n…({dropped} chars elided from the MIDDLE to fit the "
+              f"{PRE_RECON_MAX_CHARS // 1000} KB pre-recon budget — the "
+              "sections above and below are intact; spawn a recon subagent "
+              "if you need what was cut)…\n\n"
             + tail
         )
         # Log the PRE-cap length: without it a truncation-induced respawn loop
         # looks identical to a model that keeps omitting sections.
         log_fn(
             f"[{tag}] reply was {full_len} chars — elided {dropped} from the "
-            f"middle to fit the 8 KB budget (head+tail kept)"
+            f"middle to fit the {PRE_RECON_MAX_CHARS // 1000} KB budget "
+            "(head+tail kept)"
         )
     return out
 

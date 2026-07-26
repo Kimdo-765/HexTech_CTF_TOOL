@@ -240,9 +240,9 @@ def _build_pre_recon_prompt(
     libc_version: str | None = None,
 ) -> str:
     """Build the prompt for the orchestrator-driven recon subagent that
-    runs BEFORE main's first turn. Recon's job: static-map the binary
-    so main starts with a 2 KB inventory instead of having to do its
-    own objdump walk."""
+    runs BEFORE main's first turn. Recon's job: static-map the binary so
+    main starts with a ready inventory instead of doing its own objdump
+    walk."""
     parts: list[str] = []
     parts.append(
         "STATIC TRIAGE REQUEST (pre-flight for the main exploit writer)."
@@ -260,7 +260,14 @@ def _build_pre_recon_prompt(
         "./.ghidra_proj/ so subsequent reads are fast)."
     )
     parts.append(
-        "REPLY in ≤2 KB, as compact bullets, with these sections:\n"
+        "REPLY as compact bullets. Be terse — but COMPLETENESS OF THE "
+        "SECTIONS BEATS BREVITY: never drop or merge a requested section to "
+        "save space. A missing section makes the orchestrator re-run this "
+        "entire recon from scratch, which costs far more than a long reply. "
+        "(A full heap-chal answer runs ~15-20 KB; that is expected, not a "
+        "problem. Spend the length on the tables and specifics below, not on "
+        "prose.)\n"
+        "Sections:\n"
         "  ARCH         — `file` summary in one line\n"
         "  PROTECTIONS  — checksec: RELRO / Stack / NX / PIE\n"
         "  LIBC         — `./.chal-libs/libc_profile.json` version + "
