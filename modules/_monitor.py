@@ -65,6 +65,12 @@ BATCH_MAX_S = 9.0     # ...or once this long has elapsed with >=1 pending
 BACKLOG_SKIP = 8192   # if a fresh monitor attaches to a log already bigger than
                       # this, skip narrating the backlog (start live)
 _NARRATE_TIMEOUT_S = 60
+# Per-signal-line ceiling, applied at INGEST so it bounds all four consumers at
+# once: classify(), the narration prompt, the redis publish, and the `raw` field
+# persisted in monitor.jsonl. The monitor narrates — it never needed a full tool
+# result — and run.log keeps the untruncated line for search. See the rationale
+# at the clip site in run_monitor().
+_MONITOR_BODY_MAX = 2000
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
@@ -341,6 +347,30 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
             for raw in data.decode("utf-8", "replace").splitlines():
                 m = re.match(r"^\[(\d\d:\d\d:\d\d)\] (.*)$", raw)
                 body = m.group(2) if m else raw
+                # Bound the body BEFORE it is classified, narrated, published
+                # and persisted. run.log stopped truncating TOOL_RESULT
+                # (101beba), and the monitor consumed that change three times
+                # over: `raw=bodies` is written verbatim into monitor.jsonl
+                # (which the UI re-reads whole every 2 s), the same bodies are
+                # published to redis, and up to 12 of them are concatenated
+                # into the narration prompt with no bound at all. Measured on
+                # the first post-change job (f52f0219803f): narration input
+                # 303,686 B vs 191,093 B before = 1.59x, worst single body
+                # 30,942 B (~7.7 K tokens), monitor.jsonl 374 KB vs a prior
+                # 20-job max of 208 KB. Unbounded, 12 x the 200 KB run.log
+                # valve would exceed the narrator's context window, and
+                # _narrate then returns {} and the feed silently degrades to a
+                # 160-char stub — a regression in the operator's PRIMARY view.
+                #
+                # Capping at ingest also fixes a false-positive: classify()
+                # checks FLAG/ERROR before dropping tool echo, so on that same
+                # job the full bodies added 4 new kind=flag entries, ALL FAKE —
+                # judge subagents Read-ing exploit.py and echoing its literal
+                # `print("FLAG_CANDIDATE: ...")` source at offsets 27 K-30 K.
+                # 2 KB still shows far more than the old 300-char preview
+                # without reaching into a Read of the exploit's own source.
+                if len(body) > _MONITOR_BODY_MAX:
+                    body = body[:_MONITOR_BODY_MAX] + " …(monitor-clipped)"
                 kc = classify(body)
                 if kc:
                     pending.append((body, kc))

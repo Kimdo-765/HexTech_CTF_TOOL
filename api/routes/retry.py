@@ -160,6 +160,14 @@ Reply with ONLY the hint paragraph — no preamble, no markdown headers.
 """
 
 
+# run.log's own budget. It is the only file the reviewer reads head+TAIL, and
+# it is the one file where both ends carry different, non-redundant evidence:
+# the head holds the environment band (checksec / RELRO / glibc / staged
+# target), the tail holds the postjudge diagnosis + retry_hint + stop_reason.
+# Giving it a dedicated budget means adding the tail does not cost the head.
+RUN_LOG_CONTEXT_CHARS = 9000
+
+
 def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     """Bundle the prior job's evidence for the reviewer.
 
@@ -193,7 +201,18 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
             raw = p.read_text(errors="replace")
         except Exception:
             return
-        if len(raw) <= max_per_file:
+        # run.log gets its OWN, larger budget rather than re-slicing the shared
+        # one. Taking head+tail out of 6000 shrank the head 6000 -> 1500 and
+        # silently dropped chars 1500-6000, which is where the environment band
+        # lives (checksec / RELRO / glibc version / libc_profile / staged
+        # target). Measured over 20 jobs: head-only caught 604 of 1483 env
+        # lines, head+tail only 285 — worse in 19 of 20. Most of that is
+        # recoverable from meta.json, which the reviewer already gets, but
+        # checksec/RELRO is not. Widening instead of reallocating keeps the
+        # diagnosis win (1.1 -> 8.3 of 14 keyword coverage) without paying for
+        # it out of the setup band; +3 KB on a ~15 KB reviewer context is noise.
+        budget = RUN_LOG_CONTEXT_CHARS if tail_bias else max_per_file
+        if len(raw) <= budget:
             text = raw
         elif tail_bias:
             # HEAD+TAIL for run.log. A head-only slice was near-useless: the
@@ -204,16 +223,16 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
             # the END. Measured keyword coverage over 18 jobs (14 diagnostic
             # terms): head-only 1.1/14, head+tail 8.3/14. On job
             # e1b933afc137 (the libc6-dev dev/run-parity loss) it is 1 vs 14.
-            head_n = max_per_file // 4
-            tail_n = max_per_file - head_n
+            head_n = int(budget * 0.45)
+            tail_n = budget - head_n
             text = (
                 raw[:head_n]
-                + f"\n\n…({len(raw) - max_per_file} chars elided from the "
+                + f"\n\n…({len(raw) - budget} chars elided from the "
                   "MIDDLE — head and tail kept)…\n\n"
                 + raw[-tail_n:]
             )
         else:
-            text = raw[:max_per_file]
+            text = raw[:budget]
         if not text.strip():
             return
         # run.log is sanitized for the SAME reason report.md is (see the

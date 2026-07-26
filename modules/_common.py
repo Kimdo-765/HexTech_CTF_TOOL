@@ -360,7 +360,17 @@ def log_line(job_id: str, line: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     with f.open("a") as fp:
         fp.write(f"[{ts}] {line}\n")
-    _publish(job_id, "log", {"ts": ts, "line": line})
+    # The FILE keeps the whole line (that is what run.log is for now — grep /
+    # filter). The live SSE frame does not: format_tool_result stopped
+    # truncating (101beba) and joins newlines with " | ", so one subagent tool
+    # result became a single un-splittable frame of up to the 200 KB valve —
+    # while the SIBLING `sdk` publish in log_user_blocks has clamped itself to
+    # 2000 chars all along. Same asymmetry, same browser (the live view runs a
+    # regex colorizer over each frame), so apply the same clamp.
+    sse_line = line
+    if len(sse_line) > 2000:
+        sse_line = sse_line[:2000] + " …(truncated in the live view; run.log has the full line)"
+    _publish(job_id, "log", {"ts": ts, "line": sse_line})
 
 
 def log_block(
@@ -4084,11 +4094,16 @@ def extract_cost(claude_summary: dict | None) -> float:
 
 
 def format_tool_result(content: Any, is_error: bool | None = None) -> str:
-    """Compact one-line preview of a tool result for the run log.
+    """Render a tool result as ONE run.log line (newlines -> " | ").
 
     Tool results are otherwise invisible — the agent sees them, but the
     user just sees a TOOL line followed by silence until the agent's
-    next message lands. Surfacing a short preview closes that gap.
+    next message lands. Logging the result closes that gap.
+
+    NOT a preview any more: the 300-char cut was removed in 101beba, so
+    the body is written in FULL and only a 200 KB disaster valve remains
+    (see the comment at the cap). run.log is the searchable record; the
+    live SSE frame and the monitor apply their own, much smaller clamps.
     """
     text = ""
     if content is None:
@@ -4316,8 +4331,10 @@ def _check_runaway(job_id: str, tag: str, body: str) -> None:
 def log_user_blocks(job_id: str, msg) -> None:
     """Walk a UserMessage's content blocks (typically tool results) and
     write run-log entries. Main agent gets the full body of each tool
-    result with newlines preserved; subagents get the existing
-    single-line preview (≤300 bytes, ' | '-joined newlines).
+    result with newlines PRESERVED (one log line per source line);
+    subagents get the same body collapsed to ONE line (' | '-joined
+    newlines) via format_tool_result. Both are full-length since 101beba
+    — the old ≤300-byte subagent preview is gone.
     """
     tag = agent_tag(msg, job_id)
     content = getattr(msg, "content", None)
