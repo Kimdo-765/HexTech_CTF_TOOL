@@ -2150,8 +2150,43 @@ async def run_pre_recon(
             "final summary; the assistant text below is what was "
             "collected. Spawn a follow-up recon if you need more.]\n\n"
         ) + out
+    # 8 KB cap on what reaches main's user_prompt. TRUNCATE FROM THE MIDDLE,
+    # never the tail: pwn's pre-recon gate (`_missing_pre_recon_sections` in
+    # modules/pwn/analyzer.py) substring-checks the returned text for MANDATORY
+    # section titles, and those sections are the LAST thing recon writes. A
+    # plain tail cut therefore removed the very titles the gate looks for, the
+    # gate read "the model silently dropped sections", and it respawned the
+    # whole recon — up to 4 times, each a full spawn.
+    #
+    # Job 302cd87de603 (heap pwn) is the worked example: 4 attempts, every one
+    # logged at exactly `len=8013` (= 8000 + len("\n…(truncated)")) while the
+    # reported `missing=[...]` list KEPT CHANGING. A stable length with a
+    # moving miss-list is the signature of a hard cap eating the tail, not of
+    # a model omitting sections. Cost: 44 min and ~$6.4 of a 3 h / $38.5 job,
+    # and it recurs on any heap-pwn job whose recon is a few hundred chars
+    # over the cap (this reply was 8042 — it overshot by 42).
+    #
+    # Middle-out keeps both ends, so the header (ARCH / PROTECTIONS / LIBC)
+    # AND the trailing mandatory sections survive; only the least
+    # position-critical middle is dropped, with an explicit marker so main
+    # knows material is missing. Under the cap this is a no-op.
     if len(out) > 8000:
-        out = out[:8000] + "\n…(truncated)"
+        full_len = len(out)
+        head, tail = out[:5600], out[-2200:]
+        dropped = full_len - len(head) - len(tail)
+        out = (
+            head
+            + f"\n\n…({dropped} chars elided from the MIDDLE to fit the 8 KB "
+              "pre-recon budget — the sections above and below are intact; "
+              "spawn a recon subagent if you need what was cut)…\n\n"
+            + tail
+        )
+        # Log the PRE-cap length: without it a truncation-induced respawn loop
+        # looks identical to a model that keeps omitting sections.
+        log_fn(
+            f"[{tag}] reply was {full_len} chars — elided {dropped} from the "
+            f"middle to fit the 8 KB budget (head+tail kept)"
+        )
     return out
 
 
