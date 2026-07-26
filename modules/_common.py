@@ -4071,11 +4071,16 @@ def extract_cost(claude_summary: dict | None) -> float:
 
     Preference order:
       1. summary['result']['total_cost_usd']  (authoritative — ResultMessage)
-      2. summary['cost_usd']                  (mirrored by run_main_agent_session
-                                               when ResultMessage was lost)
-      3. estimate from summary['agent_tokens'] + summary['model']
-         (last-resort fallback so SIGKILL'd runs still show a non-zero,
-         estimated spend instead of $0.00).
+      2. summary['cost_usd_estimate']         (parked by _snapshot_cost when a
+                                               ResultMessage cost was lost)
+      3. summary['cost_usd']                  (LAST resort — note this key is
+                                               the SUBAGENT spend accumulator,
+                                               so it under-reports a job's cost;
+                                               kept only for back-compat with
+                                               summaries written before the
+                                               estimate got its own key)
+      4. estimate from summary['agent_tokens'] + summary['model']
+         (so SIGKILL'd runs still show a non-zero, estimated spend, not $0.00).
     """
     if not isinstance(claude_summary, dict):
         return 0.0
@@ -4084,6 +4089,9 @@ def extract_cost(claude_summary: dict | None) -> float:
         v = res.get("total_cost_usd")
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
+    parked = claude_summary.get("cost_usd_estimate")
+    if isinstance(parked, (int, float)) and parked > 0:
+        return float(parked)
     direct = claude_summary.get("cost_usd")
     if isinstance(direct, (int, float)) and direct > 0:
         return float(direct)
@@ -5561,12 +5569,25 @@ async def run_main_agent_session(
             est = estimate_cost_from_tokens(
                 tokens_now, summary.get("model"),
             )
-            if est > 0 and not summary.get("cost_usd"):
-                summary["cost_usd"] = est
+            # Park the estimate in its OWN key. `summary["cost_usd"]` is the
+            # SUBAGENT spend accumulator (written at the spawn_subagent site),
+            # and `_total_spend()` adds it to main's cost — so writing a
+            # whole-session estimate here inflated the running spend meter that
+            # the cost cap and the contrarian-reframe tooth both read. Job
+            # 2109b7ee6502: a turn-0 is_error snapshotted $19.60 into it while
+            # the job's real main cost was $15.55 and subagent spend was $0.45.
+            # extract_cost's fallback reads the estimate; nothing else should.
+            if est > 0 and not summary.get("cost_usd_estimate"):
+                summary["cost_usd_estimate"] = est
+                # The label is a SNAPSHOT REASON, not a claim about the SDK: on
+                # the RESULT_IS_ERROR path the ResultMessage did arrive (the
+                # DONE line one line above prints its total_cost_usd) — it just
+                # carried is_error=True. Saying "ResultMessage missing" there
+                # was flatly contradicted by the adjacent log line.
                 log_fn(
-                    f"COST_FALLBACK [{label}]: ResultMessage missing; "
-                    f"estimated ${est:.4f} from "
-                    f"{sum(tokens_now.values())} accumulated tokens"
+                    f"COST_FALLBACK [{label}]: parked a ${est:.4f} estimate "
+                    f"from {sum(tokens_now.values())} accumulated tokens "
+                    f"(used only if no usable ResultMessage cost lands)"
                 )
         except Exception:
             pass
@@ -6284,16 +6305,50 @@ async def run_main_agent_session(
                 # counts by then. Only clear on a REAL capture (flags_now), never
                 # on a bare verdict=success, so a judge-says-success/0-flags
                 # contradiction keeps its error trail for the operator.
-                if flags_now:
-                    for _k in ("agent_error", "agent_error_kind",
-                               "fallback_artifact_used"):
-                        if summary.get(_k):
-                            log_fn(
-                                f"[orchestrator] clearing stale {_k} from an "
-                                f"earlier failed turn — turn {attempt} captured "
-                                f"a real flag"
-                            )
-                            summary.pop(_k, None)
+                #
+                # THREE guards, each from a confirmed way the naive version of
+                # this clear does harm:
+                #  * policy_refusal is NEVER cleared. /retry keys its AUP
+                #    recovery on exactly this value (api/routes/retry.py:776
+                #    `prior_aup_blocked = error_kind == "policy_refusal"` ->
+                #    resume_sid=None). Dropping it makes the next default
+                #    /retry fork the AUP-poisoned transcript instead of a fresh
+                #    session — the one path documented as the sole cure.
+                #  * budget_fallback is NEVER cleared. That branch ships the
+                #    probe-only skeleton as the artifact, and the skeleton
+                #    echoes the service banner to stdout — so a service that
+                #    greets with the flag yields a TRUSTED flag while the
+                #    "exploit" is a stub. The marker is the only record of that.
+                #  * TRUSTED tier only. `flags_now` is not proof of a capture:
+                #    scan_job_for_flags falls back to the NARRATIVE tier
+                #    (report.md / findings.json) whenever the sandbox ran, and
+                #    _is_placeholder_flag passes plausible fabrications like
+                #    DH{decoy_do_not_submit}. Re-scan trusted-only so an
+                #    agent-authored string cannot erase a real error trail.
+                # `fallback_artifact_used` is deliberately KEPT — it is
+                # evidence, its only readers are in this function, and this
+                # branch returns immediately.
+                _stale_kind = summary.get("agent_error_kind")
+                if flags_now and _stale_kind not in (
+                        "policy_refusal", "budget_fallback"):
+                    try:
+                        _trusted = scan_job_for_flags(
+                            job_id, sandbox_result=last_sandbox,
+                            trusted_only=True,
+                        )
+                    except Exception:
+                        _trusted = []
+                    if _trusted:
+                        for _k in ("agent_error", "agent_error_kind"):
+                            if summary.get(_k):
+                                log_fn(
+                                    f"[orchestrator] clearing stale {_k} "
+                                    f"(kind={_stale_kind}) — turn {attempt} "
+                                    f"captured a TRUSTED-tier flag, so the "
+                                    f"earlier turn's failure no longer "
+                                    f"describes this job"
+                                )
+                                summary.pop(_k, None)
                 log_fn(
                     f"[orchestrator] auto-run turn {attempt} succeeded "
                     f"(flags={len(flags_now)}, verdict={verdict}) — exiting loop"
