@@ -6272,6 +6272,28 @@ async def run_main_agent_session(
                         f"but 0 flags harvested — a real capture may have been dropped by "
                         f"the placeholder filter; check solver stdout for FLAG_CANDIDATE"
                     )
+                # Clear the SALVAGE markers a FAILED EARLIER TURN may have left
+                # behind. The `msg.is_error and no artifact` branch above exists
+                # to keep a zero-artifact run runnable, and its comment assumes
+                # "the job ends no_flag with error_kind set" — but the loop can
+                # go on to succeed, and nothing un-set the marker. Job
+                # 2109b7ee6502 (RISC-V kernel, real remote flag on auto-run turn
+                # 1) finished with meta.error = "SDK ResultMessage is_error …;
+                # no artifact" and error_kind=unknown, while exploit_present was
+                # True and the flag was captured — the message was false on both
+                # counts by then. Only clear on a REAL capture (flags_now), never
+                # on a bare verdict=success, so a judge-says-success/0-flags
+                # contradiction keeps its error trail for the operator.
+                if flags_now:
+                    for _k in ("agent_error", "agent_error_kind",
+                               "fallback_artifact_used"):
+                        if summary.get(_k):
+                            log_fn(
+                                f"[orchestrator] clearing stale {_k} from an "
+                                f"earlier failed turn — turn {attempt} captured "
+                                f"a real flag"
+                            )
+                            summary.pop(_k, None)
                 log_fn(
                     f"[orchestrator] auto-run turn {attempt} succeeded "
                     f"(flags={len(flags_now)}, verdict={verdict}) — exiting loop"
