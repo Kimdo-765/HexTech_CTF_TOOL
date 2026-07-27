@@ -884,10 +884,28 @@ _JS_SIBLING_MAX_BYTES = 48 * 1024 * 1024
 _JS_SIBLING_TOTAL_MAX_BYTES = 256 * 1024 * 1024
 
 
-def _js_engine_dir(elfs: list[Path]) -> Path | None:
-    """Directory of a JS-engine build among `elfs`, or None."""
+def _js_engine_dir(elfs: list[Path], root: Path | None = None) -> Path | None:
+    """Directory of a JS-engine build among `elfs`, or None.
+
+    The VENDOR prune lives here, not in `_scan`: a challenge that npm-installs
+    Electron (or ships a headless-Chrome bot, or a venv) buries a real
+    `snapshot_blob.bin` in `node_modules/`, and letting that directory get
+    ELECTED turns an ordinary pwn job into a browser-pwn job. Pruning those
+    paths in `_scan` instead was too wide — it removed the files from ELF
+    DISCOVERY altogether, so a chal shipping its custom `.so` under a venv's
+    site-packages lost it from `./.chal-libs/` (this repo's own notes call a
+    chal-supplied `.so` the attack surface) and a binary under `vendor/` left
+    `./bin/` empty. Vendored trees are still staged; they just cannot claim to
+    be the engine.
+    """
     for e in elfs:
         d = e.parent
+        if root is not None:
+            try:
+                if any(p in _VENDOR_DIRS for p in d.relative_to(root).parts):
+                    continue
+            except ValueError:
+                pass
         if any((d / n).is_file() for n in _JS_ENGINE_DATA):
             return d
     return None
@@ -898,7 +916,15 @@ def _pick_js_engine(elfs: list[Path], engine_dir: Path) -> Path | None:
     else the largest binary that is NOT a known build tool."""
     same = [e for e in elfs if e.parent == engine_dir]
     named = [e for e in same if e.name in _JS_ENGINE_NAMES]
-    pool = named or [e for e in same if not _looks_like_build_tool(e.name)]
+    # Shared libraries can never BE the shell. A component build puts a
+    # libv8.so next to the engine that is far bigger than it, so with a
+    # renamed shell the size fallback elected the LIBRARY as "the engine" and
+    # then dropped the real shell as a co-located binary — ./bin/ ended up
+    # holding nothing but snapshot_blob.bin.
+    pool = named or [
+        e for e in same
+        if not _is_shared_lib(e) and not _looks_like_build_tool(e.name)
+    ]
     return max(pool, key=lambda p: p.stat().st_size) if pool else None
 
 
@@ -987,12 +1013,6 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
                     rel_parts = ()
                 if any(p.endswith("_extracted") for p in rel_parts):
                     continue
-                # Vendored third-party trees are not the challenge. A chal
-                # that npm-installs Electron ships a real snapshot_blob.bin
-                # + a 180 MB `electron` in node_modules/; staging those made
-                # an ordinary pwn job look like a browser-pwn job.
-                if any(p in _VENDOR_DIRS for p in rel_parts[:-1]):
-                    continue
                 if not f.is_file():
                     continue
                 kind = _elf_kind(f)
@@ -1073,7 +1093,7 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     # UNIT: the engine plus the non-ELF siblings it loads at startup, and
     # NONE of the co-located build tools. Flattening the engine alone
     # produces a ./bin/d8 that cannot start (see _JS_ENGINE_DATA).
-    engine_dir = _js_engine_dir(extracted_elfs)
+    engine_dir = _js_engine_dir(extracted_elfs, out_dir)
     engine = _pick_js_engine(extracted_elfs, engine_dir) if engine_dir else None
     if engine is not None:
         dropped = [
@@ -1204,7 +1224,12 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
 
 
 _DIFF_TARGET_RE = re.compile(r"^(?:\+\+\+|---)\s+(?:[ab]/)?(\S+)")
-_D8_PATH_RE = re.compile(r"(?:^|/)src/d8/")
+# The shell's own sources. `src/d8/` is the post-7.5 layout; before that (and
+# the oob-v8-era builds are the commonest V8 vintage in CTF) the shell was the
+# FLAT `src/d8.cc` / `src/d8-posix.cc` / `src/d8.h`. Matching only the
+# directory form classified those files' hunks as CANDIDATE BUG — the exact
+# inversion this split exists to prevent, reintroduced for older engines.
+_D8_PATH_RE = re.compile(r"(?:^|/)src/d8(?:/|\.|-)")
 
 # Caps on what CHALLENGE-CONTROLLED bytes may contribute to V8_PREFLIGHT.md.
 _PROBE_MAX_CHARS = 2000
@@ -1274,6 +1299,13 @@ def _fence_safe(s: str) -> str:
     return s.replace("```", "'''")
 
 
+def _has_body(lines: list[str]) -> bool:
+    """True once an open diff record has both its `+++` header and a hunk —
+    i.e. the next `--- ` belongs to the NEXT file, not to this one."""
+    return (any(ln.startswith("+++ ") for ln in lines)
+            and any(ln.startswith("@@") for ln in lines))
+
+
 def _split_engine_patch(text: str) -> tuple[list[str], list[tuple[str, str]]]:
     """Split a unified diff into (candidate-bug chunks, d8-side entries).
 
@@ -1331,10 +1363,14 @@ def _split_engine_patch(text: str) -> tuple[list[str], list[tuple[str, str]]]:
             current = [line]
             target = line[len("Index: "):].strip()
             continue
-        # Bare `--- a/x` opens a record only when no git-style header has been
-        # seen for the current one; inside a git record it is just the header.
-        if line.startswith("--- ") and not current:
-            saw_git = saw_git or False
+        # A bare `--- a/x` opens a record when there is no open one, AND when
+        # the open one already has a BODY (its own `+++` plus at least one
+        # `@@`). Requiring `not current` meant a plain multi-file `diff -u`
+        # merged every file into the FIRST record: a patch whose bug sat in
+        # src/objects/ behind a src/d8/ entry was swallowed whole into the
+        # hardening side and "CANDIDATE BUG" rendered empty.
+        if line.startswith("--- ") and (not current or _has_body(current)):
+            _flush()
             m = _DIFF_TARGET_RE.match(line)
             current = [line]
             target = m.group(1) if m else ""
@@ -1366,7 +1402,8 @@ def _js_engine_preflight(
         "",
     ]
 
-    def _probe(label: str, args: list[str], *, timeout: int = 25) -> str:
+    def _probe(label: str, args: list[str], *, timeout: int = 25,
+               max_chars: int = _PROBE_MAX_CHARS) -> str:
         # Capture to a FILE, not a pipe, and poll.
         #
         # With stdout=PIPE, communicate() waits for EOF on the pipe — which a
@@ -1412,11 +1449,18 @@ def _js_engine_preflight(
                     time.sleep(0.05)
                 try:
                     fh.seek(0)
-                    raw = fh.read(_PROBE_MAX_CHARS * 4)
+                    raw = fh.read(max_chars * 4 + 64)
                 except Exception:
                     raw = b""
-            out = raw.decode("utf-8", errors="replace")[:_PROBE_MAX_CHARS]
-            out = _fence_safe(out.strip() + note)
+            text = raw.decode("utf-8", errors="replace")
+            # SAY when the slice cut something. The globals probe emits one
+            # long sorted line whose TAIL is exactly the lowercase d8 helpers
+            # the section exists to enumerate, so a silent cut removed the
+            # answer while the surrounding prose still told the agent that
+            # anything absent from the list is closed.
+            if len(text) > max_chars:
+                text = text[:max_chars] + f"\n(TRUNCATED at {max_chars} chars)"
+            out = _fence_safe(text.strip() + note)
             return out or f"(no output, rc={rc})"
         except Exception as e:
             if proc is not None:
@@ -1445,7 +1489,7 @@ def _js_engine_preflight(
         _probe("globals", [
             "-e",
             "print(Object.getOwnPropertyNames(globalThis).sort().join(', '))",
-        ]),
+        ], max_chars=8000),
         "```",
         "",
         "## --allow-natives-syntax (LOCAL triage only)",

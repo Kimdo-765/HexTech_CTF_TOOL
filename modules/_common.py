@@ -3873,8 +3873,14 @@ def docker_challenge_block(job_id: str) -> str:
 # `_JS_ENGINE_NAMES` for the STAGING half of this feature (it runs before
 # any prompt exists and must not import a prompt helper). The two pairs
 # agree today and will drift if only one is edited — change both.
+#
+# SCOPE, stated honestly: the anchor is V8's external-startup-data output, so
+# TODAY this detects V8/Chromium builds only. SpiderMonkey and JSC ship no
+# such file — their names are in the shell tuple so a future anchor for them
+# has one less thing to change, NOT because they are covered.
 _JS_ENGINE_ANCHORS = ("snapshot_blob.bin",)
-_JS_ENGINE_SHELLS = ("d8", "js", "jsc", "js_shell", "chakra", "ch")
+_JS_ENGINE_SHELLS = ("d8", "js", "jsc", "js_shell", "chakra", "ch",
+                     "spidermonkey")
 
 
 def js_engine_block(job_id: str) -> str:
@@ -4001,10 +4007,13 @@ def js_engine_block(job_id: str) -> str:
         "with a non-number argument (a string, or `{valueOf(){...}}`) -> re-warm "
         "-> re-optimize. Confirm with `--trace-turbo-reduction`: you want the "
         "node reduced 'by reducer Typer', not 'by reducer JSCallReducer'.\n"
-        "- `Math.min` / `Math.max` LAUNDER NaN — minsd/maxsd return the non-NaN "
-        "operand, so a min/max clamp silently destroys a NaN-poisoned value "
-        "while the type still looks wrong. Clamp with a ternary "
-        "(`v = v > 3 ? 3 : v`) to keep the value in the register.\n"
+        "- A `Math.min`/`Math.max` clamp can LAUNDER a NaN-poisoned value: "
+        "under the bogus type the clamp has been observed to return the "
+        "non-NaN operand, so the poison is gone while the type still looks "
+        "wrong and every downstream check quietly agrees. Do not assume the "
+        "lowering — CHECK what your build emits (`--print-opt-code`) — but "
+        "prefer a ternary clamp (`v = v > 3 ? 3 : v`), which keeps the value "
+        "itself intact.\n"
         "- `|0` and `>>>0` are TRUNCATING uses -> `TruncateFloat64ToWord32` "
         "(NaN -> 0). They never produce 0x80000000; only a NON-truncating "
         "Signed32 consumer reaches the unchecked `ChangeFloat64ToInt32`.\n"
@@ -4012,10 +4021,14 @@ def js_engine_block(job_id: str) -> str:
         "`v === v` folding to `true` while the runtime value is NaN is direct "
         "evidence the typer is wrong.\n"
         "\n"
-        "STAGE 2 — CheckBounds is HARDENED in every modern build (aborting "
-        "bounds checks). A typer range that 'proves' the index in-bounds no "
-        "longer deletes the check — it deopts with `reason: out of bounds`. If "
-        "you see that, stop re-rolling the same shape. Live paths instead:\n"
+        "STAGE 2 — CheckBounds hardening (aborting bounds checks) landed in "
+        "V8 ~7.4 (early 2019). CONFIRM which side of that your build is on "
+        "before choosing an approach: on an OLDER build the classic "
+        "typer-range bounds-check elimination still works and is the short "
+        "path. On a hardened build a typer range that 'proves' the index "
+        "in-bounds no longer deletes the check — it deopts with `reason: out "
+        "of bounds`; if you see that, stop re-rolling the same shape and use "
+        "one of these instead:\n"
         "- `LOAD_IGNORE_OUT_OF_BOUNDS` / `STORE_IGNORE_OUT_OF_BOUNDS` "
         "element-access feedback: a SEPARATE `NumberLessThan(index, length)` is "
         "emitted and IS constant-folded by the bogus type. The IC must have SEEN "
