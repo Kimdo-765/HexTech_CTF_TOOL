@@ -5028,8 +5028,17 @@ _STOP_KIND_HEADERS = {
     "budget_exhausted": "Auto-retry budget exhausted",
     "no_hint": "Postjudge produced no actionable retry hint",
     "agent_error": "Main agent session error",
+    # States the OBSERVATION, not an intent the code cannot establish: all it
+    # knows is that the bytes are identical. The old wording ("Main ignored
+    # postjudge retry_hint") was written into WHY_STOPPED as ground truth and
+    # carried into /retry — on job df7dd1b4a9e8 it libelled a run in which main
+    # engaged with the hint in detail and then conceded on purpose.
     "retry_hint_ignored": (
-        "Main ignored postjudge retry_hint — script unchanged"
+        "Script unchanged after the postjudge retry hint"
+    ),
+    "conceded_by_deletion": (
+        "Main DELETED the deliverable after the retry hint — a recorded "
+        "concession, taken via the exact path the postjudge message offers"
     ),
     "unsolvable_by_analysis": (
         "Conceded unsolvable — artifacts self-admit no working chain and "
@@ -5280,6 +5289,27 @@ def write_why_stopped(
                 "reach the same true-negative.",
                 "3. **Confirm the remote is alive** (`nc -vz <host> <port>`) in "
                 "case the low likelihood was secondary to a dead target.",
+            ]
+        elif stop_kind == "conceded_by_deletion":
+            out += [
+                "Main removed the deliverable after reading the postjudge "
+                "hint. That is the give-up path the postjudge message itself "
+                "offers (\"`rm -f ./<script>` if you're giving up\"), so it is "
+                "a DELIBERATE concession, not a missed instruction — and this "
+                "file does NOT adjudicate whether the challenge is solvable.",
+                "",
+                "1. **Read main's LAST message in `run.log`** (tag `[main] "
+                "AGENT:`) — it states why it conceded. That reasoning, not "
+                "this header, is the evidence.",
+                "2. **Read `report.md`** — a concession run usually leaves the "
+                "most complete write-up of the run, including any primitive "
+                "that WAS verified and is reusable.",
+                "3. **If the concession rests on an impossibility argument, "
+                "attack its ENUMERATION** before accepting it: such arguments "
+                "here have failed on unstated premises (a search scoped to two "
+                "files, one tier, one input shape) rather than on their logic.",
+                "4. **`/retry` with a hint that names a surface the argument "
+                "did not cover** — a bare re-run re-derives the same dead end.",
             ]
         elif stop_kind == "agent_error":
             out += [
@@ -6311,6 +6341,59 @@ async def run_main_agent_session(
             if not auto_run or sandbox_runner is None:
                 return last_sandbox
             picked = _pick_present_artifact(work_dir, artifact_names)
+
+            # DELIBERATE DELETION is not "main produced nothing".
+            # _format_postjudge_user_turn tells main, in writing, to
+            # `rm -f ./<script>` if it is giving up. When main takes that
+            # published path the artifact vanishes from work/ — and the
+            # job-root fallback below (built for a DIFFERENT case: main wrote
+            # the solver to the wrong directory, job 389e39530990) would find
+            # the byte-identical copy the pre-sandbox carry left at the job
+            # root and silently promote it back. The SHA gate then compares
+            # bytes, sees "unchanged", and stamps retry_hint_ignored — the
+            # code resurrecting a file main deleted on the code's own
+            # instruction, then blaming main for not editing it. Job
+            # df7dd1b4a9e8 ended that way after a 19-minute, source-level
+            # concession that WHY_STOPPED recorded as "Main ignored the hint".
+            # Detect it with state the loop already tracks and halt honestly.
+            _inject_script = script_sha_at_last_inject["script"]
+            if (
+                not picked
+                and attempt > 0
+                and _inject_script
+                and script_sha_at_last_inject["sha"] is not None
+                and not (work_dir / _inject_script).is_file()
+            ):
+                log_fn(
+                    f"[orchestrator] {_inject_script} was DELETED from work/ "
+                    f"after the retry_hint inject (attempt {attempt}/"
+                    f"{cap_str}) — that is the concession path the postjudge "
+                    f"message offers. Not promoting any job-root copy; "
+                    f"halting as a recorded concession."
+                )
+                summary["conceded_by_deletion"] = True
+                summary["judge_stop_reason"] = (
+                    f"main deleted {_inject_script} after postjudge feedback "
+                    f"— deliberate concession via the documented give-up path, "
+                    f"NOT an ignored hint"
+                )
+                write_meta(
+                    job_id,
+                    judge_next_action="stop",
+                    judge_stop_reason=summary["judge_stop_reason"],
+                )
+                write_why_stopped(
+                    work_dir,
+                    stop_kind="conceded_by_deletion",
+                    attempt_idx=attempt,
+                    max_attempts=max_retries,
+                    judge_out=judge_out,
+                    sandbox_result=last_sandbox,
+                    summary=summary,
+                    log_fn=log_fn,
+                )
+                return last_sandbox
+
             if not picked:
                 # The agent sometimes writes the solver with an ABSOLUTE
                 # path to the JOB_DIR ROOT (/data/jobs/<id>/) instead of its
@@ -6347,6 +6430,33 @@ async def run_main_agent_session(
                         picked = None
             if not picked:
                 # Main produced nothing this round — no script to run.
+                # RECORD it: this used to return with no WHY_STOPPED, no
+                # judge_next_action and stage left at auto-retry-N, so the job
+                # ended no_flag with no stated reason at all — the exact
+                # silent halt the WHY_STOPPED mechanism exists to eliminate.
+                summary.setdefault(
+                    "judge_stop_reason",
+                    "no solver artifact present in work/ (or at the job root) "
+                    "when the auto-run loop looked — nothing to execute",
+                )
+                try:
+                    write_meta(
+                        job_id,
+                        judge_next_action="stop",
+                        judge_stop_reason=summary["judge_stop_reason"],
+                    )
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="no_hint",
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out=judge_out,
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
+                except Exception as e:
+                    log_fn(f"[orchestrator] could not record no-artifact halt: {e}")
                 return last_sandbox
 
             # SHA-unchanged ship gate: if we're on a post-retry iteration
