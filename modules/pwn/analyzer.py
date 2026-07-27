@@ -3,7 +3,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import time
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -239,6 +242,7 @@ def _build_pre_recon_prompt(
     chal_unpacked: bool,
     custom_libs: list[str] | None = None,
     libc_version: str | None = None,
+    js_engine: bool = False,
 ) -> str:
     """Build the prompt for the orchestrator-driven recon subagent that
     runs BEFORE main's first turn. Recon's job: static-map the binary so
@@ -255,11 +259,27 @@ def _build_pre_recon_prompt(
     )
     if target:
         parts.append(f"REMOTE: {target}")
-    parts.append(
-        "If `./decomp/` is missing, run `ghiant ./bin/" + binary_name + "` "
-        "ONCE to populate it (the project is cached under "
-        "./.ghidra_proj/ so subsequent reads are fast)."
-    )
+    if js_engine:
+        # autoboot skipped the ghidra pre-bake for this job precisely because
+        # a multi-MB engine build exhausts the decompiler's 4 GB / 900 s
+        # budget — telling recon to run it here reintroduces the exact cost
+        # the early return exists to avoid.
+        parts.append(
+            "This is a PREBUILT JAVASCRIPT ENGINE (d8 / js / jsc), not a "
+            "chal-authored binary. DO NOT run `ghiant` on it and do not try "
+            "to decompile it — a multi-MB engine build exhausts the "
+            "decompiler and produces nothing usable. `./prob`, "
+            "`./.chal-libs/libc_profile.json` and `./decomp/` do NOT exist "
+            "for this job. Triage from `./V8_PREFLIGHT.md` (already written: "
+            "version, exposed globals, build config, the patch split), the "
+            "challenge's own patch/source, and by RUNNING the engine."
+        )
+    else:
+        parts.append(
+            "If `./decomp/` is missing, run `ghiant ./bin/" + binary_name + "` "
+            "ONCE to populate it (the project is cached under "
+            "./.ghidra_proj/ so subsequent reads are fast)."
+        )
     parts.append(
         "REPLY as compact bullets. Be terse — but COMPLETENESS OF THE "
         "SECTIONS BEATS BREVITY: never drop or merge a requested section to "
@@ -811,8 +831,30 @@ def _elf_kind(p: Path) -> int | None:
 # (verified against job 5cb4ecb67214's bundle — a bare copy dies, a copy
 # WITH its siblings runs). Detection anchors on that data file rather than
 # on the binary's name, so a renamed shell still resolves.
-_JS_ENGINE_DATA = ("snapshot_blob.bin", "icudtl.dat")
+#
+# ANCHOR is `snapshot_blob.bin` ALONE. `icudtl.dat` was in this tuple and had
+# to come out: it is ICU data shipped by Chromium, Electron, Node, Flutter and
+# Qt-WebEngine — an ordinary pwn bundle that vendors any of those trips it,
+# and because this tuple gates SUPPRESSION (no chal-libc-fix, no ghiant, other
+# ELFs dropped from ./bin/) a false positive silently degrades a normal job.
+# It also did not match `_common._JS_ENGINE_ANCHORS`, so the suppressive half
+# fired while the explanatory prompt block stayed silent. icudtl.dat is still
+# COPIED — it is a non-ELF sibling like any other — it just cannot elect a
+# directory to be an engine build.
+_JS_ENGINE_DATA = ("snapshot_blob.bin",)
 _JS_ENGINE_NAMES = ("d8", "js", "jsc", "js_shell", "chakra", "ch", "spidermonkey")
+# Vendored third-party trees. A challenge that npm-installs Electron, or ships
+# a headless-Chrome bot, buries a real `snapshot_blob.bin` in here — which used
+# to elect that directory as "the engine build" for the whole job.
+_VENDOR_DIRS = {"node_modules", "vendor", "third_party", "bower_components",
+                "site-packages", ".git", "__pycache__"}
+# Marker recording WHICH binary the extraction step identified as the engine.
+# _staged_js_engine used to RE-DERIVE this over the flattened ./bin/ as
+# "largest ELF not in a 5-name list", so any bundle that merely CONTAINED an
+# anchor could hand the title to the real challenge binary (proven by an A/B
+# differing only by a zero-byte file). Identification now happens once, where
+# the directory structure is still intact, and is read back from here.
+_JS_ENGINE_MARKER = ".js_engine"
 # Build tools that live in the same out/ dir as the engine AND are bigger
 # than it (mksnapshot 49 MB vs d8 37 MB) — the largest-ELF heuristic picks
 # them, and then every downstream step analyses the wrong binary.
@@ -820,9 +862,12 @@ _JS_ENGINE_BUILD_TOOLS = (
     "mksnapshot", "torque", "gen-regexp-special-case",
     "bytecode_builtins_list_generator", "v8_build_config",
 )
-# Cap on a single non-ELF sibling copied next to the engine. icudtl.dat is
-# ~10 MB; anything far beyond that is build spoil, not runtime data.
+# Caps on the non-ELF siblings copied next to the engine — per file and in
+# aggregate. icudtl.dat is ~10 MB; anything far beyond that is build spoil,
+# not runtime data, and without the aggregate cap a bundle could make autoboot
+# duplicate an unbounded amount of data into ./bin/.
 _JS_SIBLING_MAX_BYTES = 48 * 1024 * 1024
+_JS_SIBLING_TOTAL_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _js_engine_dir(elfs: list[Path]) -> Path | None:
@@ -844,17 +889,51 @@ def _pick_js_engine(elfs: list[Path], engine_dir: Path) -> Path | None:
 
 
 def _staged_js_engine(staged_bin: Path) -> Path | None:
-    """The JS-engine shell already staged in ``./bin/``, or None. Used
-    post-flatten (and for a hand-uploaded engine dir) to suppress the
-    ELF-shaped autoboot steps that are meaningless for an engine build."""
+    """The JS-engine shell staged in ``./bin/``, or None.
+
+    This gates SUPPRESSION (skip chal-libc-fix + the ghidra pre-bake), so it
+    is deliberately STRICTER than the guidance-only detector in _common: it
+    accepts only (a) the binary the extraction step recorded in the
+    ``.js_engine`` marker, or (b) a file whose NAME is a known engine shell
+    sitting next to the anchor. There is no "largest ELF wins" fallback —
+    that fallback let one stray ``snapshot_blob.bin`` anywhere in a bundle
+    promote an ordinary challenge binary to "the engine" and silently cost
+    the job its libc profile.
+    """
     try:
         entries = [p for p in staged_bin.iterdir() if p.is_file()]
     except Exception:
         return None
+
+    def _safe(p: Path) -> Path | None:
+        # Never hand back a symlink or anything resolving outside ./bin/:
+        # the caller chmods it 0755 and EXECUTES it.
+        try:
+            if p.is_symlink():
+                return None
+            rp = p.resolve()
+            rp.relative_to(staged_bin.resolve())
+        except Exception:
+            return None
+        return p if _elf_kind(p) in _ELF_STAGE_TYPES else None
+
+    marker = staged_bin.parent / _JS_ENGINE_MARKER
+    if marker.is_file():
+        try:
+            recorded = marker.read_text().strip()
+        except Exception:
+            recorded = ""
+        if recorded and "/" not in recorded and recorded not in (".", ".."):
+            got = _safe(staged_bin / recorded)
+            if got is not None:
+                return got
+
     if not any(p.name in _JS_ENGINE_DATA for p in entries):
         return None
-    elfs = [p for p in entries if _elf_kind(p) in _ELF_STAGE_TYPES]
-    return _pick_js_engine(elfs, staged_bin) if elfs else None
+    named = [p for p in entries if p.name in _JS_ENGINE_NAMES and _safe(p)]
+    if not named:
+        return None
+    return max(named, key=lambda p: p.stat().st_size)
 
 
 def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
@@ -893,6 +972,12 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
                 except ValueError:
                     rel_parts = ()
                 if any(p.endswith("_extracted") for p in rel_parts):
+                    continue
+                # Vendored third-party trees are not the challenge. A chal
+                # that npm-installs Electron ships a real snapshot_blob.bin
+                # + a 180 MB `electron` in node_modules/; staging those made
+                # an ordinary pwn job look like a browser-pwn job.
+                if any(p in _VENDOR_DIRS for p in rel_parts[:-1]):
                     continue
                 if not f.is_file():
                     continue
@@ -941,7 +1026,12 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
         else:
             import tarfile
             with tarfile.open(bundle) as tf:
-                tf.extractall(out_dir)
+                # _safe_extract_tar, not tf.extractall: on 3.12 the default
+                # extraction_filter is still `fully_trusted`, so an absolute
+                # or `../` member escapes work/chal into /data (host-mounted)
+                # or /root/.claude. The hardened helper already existed in
+                # this file and was used by the .deb path only.
+                _safe_extract_tar(tf, out_dir)
     except Exception as e:
         log_fn(f"[autoboot] bundle unpack failed: {e}")
         return []
@@ -990,8 +1080,24 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     # HOST_DATA_DIR for a docker-pull fallback.
     chal_libs_dir = work_dir / ".chal-libs"
     flattened: list[Path] = []
+    engine_libs: list[str] = []
     for src in extracted_elfs:
         if engine is not None and src.parent == engine_dir and src != engine:
+            # A component build (is_component_build=true) puts libv8.so /
+            # libv8_libbase.so beside the shell, and SpiderMonkey ships
+            # libmozglue / libnspr4 — all resolved through rpath $ORIGIN, so
+            # they must land NEXT TO the engine in ./bin/, not in .chal-libs.
+            # Dropping them produced a ./bin/<engine> that dies in the loader:
+            # exactly the unstartable-engine bug this path exists to prevent.
+            if _is_shared_lib(src):
+                try:
+                    dst = staged_bin / src.name
+                    if not dst.exists():
+                        shutil.copy2(src, dst)
+                        dst.chmod(0o755)
+                        engine_libs.append(src.name)
+                except Exception as e:
+                    log_fn(f"[autoboot] engine lib {src.name} failed: {e}")
             continue
         try:
             if _is_shared_lib(src):
@@ -1020,17 +1126,32 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     # the ELF flatten so ./bin/<engine> is self-sufficient.
     if engine is not None:
         staged_siblings: list[str] = []
+        budget = _JS_SIBLING_TOTAL_MAX_BYTES
         for sib in sorted(engine_dir.iterdir()):
+            if sib.is_symlink():
+                continue          # never follow a bundle-supplied symlink
             if not sib.is_file() or _elf_kind(sib) is not None:
                 continue
             if sib.name.startswith("."):
                 continue  # .ninja_deps / .ninja_log — build state, not runtime
             try:
-                if sib.stat().st_size > _JS_SIBLING_MAX_BYTES:
+                size = sib.stat().st_size
+                if size > _JS_SIBLING_MAX_BYTES or size > budget:
                     continue
                 dst = staged_bin / sib.name
-                if not dst.exists() or dst.stat().st_size != sib.stat().st_size:
+                # NEVER clobber a challenge binary flattened from another
+                # directory: this loop runs after the ELF flatten, and a
+                # 7-byte `chall` text file in the engine dir used to silently
+                # replace the real ./bin/chall.
+                if dst.exists() and _elf_kind(dst) is not None:
+                    log_fn(
+                        f"[autoboot] engine sibling {sib.name} NOT staged — "
+                        f"would overwrite the ELF already at ./bin/{sib.name}"
+                    )
+                    continue
+                if not dst.exists() or dst.stat().st_size != size:
                     shutil.copy2(sib, dst)
+                budget -= size
                 staged_siblings.append(sib.name)
             except Exception as e:
                 log_fn(f"[autoboot] engine sibling {sib.name} failed: {e}")
@@ -1039,6 +1160,17 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
                 f"[autoboot] staged engine runtime data into ./bin/: "
                 f"{', '.join(staged_siblings)}"
             )
+        if engine_libs:
+            log_fn(
+                f"[autoboot] staged engine shared libs next to it: "
+                f"{', '.join(sorted(engine_libs))}"
+            )
+        # Record the identification while the tree structure is still intact;
+        # _staged_js_engine reads this back instead of re-deriving.
+        try:
+            (work_dir / _JS_ENGINE_MARKER).write_text(engine.name)
+        except Exception as e:
+            log_fn(f"[autoboot] could not record engine marker: {e}")
 
     if flattened:
         log_fn(
@@ -1057,42 +1189,146 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     return elfs
 
 
-def _split_engine_patch(text: str) -> tuple[list[str], list[str]]:
-    """Split a unified diff into (candidate-bug hunks, hardening files).
+_DIFF_TARGET_RE = re.compile(r"^(?:\+\+\+|---)\s+(?:[ab]/)?(\S+)")
+_D8_PATH_RE = re.compile(r"(?:^|/)src/d8/")
 
-    A JS-engine challenge ships ONE patch that does two unrelated things:
-    it introduces the bug (``src/compiler/``, ``src/objects/``, ``src/
-    builtins/`` …) and it strips d8's built-in escape hatches
-    (``src/d8/`` — os.system / read / load / Realm). The second part is
-    bulk: on job 5cb4ecb67214 the single load-bearing hunk (a two-line
-    ``JSCallTyper`` change) is 1 of 3 files and ~4 % of the diff. Surface
-    the bug side verbatim and reduce the d8 side to a file list.
+# Caps on what CHALLENGE-CONTROLLED bytes may contribute to V8_PREFLIGHT.md.
+_PROBE_MAX_CHARS = 2000
+_PROBE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+_PATCH_MAX_BYTES = 2 * 1024 * 1024      # per patch file read
+_BUG_RENDER_MAX = 8000
+_D8_RENDER_MAX = 4000
+_HARDENING_LIST_MAX = 40                # filenames listed before eliding
+
+
+def _kill_process_group(proc) -> None:
+    """SIGKILL the child's whole process group (it was started with
+    start_new_session, so its pgid == its pid). Falls back to killing the
+    direct child if the group is already gone."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _reap_engine_processes(engine: Path, log_fn) -> int:
+    """SIGKILL any process still running THIS exact engine binary.
+
+    A probe's grandchild that called ``setsid()`` escapes the process group,
+    so killpg cannot reach it and it accumulates in the long-lived worker for
+    the rest of the job. This is a PRECISE sweep — it resolves
+    ``/proc/<pid>/exe`` and kills only processes whose executable IS the
+    engine we just ran, never a name match — and it runs at autoboot, before
+    the agent exists, so nothing legitimate can be running that binary yet.
+    """
+    killed = 0
+    try:
+        target = engine.resolve()
+        me = os.getpid()
+    except Exception:
+        return 0
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == me:
+            continue
+        try:
+            if Path(f"/proc/{pid}/exe").resolve() != target:
+                continue
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except Exception:
+            continue
+    if killed:
+        log_fn(
+            f"[autoboot] reaped {killed} leftover {engine.name} process(es) "
+            f"from the preflight probes"
+        )
+    return killed
+
+
+def _fence_safe(s: str) -> str:
+    """Neutralise text that would ESCAPE the markdown code fence it is about
+    to be pasted into. V8_PREFLIGHT.md is presented to the agent as "fact,
+    not speculation", so a challenge binary (or a .patch) that prints a
+    closing fence could continue as authoritative prose — prompt injection
+    into the agent's own orientation document."""
+    return s.replace("```", "'''")
+
+
+def _split_engine_patch(text: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Split a unified diff into (candidate-bug chunks, d8-side entries).
+
+    A JS-engine challenge ships ONE patch that does two things: it introduces
+    the bug (``src/compiler/``, ``src/objects/``, ``src/builtins/`` …) and it
+    strips d8's escape hatches (``src/d8/`` — os.system / read / load /
+    Realm). The second part is bulk: on job 5cb4ecb67214 the load-bearing hunk
+    (a two-line ``JSCallTyper`` change) is 1 of 3 files and ~4 % of the diff.
+
+    Returns ``(bug_chunks, [(path, chunk), ...])``. The d8 side keeps its FULL
+    text: "src/d8 is never the bug" is a useful prior, not a fact — a
+    challenge whose bug is a custom builtin added to ``d8.cc`` is a mainstream
+    construction, and the earlier version reduced that patch to a bare
+    filename under a heading that said it was NOT the bug. The caller decides
+    how much to render.
+
+    Record boundaries accepted: ``diff --git``, ``diff --cc`` (merge), quilt
+    ``Index:``, and a bare ``--- `` header (plain ``diff -u`` / ``diff -Naur``
+    output, which has no git line at all — previously the parser produced
+    nothing for those and the caller still logged "split").
     """
     bug: list[str] = []
-    hardening: list[str] = []
+    hardening: list[tuple[str, str]] = []
     current: list[str] = []
     target = ""
 
     def _flush() -> None:
+        nonlocal current, target
         if not current:
             return
         chunk = "\n".join(current)
-        # `src/d8/**` is the shell's own API surface — removing methods
-        # there closes escape hatches, it never IS the bug.
-        if re.search(r"^\+\+\+ b?/?src/d8/", chunk, re.M) or "/src/d8/" in target:
-            hardening.append(target or "(unknown)")
+        # Path evidence from EVERY header line in the chunk, not just `+++`:
+        # a file DELETION (the commonest d8 hardening move) emits
+        # `+++ /dev/null`, which used to send the whole hunk to the bug side.
+        paths = [target] + _DIFF_TARGET_RE.findall(chunk)
+        paths = [p for p in paths if p and p != "/dev/null"]
+        if any(_D8_PATH_RE.search(p) for p in paths):
+            hardening.append((paths[0] if paths else "(unknown)", chunk))
         else:
             bug.append(chunk)
+        current = []
+        target = ""
 
+    saw_git = False
     for line in text.splitlines():
-        if line.startswith("diff --git "):
+        if line.startswith("diff --git ") or line.startswith("diff --cc "):
+            saw_git = True
             _flush()
             current = [line]
-            target = line.split(" b/")[-1] if " b/" in line else line
+            m = _DIFF_TARGET_RE.match("+++ " + line.split()[-1])
+            target = m.group(1) if m else ""
+            continue
+        if line.startswith("Index: "):
+            _flush()
+            current = [line]
+            target = line[len("Index: "):].strip()
+            continue
+        # Bare `--- a/x` opens a record only when no git-style header has been
+        # seen for the current one; inside a git record it is just the header.
+        if line.startswith("--- ") and not current:
+            saw_git = saw_git or False
+            m = _DIFF_TARGET_RE.match(line)
+            current = [line]
+            target = m.group(1) if m else ""
             continue
         if current:
             current.append(line)
     _flush()
+    del saw_git
     return bug, hardening
 
 
@@ -1117,15 +1353,60 @@ def _js_engine_preflight(
     ]
 
     def _probe(label: str, args: list[str], *, timeout: int = 25) -> str:
+        # Capture to a FILE, not a pipe, and poll.
+        #
+        # With stdout=PIPE, communicate() waits for EOF on the pipe — which a
+        # double-forked grandchild keeps open. A hostile "engine" whose direct
+        # child exited in 10 ms still burnt the full timeout (measured: 94 s
+        # across three probes) and then the second communicate() also timed
+        # out, so the captured output was thrown away entirely. Polling
+        # proc.poll() notices the real exit in <=0.1 s, and watching the file's
+        # size bounds how much an engine that prints forever can write to disk.
+        #
+        # Residual, accepted and NOT claimed fixed: a grandchild that calls
+        # setsid() leaves the group and survives the killpg. Killing that
+        # needs a PID namespace; the container is the boundary, and the agent
+        # runs this binary itself minutes later anyway.
+        proc = None
         try:
-            res = subprocess.run(
-                [str(engine), *args],
-                cwd=str(engine.parent), capture_output=True, text=True,
-                timeout=timeout, stdin=subprocess.DEVNULL, check=False,
-            )
-            out = ((res.stdout or "") + (res.stderr or "")).strip()
-            return out[:2000] or f"(no output, rc={res.returncode})"
+            with tempfile.TemporaryFile(mode="w+b") as fh:
+                proc = subprocess.Popen(
+                    [str(engine), *args],
+                    cwd=str(engine.parent), stdout=fh,
+                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                deadline = time.monotonic() + timeout
+                note = ""
+                while True:
+                    rc = proc.poll()
+                    if rc is not None:
+                        break
+                    if time.monotonic() > deadline:
+                        _kill_process_group(proc)
+                        note = f"\n(TIMED OUT after {timeout}s — group killed)"
+                        rc = None
+                        break
+                    try:
+                        if os.fstat(fh.fileno()).st_size > _PROBE_MAX_OUTPUT_BYTES:
+                            _kill_process_group(proc)
+                            note = "\n(output cap hit — killed)"
+                            rc = None
+                            break
+                    except OSError:
+                        pass
+                    time.sleep(0.05)
+                try:
+                    fh.seek(0)
+                    raw = fh.read(_PROBE_MAX_CHARS * 4)
+                except Exception:
+                    raw = b""
+            out = raw.decode("utf-8", errors="replace")[:_PROBE_MAX_CHARS]
+            out = _fence_safe(out.strip() + note)
+            return out or f"(no output, rc={rc})"
         except Exception as e:
+            if proc is not None:
+                _kill_process_group(proc)
             return f"(probe failed: {e})"
         finally:
             del label
@@ -1197,34 +1478,79 @@ def _js_engine_preflight(
             body = cfg.read_text(errors="replace")[:1500]
         except Exception:
             continue
-        md += [f"## Build config — `{cfg.name}`", "```", body.strip(), "```", ""]
+        md += [f"## Build config — `{cfg.name}`", "```",
+               _fence_safe(body.strip()), "```", ""]
+
+    def _render(chunks: list[str], budget: int) -> str:
+        """Join `chunks` under a byte budget and say HONESTLY what was cut —
+        a bare '… (truncated)' let whole files vanish while the heading still
+        claimed the reader had seen the bug side."""
+        kept, used, dropped = [], 0, 0
+        for c in chunks:
+            if used + len(c) > budget and kept:
+                dropped += 1
+                continue
+            kept.append(c[:budget])
+            used += len(c)
+        body = _fence_safe("\n\n".join(kept))
+        if dropped:
+            body += (
+                f"\n\n… {dropped} further file entr"
+                f"{'y' if dropped == 1 else 'ies'} OMITTED for length — "
+                f"read the patch file itself for the rest."
+            )
+        return body
 
     patches = _find((), (".patch", ".diff"))
+    split_ok = 0
     for p in patches:
         try:
-            text = p.read_text(errors="replace")
+            if p.stat().st_size > _PATCH_MAX_BYTES:
+                md += [f"## Patch `{p.name}`",
+                       f"({p.stat().st_size:,} bytes — too large to split here; "
+                       f"read it directly.)", ""]
+                continue
+            # utf-8-sig: a BOM on the first line stopped `diff --git` from
+            # matching, silently dropping the patch's first file entry.
+            text = p.read_text(encoding="utf-8-sig", errors="replace")
         except Exception:
             continue
         bug, hardening = _split_engine_patch(text)
+        if bug or hardening:
+            split_ok += 1
         md += [f"## Patch `{p.name}` — split by intent", ""]
-        if hardening:
-            md += [
-                f"Attack-surface removal (NOT the bug), {len(hardening)} file(s): "
-                + ", ".join(f"`{h}`" for h in hardening),
-                "",
-            ]
         if bug:
-            joined = "\n\n".join(bug)
             md += [
                 "**CANDIDATE BUG — the engine-internals side of the patch. "
-                "This is what you are meant to exploit:**",
+                "This is the most likely thing you are meant to exploit:**",
+                "```diff", _render(bug, _BUG_RENDER_MAX), "```", "",
+            ]
+        if hardening:
+            names = [h[0] for h in hardening]
+            shown = names[:_HARDENING_LIST_MAX]
+            md += [
+                f"`src/d8/` side, {len(names)} file(s): "
+                + ", ".join(f"`{n}`" for n in shown)
+                + ("" if len(names) == len(shown)
+                   else f" … +{len(names) - len(shown)} more"),
+                "",
+                "This is USUALLY attack-surface removal (deleting `os.system`, "
+                "`read`, `load`, `Realm`) rather than the bug — but NOT always: "
+                "a challenge whose bug is a custom builtin ADDED to `d8.cc` is a "
+                "standard construction. Read it, especially if the bug side "
+                "above is empty or looks inert:",
                 "```diff",
-                joined[:8000] + ("\n… (truncated)" if len(joined) > 8000 else ""),
-                "```",
+                _render([h[1] for h in hardening],
+                        _D8_RENDER_MAX if bug else _BUG_RENDER_MAX),
+                "```", "",
+            ]
+        if not bug and not hardening:
+            md += [
+                "(this file did not parse as a unified diff — read it directly)",
                 "",
             ]
-        else:
-            md += ["(no engine-internals hunk found — read the full patch)", ""]
+
+    _reap_engine_processes(engine, log_fn)
 
     out = work_dir / "V8_PREFLIGHT.md"
     try:
@@ -1234,7 +1560,7 @@ def _js_engine_preflight(
         return None
     log_fn(
         f"[autoboot] wrote V8_PREFLIGHT.md ({out.stat().st_size} B; "
-        f"{len(patches)} patch file(s) split)"
+        f"{split_ok}/{len(patches)} patch file(s) split)"
     )
     return out
 
@@ -1763,6 +2089,7 @@ async def _run_agent(
                 chal_unpacked=chal_unpacked,
                 custom_libs=custom_libs,
                 libc_version=_read_libc_version(work_dir),
+                js_engine=js_engine is not None,
             )
             log_line(job_id, "[pre-recon] spawning static-triage recon subagent")
             recon_reply = await run_pre_recon(
