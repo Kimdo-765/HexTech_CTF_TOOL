@@ -3869,6 +3869,156 @@ def docker_challenge_block(job_id: str) -> str:
     )
 
 
+_JS_ENGINE_ANCHORS = ("snapshot_blob.bin",)
+_JS_ENGINE_SHELLS = ("d8", "js", "jsc", "js_shell", "chakra", "ch")
+
+
+def js_engine_block(job_id: str) -> str:
+    """Prompt stanza injected when the bundle ships a PREBUILT JS ENGINE
+    (d8 / SpiderMonkey js / JSC) — i.e. a browser-pwn challenge.
+
+    Detection is deterministic and anchored on ``snapshot_blob.bin`` sitting
+    next to an executable, not on the binary's name: the file is essentially
+    never present in an ordinary chal, so the block cannot fire on a normal
+    pwn/web job, while a renamed engine shell still resolves.
+
+    The block is pure GUIDANCE (no suppression, no tool invocation), so it is
+    safe to wire into any module. The suppressive half — skipping
+    chal-libc-fix / ghiant, staging the engine WITH its runtime data — lives
+    in the pwn autoboot, which owns ``./bin/``.
+
+    Everything here is engine-level and version-agnostic on purpose: field
+    NAMES and the version windows they apply to, never byte offsets, and no
+    reference to any particular challenge's patched builtin.
+    """
+    job_root = JOBS_DIR / job_id
+    _noise = {"work", "__pycache__", ".git", ".ghidra_proj", "decomp",
+              "node_modules", ".venv", "tmp", ".scratch", "obj"}
+    engine_rel: str | None = None
+    for top in (".", "bin", "src"):
+        base = job_root if top == "." else job_root / top
+        if not base.is_dir():
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(base):
+                dirnames[:] = [d for d in dirnames if d not in _noise]
+                if not any(a in filenames for a in _JS_ENGINE_ANCHORS):
+                    continue
+                here = Path(dirpath)
+                names = sorted(filenames)
+                shells = [n for n in names if n in _JS_ENGINE_SHELLS]
+                if not shells:
+                    # No recognisable name — take the largest executable file
+                    # sitting with the snapshot blob.
+                    execs = [
+                        n for n in names
+                        if os.access(here / n, os.X_OK) and (here / n).is_file()
+                    ]
+                    shells = sorted(
+                        execs,
+                        key=lambda n: (here / n).stat().st_size, reverse=True,
+                    )[:1]
+                if shells:
+                    engine_rel = (here / shells[0]).relative_to(
+                        job_root).as_posix()
+                    break
+        except OSError:
+            continue
+        if engine_rel:
+            break
+    if not engine_rel:
+        return ""
+
+    preflight = ""
+    if (job_root / "work" / "V8_PREFLIGHT.md").is_file():
+        preflight = (
+            "A deterministic preflight — version, the globals this build "
+            "actually exposes, whether --allow-natives-syntax works, the build "
+            "config, and the patch SPLIT into 'candidate bug' vs 'd8 "
+            "attack-surface removal' — is already in `./V8_PREFLIGHT.md`. "
+            "READ IT FIRST; it is fact, not speculation.\n"
+        )
+
+    return (
+        "JS-ENGINE (BROWSER PWN) CHALLENGE — auto-detected\n"
+        "--------------------------------------------------\n"
+        f"Engine shell: `{engine_rel}` (relative to /data/jobs/$JOB_ID).\n"
+        "Its runtime data lives in the SAME directory: the engine resolves "
+        "`snapshot_blob.bin` relative to argv[0]'s DIRECTORY, so a copy of the "
+        "binary on its own will NOT start. Run it in place, or copy the whole "
+        "directory.\n"
+        + preflight +
+        "\n"
+        "STAGE MAP — name the stage you are on in every status line; "
+        "conflating them is the classic failure mode here:\n"
+        "  1. TRIGGER    get the patched path to actually RUN in optimized code\n"
+        "  2. PRIMITIVE  turn the divergence into an OOB read/write on the JS heap\n"
+        "  3. addrof / fakeobj -> arbitrary R/W INSIDE the sandbox cage\n"
+        "  4. ESCAPE     cage-relative R/W is NOT code execution when "
+        "v8_enable_sandbox=true; you need a RAW pointer\n"
+        "  5. RCE        shellcode/ROP -> run whatever reads the flag\n"
+        "\n"
+        "STAGE 1 — traps that look like 'the bug does not reproduce':\n"
+        "- A patched `JSCallTyper` case can be INERT. `JSCallReducer` inlines "
+        "many builtins into machine-level nodes BEFORE TyperPhase, so the "
+        "patched case never executes. Force the call site to "
+        "`SpeculationMode::kDisallowSpeculation`: warm -> optimize -> call ONCE "
+        "with a non-number argument (a string, or `{valueOf(){...}}`) -> re-warm "
+        "-> re-optimize. Confirm with `--trace-turbo-reduction`: you want the "
+        "node reduced 'by reducer Typer', not 'by reducer JSCallReducer'.\n"
+        "- `Math.min` / `Math.max` LAUNDER NaN — minsd/maxsd return the non-NaN "
+        "operand, so a min/max clamp silently destroys a NaN-poisoned value "
+        "while the type still looks wrong. Clamp with a ternary "
+        "(`v = v > 3 ? 3 : v`) to keep the value in the register.\n"
+        "- `|0` and `>>>0` are TRUNCATING uses -> `TruncateFloat64ToWord32` "
+        "(NaN -> 0). They never produce 0x80000000; only a NON-truncating "
+        "Signed32 consumer reaches the unchecked `ChangeFloat64ToInt32`.\n"
+        "- PROVE the divergence before building on it: under optimization, "
+        "`v === v` folding to `true` while the runtime value is NaN is direct "
+        "evidence the typer is wrong.\n"
+        "\n"
+        "STAGE 2 — CheckBounds is HARDENED in every modern build (aborting "
+        "bounds checks). A typer range that 'proves' the index in-bounds no "
+        "longer deletes the check — it deopts with `reason: out of bounds`. If "
+        "you see that, stop re-rolling the same shape. Live paths instead:\n"
+        "- `LOAD_IGNORE_OUT_OF_BOUNDS` / `STORE_IGNORE_OUT_OF_BOUNDS` "
+        "element-access feedback: a SEPARATE `NumberLessThan(index, length)` is "
+        "emitted and IS constant-folded by the bogus type. The IC must have SEEN "
+        "an OOB access before optimization for that feedback to exist.\n"
+        "- induction-variable phi typing (`TypeInductionVariablePhi`).\n"
+        "- a const-folded length (in-function array literal) vs a global whose "
+        "length is not const-folded — only the former folds the compare.\n"
+        "\n"
+        "STAGE 4 — WHERE the raw pointers live depends on the ENGINE VERSION:\n"
+        "- sandbox disabled: no escape stage at all.\n"
+        "- V8 ~11.0 up to ~12.2: `WasmInstanceObject` still holds RAW pointers "
+        "(`jump_table_start`, `memory_start`) INSIDE the cage -> spray shellcode "
+        "as `i64.const` immediates in a wasm function, overwrite "
+        "`jump_table_start`, then call the export.\n"
+        "- V8 >= ~12.2: those fields moved to `WasmTrustedInstanceData` outside "
+        "the cage -> go through the trusted-pointer / code-pointer tables.\n"
+        "DERIVE THE OFFSETS EMPIRICALLY for the build in front of you "
+        "(`%DebugPrint`, gdb via `%SystemBreak`, or allocate a "
+        "`WebAssembly.Memory` of known size and match the pointer). NEVER "
+        "hardcode an offset from a writeup — they move between minor versions, "
+        "and a stale offset reads as 'the technique does not work'.\n"
+        "\n"
+        "WORKFLOW\n"
+        "- Triage LOCALLY with `--allow-natives-syntax` (`%DebugPrint`, "
+        "`%OptimizeFunctionOnNextCall`, `%SystemBreak`) plus `--trace-deopt`, "
+        "`--trace-turbo-reduction`, `--print-opt-code`.\n"
+        "- The REMOTE service almost never passes that flag. Every primitive "
+        "must be re-proven with plain warm-up loops (~0x20000 iterations) "
+        "before it goes into the shipped exploit.\n"
+        "- Read the service's runner script FIRST: these challenges usually cap "
+        "the payload size and terminate input on a sentinel. A 4 KB exploit is "
+        "worthless against a 2 KB cap — find the cap before you write, not "
+        "after.\n"
+        "- Deliverable is still `./exploit.py` (pwntools): connect, send the JS, "
+        "print `FLAG_CANDIDATE: <flag>`."
+    )
+
+
 def reap_chal_containers(job_id: str, log_fn=None, *, reason: str = "") -> int:
     """Tear down any LOCAL challenge containers/networks a job spun up.
 

@@ -19,6 +19,7 @@ from modules._common import (
     make_main_session_options,
     load_cached_pre_recon,
     module_autoboot,
+    js_engine_block,
     prior_work_dirs,
     read_meta,
     resolve_effort,
@@ -768,6 +769,94 @@ def _is_shared_lib(p: Path) -> bool:
     )
 
 
+# ELF e_type values worth staging as "a binary the agent might run":
+# ET_EXEC (2) and ET_DYN (3, PIE + shared objects).
+#
+# ET_REL (1) is a relocatable object — a challenge that ships its BUILD
+# TREE carries thousands (job 5cb4ecb67214's V8 bundle: 1899 `.o` under
+# deploy/out/obj/ vs 5 real binaries), and flattening those into ./bin/
+# buries the challenge and makes the largest-ELF pick meaningless. But
+# ET_REL is NOT dead weight in general: a Linux kernel MODULE (`.ko`) is
+# ET_REL and IS the challenge in a kernel-pwn job. So drop ET_REL only on
+# the compiler-output suffixes, never on the type alone.
+_ELF_STAGE_TYPES = (2, 3)
+_ELF_BUILD_OBJECT_SUFFIXES = (".o", ".obj", ".lo", ".a", ".la")
+
+
+def _elf_kind(p: Path) -> int | None:
+    """ELF ``e_type`` of `p`, or None when it isn't an ELF.
+
+    Reads 18 bytes. The previous magic check was ``f.read_bytes()[:4]``,
+    which pulled EVERY candidate file fully into memory to look at four
+    bytes — 244 MB across 1904 files on the V8 bundle above.
+    """
+    try:
+        with p.open("rb") as fh:
+            head = fh.read(18)
+    except Exception:
+        return None
+    if len(head) < 18 or head[:4] != b"\x7fELF":
+        return None
+    # EI_DATA (byte 5): 1 = little-endian, 2 = big-endian.
+    endian = "big" if head[5] == 2 else "little"
+    return int.from_bytes(head[16:18], endian)
+
+
+# --- JS-engine (browser-pwn) bundles ---------------------------------------
+# A JS-engine challenge ships a PREBUILT engine shell (d8 / js / jsc) whose
+# runtime data sits NEXT TO the binary. d8 resolves `snapshot_blob.bin`
+# relative to the argv[0] DIRECTORY, so the plain ELF-only flatten yields a
+# ./bin/d8 that cannot start at all:
+#     Failed to open startup resource './snapshot_blob.bin'.
+# (verified against job 5cb4ecb67214's bundle — a bare copy dies, a copy
+# WITH its siblings runs). Detection anchors on that data file rather than
+# on the binary's name, so a renamed shell still resolves.
+_JS_ENGINE_DATA = ("snapshot_blob.bin", "icudtl.dat")
+_JS_ENGINE_NAMES = ("d8", "js", "jsc", "js_shell", "chakra", "ch", "spidermonkey")
+# Build tools that live in the same out/ dir as the engine AND are bigger
+# than it (mksnapshot 49 MB vs d8 37 MB) — the largest-ELF heuristic picks
+# them, and then every downstream step analyses the wrong binary.
+_JS_ENGINE_BUILD_TOOLS = (
+    "mksnapshot", "torque", "gen-regexp-special-case",
+    "bytecode_builtins_list_generator", "v8_build_config",
+)
+# Cap on a single non-ELF sibling copied next to the engine. icudtl.dat is
+# ~10 MB; anything far beyond that is build spoil, not runtime data.
+_JS_SIBLING_MAX_BYTES = 48 * 1024 * 1024
+
+
+def _js_engine_dir(elfs: list[Path]) -> Path | None:
+    """Directory of a JS-engine build among `elfs`, or None."""
+    for e in elfs:
+        d = e.parent
+        if any((d / n).is_file() for n in _JS_ENGINE_DATA):
+            return d
+    return None
+
+
+def _pick_js_engine(elfs: list[Path], engine_dir: Path) -> Path | None:
+    """The engine shell inside `engine_dir` — by name when recognisable,
+    else the largest binary that is NOT a known build tool."""
+    same = [e for e in elfs if e.parent == engine_dir]
+    named = [e for e in same if e.name in _JS_ENGINE_NAMES]
+    pool = named or [e for e in same if e.name not in _JS_ENGINE_BUILD_TOOLS]
+    return max(pool, key=lambda p: p.stat().st_size) if pool else None
+
+
+def _staged_js_engine(staged_bin: Path) -> Path | None:
+    """The JS-engine shell already staged in ``./bin/``, or None. Used
+    post-flatten (and for a hand-uploaded engine dir) to suppress the
+    ELF-shaped autoboot steps that are meaningless for an engine build."""
+    try:
+        entries = [p for p in staged_bin.iterdir() if p.is_file()]
+    except Exception:
+        return None
+    if not any(p.name in _JS_ENGINE_DATA for p in entries):
+        return None
+    elfs = [p for p in entries if _elf_kind(p) in _ELF_STAGE_TYPES]
+    return _pick_js_engine(elfs, staged_bin) if elfs else None
+
+
 def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     """Find ELF binaries in `staged_bin`. If only zip/tar bundles are
     present (the standard Dreamhack / HackTheBox shape), unzip the first
@@ -783,6 +872,9 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     Returns the list of ELFs found at their final ``staged_bin`` paths.
     """
     elfs: list[Path] = []
+    # Mutable counter so the nested _scan can report how many relocatable
+    # object files it dropped (a build-tree bundle drops thousands).
+    skipped_rel = [0]
 
     def _scan(d: Path) -> list[Path]:
         out: list[Path] = []
@@ -804,12 +896,14 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
                     continue
                 if not f.is_file():
                     continue
-                try:
-                    head = f.read_bytes()[:4]
-                except Exception:
+                kind = _elf_kind(f)
+                if kind is None:
                     continue
-                if head == b"\x7fELF":
-                    out.append(f)
+                if (kind not in _ELF_STAGE_TYPES
+                        and f.suffix.lower() in _ELF_BUILD_OBJECT_SUFFIXES):
+                    skipped_rel[0] += 1
+                    continue
+                out.append(f)
         except Exception as e:
             log_fn(f"[autoboot] scan {d} failed: {e}")
         return out
@@ -862,9 +956,32 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
         log_fn(f"[autoboot] could not remove bundle: {e}")
 
     extracted_elfs = _scan(out_dir)
+    if skipped_rel[0]:
+        log_fn(
+            f"[autoboot] skipped {skipped_rel[0]} relocatable object file(s) "
+            f"(.o / ET_REL) — build tree, not challenge binaries"
+        )
     if not extracted_elfs:
         log_fn(f"[autoboot] bundle {bundle.name} contained no ELF")
         return []
+
+    # A JS-engine build (d8 / js / jsc + snapshot_blob.bin) is staged as a
+    # UNIT: the engine plus the non-ELF siblings it loads at startup, and
+    # NONE of the co-located build tools. Flattening the engine alone
+    # produces a ./bin/d8 that cannot start (see _JS_ENGINE_DATA).
+    engine_dir = _js_engine_dir(extracted_elfs)
+    engine = _pick_js_engine(extracted_elfs, engine_dir) if engine_dir else None
+    if engine is not None:
+        dropped = [
+            e.name for e in extracted_elfs
+            if e.parent == engine_dir and e != engine
+        ]
+        log_fn(
+            f"[autoboot] JS-engine build detected: {engine.name} in "
+            f"{engine_dir.name}/"
+            + (f" — not staging co-located {', '.join(sorted(dropped))}"
+               if dropped else "")
+        )
 
     # Split into challenge binaries (non-.so) and shared libs. Flatten
     # the binaries into staged_bin so the prompt's ./bin/<name> path
@@ -874,6 +991,8 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
     chal_libs_dir = work_dir / ".chal-libs"
     flattened: list[Path] = []
     for src in extracted_elfs:
+        if engine is not None and src.parent == engine_dir and src != engine:
+            continue
         try:
             if _is_shared_lib(src):
                 chal_libs_dir.mkdir(parents=True, exist_ok=True)
@@ -897,6 +1016,30 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
         except Exception as e:
             log_fn(f"[autoboot] flatten {src.name} failed: {e}")
 
+    # Runtime data the engine loads from its OWN directory. Copied AFTER
+    # the ELF flatten so ./bin/<engine> is self-sufficient.
+    if engine is not None:
+        staged_siblings: list[str] = []
+        for sib in sorted(engine_dir.iterdir()):
+            if not sib.is_file() or _elf_kind(sib) is not None:
+                continue
+            if sib.name.startswith("."):
+                continue  # .ninja_deps / .ninja_log — build state, not runtime
+            try:
+                if sib.stat().st_size > _JS_SIBLING_MAX_BYTES:
+                    continue
+                dst = staged_bin / sib.name
+                if not dst.exists() or dst.stat().st_size != sib.stat().st_size:
+                    shutil.copy2(sib, dst)
+                staged_siblings.append(sib.name)
+            except Exception as e:
+                log_fn(f"[autoboot] engine sibling {sib.name} failed: {e}")
+        if staged_siblings:
+            log_fn(
+                f"[autoboot] staged engine runtime data into ./bin/: "
+                f"{', '.join(staged_siblings)}"
+            )
+
     if flattened:
         log_fn(
             f"[autoboot] flattened {len(flattened)} binary/binaries into "
@@ -912,6 +1055,188 @@ def _find_elf_or_unzip(staged_bin: Path, work_dir: Path, log_fn) -> list[Path]:
 
     elfs.extend(flattened or extracted_elfs)
     return elfs
+
+
+def _split_engine_patch(text: str) -> tuple[list[str], list[str]]:
+    """Split a unified diff into (candidate-bug hunks, hardening files).
+
+    A JS-engine challenge ships ONE patch that does two unrelated things:
+    it introduces the bug (``src/compiler/``, ``src/objects/``, ``src/
+    builtins/`` …) and it strips d8's built-in escape hatches
+    (``src/d8/`` — os.system / read / load / Realm). The second part is
+    bulk: on job 5cb4ecb67214 the single load-bearing hunk (a two-line
+    ``JSCallTyper`` change) is 1 of 3 files and ~4 % of the diff. Surface
+    the bug side verbatim and reduce the d8 side to a file list.
+    """
+    bug: list[str] = []
+    hardening: list[str] = []
+    current: list[str] = []
+    target = ""
+
+    def _flush() -> None:
+        if not current:
+            return
+        chunk = "\n".join(current)
+        # `src/d8/**` is the shell's own API surface — removing methods
+        # there closes escape hatches, it never IS the bug.
+        if re.search(r"^\+\+\+ b?/?src/d8/", chunk, re.M) or "/src/d8/" in target:
+            hardening.append(target or "(unknown)")
+        else:
+            bug.append(chunk)
+
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            _flush()
+            current = [line]
+            target = line.split(" b/")[-1] if " b/" in line else line
+            continue
+        if current:
+            current.append(line)
+    _flush()
+    return bug, hardening
+
+
+def _js_engine_preflight(
+    engine: Path, work_dir: Path, search_root: Path | None, log_fn,
+) -> Path | None:
+    """Deterministic, no-LLM orientation for a JS-engine challenge →
+    ``<work_dir>/V8_PREFLIGHT.md``.
+
+    Every fact here cost the agent a turn on job 5cb4ecb67214: the engine
+    was not executable (zip upload drops the mode bits), ``--version`` and
+    ``--print-all-flags`` are not d8 flags, and the globals inventory (what
+    the patch REMOVED) plus the bug-vs-hardening patch split decide the
+    whole approach. Best-effort — any probe that fails is reported as such
+    and never blocks the run.
+    """
+    md: list[str] = [
+        "# JS-engine preflight (deterministic — no model in the loop)",
+        "",
+        f"Engine: `./bin/{engine.name}`  ({engine.stat().st_size:,} bytes)",
+        "",
+    ]
+
+    def _probe(label: str, args: list[str], *, timeout: int = 25) -> str:
+        try:
+            res = subprocess.run(
+                [str(engine), *args],
+                cwd=str(engine.parent), capture_output=True, text=True,
+                timeout=timeout, stdin=subprocess.DEVNULL, check=False,
+            )
+            out = ((res.stdout or "") + (res.stderr or "")).strip()
+            return out[:2000] or f"(no output, rc={res.returncode})"
+        except Exception as e:
+            return f"(probe failed: {e})"
+        finally:
+            del label
+
+    try:
+        engine.chmod(0o755)
+    except Exception:
+        pass
+
+    md += [
+        "## Version",
+        "```",
+        _probe("version", ["-e", "print(version())"]),
+        "```",
+        "",
+        "## Globals actually exposed by THIS build",
+        "The patch usually DELETES d8 helpers (`read`, `load`, `readline`,",
+        "`writeFile`, `os.*`, `Realm`) so the trivial file-read / command-exec",
+        "escapes are closed. Anything missing here is closed; anything present",
+        "(`WebAssembly`, `Worker`, `SharedArrayBuffer`, `Atomics`) is in scope.",
+        "```",
+        _probe("globals", [
+            "-e",
+            "print(Object.getOwnPropertyNames(globalThis).sort().join(', '))",
+        ]),
+        "```",
+        "",
+        "## --allow-natives-syntax (LOCAL triage only)",
+        "If this prints `ok`, %DebugPrint / %OptimizeFunctionOnNextCall /",
+        "%SystemBreak work LOCALLY. The REMOTE service almost never passes the",
+        "flag — every primitive must be re-derived with plain warm-up loops",
+        "before it goes into the exploit.",
+        "```",
+        _probe("natives", ["--allow-natives-syntax", "-e",
+                           "function f(){}; %PrepareFunctionForOptimization(f);"
+                           " %OptimizeFunctionOnNextCall(f); f(); print('ok')"]),
+        "```",
+        "",
+    ]
+
+    roots = [r for r in (search_root, work_dir / "chal") if r and r.is_dir()]
+    # The same file is routinely reachable through two roots (./src/ holds
+    # the operator's upload, ./work/chal/ the unpacked copy). Dedupe on
+    # (name, size) so the report doesn't print a patch twice.
+    seen: set[tuple[str, int]] = set()
+
+    def _find(names: tuple[str, ...], suffixes: tuple[str, ...] = ()) -> list[Path]:
+        hits: list[Path] = []
+        for root in roots:
+            try:
+                for f in root.rglob("*"):
+                    if not f.is_file():
+                        continue
+                    if not (f.name in names or (
+                        suffixes and f.name.endswith(suffixes)
+                    )):
+                        continue
+                    key = (f.name, f.stat().st_size)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hits.append(f)
+            except Exception:
+                continue
+        return hits[:4]
+
+    for cfg in _find(("args.gn", "v8_build_config.json")):
+        try:
+            body = cfg.read_text(errors="replace")[:1500]
+        except Exception:
+            continue
+        md += [f"## Build config — `{cfg.name}`", "```", body.strip(), "```", ""]
+
+    patches = _find((), (".patch", ".diff"))
+    for p in patches:
+        try:
+            text = p.read_text(errors="replace")
+        except Exception:
+            continue
+        bug, hardening = _split_engine_patch(text)
+        md += [f"## Patch `{p.name}` — split by intent", ""]
+        if hardening:
+            md += [
+                f"Attack-surface removal (NOT the bug), {len(hardening)} file(s): "
+                + ", ".join(f"`{h}`" for h in hardening),
+                "",
+            ]
+        if bug:
+            joined = "\n\n".join(bug)
+            md += [
+                "**CANDIDATE BUG — the engine-internals side of the patch. "
+                "This is what you are meant to exploit:**",
+                "```diff",
+                joined[:8000] + ("\n… (truncated)" if len(joined) > 8000 else ""),
+                "```",
+                "",
+            ]
+        else:
+            md += ["(no engine-internals hunk found — read the full patch)", ""]
+
+    out = work_dir / "V8_PREFLIGHT.md"
+    try:
+        out.write_text("\n".join(md))
+    except Exception as e:
+        log_fn(f"[autoboot] V8_PREFLIGHT.md write failed: {e}")
+        return None
+    log_fn(
+        f"[autoboot] wrote V8_PREFLIGHT.md ({out.stat().st_size} B; "
+        f"{len(patches)} patch file(s) split)"
+    )
+    return out
 
 
 def _libc_version(libc: Path | None) -> str | None:
@@ -1191,6 +1516,19 @@ def _autobootstrap_libc(
     if not elf_candidates:
         log_fn("[autoboot] no ELF found in ./bin/ — skipping chal-libc-fix")
         return (None, None)
+    # A JS-engine shell is a self-contained multi-hundred-MB C++ build, not
+    # a chal-authored ELF: patchelf'ing it against a bundled glibc is
+    # meaningless (it ships no libc), the libc_profile heap catalogue does
+    # not apply, and `ghiant` on a 37 MB binary exhausts the decompiler's
+    # 4 GB / 900 s budget without producing anything usable. Hand the engine
+    # back as the canonical binary and skip the ELF-shaped pre-bake.
+    engine = _staged_js_engine(staged_bin)
+    if engine is not None:
+        log_fn(
+            f"[autoboot] JS-engine shell ./bin/{engine.name} — skipping "
+            f"chal-libc-fix + ghiant pre-bake (see V8_PREFLIGHT.md)"
+        )
+        return (None, engine.name)
     # Pick the largest ELF inside ./bin/ as the canonical chal — small
     # auxiliary binaries (helpers, libsalloc-style wrappers) sort below
     # the real challenge by size.
@@ -1316,6 +1654,17 @@ async def _run_agent(
     # path (observed live on 5963af004fdc).
     effective_binary_name = autoboot_elf_name or binary_name
     chal_unpacked = (work_dir / "chal").is_dir()
+
+    # JS-engine challenge → deterministic preflight before turn 1.
+    js_engine = _staged_js_engine(staged_bin)
+    if js_engine is not None:
+        try:
+            _js_engine_preflight(
+                js_engine, work_dir, job_dir(job_id) / "src",
+                lambda s: log_line(job_id, s),
+            )
+        except Exception as e:
+            log_line(job_id, f"[autoboot] JS-engine preflight failed: {e}")
     # Detect chal-author-supplied .so files in .chal-libs/. When present
     # they almost always contain the primitive — surface to pre-recon
     # so the static-triage prompt explicitly asks recon to enumerate
@@ -1584,6 +1933,12 @@ async def _run_agent(
     _mt_block = build_target_directive(target, read_meta(job_id).get("target_urls"))
     if _mt_block:
         user_prompt = user_prompt + "\n\n" + _mt_block
+    # Browser-pwn: a prebuilt JS engine in the bundle makes the whole
+    # ELF/ROP/heap playbook above inapplicable. Returns "" for every
+    # ordinary pwn job (anchored on snapshot_blob.bin).
+    _js_block = js_engine_block(job_id)
+    if _js_block:
+        user_prompt = user_prompt + "\n\n" + _js_block
 
     if recon_reply:
         user_prompt = (

@@ -23,6 +23,7 @@ from modules._common import (
     REPORT_SCHEMA_WEB,
     load_cached_pre_recon,
     module_autoboot,
+    js_engine_block,
     prior_work_dirs,
     read_meta,
     resolve_effort,
@@ -235,6 +236,13 @@ async def _run_agent(
     _mt_block = build_target_directive(target_url, read_meta(job_id).get("target_urls"))
     if _mt_block:
         user_prompt = user_prompt + "\n\n" + _mt_block
+    # A "browser / V8 sandbox escape" chal is routinely submitted to web
+    # (job 5cb4ecb67214) — it is served over TCP and has nothing to do with
+    # HTTP. Inject the engine playbook so the module the operator picked
+    # does not decide whether the guidance arrives. "" for real web jobs.
+    _js_block = js_engine_block(job_id)
+    if _js_block:
+        user_prompt = user_prompt + "\n\n" + _js_block
 
     # Auto-pre-recon — recon maps the source tree (routes, sinks, auth)
     # before main's first turn so main starts with a route inventory
