@@ -3899,7 +3899,14 @@ def js_engine_block(job_id: str) -> str:
     _noise = {"work", "__pycache__", ".git", ".ghidra_proj", "decomp",
               "node_modules", ".venv", "tmp", ".scratch", "obj"}
     engine_rel: str | None = None
-    for top in (".", "bin", "src"):
+    # `work/bin` is explicit because `work` is in _noise: the pwn module STAGES
+    # the engine there (autoboot unpacks the upload into work/chal/ and flattens
+    # the engine + its runtime data into work/bin/), so a pwn job that uploaded
+    # a .zip — the exact case this feature exists for — has NOTHING matching
+    # under ./bin/ or ./src/ and the block silently returned "". Caught by a live
+    # smoke test, not by review. Only that one subtree is opened up; the rest of
+    # work/ (scratch, tmp, decomp, .ghidra_proj) stays pruned.
+    for top in (".", "bin", "src", "work/bin"):
         base = job_root if top == "." else job_root / top
         if not base.is_dir():
             continue
@@ -3948,10 +3955,29 @@ def js_engine_block(job_id: str) -> str:
             "READ IT FIRST; it is fact, not speculation.\n"
         )
 
+    # ABSOLUTE path, mirroring docker_challenge_block: every module's agent runs
+    # with cwd=<job>/work, so a job-root-relative path ("src/extracted/...")
+    # does NOT resolve from where the agent actually stands. When the engine was
+    # staged by pwn autoboot the ./bin/ shorthand does work — offer both.
+    engine_abs = f"/data/jobs/$JOB_ID/{engine_rel}"
+    shorthand = ""
+    if engine_rel.startswith("work/"):
+        shorthand = (
+            f"  From your cwd that is `./{engine_rel[len('work/'):]}`.\n"
+            "NOTE — autoboot deliberately SKIPPED chal-libc-fix and the Ghidra "
+            "pre-bake for this job, so `./prob`, `./.chal-libs/libc_profile.json` "
+            "and `./decomp/` DO NOT EXIST and the libc/heap/ROP parts of your "
+            "instructions do not apply. The engine ships no chal libc, and "
+            "decompiling a multi-MB engine build is not how these are solved. Do "
+            "not go looking for those files, and do not run `ghiant` on the "
+            "engine.\n"
+        )
+
     return (
         "JS-ENGINE (BROWSER PWN) CHALLENGE — auto-detected\n"
         "--------------------------------------------------\n"
-        f"Engine shell: `{engine_rel}` (relative to /data/jobs/$JOB_ID).\n"
+        f"Engine shell: `{engine_abs}`\n"
+        + shorthand +
         "Its runtime data lives in the SAME directory: the engine resolves "
         "`snapshot_blob.bin` relative to argv[0]'s DIRECTORY, so a copy of the "
         "binary on its own will NOT start. Run it in place, or copy the whole "
