@@ -140,6 +140,34 @@ for c in $(docker ps -aq --filter "label=hextech_ctf_tool_role=tunnel" 2>/dev/nu
   docker rm -f "$c" >/dev/null 2>&1 || true
 done
 
+# --- core-dump sink guard (WSL) --------------------------------------------
+# Deliberately CRASHING the challenge binary is a normal method here: a V8 job
+# SIGTRAPs d8 dozens of times probing aborting bounds checks, kernel-pwn jobs
+# panic qemu, and every fuzzing sweep segfaults something. On WSL the default
+#     /proc/sys/kernel/core_pattern = |/wsl-capture-crash %t %E %p %s
+# pipes EVERY one of those to %TEMP%\wsl-crashes on the WINDOWS C: DRIVE. d8
+# reserves a multi-GB pointer-compression cage, so the dumps are enormous:
+# 2026-07-28, twelve d8 crashes from two jobs wrote 423 GB in a single day and
+# took C: down to 1.5 GB free. The container already sets RLIMIT_CORE=0, but
+# the kernel IGNORES RLIMIT_CORE when core_pattern is a PIPE — so ulimit does
+# not save you. A non-pipe pattern makes the limit effective again and no dump
+# is written at all. Warn only: this is a HOST sysctl and start.sh must not
+# need root.
+if [ -r /proc/sys/kernel/core_pattern ]; then
+  CP="$(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo)"
+  case "$CP" in
+    \|*)
+      warn "core_pattern is a PIPE ($CP)"
+      warn "  Crashing challenge binaries (d8 SIGTRAP, qemu panics, fuzzing)"
+      warn "  will be dumped by the host — on WSL that lands on the Windows"
+      warn "  C: drive and can reach hundreds of GB in a day. Fix once:"
+      warn "    echo 'kernel.core_pattern=core' | sudo tee /etc/sysctl.d/99-no-crash-dump.conf"
+      warn "    sudo sysctl -p /etc/sysctl.d/99-no-crash-dump.conf"
+      ;;
+    *) ok "core_pattern=$CP (not a pipe — container RLIMIT_CORE=0 is effective)" ;;
+  esac
+fi
+
 # --- KVM passthrough for pwn KERNEL challenges (host-conditional) -----------
 # The worker's qemu-system-x86_64 can boot a challenge's own kernel under KVM
 # only if the host's /dev/kvm is passed into the container. A hard `devices:`
