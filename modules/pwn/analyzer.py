@@ -862,6 +862,20 @@ _JS_ENGINE_BUILD_TOOLS = (
     "mksnapshot", "torque", "gen-regexp-special-case",
     "bytecode_builtins_list_generator", "v8_build_config",
 )
+# A V8 out/ dir also holds test binaries that DWARF the shell — cctest and
+# unittests are ~7 MB against a 158 KB stripped d8 — so "largest ELF that is
+# not one of five hard-coded names" handed the title to a test runner
+# whenever the shell had been renamed. Substring markers instead of an
+# ever-growing exact-name list.
+_JS_ENGINE_TOOL_MARKERS = (
+    "test", "fuzz", "bench", "gen", "mkgrokdump", "snapshot", "torque",
+)
+
+
+def _looks_like_build_tool(name: str) -> bool:
+    n = name.lower()
+    return (n in _JS_ENGINE_BUILD_TOOLS
+            or any(m in n for m in _JS_ENGINE_TOOL_MARKERS))
 # Caps on the non-ELF siblings copied next to the engine — per file and in
 # aggregate. icudtl.dat is ~10 MB; anything far beyond that is build spoil,
 # not runtime data, and without the aggregate cap a bundle could make autoboot
@@ -884,7 +898,7 @@ def _pick_js_engine(elfs: list[Path], engine_dir: Path) -> Path | None:
     else the largest binary that is NOT a known build tool."""
     same = [e for e in elfs if e.parent == engine_dir]
     named = [e for e in same if e.name in _JS_ENGINE_NAMES]
-    pool = named or [e for e in same if e.name not in _JS_ENGINE_BUILD_TOOLS]
+    pool = named or [e for e in same if not _looks_like_build_tool(e.name)]
     return max(pool, key=lambda p: p.stat().st_size) if pool else None
 
 
