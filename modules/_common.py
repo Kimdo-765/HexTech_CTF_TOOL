@@ -3869,6 +3869,10 @@ def docker_challenge_block(job_id: str) -> str:
     )
 
 
+# NOTE: modules/pwn/analyzer.py carries its own `_JS_ENGINE_DATA` /
+# `_JS_ENGINE_NAMES` for the STAGING half of this feature (it runs before
+# any prompt exists and must not import a prompt helper). The two pairs
+# agree today and will drift if only one is edited — change both.
 _JS_ENGINE_ANCHORS = ("snapshot_blob.bin",)
 _JS_ENGINE_SHELLS = ("d8", "js", "jsc", "js_shell", "chakra", "ch")
 
@@ -3909,10 +3913,15 @@ def js_engine_block(job_id: str) -> str:
                 shells = [n for n in names if n in _JS_ENGINE_SHELLS]
                 if not shells:
                     # No recognisable name — take the largest executable file
-                    # sitting with the snapshot blob.
+                    # sitting with the snapshot blob. HARD-CAPPED: this
+                    # function runs at prompt-build time on EVERY pwn and web
+                    # job, and pruning `_noise` only stops the walk from
+                    # DESCENDING — the anchor directory's own file list is
+                    # whatever the bundle put there. Never stat an unbounded
+                    # number of entries for a fallback this speculative.
                     execs = [
-                        n for n in names
-                        if os.access(here / n, os.X_OK) and (here / n).is_file()
+                        n for n in names[:200]
+                        if (here / n).is_file() and os.access(here / n, os.X_OK)
                     ]
                     shells = sorted(
                         execs,
