@@ -3401,7 +3401,13 @@ def _accumulate_flag_candidates(job_id: str, msg) -> bool:
     immediately so a found flag shows up without the 5s throttle delay).
     Cheap: a regex over the message text, matcher cached, no disk I/O."""
     text = _extract_msg_text(msg)
-    if not text or "{" not in text:
+    # The `{` fast-path is for the FORMAT-AWARE regex only. `FLAG_CANDIDATE:`
+    # is documented as format-agnostic ("works for DH{...}, FLAG{...}, raw-hex,
+    # or any prefix-less format"), so gating the whole function on a brace made
+    # that promise false for exactly the brace-less formats it names: a
+    # raw-hex capture never reached the LIVE meta.flag_candidates the UI shows,
+    # only the post-run file scan (which has no such guard).
+    if not text or ("{" not in text and "FLAG_CANDIDATE" not in text.upper()):
         return False
     found = set(_job_scan_re(job_id).findall(text))
     for raw in _FLAG_MARKER_RE.findall(text):
@@ -3411,6 +3417,17 @@ def _accumulate_flag_candidates(job_id: str, msg) -> bool:
         _bf = re.search(r"\w{1,15}\{[^}\r\n]{1,256}\}", cand)
         if _bf:
             cand = _bf.group(0)
+        elif re.search(r"\s", cand):
+            # No brace-flag AND the tail has whitespace → this is not a flag
+            # token, it is SOURCE CODE. The marker regex takes the rest of the
+            # line, and the agent's own solver contains the line that PRINTS
+            # the marker: `print("FLAG_CANDIDATE: " + m.group(0).decode())`
+            # streams past here and yielded the candidate
+            # `+ m.group(0).decode())` on job a4729b5d91f2. A real emitted flag
+            # is one whitespace-free token on its own line, brace-less formats
+            # included — so this rejects the parse artifact without touching
+            # flag curation, which stays manual and the operator's.
+            continue
         if cand:
             found.add(cand)
     fresh = {f for f in found if f and not _is_placeholder_flag(f)}
@@ -6657,9 +6674,62 @@ async def run_main_agent_session(
                                     f"describes this job"
                                 )
                                 summary.pop(_k, None)
+                # PROVENANCE of the promoted flag. A capture that only the
+                # AGENT'S PROSE records is not the same evidence as one the
+                # runner printed, and today both render identically. Job
+                # a4729b5d91f2 finished with a real DH{...} whose only home was
+                # report.md / findings.json: main captured it live mid-session,
+                # then the instance died and the auto-run's own stdout said
+                # "no flag captured". Right answer, fragile mechanism — the
+                # identical path promotes a fabrication. Do NOT drop anything
+                # (flag curation is the operator's, via the UI); just say which
+                # tier it came from, in the log and in meta.
+                _trusted_now: list = []
+                try:
+                    _trusted_now = scan_job_for_flags(
+                        job_id, sandbox_result=last_sandbox, trusted_only=True,
+                    )
+                except Exception:
+                    pass
+                _narrative_only = bool(flags_now) and not _trusted_now
+                if _narrative_only:
+                    log_fn(
+                        f"[orchestrator] ⚑ the promoted flag has NO trusted-tier "
+                        f"source — the runner's own stdout/stderr did not "
+                        f"contain it (verdict={verdict}). It comes from the "
+                        f"agent's report.md / findings.json. Genuine when the "
+                        f"agent captured it live and the target then died; "
+                        f"indistinguishable from a fabrication. Re-run the "
+                        f"exploit against a live instance to confirm."
+                    )
+                try:
+                    write_meta(job_id, flag_trusted_tier=not _narrative_only)
+                except Exception:
+                    pass
+
+                # A run that SUCCEEDED has no "why it stopped". write_why_stopped
+                # is not called on this path, so a WHY_STOPPED.md carried in from
+                # the /retry parent survives in work/ and gets published as THIS
+                # job's stop reason: a4729b5d91f2 shipped one dated to its parent
+                # saying "Main agent session error" while holding a real flag.
+                for _p in (work_dir / WHY_STOPPED_FILENAME,
+                           work_dir.parent / WHY_STOPPED_FILENAME):
+                    try:
+                        if _p.is_file():
+                            _p.unlink()
+                            log_fn(
+                                f"[orchestrator] removed stale "
+                                f"{WHY_STOPPED_FILENAME} ({_p.parent.name}/) — "
+                                f"this run succeeded, so the retry parent's stop "
+                                f"reason is not this job's"
+                            )
+                    except OSError:
+                        pass
+
                 log_fn(
                     f"[orchestrator] auto-run turn {attempt} succeeded "
-                    f"(flags={len(flags_now)}, verdict={verdict}) — exiting loop"
+                    f"(flags={len(flags_now)}, verdict={verdict}, "
+                    f"trusted_tier={not _narrative_only}) — exiting loop"
                 )
                 return last_sandbox
 
