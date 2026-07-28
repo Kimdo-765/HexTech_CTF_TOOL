@@ -54,15 +54,43 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
-    # No cgroup memory cap. Earlier images set mem_limit/memswap_limit
-    # under the assumption that long heap-pwn runs were dying from
-    # cumulative-heap OOM-killer hits. Forensic investigation in May
-    # 2026 showed every "exit code -9" from those runs was actually
-    # the debugger subagent self-pkilling via `pkill -f "./prob"` —
-    # the SDK passes system_prompt as a CLI argv, so the regex matched
-    # the agent's own claude CLI process. The fratricide is fixed in
-    # the prompt (pkill -x comm-anchored matching); no cgroup cap is
-    # required to defend against a phantom failure mode.
+    # Cgroup memory cap — RESTORED 2026-07-29 for a DIFFERENT reason than the
+    # one that was rolled back.
+    #
+    # History: earlier images set mem_limit/memswap_limit believing long
+    # heap-pwn runs died of cumulative-heap OOM hits. A May 2026 forensic pass
+    # showed every "exit code -9" there was the debugger subagent self-pkilling
+    # via `pkill -f "./prob"` (the SDK passes system_prompt as CLI argv, so the
+    # regex matched the agent's own claude CLI). That fratricide is fixed in
+    # the prompt, and the cap was removed as defending a phantom.
+    #
+    # The phantom was real, but "there is no real OOM" was too strong. On
+    # 2026-07-29 the WSL VM FROZE and had to be power-cycled by hand. The
+    # kernel journal of the dead boot is unambiguous — four `global_oom` kills
+    # inside THIS container, all python3:
+    #     Out of memory: Killed process 4668 (python3) anon-rss:14980088kB
+    # i.e. one process holding 15.0 GB inside a 15.5 GB VM. These are kernel
+    # OOM kills with real RSS, not exit -9. After the last one the VM never
+    # recovered: from 05:52:40 it could not allocate even order-0 pages for 9p
+    # reads of /mnt/c, and took 2m18s to print a single stack trace. That is
+    # the freeze.
+    #
+    # So the cap's purpose is NOT to prevent a job dying — a runaway job is
+    # killed either way. It is to make the kill LOCAL: without a cgroup bound,
+    # one uncapped container competes with the whole VM (and up to
+    # WORKER_CONCURRENCY=3 of its own jobs), and the OOM killer's collateral is
+    # the host session. 12g leaves headroom under the 16 GB VM for the kernel,
+    # dockerd, api and redis.
+    #
+    # memswap_limit == mem_limit deliberately: with mem_limit alone Docker
+    # allows swap up to 2x the cap, and slow swap thrash is precisely the state
+    # that wedged the VM. Equal values mean the container gets a fast, clean
+    # kill instead of dragging everything down with it.
+    #
+    # Requires a RECREATE (`docker compose up -d worker`), not a restart —
+    # `deploy.sh --changed` only restarts and will NOT apply this.
+    mem_limit: 12g
+    memswap_limit: 12g
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
