@@ -87,10 +87,15 @@ services:
     # that wedged the VM. Equal values mean the container gets a fast, clean
     # kill instead of dragging everything down with it.
     #
-    # Requires a RECREATE (`docker compose up -d worker`), not a restart —
-    # `deploy.sh --changed` only restarts and will NOT apply this.
-    mem_limit: 12g
-    memswap_limit: 12g
+    # This value is the BOOT default only. It is a container-CREATE property,
+    # so a recreate (`docker compose up -d worker`) is what applies it —
+    # `deploy.sh --changed` only restarts and will NOT. To change it WITHOUT a
+    # recreate use Settings → "Worker memory limit" in the UI, which pushes the
+    # new cap onto the live cgroup via the Docker API and shows the value the
+    # container actually has. Set WORKER_MEM_LIMIT in .env to change what a
+    # recreate comes back with.
+    mem_limit: ${WORKER_MEM_LIMIT:-12g}
+    memswap_limit: ${WORKER_MEM_LIMIT:-12g}
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0

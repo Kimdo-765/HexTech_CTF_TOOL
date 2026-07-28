@@ -24,6 +24,15 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     ("job_ttl_days", "JOB_TTL_DAYS", int, 7),
     ("job_timeout_seconds", "JOB_TIMEOUT", int, 900),
     ("worker_concurrency", "WORKER_CONCURRENCY", int, 3),
+    # Cgroup memory cap for the worker container, as a docker size string
+    # ("12g", "8192m", or plain bytes). Restored 2026-07-29 after a real
+    # `global_oom` (one python3 at 15.0 GB inside a 15.5 GB VM) froze the whole
+    # WSL VM: the cap does not save a runaway job, it keeps the kill LOCAL to
+    # the container instead of taking the host session down. Unlike every other
+    # key here this one is NOT read at job start — it is a container-create
+    # property — so PUT /api/settings applies it LIVE via the Docker API, and
+    # docker-compose.yml reads WORKER_MEM_LIMIT from .env as the boot default.
+    ("worker_mem_limit", "WORKER_MEM_LIMIT", str, "12g"),
     ("callback_url", "CALLBACK_URL", str, ""),
     # Operator spend budget (USD) for the top-bar "used / budget" usage pill.
     # 0 = no budget set → the pill shows cumulative spend only (no bar / %).
@@ -49,6 +58,29 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # library has several curated entries the operator trusts.
     ("enable_exploit_library_hint", "ENABLE_EXPLOIT_LIBRARY_HINT", bool, False),
 ]
+_MEM_SUFFIX = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+
+
+def parse_mem_limit(value: Any) -> int:
+    """Docker size string -> bytes. Accepts '12g', '8192m', '512K', or a plain
+    byte count. Raises ValueError on anything else, so a typo in the UI is a
+    400 rather than a silently-wrong cgroup limit."""
+    s = str(value).strip().lower().replace("ib", "")
+    if not s:
+        raise ValueError("empty memory limit")
+    mult = 1
+    if s[-1] in _MEM_SUFFIX:
+        mult = _MEM_SUFFIX[s[-1]]
+        s = s[:-1].strip()
+    try:
+        n = float(s)
+    except ValueError:
+        raise ValueError(f"not a size: {value!r} (use e.g. '12g', '8192m')")
+    if n <= 0:
+        raise ValueError(f"memory limit must be positive: {value!r}")
+    return int(n * mult)
+
+
 _SECRET_KEYS = {"anthropic_api_key", "auth_token"}
 
 _lock = threading.Lock()

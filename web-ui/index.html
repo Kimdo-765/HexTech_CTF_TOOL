@@ -469,6 +469,16 @@
           <small style="color:#8b949e">requires <code>docker compose restart worker</code> to apply</small>
         </label>
         <label>
+          Worker memory limit
+          <input type="text" name="worker_mem_limit" placeholder="12g" />
+          <small style="color:#8b949e">
+            cgroup cap on the worker container (<code>12g</code>, <code>8192m</code>, or bytes).
+            Applied to the RUNNING container immediately — no recreate needed.
+            Keeps a runaway job's OOM kill inside the container instead of freezing the whole WSL VM.
+            <span id="worker-mem-live"></span>
+          </small>
+        </label>
+        <label>
           Spend budget (USD, 0=off)
           <input type="number" name="budget_usd" min="0" step="1" placeholder="0" />
           <small style="color:#8b949e">operator budget for the top-bar <code>used / budget</code> pill — cumulative spend vs this ceiling. This is YOUR budget, not the Claude account limit (a true remaining-quota number isn't retrievable on OAuth).</small>

@@ -807,6 +807,9 @@ async function loadSettings() {
     s.job_timeout_seconds != null ? s.job_timeout_seconds : "";
   f.querySelector("[name=worker_concurrency]").value =
     s.worker_concurrency != null ? s.worker_concurrency : "";
+  const memInput = f.querySelector("[name=worker_mem_limit]");
+  if (memInput) memInput.value = s.worker_mem_limit != null ? s.worker_mem_limit : "";
+  renderWorkerMemLive(s.worker_mem_live);
   const budgetInput = f.querySelector("[name=budget_usd]");
   if (budgetInput) budgetInput.value = s.budget_usd ? s.budget_usd : "";
   f.querySelector("[name=callback_url]").value = s.callback_url || "";
@@ -846,7 +849,9 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       payload[k] = null;  // null = clear the override
       continue;
     }
-    if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "worker_concurrency" || k === "budget_usd") {
+    if (k === "worker_mem_limit") {
+      payload[k] = String(v).trim();
+    } else if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "worker_concurrency" || k === "budget_usd") {
       payload[k] = Number(v);
     } else {
       payload[k] = v;
@@ -868,9 +873,41 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   // Clear secret fields after save
   e.target.querySelector("[name=anthropic_api_key]").value = "";
   e.target.querySelector("[name=auth_token]").value = "";
+  let applied = null;
+  try { applied = (await res.clone().json()).worker_mem_applied; } catch (_) {}
   await loadSettings();
-  alert("Saved. Changes apply to the next job.");
+  if (applied && applied.applied === false) {
+    alert("Saved, but the worker memory limit was NOT applied to the running container:\n\n" +
+          applied.reason + "\n\nIt will take effect on the next `docker compose up -d worker`.");
+  } else if (applied && applied.applied) {
+    alert("Saved. Worker memory limit applied to the running container immediately.");
+  } else {
+    alert("Saved. Changes apply to the next job.");
+  }
 });
+
+// The worker memory cap is a container-CREATE property, so the saved setting
+// and the container's actual cgroup can diverge (a recreate resets it to the
+// compose/.env default). Show what the container REALLY has, never just what
+// was typed.
+function fmtBytes(n) {
+  if (!n || n <= 0) return "unlimited";
+  const g = n / 1073741824;
+  return g >= 1 ? g.toFixed(g < 10 ? 1 : 0) + " GiB" : Math.round(n / 1048576) + " MiB";
+}
+function renderWorkerMemLive(live) {
+  const el = document.getElementById("worker-mem-live");
+  if (!el) return;
+  if (!live || !live.available) {
+    el.innerHTML = '<br><b style="color:#d29922">live value unavailable</b> (docker socket not reachable from the api container)';
+    return;
+  }
+  const lim = fmtBytes(live.limit_bytes);
+  const use = live.usage_bytes ? fmtBytes(live.usage_bytes) : "?";
+  const warn = (!live.limit_bytes || live.limit_bytes <= 0)
+    ? ' <b style="color:#d29922">— uncapped: one runaway job can freeze the host</b>' : "";
+  el.innerHTML = '<br>container right now: <b>' + lim + '</b> limit, ' + use + ' in use' + warn;
+}
 
 document.getElementById("settings-reload").addEventListener("click", loadSettings);
 
