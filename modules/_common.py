@@ -5099,6 +5099,10 @@ _STOP_KIND_HEADERS = {
         "Main DELETED the deliverable after the retry hint — a recorded "
         "concession, taken via the exact path the postjudge message offers"
     ),
+    "no_artifact": (
+        "No solver artifact was found in work/ or at the job root — nothing "
+        "to execute (usually a filename/location mismatch, not a dead end)"
+    ),
     "unsolvable_by_analysis": (
         "Conceded unsolvable — artifacts self-admit no working chain and "
         "prejudge flag_likelihood≈0 (true-negative, not a fixable near-miss)"
@@ -5349,6 +5353,24 @@ def write_why_stopped(
                 "3. **Confirm the remote is alive** (`nc -vz <host> <port>`) in "
                 "case the low likelihood was secondary to a dead target.",
             ]
+        elif stop_kind == "no_artifact":
+            out += [
+                "The auto-run loop looked for the solver and found nothing — "
+                "neither in `work/` nor at the job root. This is almost always "
+                "a LOCATION or FILENAME mismatch, not an unsolvable challenge: "
+                "the orchestrator only executes specific names, so a solver "
+                "written as e.g. `solve.py` or into a scratch dir is invisible "
+                "to it even though the analysis behind it may be complete.",
+                "",
+                "1. **Look for the file yourself** — `ls -R` the job dir. If a "
+                "solver exists under another name, rename it to the expected "
+                "one and use **Run in sandbox**; nothing needs re-deriving.",
+                "2. **Read `report.md`** — the reasoning is usually intact even "
+                "when the artifact is misplaced.",
+                "3. **`/retry`** only if there is genuinely no solver. The prior "
+                "conversation is NOT discarded for this stop kind, so the agent "
+                "keeps its context.",
+            ]
         elif stop_kind == "conceded_by_deletion":
             out += [
                 "Main removed the deliverable after reading the postjudge "
@@ -5368,7 +5390,13 @@ def write_why_stopped(
                 "here have failed on unstated premises (a search scoped to two "
                 "files, one tier, one input shape) rather than on their logic.",
                 "4. **`/retry` with a hint that names a surface the argument "
-                "did not cover** — a bare re-run re-derives the same dead end.",
+                "did not cover** — a bare re-run re-derives the same dead end. "
+                "Note this stop kind DOES shed the prior conversation "
+                "(`judge_next_action=stop` makes /retry start a fresh session), "
+                "which is usually what you want after a concession: the agent's "
+                "own argument is what talked it into stopping. Its reasoning "
+                "survives in `report.md`, so put the surface it missed in the "
+                "hint rather than relying on it to remember.",
             ]
         elif stop_kind == "agent_error":
             out += [
@@ -6607,14 +6635,19 @@ async def run_main_agent_session(
                     "when the auto-run loop looked — nothing to execute",
                 )
                 try:
+                    # judge_next_action is deliberately NOT set to "stop" here.
+                    # api/routes/retry.py:761 reads that field as "the judge
+                    # ruled this approach structurally blocked" and drops the
+                    # SDK session fork — so stamping it for a missing FILE
+                    # would cost the operator the entire conversation on the
+                    # next /retry, for what is usually a filename mismatch.
                     write_meta(
                         job_id,
-                        judge_next_action="stop",
                         judge_stop_reason=summary["judge_stop_reason"],
                     )
                     write_why_stopped(
                         work_dir,
-                        stop_kind="no_hint",
+                        stop_kind="no_artifact",
                         attempt_idx=attempt,
                         max_attempts=max_retries,
                         judge_out=judge_out,
