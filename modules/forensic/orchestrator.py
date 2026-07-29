@@ -24,6 +24,7 @@ from modules._common import (
     capture_session_id,
     agent_heartbeat,
     extract_cost,
+    prior_session_cost,
     format_tool_result,
     kill_guard_hooks,
     log_thinking,
@@ -251,6 +252,8 @@ def run_job(
             result["claude"] = claude_result
 
         cost = extract_cost(result.get("claude"))
+        # + earlier sessions (stop -> continue reuses the job id)
+        cost += prior_session_cost(job_id)
         result["cost_usd"] = cost
         flags = scan_job_for_flags(job_id)
         result["flags"] = flags

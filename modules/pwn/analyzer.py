@@ -17,6 +17,7 @@ from modules._common import (
     cleanup_job_processes,
     collect_outputs,
     extract_cost,
+    prior_session_cost,
     job_dir,
     log_line,
     make_main_session_options,
@@ -2467,6 +2468,8 @@ def run_job(
             model_override,
         )
         cost = extract_cost(agent_summary)
+        # + earlier sessions (stop -> continue reuses the job id)
+        cost += prior_session_cost(job_id)
 
         # Sandbox+judge already happened inside the agent session loop;
         # the helper stashed the LAST sandbox_result on the summary.

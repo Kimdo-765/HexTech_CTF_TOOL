@@ -12,6 +12,7 @@ from modules._common import (
     collect_outputs,
     docker_challenge_block,
     extract_cost,
+    prior_session_cost,
     job_dir,
     log_line,
     reap_chal_containers,
@@ -294,6 +295,8 @@ def run_job(
             model_override,
         )
         cost = extract_cost(agent_summary)
+        # + earlier sessions (stop -> continue reuses the job id)
+        cost += prior_session_cost(job_id)
 
         sandbox_result = agent_summary.pop("sandbox", None)
 

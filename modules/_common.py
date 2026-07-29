@@ -3473,7 +3473,9 @@ def agent_heartbeat(job_id: str, msg) -> None:
     if is_result:
         cost = getattr(msg, "total_cost_usd", None)
         if isinstance(cost, (int, float)):
-            updates["cost_usd"] = float(cost)
+            # + earlier sessions of this same job (stop -> continue in place),
+            # otherwise each session's cumulative total overwrites the last.
+            updates["cost_usd"] = prior_session_cost(job_id) + float(cost)
         # Result also carries the SDK's own authoritative model_usage
         # — surface alongside our running sum for cross-checking.
         model_usage = getattr(msg, "model_usage", None)
@@ -4321,6 +4323,28 @@ def estimate_cost_from_tokens(
     cr = float(tokens.get("cache_read_input_tokens") or 0)
     r_in, r_cw, r_cr, r_out = _rates_for_model(model)
     return ((inp * r_in) + (cw * r_cw) + (cr * r_cr) + (out * r_out)) / 1_000_000.0
+
+
+def prior_session_cost(job_id: str) -> float:
+    """Spend already banked by EARLIER sessions of this same job.
+
+    `ResultMessage.total_cost_usd` is cumulative for ONE SDK session, and both
+    agent_heartbeat and the analyzers' finalize write it straight into
+    `meta.cost_usd` — an OVERWRITE. A job that is stopped and continued in
+    place (same job id, `/api/jobs/{id}/continue`) therefore ends up recording
+    only its LAST session: job c552faf18d31 ran 5h17m across three sessions,
+    the first two were stopped by the operator and never emitted a
+    ResultMessage at all, and the ledger kept $12.49 against a token-based
+    estimate of $23.92 for the whole job. Nearly half the spend vanished from
+    the operator's total.
+
+    `cost_usd_prior_sessions` is stamped once at session start with whatever
+    `cost_usd` had reached, so the running total is prior + this session.
+    """
+    try:
+        return float((read_meta(job_id) or {}).get("cost_usd_prior_sessions") or 0.0)
+    except Exception:
+        return 0.0
 
 
 def extract_cost(claude_summary: dict | None) -> float:
@@ -6137,6 +6161,21 @@ async def run_main_agent_session(
     # restarted comes back on a NEW port), but the agent's prompt is already
     # baked — see the loop check below.
     target_at_spawn = (read_meta(job_id) or {}).get("target_url")
+
+    # Bank what earlier sessions of this job already spent. A continue-in-place
+    # reuses the job id, and cost_usd is an OVERWRITE of one session's
+    # cumulative total — without this the ledger silently drops every stopped
+    # session (see prior_session_cost).
+    try:
+        _banked = float((read_meta(job_id) or {}).get("cost_usd") or 0.0)
+        if _banked > 0:
+            write_meta(job_id, cost_usd_prior_sessions=_banked)
+            log_fn(
+                f"[orchestrator] continuing a job that already spent "
+                f"${_banked:.2f} — banking it so this session adds to the total"
+            )
+    except Exception:
+        pass
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(initial_prompt)

@@ -16,6 +16,7 @@ from modules._common import (
     cleanup_job_processes,
     collect_outputs,
     extract_cost,
+    prior_session_cost,
     job_dir,
     reap_chal_containers,
     log_line,
@@ -498,6 +499,8 @@ def run_job(
             model_override,
         )
         cost = extract_cost(agent_summary)
+        # + earlier sessions (stop -> continue reuses the job id)
+        cost += prior_session_cost(job_id)
 
         sandbox_result = agent_summary.pop("sandbox", None)
 
