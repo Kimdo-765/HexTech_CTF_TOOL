@@ -133,6 +133,7 @@ def get_stats():
     if not JOBS_DIR.exists():
         return {"total_cost_usd": 0.0, "by_module": {}, "count": 0}
     total = 0.0
+    in_flight = 0.0          # token-estimated spend of jobs still running
     by_module: dict[str, dict] = {}
     count = 0
     for d in JOBS_DIR.iterdir():
@@ -157,9 +158,22 @@ def get_stats():
                 cost = float(result.get("cost_usd") or 0.0)
             except Exception:
                 pass
+        if cost == 0.0:
+            # Nothing authoritative: an IN-FLIGHT job has no ResultMessage
+            # yet, so `cost_usd` stays unset for its ENTIRE run and the pill
+            # silently under-reports by that job's whole spend (job
+            # c552faf18d31 ran 4 hours at $0.00). agent_heartbeat parks a
+            # running token estimate; report it SEPARATELY rather than
+            # folding it into `total_cost_usd`. Measured against real
+            # ResultMessage costs the estimate runs 1.4-1.7x high, so mixing
+            # it into the authoritative number would trade a known
+            # undercount for a silent overcount — the operator's budget
+            # deserves the real figure plus a labelled estimate, not a blend.
+            in_flight += float(meta.get("cost_usd_estimate") or 0.0)
         bucket["cost_usd"] += cost
         total += cost
-    return {"total_cost_usd": round(total, 4), "by_module": by_module, "count": count}
+    return {"total_cost_usd": round(total, 4), "by_module": by_module,
+            "count": count, "in_flight_estimate_usd": round(in_flight, 4)}
 
 
 @router.get("/usage")
@@ -187,6 +201,11 @@ def get_usage():
     pct_used = round(min(spent / budget * 100.0, 999.9), 1) if budget > 0 else None
     return {
         "spent_usd": round(spent, 4),
+        # Token-estimated spend of jobs still RUNNING (no ResultMessage yet, so
+        # they contribute 0 to spent_usd). Deliberately NOT added to spent_usd
+        # or to the budget maths: it is an estimate that runs high, and the
+        # budget number must stay the authoritative one.
+        "in_flight_estimate_usd": stats.get("in_flight_estimate_usd", 0.0),
         "budget_usd": round(budget, 4),
         "remaining_usd": remaining,
         "pct_used": pct_used,

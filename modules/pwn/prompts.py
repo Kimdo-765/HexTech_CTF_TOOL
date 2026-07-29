@@ -208,8 +208,17 @@ WORKFLOW
      (or one alloc batch) against `./prob` locally first, then multiply by
      N and add margin — a confident-wrong self-estimate is how a long chain
      silently blows the wall.
-       Bash(command="python3 -c \"import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=900; json.dump(d,open(p,'w'),indent=2)\"",
+       Bash(command="python3 -c \"import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; cur=json.load(open(p)); cur['exploit_timeout_seconds']=900; t=open(p+'.tmp','w'); json.dump(cur,t,indent=2); t.close(); os.replace(p+'.tmp',p)\"",
             description="raise exploit timeout to 900s for long heap chain")
+     (Write via `.tmp` + `os.replace` as shown — NEVER `open(p,'w')`
+     directly. That truncates meta.json in place, and the orchestrator's
+     own `write_meta` reads it with a bare `json.loads`, so a heartbeat
+     landing in that window either raises or reads a partial file and
+     writes the partial BACK as the whole meta. `os.replace` is atomic:
+     readers see the old file or the new one, never a torn one. Keep the
+     read and the write in the SAME one-liner so the window stays at
+     milliseconds — the operator can change the target from the UI at any
+     moment and that write must not be lost.)
      Cap is 1800s (runner clamps higher values). Default 300s is fine
      for one-shot exploits.
      ABSOLUTELY DO NOT do this from inside exploit.py at runtime —

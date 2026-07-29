@@ -89,7 +89,7 @@ WORKFLOW
        is exactly how a solver ships too-slow). The auto-run cuts an
        unbounded run at 300s by default; raise the per-job budget (cap
        1800s) with one Bash call:
-     python3 -c "import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; d=json.load(open(p)); d['exploit_timeout_seconds']=1200; json.dump(d,open(p,'w'),indent=2)"
+     python3 -c "import json,os; p='/data/jobs/'+os.environ['JOB_ID']+'/meta.json'; cur=json.load(open(p)); cur['exploit_timeout_seconds']=1200; t=open(p+'.tmp','w'); json.dump(cur,t,indent=2); t.close(); os.replace(p+'.tmp',p)"
    (c) SMOKE-TEST IN THE REAL RUNNER — critical for any solver that shells
        out to a tool (gdb / qemu-user / ltrace / strace) or emulates. Your
        WORKER dev env is NOT the auto-run RUNNER sandbox: a solver that runs

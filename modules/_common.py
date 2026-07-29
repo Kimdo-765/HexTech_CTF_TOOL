@@ -3489,6 +3489,23 @@ def agent_heartbeat(job_id: str, msg) -> None:
         return
     _heartbeat_state[job_id] = now
 
+    # IN-FLIGHT spend estimate. `cost_usd` is only ever set from a
+    # ResultMessage, so a long-running job reports NOTHING to the usage pill
+    # for its whole life: job c552faf18d31 sat at cost_usd=None for 4 hours
+    # while burning 12.8M cache-read tokens (~$7 by token estimate) plus
+    # $1.34 of judge subagents, and /api/jobs/usage counted it as $0. Park a
+    # running estimate under its OWN key so the aggregator can fall back to
+    # it — never under `cost_usd`, which is the authoritative SDK number and
+    # whose meaning must not be diluted (an earlier estimate-into-cost_usd
+    # bug poisoned the spend meter; see the _snapshot_cost fix).
+    if tokens and "cost_usd" not in updates:
+        try:
+            est = estimate_cost_from_tokens(tokens, read_meta(job_id).get("model"))
+            if est > 0:
+                updates["cost_usd_estimate"] = round(est, 4)
+        except Exception:
+            pass
+
     candidates = sorted(_flag_candidate_state.get(job_id) or [])
     write_meta(
         job_id,
@@ -4239,8 +4256,20 @@ def classify_agent_error(message: str) -> str | None:
 # accounting message, leaving meta.cost_usd at $0.00 even for runs
 # that obviously spent dollars.
 # Tuple shape: (input, cache_create, cache_read, output) per Mtok.
+# ORDER MATTERS: _rates_for_model takes the FIRST substring hit, so the
+# version-specific entries must precede the bare family name.
+# The Opus family was repriced from $15/$75 to $5/$25 per Mtok at 4.6; the
+# single "opus" row below still carried the OLD numbers, so every estimate for
+# an opus-4.6+/opus-5 run came out ~3x high. Measured against real
+# ResultMessage costs on finished opus-5 jobs, the old row produced 4.2x and
+# 5.2x overestimates.
 _MODEL_RATES_USD_PER_MTOK = {
-    "opus":   (15.0, 18.75, 1.50, 75.0),
+    "opus-5": (5.0,  6.25,  0.50, 25.0),
+    "opus-4-8": (5.0, 6.25, 0.50, 25.0),
+    "opus-4-7": (5.0, 6.25, 0.50, 25.0),
+    "opus-4-6": (5.0, 6.25, 0.50, 25.0),
+    "fable":  (10.0, 12.50, 1.00, 50.0),
+    "opus":   (15.0, 18.75, 1.50, 75.0),   # opus <= 4.5, the old pricing
     "sonnet": (3.0,  3.75,  0.30, 15.0),
     "haiku":  (1.0,  1.25,  0.10, 5.0),
 }
@@ -6062,6 +6091,12 @@ async def run_main_agent_session(
         except OSError:
             return None
 
+    # Target as it was when the prompt was built. The operator can change it
+    # mid-run from the UI (a chal-platform instance that expired and was
+    # restarted comes back on a NEW port), but the agent's prompt is already
+    # baked — see the loop check below.
+    target_at_spawn = (read_meta(job_id) or {}).get("target_url")
+
     async with ClaudeSDKClient(options=options) as client:
         await client.query(initial_prompt)
 
@@ -6305,6 +6340,53 @@ async def run_main_agent_session(
                     log_fn=log_fn,
                 )
                 return last_sandbox
+
+            # ---- Target changed under us (operator restarted the instance) ----
+            # A chal-platform instance that expires and is restarted comes back
+            # on a NEW host:port. The operator updates it from the UI, which
+            # writes meta — but the agent's target was baked into the spawn
+            # prompt and nothing ever told it. Job c552faf18d31: the port
+            # changed at 11:15:42 and main kept polling the DEAD one, printing
+            # "DOWN: Could not connect ... :18745" at 11:37 while the real
+            # target had been up for 22 minutes; it only recovered when the
+            # operator stopped and continued the job by hand at 11:45.
+            # The sandbox runner already self-heals from meta
+            # (_runner._refresh_target_from_meta) — this closes the same gap
+            # for the agent, using the injection mechanism already proven by
+            # the four user-turns below.
+            try:
+                _target_now = (read_meta(job_id) or {}).get("target_url")
+            except Exception:
+                _target_now = target_at_spawn
+            if _target_now and _target_now != target_at_spawn:
+                _prior, target_at_spawn = target_at_spawn, _target_now
+                log_fn(
+                    f"[orchestrator] target changed mid-run "
+                    f"({_prior!r} -> {_target_now!r}) — injecting a notice so "
+                    f"main stops using the stale one"
+                )
+                await client.query(
+                    "⚠️ ORCHESTRATOR INTERRUPT — THE TARGET CHANGED MID-RUN.\n\n"
+                    f"The operator updated this job's remote target:\n"
+                    f"    OLD (now dead): {_prior}\n"
+                    f"    NEW (use this): {_target_now}\n\n"
+                    "This almost always means the challenge instance EXPIRED "
+                    "and was RESTARTED, so it came back on a different port. "
+                    "Any 'target is down / connection refused' conclusion you "
+                    "drew from the old value is STALE — the service is most "
+                    "likely up right now.\n\n"
+                    "Do this before anything else:\n"
+                    f"  1. Re-probe {_target_now} (a plain TCP connect is enough).\n"
+                    "  2. Update every hardcoded host:port in your exploit/solver "
+                    "— better, read it from argv[1] so the next change costs "
+                    "nothing.\n"
+                    "  3. Resume where you left off. Your analysis, work tree and "
+                    "files are all still valid; ONLY the endpoint moved. Do NOT "
+                    "restart the investigation.\n\n"
+                    "If the restarted instance is time-limited, spend it on your "
+                    "best current exploit rather than on fresh probing."
+                )
+                continue
 
             # ---- FINAL_DRAFT last-chance injection ----
             # Highest priority — budget already overrun and the

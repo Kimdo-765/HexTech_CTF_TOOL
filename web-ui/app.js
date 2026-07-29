@@ -1412,13 +1412,23 @@ function renderUsage(u) {
       const spent = u.spent_usd || 0, budget = u.budget_usd;
       const pct = u.pct_used != null ? u.pct_used : (spent / budget * 100);
       pill.hidden = false;
-      pill.textContent = `$${spent.toFixed(2)} / $${budget.toFixed(0)} (${pct.toFixed(0)}%)`;
+      // A RUNNING job contributes $0 to spent_usd until its ResultMessage
+      // lands, so a long job is invisible here for hours. Show its token
+      // estimate as a separate "+~$X" suffix — never folded into spent,
+      // because the estimate runs high and the budget must stay honest.
+      const inflight = u.in_flight_estimate_usd || 0;
+      pill.textContent = `$${spent.toFixed(2)} / $${budget.toFixed(0)} (${pct.toFixed(0)}%)`
+        + (inflight > 0 ? ` +~$${inflight.toFixed(2)}` : "");
       pill.classList.remove("usage-pill--warn", "usage-pill--over");
       if (pct >= 100) pill.classList.add("usage-pill--over");
       else if (pct >= 80) pill.classList.add("usage-pill--warn");
       const rem = u.remaining_usd != null ? u.remaining_usd : (budget - spent);
       pill.title = `operator budget — spent $${spent.toFixed(4)} of $${budget.toFixed(2)}; `
-        + `$${rem.toFixed(2)} left. NOT the Claude account limit.`;
+        + `$${rem.toFixed(2)} left. NOT the Claude account limit.`
+        + (inflight > 0
+            ? `\n+~$${inflight.toFixed(2)} estimated for job(s) still running `
+              + `(token-based, runs high; excluded from the budget maths).`
+            : "");
     } else {
       pill.hidden = true;  // no budget configured
     }
