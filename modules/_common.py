@@ -3318,6 +3318,35 @@ _TOKEN_KEYS = (
 )
 
 
+_MODEL_USAGE_KEYMAP = {
+    "inputTokens": "input_tokens",
+    "outputTokens": "output_tokens",
+    "cacheCreationInputTokens": "cache_creation_input_tokens",
+    "cacheReadInputTokens": "cache_read_input_tokens",
+}
+
+
+def _tokens_from_model_usage(model_usage: dict) -> dict[str, int]:
+    """Fold the SDK's per-model `model_usage` into our flat token schema.
+
+    Accepts both the camelCase wire keys and the snake_case aliases; unknown
+    keys are ignored. Returns {} when nothing usable is present, so the caller
+    can fall back to the streamed sum.
+    """
+    out: dict[str, int] = {}
+    try:
+        for per_model in model_usage.values():
+            if not isinstance(per_model, dict):
+                continue
+            for k, v in per_model.items():
+                dest = _MODEL_USAGE_KEYMAP.get(k, k if k in _TOKEN_KEYS else None)
+                if dest and isinstance(v, (int, float)):
+                    out[dest] = out.get(dest, 0) + int(v)
+    except Exception:
+        return {}
+    return out if any(out.values()) else {}
+
+
 def _accumulate_tokens(
     job_id: str, usage: dict | None, message_id: str | None = None,
 ) -> dict[str, int]:
@@ -3467,7 +3496,15 @@ def agent_heartbeat(job_id: str, msg) -> None:
     updates: dict = {}
     usage = getattr(msg, "usage", None)
     msg_id = getattr(msg, "message_id", None)
-    tokens = _accumulate_tokens(job_id, usage, msg_id)
+    # A ResultMessage carries `usage` too — but it is the SESSION-CUMULATIVE
+    # total, and its dataclass has NO `message_id`, so the dedupe guard in
+    # _accumulate_tokens cannot see it. Summing it added the whole session a
+    # second time: measured EXACTLY 2.0000x against the SDK's own `model_usage`
+    # on all three jobs on disk (cache_creation and cache_read both). Every
+    # displayed token count and every cost estimate derived from them was
+    # double. Only per-turn AssistantMessages feed the accumulator.
+    tokens = (_token_state.get(job_id, {}) if is_result
+              else _accumulate_tokens(job_id, usage, msg_id))
     turns = _token_turns.get(job_id, 0)
 
     if is_result:
@@ -3481,6 +3518,14 @@ def agent_heartbeat(job_id: str, msg) -> None:
         model_usage = getattr(msg, "model_usage", None)
         if isinstance(model_usage, dict):
             updates["model_usage"] = model_usage
+            # AUTHORITATIVE. Pricing these totals reproduces the SDK's own
+            # total_cost_usd to the cent (c552faf18d31: $12.4872 computed vs
+            # $12.487236750000001 reported), so prefer them over our streamed
+            # sum for everything the operator sees.
+            _auth = _tokens_from_model_usage(model_usage)
+            if _auth:
+                updates["agent_tokens"] = _auth
+                _token_state[job_id] = dict(_auth)
 
     now = _time.monotonic()
     last = _heartbeat_state.get(job_id, 0.0)
@@ -6167,15 +6212,40 @@ async def run_main_agent_session(
     # cumulative total — without this the ledger silently drops every stopped
     # session (see prior_session_cost).
     try:
-        _banked = float((read_meta(job_id) or {}).get("cost_usd") or 0.0)
+        _m = read_meta(job_id) or {}
+        _authoritative = float(_m.get("cost_usd") or 0.0)
+        _already_banked = float(_m.get("cost_usd_prior_sessions") or 0.0)
+        # `cost_usd` is written ONLY by a ResultMessage or by an analyzer's
+        # finalize — both on paths a SIGKILLed session never reaches. An
+        # operator Stop hard-kills the RQ work horse mid-turn, so the stopped
+        # session's spend was NEVER written and banking `cost_usd` alone banks
+        # nothing: replaying job c552faf18d31 under that version reproduced its
+        # ledger BIT-IDENTICALLY ($12.487237), i.e. the fix was a no-op for the
+        # job it was written for.
+        # `cost_usd_estimate` DOES survive — the heartbeat parks it every 5 s —
+        # and now that the token double-count is gone it prices to the SDK's own
+        # figure within 0.2%. So take whichever account is higher: the
+        # authoritative total when a ResultMessage landed, else what this
+        # session is known to have spent on top of what was already banked.
+        _from_estimate = _already_banked + float(_m.get("cost_usd_estimate") or 0.0)
+        _banked = max(_authoritative, _from_estimate)
         if _banked > 0:
-            write_meta(job_id, cost_usd_prior_sessions=_banked)
+            _src = "authoritative" if _authoritative >= _from_estimate else "token estimate"
             log_fn(
                 f"[orchestrator] continuing a job that already spent "
-                f"${_banked:.2f} — banking it so this session adds to the total"
+                f"${_banked:.2f} ({_src}) — banking it so this session adds "
+                f"to the total"
             )
-    except Exception:
-        pass
+            write_meta(job_id, cost_usd_prior_sessions=_banked,
+                       cost_usd=_banked)
+    except Exception as _be:
+        # Log it: a silently-failed bank used to be byte-identical in run.log
+        # to a genuinely fresh session.
+        log_fn(
+            f"[orchestrator] could NOT bank prior-session spend "
+            f"({type(_be).__name__}: {_be}) — this job's ledger will report "
+            f"this session only"
+        )
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(initial_prompt)
@@ -6454,7 +6524,13 @@ async def run_main_agent_session(
                 _target_now = (read_meta(job_id) or {}).get("target_url")
             except Exception:
                 _target_now = target_at_spawn
-            if summary.get("agent_error_kind"):
+            # Only the kinds that actually mean the transport is GONE. An
+            # earlier version gated on any truthy kind, which also caught
+            # `budget_fallback` — a session whose transport is perfectly
+            # healthy and which the loop keeps querying — permanently
+            # suppressing the notice for the rest of that job.
+            if summary.get("agent_error_kind") in (
+                    "killed", "timeout", "policy_refusal", "cli_infra_error"):
                 _target_now = target_at_spawn   # dying session: do not query it
             if _target_now and _target_now != target_at_spawn:
                 _prior, target_at_spawn = target_at_spawn, _target_now

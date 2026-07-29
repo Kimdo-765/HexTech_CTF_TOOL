@@ -158,22 +158,25 @@ def get_stats():
                 cost = float(result.get("cost_usd") or 0.0)
             except Exception:
                 pass
-        if cost == 0.0:
-            # Nothing authoritative: an IN-FLIGHT job has no ResultMessage
-            # yet, so `cost_usd` stays unset for its ENTIRE run and the pill
-            # silently under-reports by that job's whole spend (job
-            # c552faf18d31 ran 4 hours at $0.00). agent_heartbeat parks a
-            # running token estimate; report it SEPARATELY rather than
-            # folding it into `total_cost_usd`. Measured against real
-            # ResultMessage costs the estimate runs 1.4-1.7x high, so mixing
-            # it into the authoritative number would trade a known
-            # undercount for a silent overcount — the operator's budget
-            # deserves the real figure plus a labelled estimate, not a blend.
-            # LIVENESS, not just "no cost". A stopped / killed / crashed job
-            # keeps its last parked estimate and never reaches the finalizer,
-            # so gating on cost alone counted it as "still running" forever.
-            if (meta.get("status") or "") in ("running", "queued", "analyze"):
-                in_flight += float(meta.get("cost_usd_estimate") or 0.0)
+        # LIVE jobs: surface the part of THIS session's spend that no
+        # ResultMessage has confirmed yet. A CONTINUED session carries the
+        # banked prior total in cost_usd from its first moment, so the old
+        # `cost == 0` gate never fired for it and the operator watched a frozen
+        # number for the whole session — the very "in-flight job reports $0"
+        # complaint the estimate was added to fix.
+        if (meta.get("status") or "") in ("running", "queued", "analyze"):
+            _banked = float(meta.get("cost_usd_prior_sessions") or 0.0)
+            _est = float(meta.get("cost_usd_estimate") or 0.0)
+            _confirmed_this_session = max(0.0, cost - _banked)
+            in_flight += max(0.0, _est - _confirmed_this_session)
+        elif cost == 0.0:
+            # A TERMINAL job with no authoritative cost (killed before any
+            # ResultMessage). Its parked estimate is the only record of what it
+            # spent, but it is not "in flight" — counting it there labelled dead
+            # jobs as still running forever. It is simply absent from the
+            # ledger; the session-start banking in _common.prior_session_cost
+            # is what recovers it if the job is ever continued.
+            pass
         bucket["cost_usd"] += cost
         total += cost
     return {"total_cost_usd": round(total, 4), "by_module": by_module,
@@ -937,6 +940,11 @@ async def patch_target(job_id: str, request: Request):
         # endpoint at the next turn boundary); queued/analyzing has no
         # session yet, so the value is simply read when one starts.
         "applies_live": (not live) or status == "running",
+        # The UI used to alert only when applies_live was false, so making
+        # `running` live-applying silently removed the ONLY feedback that a
+        # target change on a running job landed. Decouple the two: this says
+        # "show the note", applies_live says what actually happens.
+        "show_note": bool(live),
         "note": note,
     }
 

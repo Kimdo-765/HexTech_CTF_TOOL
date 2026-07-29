@@ -2918,11 +2918,16 @@ async function renderJob(id, opts = {}) {
           }
           close();
           await renderJob(id, { force: true });
-          // A running/queued job's live agent won't pick up a mid-run target
-          // change (it's baked into the spawn-time prompt) — warn so the
-          // operator doesn't think the running remote test just switched
-          // targets. Benign finished-job case (applies_live=true) stays quiet.
-          if (body.applies_live === false && body.note) alert(body.note);
+          // Surface the note whenever the API says so — for a RUNNING job it
+          // now explains that the orchestrator hands the new endpoint over at
+          // the next turn boundary; for queued/analyzing it explains the
+          // timing. A finished job stays quiet. (Gating this on
+          // `applies_live === false` broke once `running` became live-applying:
+          // the operator got no feedback at all.)
+          const showNote = body.show_note !== undefined
+            ? body.show_note
+            : body.applies_live === false;
+          if (showNote && body.note) alert(body.note);
         } catch (e) {
           alert(`change-target error: ${e}`);
         }

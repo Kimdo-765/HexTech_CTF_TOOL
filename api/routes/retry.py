@@ -954,6 +954,15 @@ def _continue_in_place(prev_meta: dict, comment: str,
         "finished_at": None,
         "error": None,
         "error_kind": None,
+        # ...including the JUDGE verdict. `judge_next_action == "stop"` is read
+        # by the /retry path (:761) as "this approach is structurally blocked"
+        # and makes it DISCARD the SDK session. Carrying a previous session's
+        # stop into a continued job means a later /retry silently sheds a
+        # conversation the operator was told would be kept — which is exactly
+        # what the `no_artifact` playbook promises does NOT happen. A continue
+        # re-opens the job, so the old verdict no longer describes it.
+        "judge_next_action": None,
+        "judge_stop_reason": None,
     })
 
     q = get_queue()
