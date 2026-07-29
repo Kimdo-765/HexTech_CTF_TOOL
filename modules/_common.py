@@ -3500,7 +3500,16 @@ def agent_heartbeat(job_id: str, msg) -> None:
     # bug poisoned the spend meter; see the _snapshot_cost fix).
     if tokens and "cost_usd" not in updates:
         try:
-            est = estimate_cost_from_tokens(tokens, read_meta(job_id).get("model"))
+            # RESOLVE the model — do not read meta.model raw. That key holds the
+            # per-job OVERRIDE and is null whenever the operator didn't pick a
+            # model in the form, which is the common case: the real model then
+            # comes from the preset / global setting. Passing that null fell
+            # through to _rates_for_model's unknown-model default and priced an
+            # opus-5 run at the legacy $15/$75 — the live job c552faf18d31 was
+            # parked at $13.28 against a true-rate estimate of $7.14.
+            est = estimate_cost_from_tokens(
+                tokens, resolve_main_model(read_meta(job_id).get("model"))
+            )
             if est > 0:
                 updates["cost_usd_estimate"] = round(est, 4)
         except Exception:
@@ -4281,9 +4290,13 @@ def _rates_for_model(model: str | None) -> tuple[float, float, float, float]:
         for needle, rates in _MODEL_RATES_USD_PER_MTOK.items():
             if needle in low:
                 return rates
-    # Unknown — default to opus rates (conservative upper bound so
-    # the fallback never under-reports a real spend).
-    return _MODEL_RATES_USD_PER_MTOK["opus"]
+    # Unknown model. This used to return the bare "opus" row as a "conservative
+    # upper bound", but that row is now the LEGACY (<= 4.5) pricing — since the
+    # 4.6 repricing it over-reports a modern Opus run by 3x, which is not
+    # conservative, just wrong. Default to the CURRENT Opus rates: that is the
+    # family this deployment actually runs, and it is still the most expensive
+    # of the modern tiers, so it stays an upper bound among plausible models.
+    return _MODEL_RATES_USD_PER_MTOK["opus-5"]
 
 
 def estimate_cost_from_tokens(
@@ -6354,10 +6367,28 @@ async def run_main_agent_session(
             # (_runner._refresh_target_from_meta) — this closes the same gap
             # for the agent, using the injection mechanism already proven by
             # the four user-turns below.
+            #
+            # NEVER query a session that is already dying. When the bundled
+            # CLI has been SIGKILLed the transport is gone, and the SDK's
+            # write() raises CLIConnectionError("Cannot write to terminated
+            # process"). That exception is NOT inside the try/except that wraps
+            # receive_response, so it escapes run_main_agent_session entirely —
+            # and every analyzer's outer handler does
+            # `write_meta(status="failed"); raise`, which SKIPS the whole
+            # salvage sequence (fallback artifact -> sandbox -> postjudge ->
+            # flag scan -> WHY_STOPPED). An adversarial run reproduced exactly
+            # that: with the target unchanged the sandbox ran and WHY_STOPPED
+            # was written; with the target changed in the same window the
+            # exception escaped and sandbox_runner was never called. The
+            # policy_refusal case is the same hazard for a different reason —
+            # re-querying an AUP-blocked session just re-blocks it, which is
+            # why the three sibling injections are explicitly cleared above.
             try:
                 _target_now = (read_meta(job_id) or {}).get("target_url")
             except Exception:
                 _target_now = target_at_spawn
+            if summary.get("agent_error_kind"):
+                _target_now = target_at_spawn   # dying session: do not query it
             if _target_now and _target_now != target_at_spawn:
                 _prior, target_at_spawn = target_at_spawn, _target_now
                 log_fn(
@@ -6365,7 +6396,7 @@ async def run_main_agent_session(
                     f"({_prior!r} -> {_target_now!r}) — injecting a notice so "
                     f"main stops using the stale one"
                 )
-                await client.query(
+                _target_notice = (
                     "⚠️ ORCHESTRATOR INTERRUPT — THE TARGET CHANGED MID-RUN.\n\n"
                     f"The operator updated this job's remote target:\n"
                     f"    OLD (now dead): {_prior}\n"
@@ -6386,7 +6417,19 @@ async def run_main_agent_session(
                     "If the restarted instance is time-limited, spend it on your "
                     "best current exploit rather than on fresh probing."
                 )
-                continue
+                try:
+                    await client.query(_target_notice)
+                except Exception as _qe:
+                    # Belt and braces on top of the agent_error_kind gate: a
+                    # transport that died between the last message and here
+                    # must not take the salvage path down with it.
+                    log_fn(
+                        f"[orchestrator] target notice could not be delivered "
+                        f"({type(_qe).__name__}) — session is gone; falling "
+                        f"through to the sandbox/postjudge path"
+                    )
+                else:
+                    continue
 
             # ---- FINAL_DRAFT last-chance injection ----
             # Highest priority — budget already overrun and the
@@ -6427,14 +6470,29 @@ async def run_main_agent_session(
             # its current frame and points it at a genuinely independent
             # spawn or a reframe/concede. One-shot (contrarian_fired guards
             # re-arming); does not halt — main keeps its turn budget.
-            if summary.get("contrarian_pending"):
+            # NOTE: unlike final_draft / soft_eject / scaffold_nudge, this
+            # flag is NOT cleared by the killed/timeout/policy_refusal branches
+            # above — so before this guard a dead-end signal arriving in the
+            # same turn as a SIGKILL queried a terminated transport and threw
+            # CLIConnectionError straight out of the session, skipping the
+            # entire salvage path. Same shape as the target-notice hazard;
+            # reproduced against the pre-change commit, so this one is a
+            # PRE-EXISTING bug fixed in passing.
+            if summary.get("contrarian_pending") and not summary.get("agent_error_kind"):
                 summary["contrarian_pending"] = False
                 log_fn(
                     "[orchestrator] injecting contrarian reframe user-turn "
                     "(Tooth 1) — dead-end signal on an easy-framed job"
                 )
-                await client.query(CONTRARIAN_REFRAME_USER_TURN)
-                continue
+                try:
+                    await client.query(CONTRARIAN_REFRAME_USER_TURN)
+                except Exception as _qe:
+                    log_fn(
+                        f"[orchestrator] contrarian reframe could not be "
+                        f"delivered ({type(_qe).__name__}) — session is gone"
+                    )
+                else:
+                    continue
 
             # ---- Decide whether to feed postjudge back to main ----
             if not auto_run or sandbox_runner is None:
@@ -6456,12 +6514,22 @@ async def run_main_agent_session(
             # concession that WHY_STOPPED recorded as "Main ignored the hint".
             # Detect it with state the loop already tracks and halt honestly.
             _inject_script = script_sha_at_last_inject["script"]
+            # Only a STALE copy means concession. If the job root holds a
+            # DIFFERENT build of the artifact, main rewrote it there (the exact
+            # wrong-directory case the promotion below exists for) — promote and
+            # run it instead of recording a concession that never happened.
+            _root_sha = _script_sha(job_dir(job_id) / _inject_script) if _inject_script else None
+            _root_is_stale = (
+                _root_sha is None
+                or _root_sha == script_sha_at_last_inject["sha"]
+            )
             if (
                 not picked
                 and attempt > 0
                 and _inject_script
                 and script_sha_at_last_inject["sha"] is not None
                 and not (work_dir / _inject_script).is_file()
+                and _root_is_stale
             ):
                 log_fn(
                     f"[orchestrator] {_inject_script} was DELETED from work/ "
@@ -6784,10 +6852,16 @@ async def run_main_agent_session(
                         f"indistinguishable from a fabrication. Re-run the "
                         f"exploit against a live instance to confirm."
                     )
-                try:
-                    write_meta(job_id, flag_trusted_tier=not _narrative_only)
-                except Exception:
-                    pass
+                # Only record provenance when there IS a flag to have
+                # provenance about. The success branch is also entered on
+                # `verdict == "success"` with zero flags harvested, and writing
+                # flag_trusted_tier=True there claims the most-trusted
+                # provenance for a job that captured nothing.
+                if flags_now:
+                    try:
+                        write_meta(job_id, flag_trusted_tier=not _narrative_only)
+                    except Exception:
+                        pass
 
                 # A run that SUCCEEDED has no "why it stopped". write_why_stopped
                 # is not called on this path, so a WHY_STOPPED.md carried in from

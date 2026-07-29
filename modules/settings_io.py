@@ -9,6 +9,7 @@ get_settings_view() — full values stay on disk.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from pathlib import Path
@@ -76,9 +77,38 @@ def parse_mem_limit(value: Any) -> int:
         n = float(s)
     except ValueError:
         raise ValueError(f"not a size: {value!r} (use e.g. '12g', '8192m')")
+    # `float()` happily accepts 'inf' / 'nan'. `inf <= 0` is False, so an
+    # infinity sailed past the positivity check and blew up in int() with
+    # OverflowError — which the route catches as ValueError only, turning a
+    # typo into an HTTP 500 instead of the promised 400.
+    if not math.isfinite(n):
+        raise ValueError(f"not a size: {value!r} (use e.g. '12g', '8192m')")
     if n <= 0:
         raise ValueError(f"memory limit must be positive: {value!r}")
-    return int(n * mult)
+    want = int(n * mult)
+    # Upper bound. Without one, '1000g' on a 16 GB host was accepted, written
+    # to the cgroup and reported as success — leaving the worker effectively
+    # UNCAPPED, i.e. exactly the state the cap exists to prevent, while the UI
+    # showed a reassuring number.
+    total = _host_mem_total_bytes()
+    if total and want > total:
+        raise ValueError(
+            f"{value!r} ({want:,} B) exceeds host RAM ({total:,} B) — that "
+            f"leaves the container effectively uncapped"
+        )
+    return want
+
+
+def _host_mem_total_bytes() -> int:
+    """Host MemTotal in bytes, or 0 when unreadable (non-Linux, restricted)."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 0
 
 
 _SECRET_KEYS = {"anthropic_api_key", "auth_token"}

@@ -1408,7 +1408,22 @@ function renderUsage(u) {
   // --- budget pill: "used / budget" with a color by fraction consumed ---
   const pill = document.getElementById("usage-pill");
   if (pill) {
-    if (u && u.budget_usd > 0) {
+    const inflight0 = (u && u.in_flight_estimate_usd) || 0;
+    if (u && u.budget_usd <= 0 && (u.spent_usd > 0 || inflight0 > 0)) {
+      // No budget configured. The pill used to hide entirely here, which meant
+      // the in-flight estimate shipped invisible on this deployment (no budget
+      // is set by default). Show spend without the budget framing.
+      pill.hidden = false;
+      pill.classList.remove("usage-pill--warn", "usage-pill--over");
+      pill.textContent = `$${(u.spent_usd || 0).toFixed(2)} spent`
+        + (inflight0 > 0 ? ` +~$${inflight0.toFixed(2)}` : "");
+      pill.title = `cumulative spend across all jobs — no operator budget set `
+        + `(set one in Settings to get a used/budget bar).`
+        + (inflight0 > 0
+            ? `\n+~$${inflight0.toFixed(2)} estimated for job(s) still running `
+              + `(token-based, runs high).`
+            : "");
+    } else if (u && u.budget_usd > 0) {
       const spent = u.spent_usd || 0, budget = u.budget_usd;
       const pct = u.pct_used != null ? u.pct_used : (spent / budget * 100);
       pill.hidden = false;

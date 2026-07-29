@@ -59,9 +59,20 @@ def worker_mem_live() -> dict:
         return {"available": False}
     try:
         st = c.stats(stream=False)
-        out["usage_bytes"] = int((st.get("memory_stats") or {}).get("usage") or 0)
+        ms = st.get("memory_stats") or {}
+        out["usage_bytes"] = int(ms.get("usage") or 0)
+        # `usage` (cgroup memory.current) counts RECLAIMABLE page cache, which
+        # on a job that just read a 160 MB bundle is most of it. Sizing a cap
+        # against that number refuses perfectly safe values. What actually
+        # cannot be reclaimed under pressure is anon + slab — that is the floor
+        # a cap has to clear.
+        _s = ms.get("stats") or {}
+        anon = int(_s.get("anon") or _s.get("rss") or 0)
+        slab = int(_s.get("slab") or 0)
+        out["unreclaimable_bytes"] = (anon + slab) or None
     except Exception:
         out["usage_bytes"] = None
+        out["unreclaimable_bytes"] = None
     return out
 
 
@@ -80,14 +91,22 @@ def _apply_worker_mem(value: str) -> dict:
     if c is None:
         return {"applied": False, "reason": "worker container not reachable"}
 
-    usage = worker_mem_live().get("usage_bytes")
-    if usage and want < usage:
+    live = worker_mem_live()
+    floor = live.get("unreclaimable_bytes") or live.get("usage_bytes")
+    # 1.5x headroom, not ">= floor". A cap set AT the current footprint passes a
+    # bare `want < usage` test and then OOM-kills on the very next allocation —
+    # the exact outcome this gate claims to prevent, while reporting success.
+    if floor and want < int(floor * 1.5):
+        which = ("unreclaimable (anon+slab)"
+                 if live.get("unreclaimable_bytes") else "current usage")
         return {
             "applied": False,
             "reason": (
-                f"refused: {value} ({want:,} B) is below the worker's CURRENT "
-                f"usage ({usage:,} B). Applying it would OOM-kill the running "
-                f"job immediately. Raise the limit, or wait for the job to end."
+                f"refused: {value} ({want:,} B) leaves no headroom over the "
+                f"worker's {which} footprint ({floor:,} B). A cap at or just "
+                f"above the live footprint OOM-kills the running job on its "
+                f"next allocation. Use at least {int(floor * 1.5):,} B, or "
+                f"wait for the job to end."
             ),
         }
     try:
@@ -102,7 +121,9 @@ def _apply_worker_mem(value: str) -> dict:
 @router.get("")
 def get_settings():
     view = get_settings_view()
-    view["worker_mem_live"] = worker_mem_live()
+    # Only pay for a live docker round-trip when the caller touched the cap.
+    if "worker_mem_limit" in body:
+        view["worker_mem_live"] = worker_mem_live()
     return view
 
 
@@ -116,7 +137,16 @@ async def put_settings(request: Request):
             body = {}
     except Exception:
         body = {}
+    # The Docker SDK calls below are BLOCKING and `c.stats(stream=False)` costs
+    # 1-2 s (the daemon takes two samples). On the single uvicorn loop that
+    # froze every route and every SSE stream for seconds on each save, so the
+    # blocking half runs in a worker thread.
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(_put_settings_sync, body)
 
+
+def _put_settings_sync(body: dict):
+    """Blocking half of PUT /api/settings — runs in the threadpool."""
     # Validate BEFORE persisting so a typo never reaches disk.
     if body.get("worker_mem_limit") not in (None, ""):
         try:

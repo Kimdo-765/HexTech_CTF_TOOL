@@ -2419,7 +2419,7 @@ async def _run_agent(
             found = collect_outputs(
                 work_dir,
                 ["exploit.py", "report.md", "findings.json",
-                 "THREAT_MODEL.md", "WHY_STOPPED.md"],
+                 "THREAT_MODEL.md"],
                 fallback_dirs=fallback_dirs,
                 log_fn=lambda s: log_line(job_id, s),
             )

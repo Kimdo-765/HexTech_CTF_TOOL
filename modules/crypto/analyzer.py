@@ -278,7 +278,7 @@ async def _run_agent(
             found = collect_outputs(
                 work_dir,
                 ["solver.py", "solver.sage", "report.md",
-                 "findings.json", "WHY_STOPPED.md"],
+                 "findings.json"],
                 fallback_dirs=fallback_dirs,
                 log_fn=lambda s: log_line(job_id, s),
             )

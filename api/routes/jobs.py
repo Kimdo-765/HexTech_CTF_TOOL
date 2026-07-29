@@ -169,7 +169,11 @@ def get_stats():
             # it into the authoritative number would trade a known
             # undercount for a silent overcount — the operator's budget
             # deserves the real figure plus a labelled estimate, not a blend.
-            in_flight += float(meta.get("cost_usd_estimate") or 0.0)
+            # LIVENESS, not just "no cost". A stopped / killed / crashed job
+            # keeps its last parked estimate and never reaches the finalizer,
+            # so gating on cost alone counted it as "still running" forever.
+            if (meta.get("status") or "") in ("running", "queued", "analyze"):
+                in_flight += float(meta.get("cost_usd_estimate") or 0.0)
         bucket["cost_usd"] += cost
         total += cost
     return {"total_cost_usd": round(total, 4), "by_module": by_module,
@@ -897,13 +901,24 @@ async def patch_target(job_id: str, request: Request):
     live = status in ("running", "queued", "analyzing", "analyze")
     if new_target is None:
         note = "Target cleared."
+    elif status == "running":
+        # As of the mid-run target watchdog the orchestrator DOES tell a live
+        # agent: at the next turn boundary it compares meta.target_url against
+        # the value it started with and injects a notice naming both endpoints.
+        # The old text here said the opposite and steered the operator into a
+        # Retry that discards the run — keep those two in sync.
+        note = (
+            f"Target set to {new_target}. This job is running: the orchestrator "
+            "hands the new endpoint to the agent at its NEXT TURN BOUNDARY, so "
+            "no Retry is needed. That can lag a long turn (a multi-minute "
+            "exploit run finishes first). The sandbox runner also re-reads the "
+            "target, so an exploit that takes argv[1] picks it up automatically "
+            "— a hardcoded host:port still needs the agent to edit it."
+        )
     elif live:
         note = (
-            f"Target set to {new_target} in meta — but this job is {status}: "
-            "the in-flight agent will NOT pick it up mid-run. It applies to the "
-            "next /retry or /resume, and to the final sandbox run only if the "
-            "exploit reads argv[1]. To apply it now, use Retry (ideally with "
-            "'fresh start' to shed the old target from the forked conversation)."
+            f"Target set to {new_target} in meta — this job is {status}, so no "
+            "agent session exists yet; it will start with the new value."
         )
     else:
         note = (
@@ -918,7 +933,10 @@ async def patch_target(job_id: str, request: Request):
         "target_urls": new_targets,
         "prior": prior,
         "job_status": status,
-        "applies_live": not live,
+        # `running` now DOES apply live (the orchestrator injects the new
+        # endpoint at the next turn boundary); queued/analyzing has no
+        # session yet, so the value is simply read when one starts.
+        "applies_live": (not live) or status == "running",
         "note": note,
     }
 
