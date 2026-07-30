@@ -1515,31 +1515,6 @@ async function stopJob(id, btn) {
   }
 }
 
-async function decideTimeout(jobId, decision, btn) {
-  // Disable both decision buttons in the same banner
-  const banner = btn.closest(".timeout-banner");
-  if (banner) banner.querySelectorAll("button").forEach((b) => (b.disabled = true));
-  const orig = btn.textContent;
-  btn.textContent = decision === "continue" ? "▶ continuing…" : "■ stopping…";
-  try {
-    const res = await fetch(`${API}/jobs/${jobId}/timeout/${decision}`, { method: "POST" });
-    if (!res.ok) {
-      const body = await res.text();
-      alert(`timeout/${decision} failed: ${res.status} ${body}`);
-      if (banner) banner.querySelectorAll("button").forEach((b) => (b.disabled = false));
-      btn.textContent = orig;
-      return;
-    }
-    // Refresh the job view; meta.awaiting_decision should now be false
-    // (and on 'kill', status flips to 'failed').
-    await refreshJobs();
-    await selectJob(jobId);
-  } catch (e) {
-    alert(`timeout/${decision} error: ${e}`);
-    if (banner) banner.querySelectorAll("button").forEach((b) => (b.disabled = false));
-    btn.textContent = orig;
-  }
-}
 
 // (Re)paint the "reviewer in progress" panel for `jobId` from its
 // activeReviewers entry. Idempotent: creates the panel if absent, updates
@@ -2481,25 +2456,11 @@ async function renderJob(id, opts = {}) {
     tokensPill = `<span class="tokens-pill" title="${escapeHtml(fullTitle)}">📊 in ${fmtN(ti)} · out ${fmtN(to)} · cache ${fmtN(tcr)}${turnTag}${cost}${deltaTag}</span>`;
   }
 
-  // Soft-timeout decision banner. Fires when the worker's wall-clock
-  // watchdog sets meta.awaiting_decision=true. The agent is still running
-  // — the user picks Continue (let it run) or Stop (hard-kill).
-  let timeoutBlock = "";
-  if (job.awaiting_decision) {
-    const at = job.decision_at ? new Date(job.decision_at).toLocaleTimeString() : "";
-    const budget = job.soft_timeout_s || job.job_timeout || "?";
-    timeoutBlock = `<div class="timeout-banner" data-job-id="${id}">
-      <h4>⏰ Soft timeout reached${at ? ` at ${escapeHtml(at)}` : ""}</h4>
-      <div class="timeout-msg">
-        The agent has been running for ~${escapeHtml(String(budget))}s and is still working.
-        It will keep running until you decide. Pick one:
-      </div>
-      <div class="timeout-actions">
-        <button class="timeout-continue-btn" data-action="continue">▶ Continue running</button>
-        <button class="timeout-kill-btn" data-action="kill">■ Stop now</button>
-      </div>
-    </div>`;
-  }
+  // The soft-timeout decision banner was removed with the watchdog that fed
+  // it (2026-07-30): nothing sets meta.awaiting_decision any more, so this
+  // block could never render. `timeoutBlock` stays as an empty string so
+  // the template that interpolates it is untouched.
+  const timeoutBlock = "";
 
   // Description block: render the original description and any appended
   // `[retry-hint]` segment in a separate, color-coded chip so the user can
@@ -2857,14 +2818,7 @@ async function renderJob(id, opts = {}) {
     );
   }
 
-  const continueBtn = detail.querySelector('.timeout-continue-btn[data-action="continue"]');
-  if (continueBtn) {
-    continueBtn.addEventListener("click", () => decideTimeout(id, "continue", continueBtn));
-  }
-  const killBtn = detail.querySelector('.timeout-kill-btn[data-action="kill"]');
-  if (killBtn) {
-    killBtn.addEventListener("click", () => decideTimeout(id, "kill", killBtn));
-  }
+  // (soft-timeout decision buttons removed with the watchdog — 2026-07-30)
 
   const stopBtn = detail.querySelector('.stop-job-btn[data-action="stop"]');
   if (stopBtn) {

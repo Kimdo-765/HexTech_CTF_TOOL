@@ -7372,31 +7372,12 @@ async def run_main_agent_session(
     return last_sandbox
 
 
-async def soft_timeout_watchdog(job_id: str, soft_timeout_s: int) -> None:
-    """Sleep until the user-set soft timeout elapses, then mark the job as
-    `awaiting_decision` in meta and log a single line. The agent loop is
-    NOT interrupted — this is a courtesy notification only. The caller is
-    expected to cancel this task when the agent finishes normally.
-
-    The user can then click "Continue running" or "Stop now" in the UI;
-    the API endpoints handle each side. If the user picks 'continue', the
-    watchdog stays cancelled — we don't pester them again — but the worker
-    keeps going until completion or until the RQ hard-kill ceiling.
-    """
-    if soft_timeout_s is None or soft_timeout_s <= 0:
-        return
-    try:
-        await asyncio.sleep(soft_timeout_s)
-    except asyncio.CancelledError:
-        return
-    log_line(
-        job_id,
-        f"⏰ Soft timeout reached ({soft_timeout_s}s) — waiting for user "
-        f"decision (continue / stop). The agent is still running.",
-    )
-    write_meta(
-        job_id,
-        awaiting_decision=True,
-        decision_at=datetime.now(timezone.utc).isoformat(),
-        soft_timeout_s=soft_timeout_s,
-    )
+# The soft-timeout watchdog was REMOVED 2026-07-30 (operator: "불필요한 기능").
+# It slept for `job_timeout` (default 900 s), then set `awaiting_decision` and
+# popped a UI banner the operator had to dismiss by hand. It never interrupted
+# anything — the docstring said so — so it protected nothing while firing on
+# essentially every real job: this pipeline routinely runs for hours (5h17m on
+# c552faf18d31), and job fa511be2e84e needed a manual CONTINUE click 15 minutes
+# in. The real backstop is untouched: api.queue.hard_timeout_for() still gives
+# RQ a kill ceiling of at least 24 h (7 d cap), derived from the same
+# `job_timeout`, which is why that field is still read and still meaningful.

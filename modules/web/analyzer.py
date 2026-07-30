@@ -33,7 +33,6 @@ from modules._common import (
     run_pre_recon,
     run_report_phase,
     scan_job_for_flags,
-    soft_timeout_watchdog,
     store_pre_recon_cache,
     write_meta,
 )
@@ -381,8 +380,6 @@ async def _run_agent(
     log_line(job_id, f"Launching Claude agent (model={model})")
     log_line(job_id, f"Source root: {src_root or '(remote-only)'}")
 
-    soft_timeout = int(read_meta(job_id).get("job_timeout") or 0)
-    watchdog = asyncio.create_task(soft_timeout_watchdog(job_id, soft_timeout))
 
     sandbox_result: Optional[dict] = None
 
@@ -422,14 +419,9 @@ async def _run_agent(
                 f"continuing without findings.json",
             )
     finally:
-        watchdog.cancel()
         # Kill leftover background processes (qemu/gdbserver) from this job
         # so they don't leak into the next. See modules/_common.py.
         cleanup_job_processes(lambda s: log_line(job_id, s))
-        # Clear the awaiting_decision flag if the watchdog already fired —
-        # the job has finished and the user no longer needs to decide.
-        if read_meta(job_id).get("awaiting_decision"):
-            write_meta(job_id, awaiting_decision=False)
         # Carry artifacts up to the job dir. Runs in `finally` so any
         # abrupt exit (RQ stop / Stop&Resume / SIGTERM-with-grace) still
         # flushes exploit.py / report.md into <jobdir>/, where the API's

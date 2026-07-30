@@ -33,7 +33,6 @@ from modules._common import (
     run_report_phase,
     scan_job_for_flags,
     store_pre_recon_cache,
-    soft_timeout_watchdog,
     write_meta,
 )
 from modules._events import emit_event
@@ -2346,8 +2345,6 @@ async def _run_agent(
     if resume_sid:
         log_line(job_id, f"Forking prior Claude session {resume_sid[:8]}…")
 
-    soft_timeout = int(read_meta(job_id).get("job_timeout") or 0)
-    watchdog = asyncio.create_task(soft_timeout_watchdog(job_id, soft_timeout))
 
     sandbox_result: Optional[dict] = None
 
@@ -2397,7 +2394,6 @@ async def _run_agent(
                 f"continuing without findings.json",
             )
     finally:
-        watchdog.cancel()
         # Kill leftover qemu / gdbserver background processes the
         # debugger subagent backgrounded with `& ; sleep ...`. Without
         # this they live forever in the worker container, leaking
@@ -2407,8 +2403,6 @@ async def _run_agent(
         # passes our system_prompt to the bundled claude CLI as argv,
         # so `pkill -f` would self-kill the agent.
         cleanup_job_processes(lambda s: log_line(job_id, s))
-        if read_meta(job_id).get("awaiting_decision"):
-            write_meta(job_id, awaiting_decision=False)
         # Carry artifacts up to the job dir. Runs in `finally` so any
         # abrupt exit (RQ stop / Stop&Resume / SIGTERM-with-grace) still
         # flushes the agent's exploit.py / report.md / findings.json /

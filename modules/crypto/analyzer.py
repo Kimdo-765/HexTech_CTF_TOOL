@@ -26,7 +26,6 @@ from modules._common import (
     run_pre_recon,
     run_report_phase,
     scan_job_for_flags,
-    soft_timeout_watchdog,
     store_pre_recon_cache,
     write_meta,
 )
@@ -221,8 +220,6 @@ async def _run_agent(
     if resume_sid:
         log_line(job_id, f"Forking prior Claude session {resume_sid[:8]}…")
 
-    soft_timeout = int(read_meta(job_id).get("job_timeout") or 0)
-    watchdog = asyncio.create_task(soft_timeout_watchdog(job_id, soft_timeout))
 
     sandbox_result: Optional[dict] = None
 
@@ -263,11 +260,8 @@ async def _run_agent(
                 f"continuing without findings.json",
             )
     finally:
-        watchdog.cancel()
         # Kill leftover background processes from this job.
         cleanup_job_processes(lambda s: log_line(job_id, s))
-        if read_meta(job_id).get("awaiting_decision"):
-            write_meta(job_id, awaiting_decision=False)
         # Carry artifacts up to the job dir. Runs in `finally` so any
         # abrupt exit (RQ stop / Stop&Resume / SIGTERM-with-grace) still
         # flushes solver.{py,sage} / report.md into <jobdir>/. Wrapped

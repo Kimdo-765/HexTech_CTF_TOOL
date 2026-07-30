@@ -34,7 +34,6 @@ from modules._common import (
     resolve_main_model,
     scan_job_for_flags,
     _is_placeholder_flag,
-    soft_timeout_watchdog,
     write_meta,
 )
 from modules.misc.prompts import SYSTEM_PROMPT, build_user_prompt
@@ -158,46 +157,39 @@ async def _claude_summary(
         prompt = prompt + "\n\n" + _docker_block
     summary: dict = {"messages": 0, "tool_calls": 0}
 
-    soft_timeout = int(read_meta(job_id).get("job_timeout") or 0)
-    watchdog = asyncio.create_task(soft_timeout_watchdog(job_id, soft_timeout))
 
-    try:
-        async for msg in query(prompt=prompt, options=options):
-            capture_session_id(msg, job_id)
-            agent_heartbeat(job_id, msg)
-            if isinstance(msg, AssistantMessage):
-                summary["messages"] += 1
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        _log(job_id, f"AGENT: {block.text[:500]}")
-                    elif isinstance(block, ToolUseBlock):
-                        summary["tool_calls"] += 1
-                        args_preview = json.dumps(block.input)[:200]
-                        _log(job_id, f"TOOL {block.name}: {args_preview}")
-                    elif isinstance(block, ThinkingBlock):
-                        log_thinking(
-                            lambda s: _log(job_id, s),
-                            "THINK", block.thinking,
-                        )
-            elif isinstance(msg, UserMessage):
-                content = msg.content if isinstance(msg.content, list) else []
-                for block in content:
-                    if isinstance(block, ToolResultBlock):
-                        _log(
-                            job_id,
-                            format_tool_result(block.content, block.is_error),
-                        )
-            elif isinstance(msg, ResultMessage):
-                summary["result"] = {
-                    "duration_ms": msg.duration_ms,
-                    "num_turns": msg.num_turns,
-                    "total_cost_usd": msg.total_cost_usd,
-                    "is_error": msg.is_error,
-                }
-    finally:
-        watchdog.cancel()
-        if read_meta(job_id).get("awaiting_decision"):
-            write_meta(job_id, awaiting_decision=False)
+    async for msg in query(prompt=prompt, options=options):
+        capture_session_id(msg, job_id)
+        agent_heartbeat(job_id, msg)
+        if isinstance(msg, AssistantMessage):
+            summary["messages"] += 1
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    _log(job_id, f"AGENT: {block.text[:500]}")
+                elif isinstance(block, ToolUseBlock):
+                    summary["tool_calls"] += 1
+                    args_preview = json.dumps(block.input)[:200]
+                    _log(job_id, f"TOOL {block.name}: {args_preview}")
+                elif isinstance(block, ThinkingBlock):
+                    log_thinking(
+                        lambda s: _log(job_id, s),
+                        "THINK", block.thinking,
+                    )
+        elif isinstance(msg, UserMessage):
+            content = msg.content if isinstance(msg.content, list) else []
+            for block in content:
+                if isinstance(block, ToolResultBlock):
+                    _log(
+                        job_id,
+                        format_tool_result(block.content, block.is_error),
+                    )
+        elif isinstance(msg, ResultMessage):
+            summary["result"] = {
+                "duration_ms": msg.duration_ms,
+                "num_turns": msg.num_turns,
+                "total_cost_usd": msg.total_cost_usd,
+                "is_error": msg.is_error,
+            }
     return summary
 
 
