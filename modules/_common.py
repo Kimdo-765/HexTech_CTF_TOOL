@@ -3524,8 +3524,16 @@ def agent_heartbeat(job_id: str, msg) -> None:
             # sum for everything the operator sees.
             _auth = _tokens_from_model_usage(model_usage)
             if _auth:
-                updates["agent_tokens"] = _auth
+                # Seed the accumulator, and let the SINGLE explicit
+                # `agent_tokens=` kwarg below pick it up via `tokens`.
+                # Putting it in `updates` instead collided with that kwarg —
+                # `write_meta() got multiple values for keyword argument
+                # 'agent_tokens'` — which blew up the FINAL heartbeat of every
+                # job (jobs 3452d4d7956e, c1669e159e2c: flag captured, then
+                # meta.error stamped with the TypeError and the last token /
+                # cost numbers never written).
                 _token_state[job_id] = dict(_auth)
+                tokens = _auth
 
     now = _time.monotonic()
     last = _heartbeat_state.get(job_id, 0.0)
