@@ -1941,8 +1941,15 @@ real flag, so placeholder-only jobs never enter the curated set.
   `spend_budget_usd`, escalating amber ≥80% / red ≥100%. A running job has no
   authoritative `cost_usd` yet, so its live `cost_usd_estimate` is added
   separately and rendered with a `~` — an in-flight run used to read `$0` for
-  its whole life. The chip beside it reports the account's rate-limit window
-  (a true "remaining %" is not retrievable on OAuth).
+  its whole life. Beside it, one chip per provider reports the rate-limit
+  window as **remaining**, not used: `⏳ Claude 63% left · resets 6d6h`. Grok
+  serves `remaining_pct` directly; for Claude only `utilization` (a used
+  fraction) comes back, so the chip derives `1 - utilization` and falls back to
+  a status word when the field is absent, which the API notes is common on
+  OAuth accounts. Both chips render through the same two helpers so they cannot
+  disagree — the Claude one used to append `utilization` as a USED percentage
+  while Grok showed remaining, making the same `0.37` read as "37%" on one chip
+  and "63% left" on the other.
 - **Flag alarm**. A new 🚩 flag or `[FLAG?]` candidate raises a sticky
   bottom-right toast plus a beep, and an OS notification when permission is
   already granted. Tracked by VALUE per job, so a given flag alarms exactly

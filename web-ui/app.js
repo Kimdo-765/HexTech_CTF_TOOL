@@ -1522,6 +1522,37 @@ document.getElementById("logout-btn").addEventListener("click", async () => {
   location.href = "/login";
 });
 
+// ── Rate-limit chip rendering, shared by the Claude and Grok chips ─────────
+// What an operator wants off a weekly pool is how much is LEFT, so both chips
+// lead with that. `remaining_pct` is served for Grok; for Claude only
+// `utilization` (a used fraction) comes back, and the API docs it as
+// "frequently absent for OAuth accounts" — hence the status-word fallback
+// rather than rendering a confident 0%.
+function _rlRemainingLabel(rl) {
+  if (typeof rl.remaining_pct === "number") return `${Math.round(rl.remaining_pct)}% left`;
+  if (typeof rl.utilization === "number") {
+    // utilization can exceed 1 on an overage; clamp so we never say "-40% left".
+    return `${Math.round(Math.max(0, 1 - rl.utilization) * 100)}% left`;
+  }
+  if (rl.status === "rejected") return "limit hit";
+  if (rl.status === "allowed_warning") return "near limit";
+  return "usage ok";
+}
+
+function _rlResetSuffix(rl) {
+  if (!rl.resets_at) return "";
+  const secs = rl.resets_at - Math.floor(Date.now() / 1000);
+  if (secs <= 0) return "";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  // Days matter: both windows are `seven_day`, and the Claude chip used to
+  // render a 3-day reset as "87h30m".
+  if (d > 0) return ` · resets ${d}d${h}h`;
+  if (h > 0) return ` · resets ${h}h${m}m`;
+  return ` · resets ${m}m`;
+}
+
 async function refreshStats() {
   try {
     const [statsRes, queueRes, usageRes] = await Promise.all([
@@ -1596,29 +1627,25 @@ function renderUsage(u) {
     }
   }
   // --- Claude rate-limit status chip: green/amber/red + "resets in HH:MM" ---
+  // Both provider chips render through the two helpers above so they cannot
+  // drift apart again: the Claude chip used to APPEND `utilization` as a used
+  // percentage while the Grok chip showed remaining, so the same 0.37 read as
+  // "37%" on one and "63% left" on the other — opposite meanings, same number,
+  // side by side in the same bar.
   const chip = document.getElementById("ratelimit-chip");
   if (chip) {
     const rl = u && u.rate_limit;
     if (rl && rl.status) {
       chip.hidden = false;
       chip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
-      let label;
-      if (rl.status === "rejected") { chip.classList.add("rl-chip--rejected"); label = "limit hit"; }
-      else if (rl.status === "allowed_warning") { chip.classList.add("rl-chip--warn"); label = "near limit"; }
-      else { chip.classList.add("rl-chip--ok"); label = "usage ok"; }
-      // optional numeric utilization (frequently absent on OAuth)
-      if (typeof rl.utilization === "number") label += ` ${Math.round(rl.utilization * 100)}%`;
-      let resetTxt = "";
-      if (rl.resets_at) {
-        const secs = rl.resets_at - Math.floor(Date.now() / 1000);
-        if (secs > 0) {
-          const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
-          resetTxt = h > 0 ? ` · resets ${h}h${m}m` : ` · resets ${m}m`;
-        }
-      }
-      chip.textContent = `⏳ Claude ${label}${resetTxt}`;
+      if (rl.status === "rejected") chip.classList.add("rl-chip--rejected");
+      else if (rl.status === "allowed_warning") chip.classList.add("rl-chip--warn");
+      else chip.classList.add("rl-chip--ok");
+      chip.textContent = `⏳ Claude ${_rlRemainingLabel(rl)}${_rlResetSuffix(rl)}`;
       chip.title = `Claude rate-limit: ${rl.status}`
         + (rl.rate_limit_type ? ` (${rl.rate_limit_type})` : "")
+        + (typeof rl.utilization === "number"
+            ? `\n${Math.round(rl.utilization * 100)}% of the window used` : "")
         + (rl.resets_at ? `\nresets at ${new Date(rl.resets_at * 1000).toLocaleString()}` : "")
         + (rl.updated_at ? `\nlast event ${new Date(rl.updated_at).toLocaleString()}` : "");
     } else {
@@ -1638,32 +1665,7 @@ function renderUsage(u) {
       if (gr.status === "rejected") gchip.classList.add("rl-chip--rejected");
       else if (gr.status === "allowed_warning") gchip.classList.add("rl-chip--warn");
       else gchip.classList.add("rl-chip--ok");
-      // Prefer remaining % (what operators care about for weekly pool).
-      let glabel;
-      if (typeof gr.remaining_pct === "number") {
-        glabel = `${Math.round(gr.remaining_pct)}% left`;
-      } else if (typeof gr.utilization === "number") {
-        glabel = `${Math.round((1 - gr.utilization) * 100)}% left`;
-      } else if (gr.status === "rejected") {
-        glabel = "limit hit";
-      } else if (gr.status === "allowed_warning") {
-        glabel = "near limit";
-      } else {
-        glabel = "usage ok";
-      }
-      let greset = "";
-      if (gr.resets_at) {
-        const secs = gr.resets_at - Math.floor(Date.now() / 1000);
-        if (secs > 0) {
-          const d = Math.floor(secs / 86400);
-          const h = Math.floor((secs % 86400) / 3600);
-          const m = Math.floor((secs % 3600) / 60);
-          if (d > 0) greset = ` · resets ${d}d${h}h`;
-          else if (h > 0) greset = ` · resets ${h}h${m}m`;
-          else greset = ` · resets ${m}m`;
-        }
-      }
-      gchip.textContent = `⏳ Grok ${glabel}${greset}`;
+      gchip.textContent = `⏳ Grok ${_rlRemainingLabel(gr)}${_rlResetSuffix(gr)}`;
       const prod = (gr.product_usage || [])
         .map((p) => `${p.product || "?"}: ${Math.round(p.usage_percent || 0)}%`)
         .join(", ");
