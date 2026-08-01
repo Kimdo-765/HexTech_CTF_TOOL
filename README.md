@@ -195,7 +195,9 @@ into a curated, per-language commentary feed (see
   - `agent_heartbeat()` → `meta.last_agent_event_at` per SDK message (5 s throttle).
   - RQ worker key `rq:worker:<name>` (~10 s heartbeat).
   - Token + cost meter — `result.usage` summed across every turn.
-  - Soft-timeout watchdog → `meta.awaiting_decision` banner.
+  - RQ job key `rq:job:<id>` (per-job heartbeat, 30 s) — the only *job-scoped*
+    liveness signal. `rq_worker_heartbeat_at` resolves through a REUSED worker
+    name, so it proves "a worker called htct-wN is alive", not "this job is".
 
 ### peer subagents — isolated `claude` CLI subprocesses, transient per spawn
 
@@ -646,7 +648,7 @@ back, arm `COST_CAP_USD`.
 ### Fallback artifact safety net
 
 When something stops main mid-run before it produced an artifact —
-budget exhausted, SDK transport killed, soft timeout — the
+budget exhausted, SDK transport killed, cost cap — the
 orchestrator does **not** abort the job. Instead
 `write_fallback_artifacts(work_dir, log_fn)`
 (in `modules/_common.py`) drops a probe-only `exploit.py` + a brief
@@ -871,6 +873,47 @@ the `heap-probe` JSON-timeline gdb wrapper, and the
 the auto-retry user turn. See the [Pwn](#pwn) module section for
 the full pipeline.
 
+### Agent providers
+
+The loop above is provider-agnostic. `agent_provider` (Settings, or
+`AGENT_PROVIDER` in `.env`) picks which backend actually runs it:
+
+| | `claude` (default) | `grok` |
+|---|---|---|
+| Backend | Claude Agent SDK, `claude` CLI subprocess per peer | `grok agent --always-approve --no-leader stdio`, driven over the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC on stdio) |
+| Code | the SDK | `modules/grok_acp.py` (client) + `modules/agent_provider.py` (resolution / readiness) |
+| Credentials | `~/.claude` bind-mount, or `ANTHROPIC_API_KEY` | `~/.grok` bind-mount from `grok login` |
+
+`grok_acp.py` names its message classes after the SDK's (`AssistantMessage`,
+`ToolUseBlock`, `ToolResultBlock`, `ResultMessage`, …), so
+`run_main_agent_session`'s `isinstance` dispatch, the heartbeat, the live flag
+scan and the judge all work unchanged on either provider.
+
+**Parity is not complete.** An 8-lens adversarial review of the Grok path
+confirmed 27 findings; three were fixed on the spot (tool results never
+reaching the orchestrator, which silently disabled the live flag scan; zero
+token/cost accounting, which also made `COST_CAP_USD` inert; text-only roles
+running unrestricted). What a `grok` job still does **not** get:
+
+- **No PreToolUse hooks.** `GrokSessionOptions` has no `hooks` field and the
+  session runs `yoloMode` with empty `clientCapabilities`, so there is no
+  in-process interception point. The read-only-source Write guard and the
+  mid-turn stale-target guard are Claude-only. Only a kill-guard is installed,
+  as an external hook file.
+- **Global hook config.** That kill-guard is written into the operator's real
+  `~/.grok/hooks` on every session start, non-atomically — so it cannot be
+  scoped per role or per session, and concurrent sessions race.
+- **No turn cancellation.** No `session/cancel` is ever sent, so a turn
+  abandoned at a budget break keeps running while the next injection opens a
+  second prompt on the same session.
+- **Silent session fallback.** A rejected `session/load` starts a blank
+  session, so a retry or continue can run with zero prior context and nothing
+  says so.
+
+Treat `grok` as usable-but-watched, and prefer `claude` when a run depends on
+those guards. Both providers share the runner, the judge, the monitor and the
+whole artifact/flag pipeline.
+
 ### Cookbook alignment
 
 The architecture tracks Anthropic's [vulnerability-detection agent
@@ -900,10 +943,13 @@ matrix, custom chal-author library auto-detection.
 
 - Docker Engine 24+ or Docker Desktop with WSL Integration enabled
 - 6+ GB free disk for tool images (Ghidra alone is ~1.4 GB)
-- Either:
+- One of:
   - **Claude Code OAuth** (recommended): Pro/Max claude.ai subscription, run
     `claude login` once on the host so `~/.claude/.credentials.json` exists, OR
-  - **Anthropic API key**: set in `.env` or via the Settings tab
+  - **Anthropic API key**: set in `.env` or via the Settings tab, OR
+  - **Grok Build**: run `grok login` once on the host so `~/.grok/` exists, then
+    set `AGENT_PROVIDER=grok`. See [Agent providers](#agent-providers) for what
+    that path does and does not give you.
 
 ## Quick start
 
@@ -937,7 +983,11 @@ All knobs live in two places:
    | `HOST_DATA_DIR` | `./data` | absolute host path for sibling-container bind mounts |
    | `WORKER_CONCURRENCY` | `3` | parallel job slots |
    | `JOB_TTL_DAYS` | `7` | auto-delete jobs older than N days (`0`=keep) |
-   | `JOB_TIMEOUT` | `6000` | soft job timeout in seconds — see [Timeout & soft-deadline decision](#timeout--soft-deadline-decision) |
+   | `JOB_TIMEOUT` | `900` | **not a deadline** — only scales RQ's hard ceiling (`×4`, floor 24 h, cap 7 d). See [Timeouts](#timeouts) |
+   | `WORKER_MEM_LIMIT` | `12g` | cgroup cap on the worker container. Also editable live from Settings (a change there applies via `docker update`, no restart). A 15 GB `python3` once froze the whole WSL VM with no cap. |
+   | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude` (Agent SDK) or `grok` (Grok Build over ACP). See [Agent providers](#agent-providers) |
+   | `GROK_MODEL` / `GROK_EFFORT` | `grok-build` / empty | model + reasoning effort used when `AGENT_PROVIDER=grok` |
+   | `HOST_GROK_HOME` | `${HOME}/.grok` | host path of the Grok Build config, bind-mounted into api + worker. **Pin it explicitly.** A snap-confined `docker` CLI reports `HOME` as `~/snap/docker/<rev>`, so `docker compose up -d` through `/snap/bin/docker` resolves the default to an empty directory and silently mounts that — the worker then has no `grok` binary and no auth, with no error anywhere. (`docker compose restart` keeps the old mount, so only a *recreate* exposes it.) Same reason `HOST_CLAUDE_HOME` is pinned. |
    | `WEB_PORT` | `8000` | host port |
    | `GHIDRA_VERSION` / `GHIDRA_BUILD_DATE` | `12.0.4` / `20260303` | Ghidra release used by decompiler image |
    | `ANTHROPIC_API_KEY` | empty | leave empty for OAuth |
@@ -959,9 +1009,11 @@ All knobs live in two places:
 2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides `.env`
    without restart for: Anthropic API key, Claude model, Auth token, Job TTL,
    Job timeout, Worker concurrency, Callback URL, **Spend budget (USD)**,
-   **Enable judge**, **Use Exploit Library hints**. It also hosts the
+   **Enable judge**, **Use Exploit Library hints**, **Agent provider**
+   (`claude` / `grok`) and **Worker memory limit**. It also hosts the
    **Model presets** and **Cloudflared tunnel** panels (below).
-   (Concurrency change requires `docker compose restart worker`.)
+   (Concurrency change requires `docker compose restart worker`. The memory
+   limit is applied live via `docker update` — no restart.)
 
 Precedence: `settings.json` > `.env` > defaults.
 
@@ -1024,6 +1076,11 @@ The top bar shows two chips, both best-effort:
   token from `claude login`. Settings tab shows `✓ Claude Code OAuth detected`.
 - **Anthropic API key**: paste into Settings → Anthropic API Key (or set
   `ANTHROPIC_API_KEY` in `.env`). Overrides OAuth when present.
+- **Grok Build** (when `agent_provider=grok`): host's `~/.grok/` is bind-mounted
+  into worker + api and `/root/.grok/bin` is put on `PATH`, so the credentials
+  from `grok login` are used directly — no key in `.env`. Settings shows the
+  detected state, and the top bar carries a rate-limit chip fed by the billing
+  proxy (`/data/grok_rate_limit.json`).
 
 UI access can additionally be gated by a shared **Auth Token** (`/login`,
 cookie-based). Empty = no auth (dev mode).
@@ -1096,8 +1153,7 @@ upload ──► /data/jobs/<id>/         ─► RQ enqueue
 | POST | `/api/jobs/{id}/resume/stream` | SSE-streamed resume. With `{"hint":"…"}` works exactly like `/resume`. With an empty body, calls the reviewer to write the hint first. Both modes carry `./work/`, fork the prior session, and prepend the `[RESUMING]` preamble. |
 | POST | `/api/jobs/{id}/continue` | continue a finished job IN PLACE (same job id / cwd / work tree / SDK session) with an operator note. Body `{"comment": "...", "target?": "..."}` — `comment` required. NOT a retry: no new job, no re-investigation. The note is folded in as priority guidance; the optional `target` updates `meta.target_url`. 409 if the job is still active (use Stop & resume instead). |
 | POST | `/api/jobs/{id}/stop` | halt a running/queued job WITHOUT deleting it — flips status to `stopped`, keeps the record + `./work/` so you can inspect, `/retry`, or `/resume` afterward |
-| POST | `/api/jobs/{id}/timeout/continue` | acknowledge the soft timeout — let the agent keep running |
-| POST | `/api/jobs/{id}/timeout/kill` | acknowledge the soft timeout — hard-stop the job |
+| POST | `/api/jobs/{id}/timeout/{continue,kill}` | **dead.** The soft deadline they acknowledged was removed in `3a06349`; nothing sets `awaiting_decision` any more, so these are unreachable no-ops kept only so an old bookmark 404s instead of 500s. See [Timeouts](#timeouts) |
 | POST | `/api/exploits/save` | copy a finished job's `report.md` + `exploit.py`/`solver.py` into the operator-curated library. Body `{"job_id": "...", "tags": [...], "notes": "...", "overwrite": true}`. Refuses jobs with no captured flag |
 | GET | `/api/exploits[?module=&tag=&search=]` | list library entries (filterable by module / tag / chal-substring / technique-substring / notes-substring) |
 | GET | `/api/exploits/{id}` | one entry's meta + file list |
@@ -1337,10 +1393,23 @@ unconditionally.
   / `types` / `source` for deeper recovery.
 - **Dynamic analysis** for foreign-arch ELFs:
   `qemu-aarch64-static -g 1234 ./bin/x &` followed by
-  `gdb-multiarch -batch -ex 'set arch aarch64' -ex 'target remote
+  `gdb-multiarch -nx -batch -ex 'set arch aarch64' -ex 'target remote
   :1234' -ex 'b *0x...' -ex 'continue' …` — the debugger subagent
   uses this pattern to break/inspect inside QEMU-user without a
-  full system VM.
+  full system VM. **Always pass `-nx` to a batch gdb**: `/etc/gdb/gdbinit`
+  auto-loads GEF and the banner lands ahead of what you asked for, which a
+  `| head -60` then eats. Use `gdb-clean` — or
+  `GDB_BIN=/usr/bin/gdb-multiarch gdb-clean` for a foreign arch — when you
+  do want GEF's commands without its banner.
+- **JS-engine bundles (V8 / d8)**: a browser-pwn drop is staged as a unit, not
+  as a pile of loose ELFs. `d8` resolves `snapshot_blob.bin` relative to
+  **argv[0]'s directory** — not the cwd, and not through a symlink — so a bare
+  copy of the shell cannot start at all. The pwn analyzer detects the bundle
+  (anchored on `snapshot_blob.bin`), keeps the shell beside its runtime data,
+  ignores build tooling and vendored trees when electing which binary is the
+  shell, splits a supplied `.patch` into its engine-source part and the rest,
+  and reaps stray engine processes on exit. See `_js_engine_dir` /
+  `_pick_js_engine` in `modules/pwn/analyzer.py`.
 
 ### Forensic
 - Auto-detects qcow2 / vmdk / vhd / vhdx / e01 / raw / memory / **log**.
@@ -1396,7 +1465,7 @@ unconditionally.
   was removed (34590ab) — `use_sage` is derived, not configured. **The
   worker has NO sage**, so a `.sage` solver is untestable in the dev
   environment: benchmark it with `python3 -m worker.sage_smoke solver.sage`
-  before shipping (see [dev/run parity](#devrun-parity-the-runner-is-not-the-worker)).
+  before shipping (see [dev/run parity](#devrun-parity--the-runner-is-not-the-worker)).
 - Available libs in the runner sandbox: pycryptodome, gmpy2, sympy, z3-solver,
   ecdsa, pwntools, **fpylll** (LLL / BKZ lattice reduction).
 - **Sandbox timeout** for a `.sage` solver is widened past the 300 s
@@ -1499,7 +1568,7 @@ rather than trusting the file:
 
 Best-effort: any docker hiccup degrades to a log line and never blocks the
 deploy. This pairs with the
-[dev/run parity](#devrun-parity-the-runner-is-not-the-worker) fixes — the
+[dev/run parity](#devrun-parity--the-runner-is-not-the-worker) fixes — the
 packages only help if the image is actually rebuilt.
 
 ### Full update (base images + source rebuild)
@@ -1605,29 +1674,30 @@ dynamic analysis and never reaped it. Without the cleanup hook,
 two jobs deep the worker container had TWO qemu instances both
 holding port forwards on `:18000` and ~512 MB combined.
 
-## Timeout & soft-deadline decision
+## Timeouts
 
-Default job timeout is **6000s** (≈100 min). Override per-job from each
-Analyze form, or globally in Settings (`job_timeout_seconds`).
+`JOB_TIMEOUT` defaults to **900 s**. Override per-job from each Analyze form,
+or globally in Settings (`job_timeout_seconds`).
 
-The timeout is **soft**: when it elapses while the agent is still working,
-the job is **not** killed. Instead a yellow banner appears on the job
-detail panel showing two buttons:
+**Nothing fires when that number elapses.** It is no longer a deadline — it is
+only the input to RQ's hard ceiling (`api/queue.py:hard_timeout_for`):
 
-| Button | What happens |
-|---|---|
-| **▶ Continue running** | Acknowledges the timeout and lets the agent run to completion. The watchdog does not fire again — your acknowledgment carries through to the natural end of the job. |
-| **■ Stop now** | Hard-kills the job: signals the worker, removes any sibling containers, marks `meta.status = failed` with `error: "Stopped by user at soft timeout"`. |
+```
+hard = min(max(JOB_TIMEOUT * 4, 24 h), 7 d)      # JOB_TIMEOUT <= 0  ->  7 d
+```
 
-Internally:
-- The worker spawns an `asyncio` watchdog at the start of the agent loop
-  that sleeps the user-set soft timeout, then sets `meta.awaiting_decision`
-  and logs a single line. The agent loop is never interrupted.
-- RQ's hard timeout is set automatically to **4× the soft budget (min 24 h,
-  max 7 d)** so the worker has plenty of runway after a `continue` decision
-  before RQ's safety net fires.
-- If the agent finishes naturally before the soft timeout, the watchdog is
-  cancelled silently and no banner ever appears.
+So the default 900 s buys a **24 h** hard kill. What actually bounds a run is
+the tool-call budget (`INVESTIGATION_BUDGET`), the spend cap (`COST_CAP_USD`),
+the judge / postjudge loop, and **■ Stop** — not the clock.
+
+> **The soft deadline was removed in `3a06349`.** A watchdog used to set
+> `meta.awaiting_decision` at `JOB_TIMEOUT` and the job panel showed
+> "▶ Continue running / ■ Stop now". It protected nothing: the agent was never
+> interrupted, so the banner only asked the operator to re-authorise work that
+> was already continuing — while interrupting every long job with a decision
+> that had no wrong answer. The watchdog, the banner and the flag are gone; the
+> `/timeout/continue` and `/timeout/kill` endpoints survive as unreachable
+> no-ops.
 
 ## Retry / Resume
 
@@ -1862,6 +1932,22 @@ real flag, so placeholder-only jobs never enter the curated set.
 
 ## UI niceties
 
+- **Palette**. Themed after the terminal's *Grok Build* scheme — a neutral
+  `#141414` surface ramp with Tokyo-Night accents, defined once as CSS custom
+  properties in `:root` (`web-ui/style.css`). Because that scheme is a pastel
+  *foreground* palette, the opaque button fills are darkened derivatives rather
+  than the raw hues, each pinned so it clears 4.5:1 against the body text.
+- **Spend pill + rate chip** (top bar). The pill shows cumulative spend against
+  `spend_budget_usd`, escalating amber ≥80% / red ≥100%. A running job has no
+  authoritative `cost_usd` yet, so its live `cost_usd_estimate` is added
+  separately and rendered with a `~` — an in-flight run used to read `$0` for
+  its whole life. The chip beside it reports the account's rate-limit window
+  (a true "remaining %" is not retrievable on OAuth).
+- **Flag alarm**. A new 🚩 flag or `[FLAG?]` candidate raises a sticky
+  bottom-right toast plus a beep, and an OS notification when permission is
+  already granted. Tracked by VALUE per job, so a given flag alarms exactly
+  once: counting instead meant an out-of-order poll re-announced the same flag,
+  while a poll carrying two candidates announced only one.
 - **Job detail modal**. Clicking a job opens a centered overlay (~96vw),
   not an inline panel. Esc / backdrop / ✕ closes; background scroll is
   locked while open.
