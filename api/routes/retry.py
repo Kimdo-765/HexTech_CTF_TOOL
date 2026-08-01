@@ -157,6 +157,10 @@ paragraph (<=1500 chars) that:
 - Uses plain, neutral, factual technical phrasing throughout.
 
 Reply with ONLY the hint paragraph — no preamble, no markdown headers.
+
+CRITICAL: Do NOT call any tools (no shell, no file read, no web, no
+subagent). Everything you need is already in the user message. Answer
+immediately with the hint paragraph only.
 """
 
 
@@ -321,12 +325,91 @@ async def _iter_reviewer_messages(framed_context: str, options, deadline_s: floa
                 await asyncio.wait_for(aclose(), timeout=10)
 
 
+def _reviewer_provider_and_model(model: str | None) -> tuple[str, str]:
+    """Resolve (provider, model) for the retry reviewer.
+
+    Provider follows Settings / active job stamp; model is coerced so a
+    Grok selection never launches a Claude reviewer (and vice versa).
+    """
+    from modules.agent_provider import (
+        active_provider,
+        coerce_model_for_provider,
+        default_model_for,
+    )
+    provider = active_provider()
+    m = coerce_model_for_provider(model or LATEST_REVIEWER_MODEL, provider)
+    if provider == "grok" and (not m or m.lower().startswith("claude")):
+        m = default_model_for("grok")
+    return provider, m
+
+
+async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
+    """One-shot Grok reviewer (text only). Raises ReviewerError on failure.
+
+    Effort is capped at medium — ``high`` on a large artifact dump routinely
+    sat past the UI's patience with zero tokens (operator: "reviewer never
+    starts"). Tools are disabled via append_tool_addendum=False so the
+    agent does not wander into shell/file tools on /tmp.
+    """
+    from modules.grok_acp import query_grok_once
+
+    # Soft cap prompt size for Grok path — full dumps can exceed 40 KB and
+    # make the one-shot feel hung. Keep head + tail of the framed blob.
+    prompt = framed_context
+    _max = 28_000
+    if len(prompt) > _max:
+        head, tail = prompt[:18_000], prompt[-8_000:]
+        prompt = head + "\n\n…[context truncated for reviewer]…\n\n" + tail
+
+    try:
+        r = await asyncio.wait_for(
+            query_grok_once(
+                prompt=prompt,
+                cwd="/tmp",
+                system_prompt=_REVIEWER_PROMPT,
+                model=model,
+                effort="medium",
+                timeout_s=min(_REVIEWER_WALL_CLOCK_S, 180.0),
+                append_tool_addendum=False,
+            ),
+            timeout=min(_REVIEWER_WALL_CLOCK_S, 180.0) + 30,
+        )
+    except asyncio.TimeoutError:
+        raise ReviewerError(
+            f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with no "
+            "completion (possible transport stall or expired auth); not "
+            "enqueuing a retry",
+            "timeout",
+        )
+    except Exception as e:
+        raw = str(e)
+        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+
+    if r.get("error"):
+        detail = str(r["error"])
+        raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
+    hint = (r.get("text") or "").strip()
+    diag = _diagnose_reviewer_text(hint)
+    if diag is not None:
+        kind, message = diag
+        raise ReviewerError(message, kind)
+    return hint
+
+
 async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
     when this raises.
+
+    Backend follows Settings ``agent_provider``: Grok jobs get a Grok
+    reviewer (never Claude weekly-quota on a Grok-selected stack).
     """
-    model = model or LATEST_REVIEWER_MODEL
+    provider, model = _reviewer_provider_and_model(model)
+    framed_context = _frame_reviewer_context(context)
+
+    if provider == "grok":
+        return await _ask_reviewer_grok(framed_context, model=model)
+
     work_dir = Path("/tmp")
     options = ClaudeAgentOptions(
         system_prompt=_REVIEWER_PROMPT,
@@ -342,7 +425,6 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
         hooks=kill_guard_hooks(),
     )
     hint_parts: list[str] = []
-    framed_context = _frame_reviewer_context(context)
     try:
         async for msg in _iter_reviewer_messages(
             framed_context, options, _REVIEWER_WALL_CLOCK_S
@@ -394,8 +476,32 @@ async def _ask_reviewer_streaming(
       - 'error'  : reviewer failed     -> {"message": "...", "kind": "..."}
 
     On 'error' the caller MUST stop and NOT enqueue a new job.
+    Backend follows Settings ``agent_provider`` (Grok → Grok ACP).
     """
-    model = model or LATEST_REVIEWER_MODEL
+    provider, model = _reviewer_provider_and_model(model)
+    framed_context = _frame_reviewer_context(context)
+
+    if provider == "grok":
+        # Grok one-shot doesn't stream token deltas cleanly; emit one token
+        # burst then done (UI still shows progressive text via the final
+        # delta). Errors surface as 'error' events same as Claude path.
+        try:
+            hint = await _ask_reviewer_grok(framed_context, model=model)
+        except ReviewerError as e:
+            yield "error", {"message": str(e), "kind": e.kind or "api_error"}
+            return
+        except Exception as e:
+            raw = str(e)
+            yield "error", {
+                "message": raw,
+                "kind": classify_agent_error(raw) or "api_error",
+            }
+            return
+        if hint:
+            yield "token", {"delta": hint}
+        yield "done", {"hint": hint}
+        return
+
     work_dir = Path("/tmp")
     options = ClaudeAgentOptions(
         system_prompt=_REVIEWER_PROMPT,
@@ -412,7 +518,6 @@ async def _ask_reviewer_streaming(
     )
     accumulated: list[str] = []
     last_emitted = 0
-    framed_context = _frame_reviewer_context(context)
     try:
         async for msg in _iter_reviewer_messages(
             framed_context, options, _REVIEWER_WALL_CLOCK_S
@@ -991,6 +1096,14 @@ _MAX_MANUAL_HINT = 4000
 
 
 def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Path, dict]:
+    """Validate a job can be retried.
+
+    ``require_claude_auth`` is kept as the kwarg name for call-site
+    compatibility, but the check is **provider-aware**: when Settings
+    ``agent_provider=grok`` (or the job meta stamps grok), Grok auth is
+    required instead of Claude. Manual-hint retries pass
+    ``require_claude_auth=False`` and skip this gate entirely.
+    """
     jd = JOBS_DIR / safe
     if not jd.is_dir():
         raise HTTPException(status_code=404, detail="job not found")
@@ -1002,12 +1115,29 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
         )
     if require_claude_auth:
         apply_to_env()
-        if not (str(get_setting("anthropic_api_key") or "")) and not Path(
-            "/root/.claude/.credentials.json"
-        ).is_file():
+        from modules.agent_provider import (
+            has_provider_auth,
+            normalize_provider,
+            provider_display_name,
+            provider_for_job,
+        )
+        provider = normalize_provider(
+            prev_meta.get("agent_provider") or provider_for_job(safe)
+        )
+        if not has_provider_auth(provider):
+            if provider == "grok":
+                detail = (
+                    "no Grok/xAI auth configured (Settings → xAI API key, "
+                    "or `grok login` with ~/.grok mounted)"
+                )
+            else:
+                detail = (
+                    "no Claude auth configured (set Settings → API key "
+                    "or claude login)"
+                )
             raise HTTPException(
                 status_code=400,
-                detail="no Claude auth configured (set Settings → API key or claude login)",
+                detail=f"{detail} [provider={provider_display_name(provider)}]",
             )
     return jd, prev_meta
 

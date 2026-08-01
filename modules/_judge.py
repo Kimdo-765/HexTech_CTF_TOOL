@@ -378,14 +378,72 @@ async def _run_judge_turn(
     """Run a single judge turn (which may internally do multiple tool
     calls). Returns (final_text, captured_session_id).
 
-    `model` makes the judge (and its spawned recon) FOLLOW the job's main
-    model; when None it falls back to LATEST_JUDGE_MODEL. The same model is
-    used for the judge session AND build_judge_agents (judge-spawned recon),
-    so judge-recon tracks main too.
+    Backend follows the job's ``agent_provider`` (Settings / meta):
+      * claude — Claude Agent SDK ``query()`` (historical path; session
+        continuity via ``resume`` / project-key under ``~/.claude``)
+      * grok   — ``GrokACPClient`` with ``JUDGE_AGENT_PROMPT`` so
+        prejudge/supervise/postjudge never burn Claude quota on a Grok job
 
-    Empty string + None on failure — judge errors are NEVER fatal.
+    `model` follows the job's main model family via ``resolve_judge_model``;
+    when None it falls back to LATEST_JUDGE_MODEL (Claude) or the Grok
+    default. Empty string + None on failure — judge errors are NEVER fatal.
     """
-    _jm = model or LATEST_JUDGE_MODEL
+    from modules.agent_provider import (
+        coerce_model_for_provider,
+        provider_for_job,
+        default_model_for,
+    )
+
+    job_id = Path(cwd).name
+    provider = provider_for_job(job_id)
+    _jm = coerce_model_for_provider(model or LATEST_JUDGE_MODEL, provider)
+
+    # ---- Grok path: full ACP session (tools available like Claude judge) --
+    if provider == "grok":
+        try:
+            from modules.grok_acp import (
+                GrokACPClient,
+                GrokSessionOptions,
+                AssistantMessage as GrokAssistantMessage,
+                ResultMessage as GrokResultMessage,
+            )
+            from modules._prompts import JUDGE_AGENT_PROMPT
+        except Exception:
+            return "", None
+        if not _jm or str(_jm).lower().startswith("claude"):
+            _jm = default_model_for("grok")
+        opts = GrokSessionOptions(
+            system_prompt=JUDGE_AGENT_PROMPT,
+            model=_jm,
+            cwd=str(cwd),
+            resume=resume_sid,
+            effort="medium",
+            env={"JOB_ID": job_id, "AGENT_ROLE": "judge"},
+        )
+        parts: list[str] = []
+        captured_sid: str | None = None
+        try:
+            async with GrokACPClient(opts) as client:
+                captured_sid = client.session_id
+                await client.query(user_prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, GrokAssistantMessage):
+                        for blk in (getattr(msg, "content", None) or []):
+                            t = getattr(blk, "text", None)
+                            if t:
+                                parts.append(t)
+                    elif isinstance(msg, GrokResultMessage):
+                        sid = getattr(msg, "session_id", None)
+                        if sid and not captured_sid:
+                            captured_sid = sid
+                        if getattr(msg, "is_error", False):
+                            return "", captured_sid
+                        break
+        except Exception:
+            return "", captured_sid
+        return "".join(parts).strip()[:8000], captured_sid
+
+    # ---- Claude path (historical) ----------------------------------------
     options = ClaudeAgentOptions(
         system_prompt=None,  # judge AgentDefinition prompt is loaded by SDK
         model=_jm,
@@ -399,8 +457,8 @@ async def _run_judge_turn(
         # 2026-07-22 — kill_guard_hooks no longer denies WebSearch/WebFetch).
         hooks=kill_guard_hooks(),
     )
-    parts: list[str] = []
-    captured_sid: str | None = None
+    parts = []
+    captured_sid = None
     try:
         async for msg in query(prompt=user_prompt, options=options):
             if isinstance(msg, SystemMessage):

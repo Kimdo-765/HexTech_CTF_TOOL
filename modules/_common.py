@@ -14,6 +14,9 @@ from typing import Any, List, Dict  # noqa: F401
 # this file navigable). Re-exported here so existing references resolve.
 from modules._prompts import (  # noqa: E402,F401
     mission_block,
+    adapt_system_prompt_for_grok,
+    GROK_DELEGATION_CONTRACT,
+    GROK_ROLE_TO_SUBAGENT_TYPE,
     CTF_PREAMBLE,
     _TOOLS_BASE,
     TOOLS_WEB,
@@ -424,6 +427,335 @@ def read_rate_limit() -> dict | None:
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# Grok (SuperGrok / OAuth) weekly usage chip
+# ---------------------------------------------------------------------------
+# Grok Build's `/usage` slash command hits cli-chat-proxy:
+#   GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
+# with the OIDC access token from ~/.grok/auth.json. Response shape (2026):
+#   config.creditUsagePercent  — % of the weekly pool USED (0–100+)
+#   config.currentPeriod.end   — weekly reset timestamp
+#   config.productUsage[]      — per-product breakdown (GrokBuild, …)
+# Unlike Claude's RateLimitEvent (passive, last-seen), this is an active poll
+# against the billing API. Cache for GROK_RATE_LIMIT_TTL_S so the 7s UI
+# heartbeat does not hammer the proxy. Never raises — missing auth / network
+# just means the chip stays hidden.
+GROK_RATE_LIMIT_CACHE = DATA_DIR / "grok_rate_limit.json"
+GROK_RATE_LIMIT_TTL_S = 60
+_GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+_GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
+
+
+def _grok_auth_paths() -> list[Path]:
+    return [
+        Path("/root/.grok/auth.json"),
+        Path.home() / ".grok" / "auth.json",
+        Path(os.environ.get("GROK_HOME", "") or "/nonexistent") / "auth.json",
+    ]
+
+
+def _load_grok_auth_entry() -> tuple[Path | None, str | None, dict | None]:
+    """Return (path, entry_key, entry_dict) for the first usable auth.json."""
+    for p in _grok_auth_paths():
+        try:
+            if not p.is_file() or p.stat().st_size <= 0:
+                continue
+            data = json.loads(p.read_text())
+            if not isinstance(data, dict) or not data:
+                continue
+            # Prefer an entry that has an access token ("key") and looks like OIDC.
+            for ek, ev in data.items():
+                if isinstance(ev, dict) and ev.get("key"):
+                    return p, ek, ev
+        except Exception:
+            continue
+    return None, None, None
+
+
+def _grok_token_expired(entry: dict, skew_s: int = 120) -> bool:
+    """True if the access token is missing an expiry or is within skew of it."""
+    exp = entry.get("expires_at")
+    if not exp:
+        return False  # unknown — try the token as-is; 401 triggers refresh
+    try:
+        # "2026-07-31T15:07:04.382952296Z" — trim sub-micro if present
+        s = str(exp).replace("Z", "+00:00")
+        # fromisoformat chokes on >6 fractional digits; keep microseconds
+        if "." in s:
+            head, rest = s.split(".", 1)
+            frac = ""
+            tz = ""
+            for i, ch in enumerate(rest):
+                if ch.isdigit():
+                    frac += ch
+                else:
+                    tz = rest[i:]
+                    break
+            s = f"{head}.{frac[:6]}{tz}"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (dt.timestamp() - skew_s) <= datetime.now(timezone.utc).timestamp()
+    except Exception:
+        return False
+
+
+def _refresh_grok_token(auth_path: Path, entry_key: str, entry: dict) -> str | None:
+    """OIDC refresh_token grant. Updates auth.json in place. Returns new access token."""
+    import urllib.parse
+    import urllib.request
+
+    refresh = entry.get("refresh_token")
+    client_id = entry.get("oidc_client_id")
+    if not refresh or not client_id:
+        return None
+    token_url = _GROK_TOKEN_URL
+    # Some installs may store a non-default issuer; prefer its token endpoint
+    # only when the issuer is auth.x.ai (the only one we know works).
+    body = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": client_id,
+    }).encode()
+    req = urllib.request.Request(
+        token_url,
+        data=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        payload = json.loads(resp.read())
+    access = payload.get("access_token")
+    if not access:
+        return None
+    entry["key"] = access
+    if payload.get("refresh_token"):
+        entry["refresh_token"] = payload["refresh_token"]
+    expires_in = payload.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        entry["expires_at"] = (
+            datetime.now(timezone.utc).timestamp() + float(expires_in)
+        )
+        # Store ISO like the CLI does
+        entry["expires_at"] = datetime.fromtimestamp(
+            entry["expires_at"], tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+    # Write back full file (preserve sibling entries)
+    try:
+        raw = json.loads(auth_path.read_text())
+        if not isinstance(raw, dict):
+            raw = {}
+        raw[entry_key] = entry
+        tmp = auth_path.with_name(auth_path.name + ".tmp")
+        tmp.write_text(json.dumps(raw, indent=2))
+        tmp.replace(auth_path)
+    except Exception:
+        pass  # token still usable even if disk write fails
+    return access
+
+
+def _fetch_grok_billing_credits(token: str) -> dict:
+    """GET billing?format=credits; return parsed JSON. Raises on HTTP error."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        _GROK_BILLING_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "x-grok-client-mode": "cli",
+            "User-Agent": "HexTech_CTF_TOOL/grok-usage",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        return json.loads(resp.read())
+
+
+def _normalize_grok_billing(raw: dict) -> dict:
+    """Map cli-chat-proxy billing response → UI chip fields."""
+    cfg = raw.get("config") if isinstance(raw, dict) else None
+    if not isinstance(cfg, dict):
+        cfg = raw if isinstance(raw, dict) else {}
+
+    used_pct = cfg.get("creditUsagePercent")
+    try:
+        used_pct = float(used_pct) if used_pct is not None else None
+    except (TypeError, ValueError):
+        used_pct = None
+
+    remaining_pct = None
+    utilization = None
+    if used_pct is not None:
+        utilization = max(0.0, min(used_pct / 100.0, 9.99))
+        remaining_pct = max(0.0, round(100.0 - used_pct, 1))
+
+    # Weekly reset: prefer currentPeriod.end, fall back to billingPeriodEnd.
+    period = cfg.get("currentPeriod") if isinstance(cfg.get("currentPeriod"), dict) else {}
+    end_s = period.get("end") or cfg.get("billingPeriodEnd")
+    resets_at = None
+    if end_s:
+        try:
+            s = str(end_s).replace("Z", "+00:00")
+            if "." in s:
+                head, rest = s.split(".", 1)
+                frac, tz = "", ""
+                for i, ch in enumerate(rest):
+                    if ch.isdigit():
+                        frac += ch
+                    else:
+                        tz = rest[i:]
+                        break
+                s = f"{head}.{frac[:6]}{tz}"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            resets_at = int(dt.timestamp())
+        except Exception:
+            resets_at = None
+
+    period_type = period.get("type") or ""
+    rate_limit_type = "seven_day" if "WEEKLY" in str(period_type).upper() else (
+        "weekly" if period_type else "subscription"
+    )
+
+    if used_pct is None:
+        status = "unknown"
+    elif used_pct >= 100:
+        status = "rejected"
+    elif used_pct >= 80:
+        status = "allowed_warning"
+    else:
+        status = "allowed"
+
+    product_usage = []
+    for row in (cfg.get("productUsage") or []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            product_usage.append({
+                "product": row.get("product"),
+                "usage_percent": float(row.get("usagePercent") or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+
+    return {
+        "status": status,
+        "utilization": utilization,
+        "used_pct": round(used_pct, 1) if used_pct is not None else None,
+        "remaining_pct": remaining_pct,
+        "resets_at": resets_at,
+        "rate_limit_type": rate_limit_type,
+        "product_usage": product_usage,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "billing_credits",
+    }
+
+
+def _write_grok_rate_limit_cache(payload: dict) -> None:
+    try:
+        GROK_RATE_LIMIT_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = GROK_RATE_LIMIT_CACHE.with_name(GROK_RATE_LIMIT_CACHE.name + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(GROK_RATE_LIMIT_CACHE)
+    except Exception:
+        pass
+
+
+def read_grok_rate_limit(force: bool = False) -> dict | None:
+    """Latest Grok weekly usage for the UI chip (or None).
+
+    Serves a short-TTL disk cache so the top-bar 7s poll stays free; refreshes
+    from the billing API when the cache is stale / missing / forced. Never
+    raises — any failure returns the last good cache (if any) or None.
+    """
+    # Serve cache when fresh.
+    if not force:
+        try:
+            if GROK_RATE_LIMIT_CACHE.is_file():
+                cached = json.loads(GROK_RATE_LIMIT_CACHE.read_text())
+                if isinstance(cached, dict) and cached.get("status"):
+                    ts = cached.get("updated_at")
+                    age_ok = False
+                    if ts:
+                        try:
+                            s = str(ts).replace("Z", "+00:00")
+                            if "." in s:
+                                head, rest = s.split(".", 1)
+                                frac, tz = "", ""
+                                for i, ch in enumerate(rest):
+                                    if ch.isdigit():
+                                        frac += ch
+                                    else:
+                                        tz = rest[i:]
+                                        break
+                                s = f"{head}.{frac[:6]}{tz}"
+                            dt = datetime.fromisoformat(s)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            age_ok = (
+                                datetime.now(timezone.utc).timestamp() - dt.timestamp()
+                            ) < GROK_RATE_LIMIT_TTL_S
+                        except Exception:
+                            age_ok = False
+                    if age_ok:
+                        return cached
+        except Exception:
+            pass
+
+    # Live fetch.
+    try:
+        auth_path, entry_key, entry = _load_grok_auth_entry()
+        if not entry or not entry.get("key"):
+            # No OAuth — weekly SuperGrok pool is not visible via API key alone.
+            return _read_stale_grok_cache()
+        token = entry["key"]
+        if _grok_token_expired(entry):
+            try:
+                new_tok = _refresh_grok_token(auth_path, entry_key, entry)
+                if new_tok:
+                    token = new_tok
+            except Exception:
+                pass  # try the existing token anyway
+        try:
+            raw = _fetch_grok_billing_credits(token)
+        except Exception as e:
+            # 401 → one refresh retry
+            code = getattr(e, "code", None)
+            if code == 401 and auth_path and entry_key:
+                try:
+                    new_tok = _refresh_grok_token(auth_path, entry_key, entry)
+                    if new_tok:
+                        raw = _fetch_grok_billing_credits(new_tok)
+                    else:
+                        return _read_stale_grok_cache()
+                except Exception:
+                    return _read_stale_grok_cache()
+            else:
+                return _read_stale_grok_cache()
+        payload = _normalize_grok_billing(raw)
+        _write_grok_rate_limit_cache(payload)
+        return payload
+    except Exception:
+        return _read_stale_grok_cache()
+
+
+def _read_stale_grok_cache() -> dict | None:
+    try:
+        if GROK_RATE_LIMIT_CACHE.is_file():
+            cached = json.loads(GROK_RATE_LIMIT_CACHE.read_text())
+            if isinstance(cached, dict) and cached.get("status"):
+                return cached
+    except Exception:
+        pass
+    return None
+
 
 # Single source of truth for the latest Claude model used by ad-hoc
 # Claude calls (retry reviewer, exploit/solver judge). Bump here and
@@ -2003,12 +2335,6 @@ async def run_report_phase(
     logged and swallowed. Downstream ``validate_findings`` already
     tolerates missing/empty files; UI has no readers.
     """
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions, query
-    except Exception as e:
-        log_fn(f"[report] SDK import failed ({e}); skipping report phase")
-        return False
-
     report_md = work_dir / "report.md"
     exploit_py = work_dir / "exploit.py"
     solver_py = work_dir / "solver.py"
@@ -2067,63 +2393,105 @@ async def run_report_phase(
         label="report-options", log_fn=log_fn,
     )
 
+    from modules.agent_provider import active_provider, default_model_for
     from modules.model_presets import resolve_role_model
 
-    options = ClaudeAgentOptions(
-        system_prompt=sys_prompt,
-        # Active model-preset pins the report role; when unset it falls through
-        # to the caller's model (the analyzers pass main's per-job model here,
-        # so report follows main) or REPORT_PHASE_MODEL if neither is given.
-        # NB: the preset must win OVER the caller's model — the analyzers always
-        # pass model=<main>, so `model or resolve(...)` would never consult it.
-        model=resolve_role_model("report", model or REPORT_PHASE_MODEL),
-        cwd=str(work_dir),
-        allowed_tools=[],
-        disallowed_tools=["Agent", "Task", "WebSearch", "WebFetch", "Bash",
-                          "Read", "Write", "Edit", "Glob", "Grep"],
-        permission_mode="bypassPermissions",
-    )
+    report_model = resolve_role_model("report", model or REPORT_PHASE_MODEL)
+    if active_provider() == "grok" and (
+        not report_model
+        or str(report_model).lower().startswith("claude")
+        or str(report_model).lower().startswith("anthropic")
+    ):
+        report_model = default_model_for("grok")
 
-    log_fn(f"[report] launching report phase (model={options.model}, "
-           f"sources={[n for n, _ in sources]})")
-
-    accumulated = ""
-    try:
-        import anyio
-        with anyio.fail_after(timeout_s):
-            async for msg in query(prompt=report_prompt, options=options):
-                cls = type(msg).__name__
-                if cls == "AssistantMessage":
-                    for block in getattr(msg, "content", []) or []:
-                        if type(block).__name__ == "TextBlock":
-                            accumulated += getattr(block, "text", "") or ""
-                elif cls == "ResultMessage":
-                    if getattr(msg, "is_error", False):
-                        log_fn(f"[report] SDK ResultMessage error: "
-                               f"{getattr(msg, 'result', '')[:200]}")
-                        return False
-    except TimeoutError:
-        log_fn(f"[report] timed out after {timeout_s}s — keeping any prior "
-               f"findings.json untouched")
-        return False
-    except Exception as e:
-        log_fn(f"[report] phase crashed: {type(e).__name__}: {e}")
-        # Surface infra failures (e.g. bundled claude CLI dies exit 127 from a
-        # polluted worker glibc) so the job isn't a silent no_flag with
-        # error=null. Stamp a DISTINCT meta field (write_meta merges, so this
-        # survives run_job's final write which only touches error_kind/status).
-        kind = classify_agent_error(f"{type(e).__name__}: {e}")
-        if kind == "cli_infra_error":
-            log_fn(
-                "[report] INFRA: claude CLI spawn failed (likely worker glibc "
-                "pollution from in-run lib/ld manipulation) — this no_flag is "
-                "an infrastructure cascade, not a clean miss"
+    # ---- Grok path: avoid Claude weekly-limit failures on Grok jobs -------
+    if active_provider() == "grok":
+        from modules.grok_acp import query_grok_once
+        log_fn(
+            f"[report] launching report phase via Grok (model={report_model}, "
+            f"sources={[n for n, _ in sources]})"
+        )
+        try:
+            r = await query_grok_once(
+                prompt=report_prompt,
+                cwd=str(work_dir),
+                system_prompt=sys_prompt,
+                model=report_model,
+                effort="low",
+                timeout_s=float(timeout_s),
             )
-            try:
-                write_meta(job_id, report_phase_error=f"{kind}: {str(e)[:200]}")
-            except Exception:
-                pass
-        return False
+        except Exception as e:
+            log_fn(f"[report] Grok report phase failed ({e}); skipping")
+            return False
+        if r.get("error"):
+            log_fn(f"[report] Grok error: {r['error']}; skipping")
+            return False
+        accumulated = (r.get("text") or "").strip()
+        # fall through to shared JSON extract / write below
+    else:
+        try:
+            from claude_agent_sdk import ClaudeAgentOptions, query
+        except Exception as e:
+            log_fn(f"[report] SDK import failed ({e}); skipping report phase")
+            return False
+
+        options = ClaudeAgentOptions(
+            system_prompt=sys_prompt,
+            # Active model-preset pins the report role; when unset it falls through
+            # to the caller's model (the analyzers pass main's per-job model here,
+            # so report follows main) or REPORT_PHASE_MODEL if neither is given.
+            # NB: the preset must win OVER the caller's model — the analyzers always
+            # pass model=<main>, so `model or resolve(...)` would never consult it.
+            model=report_model,
+            cwd=str(work_dir),
+            allowed_tools=[],
+            disallowed_tools=["Agent", "Task", "WebSearch", "WebFetch", "Bash",
+                              "Read", "Write", "Edit", "Glob", "Grep"],
+            permission_mode="bypassPermissions",
+        )
+
+        log_fn(f"[report] launching report phase (model={options.model}, "
+               f"sources={[n for n, _ in sources]})")
+
+        accumulated = ""
+        try:
+            import anyio
+            with anyio.fail_after(timeout_s):
+                async for msg in query(prompt=report_prompt, options=options):
+                    cls = type(msg).__name__
+                    if cls == "AssistantMessage":
+                        for block in getattr(msg, "content", []) or []:
+                            if type(block).__name__ == "TextBlock":
+                                accumulated += getattr(block, "text", "") or ""
+                    elif cls == "ResultMessage":
+                        if getattr(msg, "is_error", False):
+                            log_fn(
+                                f"[report] SDK ResultMessage error: "
+                                f"{getattr(msg, 'result', '')[:200]}"
+                            )
+                            return False
+        except TimeoutError:
+            log_fn(
+                f"[report] timed out after {timeout_s}s — keeping any prior "
+                f"findings.json untouched"
+            )
+            return False
+        except Exception as e:
+            log_fn(f"[report] phase crashed: {type(e).__name__}: {e}")
+            kind = classify_agent_error(f"{type(e).__name__}: {e}")
+            if kind == "cli_infra_error":
+                log_fn(
+                    "[report] INFRA: claude CLI spawn failed (likely worker glibc "
+                    "pollution from in-run lib/ld manipulation) — this no_flag is "
+                    "an infrastructure cascade, not a clean miss"
+                )
+                try:
+                    write_meta(
+                        job_id, report_phase_error=f"{kind}: {str(e)[:200]}"
+                    )
+                except Exception:
+                    pass
+            return False
 
     raw = accumulated.strip()
     if not raw:
@@ -2179,98 +2547,160 @@ async def run_pre_recon(
     main's "should I delegate?" decision (which is consistently mis-made
     in favor of direct Bash analysis, bloating main's cache_read).
 
-    Spawned as a STANDALONE ClaudeSDKClient with ``make_standalone_options``
-    — same isolation contract as `spawn_subagent` MCP, so main never
-    sees recon's investigation context. Returns ONLY recon's final text
-    (joined assistant TextBlocks), capped at 8 KB.
+    Backend follows Settings ``agent_provider``:
+      * claude — standalone ``ClaudeSDKClient`` (historical path)
+      * grok   — standalone ``GrokACPClient`` (avoids burning Claude quota
+        / weekly limits when the job itself is on Grok)
 
-    No per-helper timeout: the job-level soft timeout (set via the
-    UI / `JOB_TIMEOUT` env) bounds total wall time, and recon's own
-    output budget keeps it bounded in practice. A separate pre-recon
-    cap was double-counting and (on job fa6520405673) discarded a
-    nearly-complete investigation when the final summary was about
-    to be emitted. If recon genuinely hangs, the watchdog + user
-    Stop button still apply.
-
-    Best-effort: SDK import / unexpected crashes return whatever
-    assistant text was accumulated so far (possibly empty); the
-    caller falls back to the normal "main delegates as needed" flow.
+    Returns ONLY recon's final text (joined assistant TextBlocks), capped
+    at 8 KB. Best-effort: crashes return partial/empty text; caller falls
+    back to "main delegates as needed".
     """
-    try:
-        from claude_agent_sdk import (
-            AssistantMessage,
-            ClaudeSDKClient,
-            ResultMessage,
-            UserMessage,
-        )
-    except Exception as e:
-        log_fn(f"[{tag}] SDK import failed ({e}); skipping pre-recon")
-        return ""
+    from modules.agent_provider import active_provider, default_model_for
 
-    options = make_standalone_options(
-        "recon", model, work_dir, job_id,
-    )
     chunks: list[str] = []
     crashed = False
     result_is_error = False
+    provider = active_provider()
 
-    try:
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    for block in (getattr(msg, "content", None) or []):
-                        if type(block).__name__ == "TextBlock":
-                            txt = getattr(block, "text", "") or ""
-                            if txt.strip():
-                                chunks.append(txt)
+    # ---- Grok path --------------------------------------------------------
+    if provider == "grok":
+        try:
+            from modules.grok_acp import (
+                GrokACPClient,
+                GrokSessionOptions,
+                AssistantMessage as GrokAssistantMessage,
+                ResultMessage as GrokResultMessage,
+                ToolUseBlock as GrokToolUseBlock,
+            )
+        except Exception as e:
+            log_fn(f"[{tag}] Grok ACP import failed ({e}); skipping pre-recon")
+            return ""
+        # Reuse recon system prompt from the standalone options builder.
+        try:
+            claude_opts = make_standalone_options("recon", model, work_dir, job_id)
+            recon_system = getattr(claude_opts, "system_prompt", "") or ""
+        except Exception:
+            recon_system = (
+                "You are a read-only recon agent. Investigate the challenge "
+                "statically and return a concise summary (≤2 KB)."
+            )
+        grok_model = (model or "").strip()
+        if not grok_model or grok_model.lower().startswith("claude"):
+            grok_model = default_model_for("grok")
+        log_fn(f"[{tag}] backend=Grok model={grok_model}")
+        opts = GrokSessionOptions(
+            system_prompt=recon_system,
+            model=grok_model,
+            cwd=str(work_dir),
+            effort=None,
+            env={"JOB_ID": job_id, "AGENT_ROLE": "recon"},
+        )
+        try:
+            async with GrokACPClient(opts) as client:
+                await client.query(prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, GrokAssistantMessage):
+                        for block in (getattr(msg, "content", None) or []):
+                            if type(block).__name__ == "TextBlock":
+                                txt = getattr(block, "text", "") or ""
+                                if txt.strip():
+                                    chunks.append(txt)
+                                    log_line(
+                                        job_id,
+                                        f"[{tag}] AGENT: {txt[:500]}",
+                                    )
+                            elif type(block).__name__ == "ToolUseBlock":
+                                nm = getattr(block, "name", "?")
+                                inp = getattr(block, "input", None) or {}
+                                try:
+                                    preview = json.dumps(inp)[:200]
+                                except Exception:
+                                    preview = str(inp)[:200]
                                 log_line(
                                     job_id,
-                                    f"[{tag}] AGENT: {txt[:500]}",
+                                    f"[{tag}] TOOL {nm}: {preview}",
                                 )
-                        elif type(block).__name__ == "ToolUseBlock":
-                            nm = getattr(block, "name", "?")
-                            inp = getattr(block, "input", None) or {}
+                    elif isinstance(msg, GrokResultMessage):
+                        result_is_error = bool(getattr(msg, "is_error", False))
+        except Exception as e:
+            crashed = True
+            log_fn(f"[{tag}] crashed: {e!r} — returning partial output")
+        # fall through to shared post-processing below
+    else:
+        # ---- Claude path --------------------------------------------------
+        try:
+            from claude_agent_sdk import (
+                AssistantMessage,
+                ClaudeSDKClient,
+                ResultMessage,
+                UserMessage,
+            )
+        except Exception as e:
+            log_fn(f"[{tag}] SDK import failed ({e}); skipping pre-recon")
+            return ""
+
+        options = make_standalone_options(
+            "recon", model, work_dir, job_id,
+        )
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        for block in (getattr(msg, "content", None) or []):
+                            if type(block).__name__ == "TextBlock":
+                                txt = getattr(block, "text", "") or ""
+                                if txt.strip():
+                                    chunks.append(txt)
+                                    log_line(
+                                        job_id,
+                                        f"[{tag}] AGENT: {txt[:500]}",
+                                    )
+                            elif type(block).__name__ == "ToolUseBlock":
+                                nm = getattr(block, "name", "?")
+                                inp = getattr(block, "input", None) or {}
+                                try:
+                                    preview = json.dumps(inp)[:200]
+                                except Exception:
+                                    preview = str(inp)[:200]
+                                log_line(
+                                    job_id,
+                                    f"[{tag}] TOOL {nm}: {preview}",
+                                )
+                    elif isinstance(msg, UserMessage):
+                        # Tool RESULTS arrive as UserMessage/ToolResultBlock.
+                        # This branch did not exist, so pre-recon logged every
+                        # command it ran and not one of their outputs — job
+                        # 62531f9da538 counted 18 TOOL calls and 0 TOOL_RESULT
+                        # for this phase (main 46/772, the recon subagent
+                        # 21/21). The cost is not cosmetic: pre-recon runs a
+                        # job's FIRST dynamic probes, so when one silently
+                        # returns nothing there is no way afterwards to tell
+                        # "the tool failed" from "it worked and the agent moved
+                        # on" — exactly the question a post-mortem asks. Same
+                        # formatter the isolated subagents use, so the 200 KB
+                        # disaster valve applies and a huge objdump cannot
+                        # flood run.log.
+                        for block in (getattr(msg, "content", None) or []):
+                            if type(block).__name__ != "ToolResultBlock":
+                                continue
                             try:
-                                preview = json.dumps(inp)[:200]
+                                line = format_tool_result(
+                                    getattr(block, "content", None),
+                                    bool(getattr(block, "is_error", False)),
+                                )
                             except Exception:
-                                preview = str(inp)[:200]
-                            log_line(
-                                job_id,
-                                f"[{tag}] TOOL {nm}: {preview}",
-                            )
-                elif isinstance(msg, UserMessage):
-                    # Tool RESULTS arrive as UserMessage/ToolResultBlock. This
-                    # branch did not exist, so pre-recon logged every command
-                    # it ran and not one of their outputs — job 62531f9da538
-                    # counted 18 TOOL calls and 0 TOOL_RESULT for this phase
-                    # (main 46/772, the recon subagent 21/21). The cost is not
-                    # cosmetic: pre-recon runs the FIRST dynamic probes of a
-                    # job, so when one of them silently returns nothing there
-                    # is no way afterwards to tell "the tool failed" from "it
-                    # worked and the agent moved on" — which is exactly the
-                    # question a post-mortem asks. Same formatter the isolated
-                    # subagents use, so the 200 KB disaster valve applies here
-                    # too and a huge objdump cannot flood run.log.
-                    for block in (getattr(msg, "content", None) or []):
-                        if type(block).__name__ != "ToolResultBlock":
-                            continue
-                        try:
-                            line = format_tool_result(
-                                getattr(block, "content", None),
-                                bool(getattr(block, "is_error", False)),
-                            )
-                        except Exception:
-                            continue
-                        log_line(job_id, f"[{tag}] {line}")
-                elif isinstance(msg, ResultMessage):
-                    result_is_error = bool(getattr(msg, "is_error", False))
-                    cost = getattr(msg, "total_cost_usd", None)
-                    if isinstance(cost, (int, float)) and cost:
-                        log_fn(f"[{tag}] cost: ${cost:.4f}")
-    except Exception as e:
-        crashed = True
-        log_fn(f"[{tag}] crashed: {e!r} — returning partial output")
+                                continue
+                            log_line(job_id, f"[{tag}] {line}")
+                    elif isinstance(msg, ResultMessage):
+                        result_is_error = bool(getattr(msg, "is_error", False))
+                        cost = getattr(msg, "total_cost_usd", None)
+                        if isinstance(cost, (int, float)) and cost:
+                            log_fn(f"[{tag}] cost: ${cost:.4f}")
+        except Exception as e:
+            crashed = True
+            log_fn(f"[{tag}] crashed: {e!r} — returning partial output")
 
     out = "".join(chunks).strip()
     if not out:
@@ -2383,11 +2813,11 @@ def resolve_effort(meta_effort: str | None) -> str | None:
     """Resolve the per-job effort with the global Settings fallback.
 
     Per-job effort (saved in meta.json by api/routes/*_module.py)
-    wins when set; otherwise fall back to the `claude_effort`
-    Settings value; otherwise return None and let the SDK pick its
-    own default (model-dependent).
+    wins when set; otherwise fall back to the active provider's effort
+    Setting (``claude_effort`` or ``grok_effort``); otherwise return None
+    and let the SDK/CLI pick its own default (model-dependent).
     """
-    from modules.settings_io import get_setting
+    from modules.agent_provider import default_effort_for
 
     def _norm(v: object) -> str | None:
         if v is None:
@@ -2401,7 +2831,7 @@ def resolve_effort(meta_effort: str | None) -> str | None:
     if per_job is not None:
         return per_job
     # An active model-preset can pin effort for the main session (overrides the
-    # global claude_effort Setting); a blank preset slot falls through to global.
+    # global effort Setting); a blank preset slot falls through to global.
     try:
         from modules.model_presets import get_preset_effort
         preset_e = _norm(get_preset_effort())
@@ -2409,24 +2839,36 @@ def resolve_effort(meta_effort: str | None) -> str | None:
             return preset_e
     except Exception:
         pass
-    return _norm(get_setting("claude_effort"))
+    return _norm(default_effort_for())
 
 
 def resolve_main_model(model_override: str | None) -> str:
     """Resolve the MAIN CTF agent's model.
 
     Precedence: explicit per-job pick (``model_override``) > active preset's
-    ``main`` slot > global ``claude_model`` Setting > opus-4-7 default. When no
-    preset is active (or its ``main`` slot is blank), this is byte-identical to
-    the historical ``model_override or get_setting("claude_model") or default``.
+    ``main`` slot > global provider model Setting (``claude_model`` or
+    ``grok_model``) > provider default. When no preset is active (or its
+    ``main`` slot is blank), this is byte-identical to the historical
+    ``model_override or get_setting("claude_model") or default`` for the
+    Claude provider.
+
+    Provider safety: if Settings selects Grok but a model-preset still pins
+    a ``claude-*`` main model (common after switching providers), ignore the
+    preset and use the Grok default. Otherwise Grok sessions launch with a
+    Claude model id and/or logs claim the wrong backend.
     """
-    from modules.settings_io import get_setting
+    from modules.agent_provider import active_provider, default_model_for
     from modules.model_presets import resolve_role_model
 
     if model_override and str(model_override).strip():
         return str(model_override).strip()
-    global_default = str(get_setting("claude_model") or "claude-opus-4-7")
-    return resolve_role_model("main", global_default)
+    global_default = default_model_for()
+    resolved = resolve_role_model("main", global_default)
+    if active_provider() == "grok":
+        r = (resolved or "").strip().lower()
+        if r.startswith("claude") or r.startswith("anthropic"):
+            return global_default
+    return resolved
 
 
 def resolve_judge_model(job_id: str | None) -> str:
@@ -2436,17 +2878,19 @@ def resolve_judge_model(job_id: str | None) -> str:
     ``resolve_reviewer_model``, which folds the ``reviewer`` slot over this.)
 
     Base is derived through ``resolve_main_model`` (per-job ``meta.model``
-    override → preset ``main`` → global ``claude_model`` → default), so the
-    judge family tracks main even when main is pinned by a preset. An active
+    override → preset ``main`` → global provider default), so the judge
+    family tracks main even when main is pinned by a preset. An active
     preset's own ``judge`` slot then folds over that base; a blank slot falls
-    through to it. The legacy LATEST_JUDGE_MODEL constant is kept only as an
-    import-time fallback elsewhere.
+    through to it. Always coerced to the job's ``agent_provider`` family so
+    a Grok job never launches a Claude judge (and vice versa).
     """
+    from modules.agent_provider import coerce_model_for_provider, provider_for_job
     from modules.model_presets import resolve_role_model
 
     meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
     base = resolve_main_model(meta_model)
-    return resolve_role_model("judge", base)
+    resolved = resolve_role_model("judge", base)
+    return coerce_model_for_provider(resolved, provider_for_job(job_id))
 
 
 def resolve_reviewer_model(job_id: str | None) -> str:
@@ -2455,16 +2899,17 @@ def resolve_reviewer_model(job_id: str | None) -> str:
 
     Fold order: an active preset's ``reviewer`` slot wins; else it falls back to
     the ``judge`` slot (which itself follows main); else to the main-derived
-    base. So a blank ``reviewer`` slot is byte-identical to the old behavior
-    (reviewer == resolve_judge_model), and setting ``reviewer`` overrides ONLY
-    the retry reviewer without touching prejudge/postjudge/supervise.
+    base. Coerced to the job's ``agent_provider`` so reviewer is Grok when
+    the job/settings selected Grok.
     """
+    from modules.agent_provider import coerce_model_for_provider, provider_for_job
     from modules.model_presets import resolve_role_model
 
     meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
     base = resolve_main_model(meta_model)
     judge_base = resolve_role_model("judge", base)   # current reviewer default
-    return resolve_role_model("reviewer", judge_base)
+    resolved = resolve_role_model("reviewer", judge_base)
+    return coerce_model_for_provider(resolved, provider_for_job(job_id))
 
 
 def make_main_session_options(
@@ -2480,32 +2925,28 @@ def make_main_session_options(
     extra_env: dict | None = None,
     effort: str | None = None,
 ):
-    """Build ``ClaudeAgentOptions`` for a main agent session. Selects
-    isolated-subagent (MCP) vs legacy in-process (``agents=``) path
-    based on ``USE_ISOLATED_SUBAGENTS`` (default ON). All four module
-    analyzers (pwn / web / crypto / rev) share this builder so the
-    isolation behavior is uniform.
+    """Build agent options for a main session (Claude SDK or Grok ACP).
+
+    When Settings ``agent_provider=grok``, returns ``GrokSessionOptions``.
+    Otherwise builds ``ClaudeAgentOptions`` and selects isolated-subagent
+    (MCP) vs legacy in-process (``agents=``) based on
+    ``USE_ISOLATED_SUBAGENTS`` (default ON).
 
     Args:
       base_tools: the per-module tool set (Read/Write/Bash/...) WITHOUT
         the subagent-spawn tool. The builder appends either
         ``mcp__team__spawn_subagent`` or ``Agent`` depending on the
-        active path.
+        active path (Claude only).
       summary: the main session's summary dict; passed through to the
         MCP tool so per-spawn cost + counter increments roll up.
     """
-    from claude_agent_sdk import ClaudeAgentOptions
+    from modules.agent_provider import active_provider
 
-    use_isolated = os.environ.get(
-        "USE_ISOLATED_SUBAGENTS", "1") != "0"
     log_fn_local = lambda s: log_line(job_id, s)
     # Strip argv-fatal control bytes before the prompt is shipped via
-    # `claude --system-prompt <text>` argv. A stray `\0` in any prompt
-    # constant (e.g. a Python source-literal escape like `\0` written
-    # without doubling the backslash) makes execve(2) reject the
-    # spawn with `ValueError: embedded null byte`, killing the
-    # session before turn 1. Job d30897ee5b30 (2026-05-15) failed
-    # that way after a `\0` landmine landed in pwn SYSTEM_PROMPT.
+    # CLI argv (Claude) or ACP meta (Grok). A stray `\0` in any prompt
+    # constant makes execve(2) reject the spawn with
+    # `ValueError: embedded null byte`.
     system_prompt = sanitize_for_argv(
         system_prompt, label="main-options", log_fn=log_fn_local,
     )
@@ -2544,6 +2985,46 @@ def make_main_session_options(
     # one `[*] '<file>'` line per call; minor cost vs. losing checksec.
     env.setdefault("TERM", "xterm")
     env.setdefault("PWNLIB_NOTERM", "1")
+
+    if active_provider() == "grok":
+        from modules.grok_acp import GrokSessionOptions
+        # Rewrite Claude MCP delegation (mcp__team__spawn_subagent, recon
+        # as a Claude type, …) into Grok native spawn_subagent + role map.
+        # Claude path never enters this branch — SYSTEM_PROMPT constants stay
+        # Claude-correct for agent_provider=claude.
+        system_prompt = adapt_system_prompt_for_grok(system_prompt)
+        # Per-turn budget: at least 30 min, or the job soft-timeout if larger.
+        # Kernel/pwn CTF turns routinely need >10 min of tool use (3c0e0edb73db).
+        turn_timeout_s = 1800.0
+        try:
+            jt = int((read_meta(job_id) or {}).get("job_timeout") or 0)
+            if jt > 0:
+                turn_timeout_s = float(max(jt, 1800))
+        except Exception:
+            pass
+        log_fn_local(
+            "[orchestrator] agent backend: Grok Build (ACP stdio); "
+            "native spawn_subagent for delegation "
+            "(recon→explore, debugger/judge→general-purpose; "
+            "[HEXTECH_ROLE=…] prefix required); "
+            "kill-guard hooks under $GROK_HOME/hooks/; "
+            f"turn_timeout={turn_timeout_s:.0f}s"
+        )
+        return GrokSessionOptions(
+            system_prompt=system_prompt,
+            model=model,
+            cwd=str(work_dir),
+            effort=effort,
+            env=env,
+            resume=resume_sid,
+            add_dirs=list(add_dirs or []),
+            turn_timeout_s=turn_timeout_s,
+        )
+
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    use_isolated = os.environ.get(
+        "USE_ISOLATED_SUBAGENTS", "1") != "0"
 
     if use_isolated:
         mcp_server, spawn_tool = make_spawn_subagent_mcp(
@@ -3813,7 +4294,9 @@ def capture_session_id(msg, job_id: str) -> None:
     if isinstance(data, dict):
         sid = data.get("session_id") or data.get("sessionId")
     if sid:
-        write_meta(job_id, claude_session_id=sid)
+        # Historical field name kept for /retry resume compatibility;
+        # agent_session_id is provider-neutral.
+        write_meta(job_id, claude_session_id=sid, agent_session_id=sid)
 
 
 _RETRY_HINT_MARKER = "[retry-hint]"
@@ -4742,10 +5225,13 @@ def log_assistant_blocks(job_id: str, msg, summary: dict) -> None:
             # exited and the SDK context manager closes (= MCP tool
             # is never called, legacy Agent dispatch is interrupted).
             # The MCP tool function intentionally does NOT increment
-            # the counter (avoids double count). Both legacy `Agent`
-            # and MCP `mcp__team__spawn_subagent` count the same way.
+            # the counter (avoids double count). Legacy `Agent`, MCP
+            # `mcp__team__spawn_subagent` (Claude), and Grok native
+            # `spawn_subagent` all count the same way.
             if is_main and (
-                name == "Agent" or name == "mcp__team__spawn_subagent"
+                name == "Agent"
+                or name == "mcp__team__spawn_subagent"
+                or name == "spawn_subagent"
             ):
                 summary["subagent_spawns"] = (
                     int(summary.get("subagent_spawns", 0)) + 1
@@ -6079,6 +6565,10 @@ async def run_main_agent_session(
     on a non-success postjudge verdict, injects the retry_hint as a
     new user turn back into the same SDK session.
 
+    Provider gate: Settings ``agent_provider`` must be ready (auth +
+    runtime). Grok selection fails here until the ACP client is wired,
+    so the job does not silently run Claude after the operator switched.
+
     Loop terminates on FIRST hit among:
       * flag captured / postjudge verdict == "success"
       * postjudge produced no actionable retry_hint
@@ -6134,9 +6624,41 @@ async def run_main_agent_session(
         except Exception:
             pass
 
-    from claude_agent_sdk import (
-        AssistantMessage, ClaudeSDKClient, ResultMessage, UserMessage,
+    from modules.agent_provider import (
+        ensure_provider_ready,
+        provider_display_name,
+        provider_meta_fields,
     )
+    from modules.grok_acp import GrokSessionOptions
+
+    # Fail fast when Settings selects an unready backend (missing auth,
+    # or Grok runtime not yet wired). Stamps agent_provider on meta so
+    # the UI /retry path can show which backend was intended.
+    _provider = ensure_provider_ready()
+    try:
+        write_meta(job_id, **provider_meta_fields(_provider))
+    except Exception:
+        pass
+    log_fn(f"[orchestrator] agent provider: {provider_display_name(_provider)}")
+
+    # Branch message/client types so isinstance checks in the shared loop
+    # match the active backend.
+    if _provider == "grok" or isinstance(options, GrokSessionOptions):
+        from modules.grok_acp import (
+            GrokACPClient as AgentClient,
+            AssistantMessage,
+            ResultMessage,
+            UserMessage,
+        )
+        _use_grok = True
+    else:
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeSDKClient as AgentClient,
+            ResultMessage,
+            UserMessage,
+        )
+        _use_grok = False
     import anyio
 
     max_retries = auto_retry_max() if auto_run else 0
@@ -6406,7 +6928,25 @@ async def run_main_agent_session(
             f"this session only"
         )
 
-    async with ClaudeSDKClient(options=options) as client:
+    if _use_grok and not isinstance(options, GrokSessionOptions):
+        # Analyzer built Claude options while provider flipped mid-flight —
+        # rebuild from the Claude options fields we still understand.
+        from modules.grok_acp import GrokSessionOptions as _GSO
+        options = _GSO(
+            system_prompt=getattr(options, "system_prompt", "") or "",
+            model=getattr(options, "model", None) or "grok-build",
+            cwd=str(getattr(options, "cwd", work_dir) or work_dir),
+            effort=getattr(options, "effort", None),
+            env=dict(getattr(options, "env", None) or {}),
+            resume=getattr(options, "resume", None),
+            add_dirs=list(getattr(options, "add_dirs", None) or []),
+        )
+
+    _client_kwargs = (
+        {"options": options} if _use_grok
+        else {"options": options}
+    )
+    async with AgentClient(**_client_kwargs) as client:
         await client.query(initial_prompt)
 
         # max_retries semantics: 0 = disabled, N>0 = cap, -1 = unlimited.
@@ -6475,7 +7015,14 @@ async def run_main_agent_session(
                             "num_turns": msg.num_turns,
                             "total_cost_usd": msg.total_cost_usd,
                             "is_error": msg.is_error,
+                            "stop_reason": getattr(msg, "stop_reason", None),
                         }
+                        # Grok soft turn-budget: continue the same session
+                        # instead of dying into the no_artifact / fallback path
+                        # (job 3c0e0edb73db: 600s hard timeout mid-exploit draft).
+                        _sr = (getattr(msg, "stop_reason", None) or "").lower()
+                        if _sr == "turn_budget" and not msg.is_error:
+                            summary["grok_turn_budget_continue"] = True
                         log_fn(f"DONE: {summary['result']}")
                         # Post-FINAL_DRAFT artifact verdict: main has
                         # had one full turn since the inject. If we're
@@ -6742,6 +7289,47 @@ async def run_main_agent_session(
                     )
                 else:
                     continue
+
+            # ---- Grok soft turn-budget continue ----
+            # A long Grok turn hit its wall-clock budget after real tool work.
+            # Keep the ACP session alive and ask main to resume (especially
+            # to write exploit.py / report.md). Without this the loop falls
+            # through to no_artifact + fallback skeleton.
+            if summary.pop("grok_turn_budget_continue", False):
+                if summary.get("agent_error_kind") in (
+                        "killed", "timeout", "policy_refusal", "cli_infra_error"):
+                    pass  # transport already dead
+                elif not _pick_present_artifact(work_dir, artifact_names):
+                    log_fn(
+                        "[orchestrator] Grok turn budget hit with no deliverable "
+                        "yet — injecting CONTINUE user-turn"
+                    )
+                    _cont = (
+                        "⚠️ ORCHESTRATOR INTERRUPT — TURN TIME BUDGET REACHED.\n\n"
+                        "Your previous turn hit the wall-clock budget while you "
+                        "were still investigating. The session and work tree are "
+                        "intact (decomp, notes, tmp files). Do NOT restart analysis "
+                        "from scratch.\n\n"
+                        "Priority now:\n"
+                        "1. Synthesize what you already know into "
+                        f"{' / '.join(artifact_names)} in the CURRENT WORKING "
+                        "DIRECTORY (relative paths only).\n"
+                        "2. Prefer a working / partially-working exploit over more "
+                        "recon. Local-proof is fine; remote capture is better.\n"
+                        "3. Write report.md with the vuln, primitive, and remaining "
+                        "open questions.\n"
+                        "4. If you need one more focused tool check before writing, "
+                        "do it — then WRITE THE DELIVERABLES this turn."
+                    )
+                    try:
+                        await client.query(_cont)
+                    except Exception as _qe:
+                        log_fn(
+                            f"[orchestrator] turn-budget continue failed "
+                            f"({type(_qe).__name__}) — falling through"
+                        )
+                    else:
+                        continue
 
             # ---- FINAL_DRAFT last-chance injection ----
             # Highest priority — budget already overrun and the

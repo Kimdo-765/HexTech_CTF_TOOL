@@ -10,6 +10,7 @@ from api.storage import (
     save_upload,
     write_job_meta,
 )
+from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
 
@@ -62,6 +63,7 @@ async def analyze_web(
         "src_root": src_root,
         "remote_only": not has_file,
     }
+    enrich_job_meta(meta)
     write_job_meta(job_id, meta)
 
     q = get_queue()

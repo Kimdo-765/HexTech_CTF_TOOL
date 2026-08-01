@@ -153,14 +153,26 @@ def get_preset_effort() -> str:
 
 def resolve_role_model(role: str, fallback: str) -> str:
     """Active preset's model for ``role``, else ``fallback`` (the role's
-    existing default behavior). Never raises."""
+    existing default behavior). Never raises.
+
+    When Settings ``agent_provider=grok`` (or claude), a preset entry from
+    the *other* family is coerced to the active provider's default so
+    judge/reviewer/report/monitor never call Claude while Grok is selected
+    (and vice versa).
+    """
     try:
         m = get_role_model(role)
         if m:
-            return m
+            resolved = m
+        else:
+            resolved = fallback
     except Exception:
-        pass
-    return fallback
+        resolved = fallback
+    try:
+        from modules.agent_provider import coerce_model_for_provider
+        return coerce_model_for_provider(resolved)
+    except Exception:
+        return resolved
 
 
 def view() -> dict[str, Any]:

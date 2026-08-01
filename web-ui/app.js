@@ -71,35 +71,86 @@ const CLAUDE_MODELS = [
 // for high-stakes synthesis turns and "low" for cheap probes.
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
-function fillModelSelects() {
+// Grok Build / xAI model ids offered in Settings (and per-job dropdowns
+// when agent_provider=grok). `grok-build` is the coding-agent default.
+const GROK_MODELS = [
+  "grok-build",
+  "grok-4.5",
+  "grok-4",
+  "grok-3",
+  "grok-3-mini",
+  "grok-code-fast-1",
+];
+
+// Grok CLI effort ladder (union with Claude's so per-job dropdowns stay
+// one list). Empty = CLI/model default.
+const GROK_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+// Active provider from last Settings load — drives per-job model lists.
+let activeAgentProvider = "claude";
+
+function fillModelSelects(provider) {
+  const p = provider || activeAgentProvider || "claude";
+  const models = p === "grok" ? GROK_MODELS : CLAUDE_MODELS;
   // Per-job selects: empty = "default from Settings"
   document.querySelectorAll('[data-role="model-select"]').forEach((sel) => {
+    const prev = sel.value;
     sel.innerHTML = "";
     sel.appendChild(new Option("(default — Settings value)", ""));
-    for (const m of CLAUDE_MODELS) sel.appendChild(new Option(m, m));
+    for (const m of models) sel.appendChild(new Option(m, m));
+    if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   });
-  // Global Settings select: no empty entry, but a leading blank means
-  // "no override saved". Actual current value populated by loadSettings().
+  // Global Claude Settings select (always Claude catalog).
   document.querySelectorAll('[data-role="model-select-settings"]').forEach((sel) => {
     sel.innerHTML = "";
     sel.appendChild(new Option("(use env / default)", ""));
     for (const m of CLAUDE_MODELS) sel.appendChild(new Option(m, m));
   });
+  // Global Grok Settings select.
+  document.querySelectorAll('[data-role="grok-model-select-settings"]').forEach((sel) => {
+    sel.innerHTML = "";
+    sel.appendChild(new Option("(use env / default)", ""));
+    for (const m of GROK_MODELS) sel.appendChild(new Option(m, m));
+  });
 }
 
-function fillEffortSelects() {
+function fillEffortSelects(provider) {
+  const p = provider || activeAgentProvider || "claude";
+  const efforts = p === "grok" ? GROK_EFFORTS : CLAUDE_EFFORTS;
   // Per-job: empty = Settings value (falls through to SDK default if
   // Settings is also empty). Same UX as fillModelSelects.
   document.querySelectorAll('[data-role="effort-select"]').forEach((sel) => {
+    const prev = sel.value;
     sel.innerHTML = "";
     sel.appendChild(new Option("(default — Settings value)", ""));
-    for (const e of CLAUDE_EFFORTS) sel.appendChild(new Option(e, e));
+    for (const e of efforts) sel.appendChild(new Option(e, e));
+    if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   });
   document.querySelectorAll('[data-role="effort-select-settings"]').forEach((sel) => {
     sel.innerHTML = "";
     sel.appendChild(new Option("(use SDK default)", ""));
     for (const e of CLAUDE_EFFORTS) sel.appendChild(new Option(e, e));
   });
+  document.querySelectorAll('[data-role="grok-effort-select-settings"]').forEach((sel) => {
+    sel.innerHTML = "";
+    sel.appendChild(new Option("(use CLI default)", ""));
+    for (const e of GROK_EFFORTS) sel.appendChild(new Option(e, e));
+  });
+}
+
+function setProviderUI(provider) {
+  const p = provider === "grok" ? "grok" : "claude";
+  activeAgentProvider = p;
+  const radio = document.querySelector(
+    `#settings-form input[name=agent_provider][value="${p}"]`
+  );
+  if (radio) radio.checked = true;
+  const claudeBlock = document.getElementById("settings-claude-block");
+  const grokBlock = document.getElementById("settings-grok-block");
+  if (claudeBlock) claudeBlock.classList.toggle("provider-active", p === "claude");
+  if (grokBlock) grokBlock.classList.toggle("provider-active", p === "grok");
+  fillModelSelects(p);
+  fillEffortSelects(p);
 }
 
 let selectedJob = null;
@@ -791,21 +842,33 @@ document.getElementById("rev-form").addEventListener("submit", (e) => {
   e.preventDefault(); submitJob(e.target, "/modules/rev/analyze");
 });
 
+function _setModelField(f, name, customName, catalog, value) {
+  const modelSel = f.querySelector(`[name=${name}]`);
+  const modelCustom = f.querySelector(`[name=${customName}]`);
+  if (!modelSel) return;
+  const cur = value || "";
+  if (catalog.includes(cur)) {
+    modelSel.value = cur;
+    if (modelCustom) modelCustom.value = "";
+  } else {
+    modelSel.value = "";
+    if (modelCustom) modelCustom.value = cur;
+  }
+}
+
 async function loadSettings() {
   const res = await fetch(`${API}/settings`);
   if (!res.ok) return;
   const s = await res.json();
   const f = document.getElementById("settings-form");
-  const modelSel = f.querySelector("[name=claude_model]");
-  const modelCustom = f.querySelector("[name=claude_model_custom]");
-  const cur = s.claude_model || "";
-  // If the saved value is one we know, select it; otherwise stash it
-  // in the custom-text input so the user can see/edit it.
-  if (CLAUDE_MODELS.includes(cur)) {
-    modelSel.value = cur; modelCustom.value = "";
-  } else {
-    modelSel.value = ""; modelCustom.value = cur;
-  }
+
+  // Provider first so model/effort catalogs match the selection.
+  const provider = (s.agent_provider === "grok") ? "grok" : "claude";
+  setProviderUI(provider);
+
+  _setModelField(f, "claude_model", "claude_model_custom", CLAUDE_MODELS, s.claude_model);
+  _setModelField(f, "grok_model", "grok_model_custom", GROK_MODELS, s.grok_model);
+
   // Claude effort (mirrors model: empty = SDK default; otherwise one
   // of low/medium/high/xhigh/max). Stored under `claude_effort` in the
   // settings blob; per-job submissions inherit it when their own
@@ -815,6 +878,12 @@ async function loadSettings() {
     const curEffort = s.claude_effort || "";
     effortSel.value = CLAUDE_EFFORTS.includes(curEffort) ? curEffort : "";
   }
+  const grokEffortSel = f.querySelector("[name=grok_effort]");
+  if (grokEffortSel) {
+    const curG = s.grok_effort || "";
+    grokEffortSel.value = GROK_EFFORTS.includes(curG) ? curG : "";
+  }
+
   f.querySelector("[name=job_ttl_days]").value =
     s.job_ttl_days != null ? s.job_ttl_days : "";
   f.querySelector("[name=job_timeout_seconds]").value =
@@ -831,6 +900,7 @@ async function loadSettings() {
   f.querySelector("[name=enable_judge]").checked = s.enable_judge !== false;
   // enable_exploit_library_hint default-False
   f.querySelector("[name=enable_exploit_library_hint]").checked = !!s.enable_exploit_library_hint;
+
   document.getElementById("key-status").textContent = s.anthropic_api_key_set
     ? `set (${s.anthropic_api_key_masked}) — leave blank to keep, type new to replace`
     : (s.anthropic_api_key_env_set ? "using ANTHROPIC_API_KEY from env" : "not set");
@@ -838,22 +908,72 @@ async function loadSettings() {
     ? "✓ Claude Code OAuth detected — works without API key"
     : "✗ no OAuth credentials — run `claude login` on the host";
   document.getElementById("oauth-status").classList.toggle("oauth-ok", !!s.claude_oauth_detected);
+
+  const xaiStatus = document.getElementById("xai-key-status");
+  if (xaiStatus) {
+    xaiStatus.textContent = s.xai_api_key_set
+      ? `set (${s.xai_api_key_masked}) — leave blank to keep, type new to replace`
+      : (s.xai_api_key_env_set ? "using XAI_API_KEY from env" : "not set");
+  }
+  const grokAuth = document.getElementById("grok-auth-status");
+  if (grokAuth) {
+    grokAuth.textContent = s.grok_auth_detected
+      ? "✓ Grok auth.json detected — works without API key"
+      : "✗ no Grok auth file — run `grok login` on the host (mount ~/.grok) or set XAI_API_KEY";
+    grokAuth.style.color = s.grok_auth_detected ? "var(--green)" : "var(--fg-muted)";
+  }
+
+  const provStatus = document.getElementById("provider-status");
+  if (provStatus) {
+    if (provider === "grok") {
+      const authOk = s.xai_api_key_set || s.xai_api_key_env_set || s.grok_auth_detected;
+      provStatus.textContent = authOk
+        ? "Active: Grok Build (ACP) — next job uses Grok agent stdio."
+        : "Active: Grok Build — configure xAI key or grok login auth before running jobs.";
+      provStatus.style.color = authOk ? "var(--green)" : "var(--red)";
+    } else {
+      const authOk = s.anthropic_api_key_set || s.anthropic_api_key_env_set || s.claude_oauth_detected;
+      provStatus.textContent = authOk
+        ? "Active: Claude Agent SDK — ready for jobs."
+        : "Active: Claude — no auth detected; set API key or run claude login.";
+      provStatus.style.color = authOk ? "var(--green)" : "var(--red)";
+    }
+  }
+
   document.getElementById("auth-status").textContent = s.auth_token_set
     ? `set (${s.auth_token_masked})`
     : (s.auth_token_env_set ? "using AUTH_TOKEN from env" : "not set (auth disabled)");
 }
 
+// Live-toggle provider cards without saving (save still required).
+document.getElementById("settings-form")?.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t && t.name === "agent_provider") {
+    setProviderUI(t.value);
+    const provStatus = document.getElementById("provider-status");
+    if (provStatus) {
+      provStatus.textContent = t.value === "grok"
+        ? "Grok selected (unsaved) — click Save to apply to the next job."
+        : "Claude selected (unsaved) — click Save to apply to the next job.";
+      provStatus.style.color = "var(--yellow)";
+    }
+  }
+});
+
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
-  // Custom-text overrides the dropdown for claude_model.
+  // Custom-text overrides the dropdown for claude_model / grok_model.
   const custom = (fd.get("claude_model_custom") || "").toString().trim();
   if (custom) fd.set("claude_model", custom);
   fd.delete("claude_model_custom");
+  const grokCustom = (fd.get("grok_model_custom") || "").toString().trim();
+  if (grokCustom) fd.set("grok_model", grokCustom);
+  fd.delete("grok_model_custom");
 
   const payload = {};
   for (const [k, v] of fd.entries()) {
-    if (v === "" && (k === "anthropic_api_key" || k === "auth_token")) {
+    if (v === "" && (k === "anthropic_api_key" || k === "xai_api_key" || k === "auth_token")) {
       // Empty secret field: skip — keep current value
       continue;
     }
@@ -875,6 +995,10 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   // so the OFF state is sent as `false`, not "clear the override".
   payload.enable_judge = !!e.target.querySelector("[name=enable_judge]").checked;
   payload.enable_exploit_library_hint = !!e.target.querySelector("[name=enable_exploit_library_hint]").checked;
+  // Radio always present; default claude if somehow missing.
+  if (!payload.agent_provider) {
+    payload.agent_provider = e.target.querySelector("[name=agent_provider]:checked")?.value || "claude";
+  }
   const res = await fetch(`${API}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -886,17 +1010,26 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   }
   // Clear secret fields after save
   e.target.querySelector("[name=anthropic_api_key]").value = "";
+  const xaiIn = e.target.querySelector("[name=xai_api_key]");
+  if (xaiIn) xaiIn.value = "";
   e.target.querySelector("[name=auth_token]").value = "";
   let applied = null;
   try { applied = (await res.clone().json()).worker_mem_applied; } catch (_) {}
+  let savedView = null;
+  try { savedView = await res.clone().json(); } catch (_) {}
   await loadSettings();
+  const savedProvider = (savedView && savedView.agent_provider) || payload.agent_provider || "claude";
+  const providerLine = savedProvider === "grok"
+    ? "Agent provider: Grok Build (ACP) — next job uses Grok."
+    : "Agent provider: Claude (Agent SDK) — next job uses Claude.";
   if (applied && applied.applied === false) {
     alert("Saved, but the worker memory limit was NOT applied to the running container:\n\n" +
-          applied.reason + "\n\nIt will take effect on the next `docker compose up -d worker`.");
+          applied.reason + "\n\nIt will take effect on the next `docker compose up -d worker`.\n\n" +
+          providerLine);
   } else if (applied && applied.applied) {
-    alert("Saved. Worker memory limit applied to the running container immediately.");
+    alert("Saved. Worker memory limit applied to the running container immediately.\n\n" + providerLine);
   } else {
-    alert("Saved. Changes apply to the next job.");
+    alert("Saved. Changes apply to the next job.\n\n" + providerLine);
   }
 });
 
@@ -1462,7 +1595,7 @@ function renderUsage(u) {
       pill.hidden = true;  // no budget configured
     }
   }
-  // --- rate-limit status chip: green/amber/red + "resets in HH:MM" ---
+  // --- Claude rate-limit status chip: green/amber/red + "resets in HH:MM" ---
   const chip = document.getElementById("ratelimit-chip");
   if (chip) {
     const rl = u && u.rate_limit;
@@ -1483,13 +1616,66 @@ function renderUsage(u) {
           resetTxt = h > 0 ? ` · resets ${h}h${m}m` : ` · resets ${m}m`;
         }
       }
-      chip.textContent = `⏳ ${label}${resetTxt}`;
+      chip.textContent = `⏳ Claude ${label}${resetTxt}`;
       chip.title = `Claude rate-limit: ${rl.status}`
         + (rl.rate_limit_type ? ` (${rl.rate_limit_type})` : "")
         + (rl.resets_at ? `\nresets at ${new Date(rl.resets_at * 1000).toLocaleString()}` : "")
         + (rl.updated_at ? `\nlast event ${new Date(rl.updated_at).toLocaleString()}` : "");
     } else {
       chip.hidden = true;  // no rate-limit event seen yet
+    }
+  }
+
+  // --- Grok SuperGrok weekly pool chip (remaining %) ---
+  // Source: GET /api/jobs/usage → grok_rate_limit (cli-chat-proxy billing
+  // poll, needs grok login OAuth). Hides when no auth / no data yet.
+  const gchip = document.getElementById("grok-ratelimit-chip");
+  if (gchip) {
+    const gr = u && u.grok_rate_limit;
+    if (gr && gr.status && gr.status !== "unknown") {
+      gchip.hidden = false;
+      gchip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
+      if (gr.status === "rejected") gchip.classList.add("rl-chip--rejected");
+      else if (gr.status === "allowed_warning") gchip.classList.add("rl-chip--warn");
+      else gchip.classList.add("rl-chip--ok");
+      // Prefer remaining % (what operators care about for weekly pool).
+      let glabel;
+      if (typeof gr.remaining_pct === "number") {
+        glabel = `${Math.round(gr.remaining_pct)}% left`;
+      } else if (typeof gr.utilization === "number") {
+        glabel = `${Math.round((1 - gr.utilization) * 100)}% left`;
+      } else if (gr.status === "rejected") {
+        glabel = "limit hit";
+      } else if (gr.status === "allowed_warning") {
+        glabel = "near limit";
+      } else {
+        glabel = "usage ok";
+      }
+      let greset = "";
+      if (gr.resets_at) {
+        const secs = gr.resets_at - Math.floor(Date.now() / 1000);
+        if (secs > 0) {
+          const d = Math.floor(secs / 86400);
+          const h = Math.floor((secs % 86400) / 3600);
+          const m = Math.floor((secs % 3600) / 60);
+          if (d > 0) greset = ` · resets ${d}d${h}h`;
+          else if (h > 0) greset = ` · resets ${h}h${m}m`;
+          else greset = ` · resets ${m}m`;
+        }
+      }
+      gchip.textContent = `⏳ Grok ${glabel}${greset}`;
+      const prod = (gr.product_usage || [])
+        .map((p) => `${p.product || "?"}: ${Math.round(p.usage_percent || 0)}%`)
+        .join(", ");
+      gchip.title = `Grok weekly pool: ${gr.status}`
+        + (gr.rate_limit_type ? ` (${gr.rate_limit_type})` : "")
+        + (typeof gr.used_pct === "number" ? `\nused ${gr.used_pct}%` : "")
+        + (typeof gr.remaining_pct === "number" ? ` · ${gr.remaining_pct}% remaining` : "")
+        + (prod ? `\nby product: ${prod}` : "")
+        + (gr.resets_at ? `\nresets at ${new Date(gr.resets_at * 1000).toLocaleString()}` : "")
+        + (gr.updated_at ? `\nlast poll ${new Date(gr.updated_at).toLocaleString()}` : "");
+    } else {
+      gchip.hidden = true;
     }
   }
 }
@@ -2346,6 +2532,9 @@ async function renderJob(id, opts = {}) {
   const cost = job.cost_usd ? ` · cost: $${Number(job.cost_usd).toFixed(4)}` : "";
   const stage = job.stage ? ` · stage: ${job.stage}` : "";
   const timeout = job.job_timeout ? ` · timeout: ${job.job_timeout}s` : "";
+  const providerInfo = job.agent_provider
+    ? ` · agent: ${escapeHtml(job.agent_provider_label || job.agent_provider)}`
+    : "";
   const modelInfo = job.model ? ` · model: ${escapeHtml(job.model)}` : "";
 
   // Elapsed (running) / duration (terminal). Now rendered as a
@@ -2519,6 +2708,27 @@ async function renderJob(id, opts = {}) {
   // suspect / placeholder flag or grab additional flags. The reviewer
   // path is still useful in that case ("the captured value looks like a
   // dummy — find the real flag").
+  // TERMINAL ONLY — deliberately no "looks orphaned" escape hatch here.
+  // There was one: `running` also qualified when the newest of
+  // last_agent_event_at / updated_at / started_at was over 3 minutes old.
+  // It fired on healthy jobs constantly, which is how a panel ends up showing
+  // Stop AND Retry at once (showStopResume below is true for every running
+  // job, and the two are computed independently):
+  //   * nothing writes meta during the pre-agent `analyze` phase, so
+  //     updated_at stays pinned to started_at and last_agent_event_at does
+  //     not exist yet — the fallback chain then measures "time since the job
+  //     started" and crosses 3 min at T+3min on literally every job;
+  //   * a healthy agent is routinely silent far longer than 3 minutes.
+  // Job 476158d89fc1, measured live: status=running, stage=analyze,
+  // updated_at == started_at 443s ago, last_agent_event_at absent — while
+  // rq_status=started and the worker heartbeat was 24s old. The job was
+  // fine; the panel lied. (235ee5080a6a read identically earlier.)
+  // Removing it costs no capability: a running job already offers ■ Stop and
+  // ↻/✋ Stop & resume, and the resume backend halts the source job first —
+  // exactly what a genuinely orphaned job needs. It also stops rendering
+  // 💬 Continue on running jobs, which the backend 409s anyway.
+  // If a real orphan affordance is ever wanted, key it on rq_status plus the
+  // WORKER heartbeat (both already in the payload), never on updated_at.
   const showRetry = isExploitableModule && [
     "failed", "no_flag", "finished", "stopped",
   ].includes(job.status);
@@ -2686,7 +2896,7 @@ async function renderJob(id, opts = {}) {
       <span class="status ${job.status}">${job.status}</span>
       ${timingPill}
     </h3>
-    <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${targetExtra}${stage}${cost}${timeout}${modelInfo}</small></div>
+    <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${targetExtra}${stage}${cost}${timeout}${providerInfo}${modelInfo}</small></div>
     ${timeoutBlock}
     ${descBlock}
     ${candBlock}
@@ -2807,7 +3017,20 @@ async function renderJob(id, opts = {}) {
     // Reviewer-mode retry: open an inline form with an optional MULTI-target
     // override (+/× list). Blank = keep prior, "(none)" = clear. The reviewer
     // auto-generates the hint; this form only collects target(s).
-    retryBtn.addEventListener("click", () => openReviewerRetryForm(id, retryBtn));
+    // If the source job is still queued/running (incl. orphaned "running"),
+    // use /resume/stream so the backend halts it first — plain /retry would
+    // leave a ghost worker/meta race.
+    retryBtn.addEventListener("click", () => {
+      const live = job.status === "queued" || job.status === "running";
+      openReviewerRetryForm(id, retryBtn, live ? {
+        formKey: "retry",
+        submitLabel: "↻ Halt & retry (reviewer)",
+        streamOpts: {
+          endpoint: `${API}/jobs/${id}/resume/stream`,
+          flow: "resume",
+        },
+      } : undefined);
+    });
   }
   const retryManualBtn = detail.querySelector('.retry-btn[data-action="retry-manual"]');
   if (retryManualBtn) {
@@ -3562,6 +3785,9 @@ document.addEventListener("keydown", (e) => {
 
 fillModelSelects();
 fillEffortSelects();
+// Load Settings once at boot so agent_provider is known before the
+// operator opens a form (per-job model catalogs follow the provider).
+loadSettings().catch(() => {});
 loadModelPresets();
 loadTunnelStatus();
 refreshJobs();

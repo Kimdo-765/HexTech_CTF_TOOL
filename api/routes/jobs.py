@@ -225,17 +225,21 @@ def get_stats():
 @router.get("/usage")
 def get_usage():
     """Top-bar usage pill data: cumulative SPENT cost vs an operator-set
-    budget, plus the latest account-global rate-limit STATUS.
+    budget, plus account-global rate-limit STATUS for Claude and Grok.
 
-    Honest scope: this deployment authenticates via OAuth (subscription), so a
-    true numeric account-quota "remaining %" is NOT retrievable in the headless
-    path. `remaining_usd` here is `budget_usd - spent` against the OPERATOR'S
-    configured budget (0 = no budget → spent-only). `rate_limit` is the coarse,
-    subscription-real signal the SDK already emits (status + reset epoch; the
-    `utilization` number is frequently absent for OAuth accounts).
+    Honest scope:
+      * `remaining_usd` is `budget_usd - spent` against the OPERATOR'S
+        configured budget (0 = no budget → spent-only). Not the Claude
+        account limit.
+      * `rate_limit` is Claude's coarse subscription signal the Agent SDK
+        emits (status + reset epoch; `utilization` is frequently absent
+        for OAuth accounts).
+      * `grok_rate_limit` is Grok SuperGrok weekly pool usage polled from
+        cli-chat-proxy `/v1/billing?format=credits` (needs `grok login`
+        OAuth mounted). Includes `remaining_pct` when available.
     """
     from modules.settings_io import get_setting
-    from modules._common import read_rate_limit
+    from modules._common import read_rate_limit, read_grok_rate_limit
 
     stats = get_stats()
     spent = float(stats.get("total_cost_usd") or 0.0)
@@ -257,6 +261,7 @@ def get_usage():
         "pct_used": pct_used,
         "count": stats.get("count", 0),
         "rate_limit": read_rate_limit(),
+        "grok_rate_limit": read_grok_rate_limit(),
     }
 
 

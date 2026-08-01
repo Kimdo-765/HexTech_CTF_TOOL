@@ -463,6 +463,235 @@ a single subagent turn.
 
 """
 
+
+# ---------------------------------------------------------------------------
+# Grok-only delegation (agent_provider=grok). Claude path never imports these
+# into a live Claude system_prompt — adapt_system_prompt_for_grok is called
+# only from make_main_session_options / GrokACPClient when provider is grok.
+# ---------------------------------------------------------------------------
+
+# HexTech role → Grok Build native spawn_subagent type.
+# Grok does not expose recon/debugger/judge as first-class types; we keep the
+# *role names* in the prompt (so routing rules stay familiar) and map them
+# onto Grok's built-in types, with a mandatory [HEXTECH_ROLE=…] prefix so the
+# child knows which contract to follow.
+GROK_ROLE_TO_SUBAGENT_TYPE: dict[str, str] = {
+    "recon": "explore",
+    "triage": "explore",
+    "debugger": "general-purpose",
+    "judge": "general-purpose",
+}
+
+GROK_DELEGATION_CONTRACT = """\
+## GROK DELEGATION CONTRACT (this session is Grok Build — supersedes Claude MCP rules above)
+
+This CTF session runs on **Grok Build (ACP)**, NOT Claude Code. Ignore every
+instruction that mentions `mcp__team__spawn_subagent`, `USE_ISOLATED_SUBAGENTS`,
+or the SDK built-in `Agent` / `Task` tools — those tools **do not exist here**.
+
+### The ONE delegation tool
+Use Grok's built-in tool **`spawn_subagent`**. Map HexTech roles as follows
+(role name is conceptual; `subagent_type` is what the tool accepts):
+
+| HexTech role | `subagent_type`   | `capability_mode` | When |
+|--------------|-------------------|-------------------|------|
+| recon        | `explore`         | `read-only`       | heavy static: objdump/readelf/strings/ghiant/ROPgadget/one_gadget/multi-file inventory |
+| triage       | `explore`         | `read-only`       | re-verify a long candidate list from recon |
+| debugger     | `general-purpose` | (default)         | gdb/strace/ltrace/qemu, heap-probe, live leaks |
+| judge        | `general-purpose` | `read-only`       | pre-finalize hang/parse review of exploit.py/solver.py |
+
+### Mandatory prompt prefix (every spawn)
+First line of `prompt` MUST be exactly one of:
+  `[HEXTECH_ROLE=recon]`
+  `[HEXTECH_ROLE=debugger]`
+  `[HEXTECH_ROLE=triage]`
+  `[HEXTECH_ROLE=judge]`
+Then state GOAL / paths / constraints. The child has **no memory** of your
+prior turns — put every path and offset in the prompt.
+
+Examples (copy shape, not content):
+```
+spawn_subagent(
+  subagent_type="explore",
+  capability_mode="read-only",
+  description="Static recon of note heap",
+  prompt=\"\"\"[HEXTECH_ROLE=recon]
+GOAL: inventory user-input sinks + size arithmetic in ./bin/prob
+PATHS: ./bin/prob, ./decomp/, ./.chal-libs/libc_profile.json
+RETURN: ≤2 KB bullets — vulns, mitigations, glibc version, recommended chain
+\"\"\"
+)
+
+spawn_subagent(
+  subagent_type="general-purpose",
+  description="GDB heap layout after free pair",
+  prompt=\"\"\"[HEXTECH_ROLE=debugger]
+GOAL: tcache fd values after alloc×2 free×2 on 0x68
+BINARY: ./bin/prob  (use chal-libc-fix / ./.chal-libs if needed)
+INPUT: <bytes or python that prints them>
+BREAKPOINTS: free+8; dump tcache/fastbin
+RETURN: OBSERVED / TRACE / CONCLUSION / CAVEATS
+\"\"\"
+)
+
+spawn_subagent(
+  subagent_type="general-purpose",
+  capability_mode="read-only",
+  description="Pre-ship hang/parse review",
+  prompt=\"\"\"[HEXTECH_ROLE=judge]
+Review ./exploit.py for hang/parse risks: recvuntil without timeout,
+wrong prompts, wrong tube, missing argv, infinite loops.
+List: LINE n: issue → fix; SEVERITY low|med|high; safe to run?
+\"\"\"
+)
+```
+
+### MANDATORY ROUTING (apply BEFORE every shell/read)
+  · Expected shell output > ~4 KB (objdump, readelf -a, strings, ghiant,
+    ROPgadget, one_gadget, find/grep across many files)     → ROLE=recon
+  · File read > 200 lines or unknown size                    → ROLE=recon
+  · Multi-file scan / map / inventory                        → ROLE=recon
+  · Multi-function disasm / decomp triage                    → ROLE=recon
+  · Libc symbol / offset / gadget / one_gadget lookups       → ROLE=recon
+  · Live gdb/strace/qemu / heap-probe / observed registers   → ROLE=debugger
+  · Pre-finalize exploit/solver hang-risk review             → ROLE=judge
+  · Short verify (one-line read, single curl/nc, build)      → run_terminal_command / read_file
+  · Writing exploit.py / solver.py / report.md               → YOU only (search_replace / write)
+
+Do NOT dump multi-hundred-line disasm into YOUR context via
+`run_terminal_command` when a recon spawn would return a 2 KB summary.
+A ratio of many heavy shell calls and zero `spawn_subagent` is a miss —
+delegate the investigation, keep drafting yourself.
+
+### Tool name map (Grok ≠ Claude Code)
+  File read → `read_file` / `list_dir` / `grep`   (not Read/Glob/Grep)
+  File write → `search_replace` (or write tools)  (not Write/Edit)
+  Shell → `run_terminal_command`                  (not Bash)
+  Web → `web_search` / `web_fetch`                (not WebSearch/WebFetch)
+  Delegate → `spawn_subagent`                     (not mcp__team__spawn_subagent)
+
+Deliverables still land as relative paths in the CURRENT WORKING DIRECTORY.
+Print `FLAG_CANDIDATE: <flag>` when you capture a real flag.
+"""
+
+
+def _grok_role_spawn_snippet(role: str) -> str:
+    """Example spawn_subagent call for a HexTech role (Grok types)."""
+    st = GROK_ROLE_TO_SUBAGENT_TYPE.get(role, "general-purpose")
+    cap = (
+        'capability_mode="read-only", '
+        if role in ("recon", "triage", "judge")
+        else ""
+    )
+    return (
+        f'spawn_subagent(\n'
+        f'  subagent_type="{st}",\n'
+        f'  {cap}description="{role} task",\n'
+        f'  prompt="[HEXTECH_ROLE={role}]\\n'
+        f'<GOAL + paths + constraints — child has no prior context>"\n'
+        f')'
+    )
+
+
+def adapt_system_prompt_for_grok(system_prompt: str) -> str:
+    """Rewrite a Claude-oriented CTF system_prompt for Grok Build.
+
+    Called ONLY when Settings ``agent_provider=grok`` (or the Grok ACP
+    client is constructing a main session). Claude sessions never call
+    this — their ``mcp__team__spawn_subagent`` wording stays intact.
+
+    Mechanical rewrites:
+      * mcp__team__spawn_subagent → spawn_subagent
+      * subagent_type recon/debugger/judge/triage → Grok native types
+        with ROLE comments
+      * prepend GROK_DELEGATION_CONTRACT (wins over leftover Claude MCP text)
+    """
+    if not system_prompt:
+        system_prompt = ""
+    text = system_prompt
+
+    # Already adapted (resume / double-wrap guard).
+    if "GROK DELEGATION CONTRACT" in text:
+        return text
+
+    # Tool name: Claude MCP → Grok native.
+    text = text.replace("mcp__team__spawn_subagent", "spawn_subagent")
+
+    # Role types: keep conceptual names in prose; fix call-site types.
+    # Order matters: longer / more specific first.
+    type_swaps = (
+        ('subagent_type="debugger"', 'subagent_type="general-purpose"  # ROLE=debugger'),
+        ("subagent_type='debugger'", "subagent_type='general-purpose'  # ROLE=debugger"),
+        ('subagent_type="judge"', 'subagent_type="general-purpose"  # ROLE=judge'),
+        ("subagent_type='judge'", "subagent_type='general-purpose'  # ROLE=judge"),
+        ('subagent_type="triage"', 'subagent_type="explore"  # ROLE=triage'),
+        ("subagent_type='triage'", "subagent_type='explore'  # ROLE=triage"),
+        ('subagent_type="recon"', 'subagent_type="explore"  # ROLE=recon'),
+        ("subagent_type='recon'", "subagent_type='explore'  # ROLE=recon"),
+        # catalog form: subagent_type ∈ {recon, debugger, judge, triage}
+        (
+            "subagent_type ∈\n         {recon, debugger, judge, triage}",
+            'subagent_type ∈ {explore, general-purpose}  '
+            "# map: recon/triage→explore, debugger/judge→general-purpose; "
+            "prefix prompt with [HEXTECH_ROLE=…]",
+        ),
+        (
+            "subagent_type ∈\n         {{recon, debugger, judge, triage}}",
+            'subagent_type ∈ {{explore, general-purpose}}  '
+            "# map: recon/triage→explore, debugger/judge→general-purpose; "
+            "prefix prompt with [HEXTECH_ROLE=…]",
+        ),
+    )
+    for a, b in type_swaps:
+        text = text.replace(a, b)
+
+    # Soften Claude-only isolation prose that would confuse Grok.
+    text = text.replace(
+        "launches the subagent as its own\n   `claude` CLI subprocess",
+        "launches a Grok subagent process (own context; dies on return)",
+    )
+    text = text.replace(
+        "launches the debugger in its OWN claude CLI subprocess",
+        "launches the debugger as a Grok `spawn_subagent` (general-purpose)",
+    )
+    text = text.replace(
+        "The SDK's built-in\n   `Agent` / `Task` tools are EXPLICITLY DISALLOWED",
+        "Claude `Agent` / `Task` / `mcp__team__*` tools are unavailable on Grok",
+    )
+    text = text.replace(
+        "via the isolated MCP tool. There is exactly ONE delegation tool\n"
+        "   in this run — `spawn_subagent`.",
+        "There is exactly ONE delegation tool in this run — `spawn_subagent`.",
+    )
+    text = text.replace("via the isolated MCP tool.", "via `spawn_subagent`.")
+    text = text.replace(
+        "SUBAGENT ISOLATION CONTRACT. The MCP tool\n   `spawn_subagent`",
+        "SUBAGENT ISOLATION CONTRACT. The tool\n   `spawn_subagent`",
+    )
+    text = text.replace(
+        "the MCP tool `spawn_subagent`",
+        "the tool `spawn_subagent`",
+    )
+    text = text.replace(
+        "prefer the isolated MCP\ntool:",
+        "prefer `spawn_subagent`:",
+    )
+    text = text.replace(
+        "prefer the isolated MCP tool:",
+        "prefer `spawn_subagent`:",
+    )
+    text = text.replace(
+        "(USE_ISOLATED_SUBAGENTS=0), prefer the MCP form anyway —\n"
+        "       isolation keeps your context smaller.",
+        "On Grok always use `spawn_subagent` (no Claude MCP path).",
+    )
+
+    # Inject contract at the top so it wins over any residual Claude MCP text
+    # that mechanical rewrite did not catch.
+    text = GROK_DELEGATION_CONTRACT.strip() + "\n\n" + text.lstrip()
+    return text
+
+
 CTF_PREAMBLE = """\
 CONTEXT: You are assisting with a legitimate Capture-The-Flag (CTF) challenge.
 CTF challenges are deliberately vulnerable training artifacts hosted for

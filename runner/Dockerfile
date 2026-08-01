@@ -53,6 +53,20 @@ RUN pip install --no-cache-dir cysignals fpylll 2>&1 | tail -3 || true \
  && ( python3 -c "from fpylll import LLL, IntegerMatrix; print('fpylll OK in runner')" \
       || echo "[WARN] fpylll unavailable in runner" )
 
+# Heap-pwn scaffolds — same tree the worker bakes at /opt/scaffold so an
+# exploit that does `sys.path.insert(0, "/opt"); from scaffold.tcache_poison
+# import …` (what pwn prompts teach, and what the SCAFFOLD_NUDGE pushes)
+# survives auto-run. Without this, agent-side validation in the worker passes
+# and the orchestrator sandbox dies on ModuleNotFoundError: No module named
+# 'scaffold' with stdout 0 B (job ddcd69cc259c: working local chain, runner
+# crash on import line 15, status=no_flag). Dev/run parity: worker Dockerfile
+# already `COPY scaffold /opt/scaffold`; keep the two images in lockstep.
+COPY scaffold /opt/scaffold
+RUN python3 -c "import sys; sys.path.insert(0, '/opt'); \
+ from scaffold.tcache_poison import safe_link, alignment_ok; \
+ from scaffold.aslr_retry import aslr_retry; \
+ print('scaffold OK in runner')"
+
 WORKDIR /work
 # Default to bash so the web terminal works; orchestrators set their
 # own command (`python3 /work/exploit.py ...` or `sage ...`) via

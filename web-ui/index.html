@@ -19,6 +19,7 @@
       <div id="cost-banner" class="cost-banner" title="Cumulative Claude API spend">
         <span id="queue-info" title="busy/total workers · queued jobs">0/0 · 0 queued</span>
         <span id="ratelimit-chip" class="rl-chip" title="Claude account rate-limit status (subscription usage window)" hidden></span>
+        <span id="grok-ratelimit-chip" class="rl-chip" title="Grok SuperGrok weekly usage pool (remaining %)" hidden></span>
         <span id="usage-pill" class="usage-pill" title="operator spend vs configured budget (Settings → Spend budget)" hidden></span>
         <span id="cost-total">$0.00</span>
         <button id="logout-btn" type="button" class="logout">logout</button>
@@ -431,25 +432,78 @@
         to its env/default.
       </p>
       <form id="settings-form">
-        <label>
-          Anthropic API Key (optional if Claude Code OAuth is mounted)
-          <input type="password" name="anthropic_api_key" placeholder="sk-ant-... (leave empty to use OAuth)" autocomplete="new-password" />
-          <small id="key-status" style="color:var(--fg-muted)"></small>
-          <small id="oauth-status"></small>
-        </label>
-        <label>
-          Claude model (global default)
-          <select name="claude_model" data-role="model-select-settings"></select>
-          <small style="color:var(--fg-muted)">add a custom model with the field below if it's missing</small>
-        </label>
-        <label>
-          Effort (global default; blank = SDK default)
-          <select name="claude_effort" data-role="effort-select-settings"></select>
-        </label>
-        <label>
-          ...or type a custom model id
-          <input type="text" name="claude_model_custom" placeholder="claude-sonnet-4-20250514 / claude-opus-4-1 / …" />
-        </label>
+        <fieldset class="provider-fieldset">
+          <legend>Agent provider</legend>
+          <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.5rem">
+            Which coding agent drives CTF jobs. Applies to the <strong>next</strong> job
+            (no restart). Claude uses the Claude Agent SDK; Grok uses Grok Build via ACP
+            (<code>grok agent stdio</code>).
+          </p>
+          <div class="provider-radios" id="agent-provider-radios">
+            <label class="provider-card">
+              <input type="radio" name="agent_provider" value="claude" checked />
+              <span class="provider-card-body">
+                <strong>Claude</strong>
+                <small>Claude Agent SDK · current default</small>
+              </span>
+            </label>
+            <label class="provider-card">
+              <input type="radio" name="agent_provider" value="grok" />
+              <span class="provider-card-body">
+                <strong>Grok</strong>
+                <small>Grok Build · ACP / headless</small>
+              </span>
+            </label>
+          </div>
+          <small id="provider-status" style="color:var(--fg-muted)"></small>
+        </fieldset>
+
+        <div id="settings-claude-block" class="provider-settings-block">
+          <h3 class="provider-block-title">Claude credentials &amp; model</h3>
+          <label>
+            Anthropic API Key (optional if Claude Code OAuth is mounted)
+            <input type="password" name="anthropic_api_key" placeholder="sk-ant-... (leave empty to use OAuth)" autocomplete="new-password" />
+            <small id="key-status" style="color:var(--fg-muted)"></small>
+            <small id="oauth-status"></small>
+          </label>
+          <label>
+            Claude model (global default)
+            <select name="claude_model" data-role="model-select-settings"></select>
+            <small style="color:var(--fg-muted)">add a custom model with the field below if it's missing</small>
+          </label>
+          <label>
+            Effort (global default; blank = SDK default)
+            <select name="claude_effort" data-role="effort-select-settings"></select>
+          </label>
+          <label>
+            ...or type a custom model id
+            <input type="text" name="claude_model_custom" placeholder="claude-sonnet-4-20250514 / claude-opus-4-1 / …" />
+          </label>
+        </div>
+
+        <div id="settings-grok-block" class="provider-settings-block">
+          <h3 class="provider-block-title">Grok credentials &amp; model</h3>
+          <label>
+            xAI API Key (optional if <code>grok login</code> auth is mounted)
+            <input type="password" name="xai_api_key" placeholder="xai-... (leave empty to keep / use OAuth file)" autocomplete="new-password" />
+            <small id="xai-key-status" style="color:var(--fg-muted)"></small>
+            <small id="grok-auth-status" style="color:var(--fg-muted)"></small>
+          </label>
+          <label>
+            Grok model (global default)
+            <select name="grok_model" data-role="grok-model-select-settings"></select>
+            <small style="color:var(--fg-muted)">add a custom model with the field below if it's missing</small>
+          </label>
+          <label>
+            Effort (global default; blank = CLI default)
+            <select name="grok_effort" data-role="grok-effort-select-settings"></select>
+          </label>
+          <label>
+            ...or type a custom Grok model id
+            <input type="text" name="grok_model_custom" placeholder="grok-build / grok-4.5 / …" />
+          </label>
+        </div>
+
         <label>
           Auth token (UI/API access)
           <input type="password" name="auth_token" placeholder="leave empty to disable auth" autocomplete="new-password" />

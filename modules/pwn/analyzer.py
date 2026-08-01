@@ -2341,7 +2341,11 @@ async def _run_agent(
     if _lib_hint:
         user_prompt = _lib_hint + "\n\n" + user_prompt
 
-    log_line(job_id, f"Launching Claude agent (model={model})")
+    from modules.agent_provider import active_provider, provider_display_name
+    log_line(
+        job_id,
+        f"Launching {provider_display_name(active_provider())} agent (model={model})",
+    )
     if resume_sid:
         log_line(job_id, f"Forking prior Claude session {resume_sid[:8]}…")
 

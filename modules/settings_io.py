@@ -17,10 +17,24 @@ from typing import Any  # noqa: F401
 
 SETTINGS_PATH = Path(os.environ.get("SETTINGS_PATH", "/data/settings.json"))
 
+# Allowed values for agent_provider. Keep in sync with the Settings UI and
+# modules/agent_provider.py.
+AGENT_PROVIDERS = ("claude", "grok")
+
 # (key, env_fallback, type, default)
 SCHEMA: list[tuple[str, str | None, type, Any]] = [
+    # Which coding-agent backend runs CTF jobs. "claude" = Claude Agent SDK
+    # (current default). "grok" = Grok Build via ACP / headless (in progress).
+    ("agent_provider", "AGENT_PROVIDER", str, "claude"),
     ("anthropic_api_key", "ANTHROPIC_API_KEY", str, ""),
     ("claude_model", "CLAUDE_MODEL", str, "claude-opus-4-7"),
+    # Global effort for Claude sessions (low/medium/high/xhigh/max). UI has
+    # always exposed this; SCHEMA entry was missing so saves were dropped.
+    ("claude_effort", "CLAUDE_EFFORT", str, ""),
+    # xAI / Grok Build credentials + defaults (used when agent_provider=grok).
+    ("xai_api_key", "XAI_API_KEY", str, ""),
+    ("grok_model", "GROK_MODEL", str, "grok-build"),
+    ("grok_effort", "GROK_EFFORT", str, ""),
     ("auth_token", "AUTH_TOKEN", str, ""),
     ("job_ttl_days", "JOB_TTL_DAYS", int, 7),
     ("job_timeout_seconds", "JOB_TIMEOUT", int, 900),
@@ -111,7 +125,7 @@ def _host_mem_total_bytes() -> int:
     return 0
 
 
-_SECRET_KEYS = {"anthropic_api_key", "auth_token"}
+_SECRET_KEYS = {"anthropic_api_key", "xai_api_key", "auth_token"}
 
 _lock = threading.Lock()
 
@@ -183,8 +197,9 @@ def apply_to_env() -> None:
     can change the key via the UI and the next job picks it up without a
     container restart.
 
-    For ANTHROPIC_API_KEY: a placeholder value (e.g. "sk-ant-...") is
-    treated as unset so the SDK falls back to OAuth credentials.
+    For ANTHROPIC_API_KEY / XAI_API_KEY: a placeholder value (e.g.
+    "sk-ant-..." or a value ending in "...") is treated as unset so the
+    agent falls back to OAuth / browser credentials on disk.
     """
     for key, env_key, typ, _ in SCHEMA:
         if not env_key:
@@ -192,7 +207,7 @@ def apply_to_env() -> None:
         v = get_setting(key)
         if v in (None, ""):
             continue
-        if key == "anthropic_api_key":
+        if key in ("anthropic_api_key", "xai_api_key"):
             sv = str(v)
             if sv.startswith("sk-ant-...") or sv.endswith("..."):
                 os.environ.pop(env_key, None)
@@ -234,6 +249,58 @@ def has_claude_auth() -> bool:
     return has_anthropic_api_key() or has_claude_oauth()
 
 
+def has_xai_api_key() -> bool:
+    """True if a real (non-placeholder) xAI API key is configured."""
+    v = str(get_setting("xai_api_key") or "")
+    if not v:
+        return False
+    if v.endswith("..."):
+        return False
+    return True
+
+
+def has_grok_auth_file() -> bool:
+    """True if Grok CLI browser/OAuth credentials exist on disk.
+
+    The worker may mount the host ``~/.grok`` (or equivalent) so
+    ``grok login`` credentials work without stuffing XAI_API_KEY into
+    settings. Paths mirror the Claude OAuth check.
+    """
+    candidates = [
+        Path("/root/.grok/auth.json"),
+        Path.home() / ".grok" / "auth.json",
+        Path(os.environ.get("GROK_HOME", "") or "/nonexistent") / "auth.json",
+    ]
+    for c in candidates:
+        try:
+            if c.is_file() and c.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def has_grok_auth() -> bool:
+    return has_xai_api_key() or has_grok_auth_file()
+
+
+def get_agent_provider() -> str:
+    """Return the active agent backend: ``claude`` or ``grok``.
+
+    Unknown / empty values fall back to ``claude`` so a typo in settings
+    never silently disables the only fully-wired path.
+    """
+    v = str(get_setting("agent_provider") or "claude").strip().lower()
+    return v if v in AGENT_PROVIDERS else "claude"
+
+
+def has_active_agent_auth() -> bool:
+    """Auth available for whichever provider Settings currently selects."""
+    if get_agent_provider() == "grok":
+        return has_grok_auth()
+    return has_claude_auth()
+
+
 def mask(value: str) -> str:
     if not value:
         return ""
@@ -247,6 +314,8 @@ def get_settings_view() -> dict[str, Any]:
     settings = load_settings()
     out: dict[str, Any] = {
         "claude_oauth_detected": has_claude_oauth(),
+        "grok_auth_detected": has_grok_auth_file(),
+        "agent_providers": list(AGENT_PROVIDERS),
     }
     for key, env_key, typ, default in SCHEMA:
         raw = settings.get(key)
@@ -256,6 +325,12 @@ def get_settings_view() -> dict[str, Any]:
             effective = _coerce(effective_raw, typ) if effective_raw not in (None, "") else default
         except (TypeError, ValueError):
             effective = effective_raw
+        if key == "agent_provider":
+            # Always expose a normalized value so the UI never has to
+            # re-validate typos stored on disk.
+            effective = str(effective or "claude").strip().lower()
+            if effective not in AGENT_PROVIDERS:
+                effective = "claude"
         if key in _SECRET_KEYS:
             out[f"{key}_set"] = bool(raw)
             out[f"{key}_env_set"] = bool(env_v)
@@ -282,6 +357,14 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
             continue
         if val is None or (isinstance(val, str) and val == ""):
             cur.pop(key, None)
+            continue
+        if key == "agent_provider":
+            v = str(val).strip().lower()
+            if v not in AGENT_PROVIDERS:
+                raise ValueError(
+                    f"agent_provider must be one of {AGENT_PROVIDERS}, got {val!r}"
+                )
+            cur[key] = v
             continue
         for k, _, typ, _ in SCHEMA:
             if k == key:

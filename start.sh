@@ -92,10 +92,17 @@ if [ ! -f .env ]; then
 fi
 
 # --- auth hint (non-fatal) -------------------------------------------------
-CLAUDE_HOME="${HOST_CLAUDE_HOME:-$HOME/.claude}"
+# Pin mount sources so compose substitution is stable under sudo / different shells.
+export HOST_CLAUDE_HOME="${HOST_CLAUDE_HOME:-$HOME/.claude}"
+export HOST_GROK_HOME="${HOST_GROK_HOME:-$HOME/.grok}"
+CLAUDE_HOME="$HOST_CLAUDE_HOME"
 if [ ! -d "$CLAUDE_HOME" ]; then
   warn "Claude config dir not found at $CLAUDE_HOME."
   warn "Run 'claude login' on the host for OAuth, or set ANTHROPIC_API_KEY in .env / Settings."
+fi
+if [ ! -f "$HOST_GROK_HOME/auth.json" ] && [ -z "${XAI_API_KEY:-}" ]; then
+  warn "No Grok auth at $HOST_GROK_HOME/auth.json and XAI_API_KEY unset."
+  warn "Run 'grok login' or set XAI_API_KEY if you plan to use agent_provider=grok."
 fi
 
 # --- which tool images are missing -----------------------------------------

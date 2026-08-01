@@ -7,6 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
 from api.storage import job_dir, new_job_id, parse_targets, write_job_meta
+from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
 
@@ -136,6 +137,7 @@ async def analyze_rev(
         "effort": chosen_effort,
         "flag_format": (flag_format or "").strip() or None,
     }
+    enrich_job_meta(meta)
     write_job_meta(job_id, meta)
 
     q = get_queue()

@@ -68,14 +68,21 @@ log "project=$PROJECT  dir=$PROJECT_DIR  mode=$MODE  build=$BUILD"
 REAL_USER="${SUDO_USER:-$(stat -c %U "$PROJECT_DIR" 2>/dev/null || id -un)}"
 REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)"; REAL_HOME="${REAL_HOME:-$HOME}"
 export HOST_CLAUDE_HOME="${HOST_CLAUDE_HOME:-$REAL_HOME/.claude}"
+export HOST_GROK_HOME="${HOST_GROK_HOME:-$REAL_HOME/.grok}"
 log "compose user=$REAL_USER  HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME (claude.ai OAuth mount)"
+log "HOST_GROK_HOME=$HOST_GROK_HOME (Grok Build auth + binary mount)"
 [ -f "$HOST_CLAUDE_HOME/.credentials.json" ] \
   || warn "no $HOST_CLAUDE_HOME/.credentials.json — worker will have NO OAuth token (run \`claude login\` as $REAL_USER)"
+[ -f "$HOST_GROK_HOME/auth.json" ] \
+  || warn "no $HOST_GROK_HOME/auth.json — worker will have no Grok login (run \`grok login\` as $REAL_USER or set XAI_API_KEY)"
 dc() {
   if [ "$(id -un)" = "$REAL_USER" ]; then
     docker compose -p "$PROJECT" "$@"
   else
-    sudo -u "$REAL_USER" env "HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME" docker compose -p "$PROJECT" "$@"
+    sudo -u "$REAL_USER" env \
+      "HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME" \
+      "HOST_GROK_HOME=$HOST_GROK_HOME" \
+      docker compose -p "$PROJECT" "$@"
   fi
 }
 

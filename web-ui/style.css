@@ -38,6 +38,7 @@
   /* ── derived: neutral surface ramp ──────────────────────────────── */
   --bg-deep:             #0b0b0b;
   --bg-sunken:           #101010;
+  --sunken-wash:         #10101010;  /* 6% wash on an active block */
   --surface:             #1b1b1b;
   --surface-2:           #242424;
   --grad-hi:             #222222;
@@ -151,6 +152,78 @@ main { padding: 1.5rem 2rem; display: grid; grid-template-columns: 1fr 1fr; gap:
 form { display: flex; flex-direction: column; gap: 0.75rem; }
 label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
 label.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
+
+/* Settings: Claude vs Grok provider picker */
+.provider-fieldset {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 1rem;
+  margin: 0 0 0.5rem;
+  background: var(--bg-sunken);
+}
+.provider-fieldset legend {
+  padding: 0 0.4rem;
+  color: var(--fg-bright);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.provider-radios {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+@media (max-width: 640px) {
+  .provider-radios { grid-template-columns: 1fr; }
+}
+.provider-card {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+.provider-card:hover { border-color: var(--blue-line); }
+.provider-card:has(input:checked) {
+  border-color: var(--blue);
+  background: var(--blue-tint);
+  box-shadow: 0 0 0 1px var(--blue-fill) inset;
+}
+.provider-card input[type="radio"] {
+  margin-top: 0.2rem;
+  accent-color: var(--blue);
+}
+.provider-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.provider-card-body strong { color: var(--fg-bright); font-size: 0.95rem; }
+.provider-card-body small { color: var(--fg-muted); font-size: 0.8rem; }
+.provider-settings-block {
+  border: 1px solid var(--surface-2);
+  border-radius: 8px;
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.provider-settings-block.provider-active {
+  opacity: 1;
+  border-color: var(--line);
+  background: var(--sunken-wash);
+}
+.provider-block-title {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--fg);
+  font-weight: 600;
+}
+
 /* "Capture remote flag" gate — a tinted row so the success-bar override reads as
    a deliberate requirement rather than a stray option. */
 label.capture-flag-toggle {
@@ -319,7 +392,7 @@ textarea, select {
 }
 .fresh-toggle:has(.fresh-ctx-cb:checked) .fresh-box,
 .fresh-toggle.checked .fresh-box {
-  background: var(--green-solid-hi); border-color: var(--green-solid-hi);
+  background: var(--green-solid-hi); border-color: var(--green);
 }
 .fresh-toggle:has(.fresh-ctx-cb:checked) .fresh-box::after,
 .fresh-toggle.checked .fresh-box::after {
@@ -346,17 +419,17 @@ textarea, select {
 .retry-panel .stage {
   font-size: 0.75rem; color: var(--fg-muted); margin-bottom: 0.4rem;
 }
-.retry-panel .stage .dot {
-  display: inline-block; width: 0.5rem; height: 0.5rem;
-  border-radius: 50%; background: var(--purple); margin-right: 0.3rem;
-  animation: blink 1s ease-in-out infinite;
-}
 /* Terminal states, toggled by class rather than element.style: assigning a
    var() reference through the CSSOM is engine-dependent, the cascade is not. */
 .retry-panel .stage .dot.dot--error { background: var(--red); animation: none; }
 .retry-panel .stage .dot.dot--done  { background: var(--green-bright); animation: none; }
 #oauth-status { color: var(--fg-muted); }
 #oauth-status.oauth-ok { color: var(--green); }
+.retry-panel .stage .dot {
+  display: inline-block; width: 0.5rem; height: 0.5rem;
+  border-radius: 50%; background: var(--purple); margin-right: 0.3rem;
+  animation: blink 1s ease-in-out infinite;
+}
 @keyframes blink {
   0%, 100% { opacity: 0.3; }
   50% { opacity: 1; }

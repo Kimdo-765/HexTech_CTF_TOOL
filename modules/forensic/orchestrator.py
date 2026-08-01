@@ -37,6 +37,12 @@ from modules._common import (
 )
 from modules.forensic.prompts import SYSTEM_PROMPT, build_user_prompt
 from modules.settings_io import apply_to_env, get_setting, has_claude_auth
+from modules.agent_provider import (
+    active_provider,
+    has_provider_auth,
+    provider_display_name,
+    coerce_model_for_provider,
+)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 JOBS_DIR = DATA_DIR / "jobs"
@@ -128,13 +134,84 @@ async def _claude_summary(
     description: Optional[str],
     model_override: Optional[str] = None,
 ) -> dict:
+    """Forensic summary agent. Backend follows Settings ``agent_provider``."""
     work_dir = _job_dir(job_id)
-    model = resolve_main_model(model_override)
+    model = coerce_model_for_provider(resolve_main_model(model_override))
     # Per-job scratch dir (see modules/_common.py make_main_session_options
     # for rationale). Cleanup is implicit via job DELETE rmtree.
     tmp_dir = Path(work_dir) / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     _tmp_str = str(tmp_dir)
+    prompt = build_user_prompt(target_os, kind, description)
+    from modules._common import build_exploit_library_hint
+    _lib_hint = build_exploit_library_hint("forensic")
+    if _lib_hint:
+        prompt = _lib_hint + "\n\n" + prompt
+    # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose and instruct
+    # the agent to build+run it. Returns "" (no-op) when the box is unticked.
+    from modules._common import docker_challenge_block
+    _docker_block = docker_challenge_block(job_id)
+    if _docker_block:
+        prompt = prompt + "\n\n" + _docker_block
+
+    provider = active_provider()
+    summary: dict = {"messages": 0, "tool_calls": 0, "agent_provider": provider}
+
+    # ---- Grok path --------------------------------------------------------
+    if provider == "grok":
+        from modules.grok_acp import (
+            GrokACPClient,
+            GrokSessionOptions,
+            AssistantMessage as GrokAM,
+            ResultMessage as GrokRM,
+            ToolUseBlock as GrokTUB,
+        )
+        from modules._prompts import adapt_system_prompt_for_grok
+        _log(job_id, f"Launching {provider_display_name('grok')} summary agent (model={model})")
+        opts = GrokSessionOptions(
+            system_prompt=adapt_system_prompt_for_grok(SYSTEM_PROMPT),
+            model=model,
+            cwd=str(work_dir),
+            effort=resolve_effort(read_meta(job_id).get("effort")),
+            env={
+                "JOB_ID": job_id,
+                "TMPDIR": _tmp_str,
+                "TMP": _tmp_str,
+                "TEMP": _tmp_str,
+            },
+        )
+        async with GrokACPClient(opts) as client:
+            if client.session_id:
+                try:
+                    write_meta(job_id, agent_session_id=client.session_id)
+                except Exception:
+                    pass
+            await client.query(prompt)
+            async for msg in client.receive_response():
+                agent_heartbeat(job_id, msg)
+                if isinstance(msg, GrokAM):
+                    summary["messages"] += 1
+                    for block in (getattr(msg, "content", None) or []):
+                        if type(block).__name__ == "TextBlock":
+                            _log(job_id, f"AGENT: {(getattr(block, 'text', '') or '')[:500]}")
+                        elif type(block).__name__ == "ToolUseBlock" or isinstance(block, GrokTUB):
+                            summary["tool_calls"] += 1
+                            inp = getattr(block, "input", None) or {}
+                            try:
+                                args_preview = json.dumps(inp)[:200]
+                            except Exception:
+                                args_preview = str(inp)[:200]
+                            _log(job_id, f"TOOL {getattr(block, 'name', '?')}: {args_preview}")
+                elif isinstance(msg, GrokRM):
+                    summary["result"] = {
+                        "duration_ms": getattr(msg, "duration_ms", None),
+                        "num_turns": getattr(msg, "num_turns", None),
+                        "total_cost_usd": getattr(msg, "total_cost_usd", None),
+                        "is_error": bool(getattr(msg, "is_error", False)),
+                    }
+        return summary
+
+    # ---- Claude path ------------------------------------------------------
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         model=model,
@@ -152,20 +229,7 @@ async def _claude_summary(
         # 2026-07-22 — kill_guard_hooks no longer denies WebSearch/WebFetch).
         hooks=kill_guard_hooks(job_id),
     )
-    prompt = build_user_prompt(target_os, kind, description)
-    from modules._common import build_exploit_library_hint
-    _lib_hint = build_exploit_library_hint("forensic")
-    if _lib_hint:
-        prompt = _lib_hint + "\n\n" + prompt
-    # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose and instruct
-    # the agent to build+run it. Returns "" (no-op) when the box is unticked.
-    from modules._common import docker_challenge_block
-    _docker_block = docker_challenge_block(job_id)
-    if _docker_block:
-        prompt = prompt + "\n\n" + _docker_block
-    _log(job_id, f"Launching Claude summary agent (model={model})")
-    summary: dict = {"messages": 0, "tool_calls": 0}
-
+    _log(job_id, f"Launching {provider_display_name('claude')} summary agent (model={model})")
 
     async for msg in query(prompt=prompt, options=options):
         capture_session_id(msg, job_id)
@@ -232,8 +296,11 @@ def run_job(
         result: dict = {"collected": collected_summary}
         kind = collected_summary.get("kind", image_type)
 
-        if skip_claude or not has_claude_auth():
-            _log(job_id, "Skipping Claude summary (no API key, no OAuth, or skip flag).")
+        if skip_claude or not has_provider_auth():
+            _log(
+                job_id,
+                f"Skipping agent summary (no {active_provider()} auth, or skip flag).",
+            )
             result["claude"] = None
         else:
             _write_meta(job_id, stage="summarize")

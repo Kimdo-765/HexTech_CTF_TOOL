@@ -203,39 +203,90 @@ def _read_json(p: Path) -> dict:
 # ---------------------------------------------------------------------------
 # LLM narration of a signal batch (cheap model, strict-JSON multi-language)
 # ---------------------------------------------------------------------------
-async def _narrate(signal_lines: list[str], model: str) -> dict:
-    """Return {lang: one-line summary} for the batch, or {} on any failure."""
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions, query
-        import anyio
-    except Exception:
-        return {}
-
+def _narrate_sys_prompt() -> str:
     langs = MONITOR_LANGS
     want = ", ".join(
         f'"{l}" ({_LANG_NAMES.get(l, l)})' for l in langs
     )
-    sys_prompt = (
+    return (
         "You are a live MONITOR for an autonomous CTF-solving agent run. "
         "You receive a small batch of already-filtered raw log SIGNAL lines from "
         "one moment of the run (agent prose, subagent lifecycle, judge/retry, "
         "errors, artifacts). Summarize WHAT JUST HAPPENED in ONE short, concrete, "
         "technical line per language (max ~160 chars each). Plain text, no markdown, "
         "no line breaks within a value. "
+        "Korean (ko) lines MUST be written in Hangul (한국어), not English. "
+        "English (en) lines in English. "
         f"Respond with STRICT JSON ONLY — an object whose keys are exactly {want}. "
         "No prose, no code fences, nothing but the JSON object."
     )
-    prompt = "SIGNAL LINES:\n" + "\n".join(signal_lines[-12:])
 
+
+def _parse_narration_json(acc: str) -> dict:
+    """Parse model JSON into {lang: line}. Empty dict on any failure."""
+    langs = MONITOR_LANGS
+    acc = (acc or "").strip()
+    if not acc:
+        return {}
+    if acc.startswith("```"):
+        acc = acc.split("\n", 1)[1] if "\n" in acc else acc[3:]
+        if acc.endswith("```"):
+            acc = acc[:-3]
+        acc = acc.strip()
+    # Tolerate a leading/trailing prose wrapper by carving the outermost object.
+    if "{" in acc and "}" in acc:
+        acc = acc[acc.find("{"): acc.rfind("}") + 1]
+    try:
+        d = json.loads(acc)
+        if not isinstance(d, dict):
+            return {}
+        out = {l: str(d.get(l, "")).strip() for l in langs}
+        # Require at least one non-empty language line.
+        if not any(out.values()):
+            return {}
+        return out
+    except Exception:
+        return {}
+
+
+def _prefer_grok_narration(model: str) -> bool:
+    """True when the job/settings path wants Grok, or the model id is Grok."""
+    m = (model or "").strip().lower()
+    if m.startswith("grok"):
+        return True
+    try:
+        from modules.agent_provider import active_provider, has_grok_auth
+        if active_provider() == "grok" and has_grok_auth():
+            return True
+    except Exception:
+        pass
+    # Claude weekly-limit era: if Claude auth is dead but Grok works, prefer Grok.
+    try:
+        from modules.agent_provider import has_grok_auth
+        from modules.settings_io import has_claude_auth
+        if has_grok_auth() and not has_claude_auth():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _narrate_claude(signal_lines: list[str], model: str) -> dict:
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions, query
+        import anyio
+    except Exception:
+        return {}
+
+    prompt = "SIGNAL LINES:\n" + "\n".join(signal_lines[-12:])
     options = ClaudeAgentOptions(
-        system_prompt=sys_prompt,
+        system_prompt=_narrate_sys_prompt(),
         model=model,
         allowed_tools=[],
         disallowed_tools=["Agent", "Task", "WebSearch", "WebFetch", "Bash",
                           "Read", "Write", "Edit", "Glob", "Grep"],
         permission_mode="bypassPermissions",
     )
-
     acc = ""
     try:
         with anyio.fail_after(_NARRATE_TIMEOUT_S):
@@ -250,20 +301,77 @@ async def _narrate(signal_lines: list[str], model: str) -> dict:
                         return {}
     except Exception:
         return {}
+    return _parse_narration_json(acc)
 
-    acc = acc.strip()
-    if acc.startswith("```"):
-        acc = acc.split("\n", 1)[1] if "\n" in acc else acc[3:]
-        if acc.endswith("```"):
-            acc = acc[:-3]
-        acc = acc.strip()
+
+async def _narrate_grok(signal_lines: list[str], model: str | None = None) -> dict:
+    """Narrate via Grok Build ACP (api container must have ~/.grok + binary)."""
     try:
-        d = json.loads(acc)
-        if not isinstance(d, dict):
-            return {}
-        return {l: str(d.get(l, "")).strip() for l in langs}
+        from modules.grok_acp import query_grok_once, resolve_grok_bin
+        from modules.agent_provider import default_model_for
+        resolve_grok_bin()  # fail fast if binary missing
     except Exception:
         return {}
+
+    grok_model = (model or "").strip()
+    if not grok_model or grok_model.lower().startswith("claude"):
+        try:
+            grok_model = default_model_for("grok")
+        except Exception:
+            grok_model = "grok-build"
+    # Prefer a fast model for live commentary when possible.
+    if grok_model in ("grok-build", ""):
+        grok_model = os.environ.get("MONITOR_GROK_MODEL", "grok-4.5")
+
+    prompt = "SIGNAL LINES:\n" + "\n".join(signal_lines[-12:])
+    try:
+        r = await query_grok_once(
+            prompt=prompt,
+            cwd="/tmp",
+            system_prompt=_narrate_sys_prompt(),
+            model=grok_model,
+            effort="low",
+            timeout_s=float(_NARRATE_TIMEOUT_S),
+        )
+    except Exception:
+        return {}
+    if r.get("error"):
+        return {}
+    return _parse_narration_json(r.get("text") or "")
+
+
+async def _narrate(signal_lines: list[str], model: str) -> dict:
+    """Return {lang: one-line summary} for the batch, or {} on any failure.
+
+    When Settings ``agent_provider=grok`` (or the model id is Grok), use
+    Grok ONLY — do not fall back to Claude (operator chose Grok for the
+    whole stack). Claude-selected jobs still try Claude first, then Grok
+    once as a weekly-limit escape hatch.
+    """
+    if not signal_lines:
+        return {}
+
+    prefer_grok = _prefer_grok_narration(model)
+    # Strict: Grok provider → Grok only. Claude provider → Claude then Grok.
+    if prefer_grok:
+        order = ("grok",)
+    else:
+        order = ("claude", "grok")
+    for backend in order:
+        try:
+            if backend == "grok":
+                out = await _narrate_grok(signal_lines, model)
+            else:
+                out = await _narrate_claude(signal_lines, model)
+        except Exception:
+            out = {}
+        if out:
+            # Drop empty language keys so UI can fall through, but keep filled ones.
+            cleaned = {k: v for k, v in out.items() if v}
+            if cleaned:
+                # Ensure every MONITOR_LANGS key exists (empty → UI falls back).
+                return {l: cleaned.get(l, "") for l in MONITOR_LANGS}
+    return {}
 
 
 async def _flush_batch(job_id: str, batch: list[tuple[str, tuple[str, str]]], model: str) -> None:
@@ -277,9 +385,15 @@ async def _flush_batch(job_id: str, batch: list[tuple[str, tuple[str, str]]], mo
     text = await _narrate(bodies, model)
     if not text:
         # LLM unavailable: fall back to a raw-only entry so the signal still
-        # shows up in the monitor feed (just without narration).
-        text = {l: bodies[-1][:160] for l in MONITOR_LANGS}
+        # shows up in the monitor feed (just without narration). Both ko and
+        # en get the same English log snippet — UI language toggle can't invent
+        # Hangul here; the real fix is making _narrate succeed (Grok path).
+        snippet = bodies[-1][:160]
+        text = {l: snippet for l in MONITOR_LANGS}
         text["_fallback"] = "1"
+        # Tiny ko-only prefix so operators can tell fallback from real narration.
+        if "ko" in text:
+            text["ko"] = f"(원문) {snippet}"
     _emit(job_id, _entry(kind, sev, text, raw=bodies))
 
 
@@ -301,6 +415,15 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
         except Exception:
             model = MONITOR_MODEL
     model = model or MONITOR_MODEL
+    # When the CTF job runs on Grok (or Claude is weekly-limited), pin a Grok
+    # model id so _narrate prefers the Grok backend and produces real ko lines.
+    try:
+        from modules.agent_provider import active_provider, has_grok_auth
+        if active_provider() == "grok" and has_grok_auth():
+            if not str(model).lower().startswith("grok"):
+                model = os.environ.get("MONITOR_GROK_MODEL", "grok-4.5")
+    except Exception:
+        pass
     jd = JOBS_DIR / Path(job_id).name
     logp = jd / "run.log"
     metap = jd / "meta.json"

@@ -16,6 +16,9 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      # Grok binary for live monitor narration (and Settings auth status).
+      PATH: /root/.grok/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      GROK_HOME: /root/.grok
       # Lift the SDK's per-turn output cap. The model still has its
       # own hard ceiling (Sonnet/Opus ~64k), so the agent picks
       # whatever its model supports rather than getting truncated
@@ -43,6 +46,8 @@ services:
       # CLI transport searches only the new cwd's project key and
       # can't find the prior session, so fork_session silently fails.
       - ${HOST_CLAUDE_HOME:-${HOME}/.claude}:/root/.claude
+      # Grok auth for Settings status + future Grok-driven jobs.
+      - ${HOST_GROK_HOME:-${HOME}/.grok}:/root/.grok
       # api needs the docker socket to kill sibling containers spawned by
       # workers when the user deletes a running job.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -101,6 +106,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       HOST_DATA_DIR: ${HOST_DATA_DIR:-./data}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
+      # Grok Build binary lives under the mounted ~/.grok tree.
+      PATH: /root/.grok/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      GROK_HOME: /root/.grok
       # Tell the bundled `claude` CLI it is running in a sandbox so it allows
       # --dangerously-skip-permissions even though the container runs as root.
       IS_SANDBOX: "1"
@@ -148,6 +156,10 @@ services:
       # worker uses your existing claude.ai OAuth token (no API key needed).
       # Run `claude login` once on the host to populate ~/.claude/.
       - ${HOST_CLAUDE_HOME:-${HOME}/.claude}:/root/.claude
+      # Optional Grok Build auth (agent_provider=grok). Run `grok login` on the
+      # host; set HOST_GROK_HOME if ~/.grok lives elsewhere. Not required when
+      # using XAI_API_KEY / Settings xai_api_key instead.
+      - ${HOST_GROK_HOME:-${HOME}/.grok}:/root/.grok
     # Targeted seccomp profile so gdb/dynamic-analysis in the rev `debugger`
     # subagent can disable ASLR. gdb turns off per-inferior randomization via
     # personality(ADDR_NO_RANDOMIZE = 0x40000), which the DEFAULT Docker seccomp

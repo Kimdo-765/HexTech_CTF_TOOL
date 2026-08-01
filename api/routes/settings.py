@@ -121,9 +121,10 @@ def _apply_worker_mem(value: str) -> dict:
 @router.get("")
 def get_settings():
     view = get_settings_view()
-    # Only pay for a live docker round-trip when the caller touched the cap.
-    if "worker_mem_limit" in body:
-        view["worker_mem_live"] = worker_mem_live()
+    # Live cgroup sample for the Settings "worker memory" row. Cheap enough
+    # on GET that we always attach it; a docker-socket miss returns
+    # {available: false} without raising.
+    view["worker_mem_live"] = worker_mem_live()
     return view
 
 
@@ -154,7 +155,10 @@ def _put_settings_sync(body: dict):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"worker_mem_limit: {e}")
 
-    view = update_settings(body)
+    try:
+        view = update_settings(body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Container-create property → push it to the live cgroup too, otherwise
     # saving would appear to work and change nothing until a recreate.
