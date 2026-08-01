@@ -14,11 +14,34 @@
 # USAGE:
 #   gdb-clean -nh -batch -x probe.py
 #   gdb-clean ./binary < input
+#   GDB_BIN=/usr/bin/gdb-multiarch gdb-clean -batch -ex 'file ./bin/user' …
+#   gdb-multiarch-clean -batch …        # same thing via the $0 shorthand
 # Anything you'd pass to `gdb` works. ANSI/banner stripping is unconditional.
 #
 # If you NEED the banner (rare), call /usr/bin/gdb directly.
+#
+# FOREIGN ARCHITECTURES: this used to `exec /usr/bin/gdb` unconditionally,
+# so a RISC-V / ARM / MIPS target — exactly the case that needs
+# gdb-multiarch — had no clean wrapper at all and the agent got GEF's
+# banner instead of its disassembly (job 62531f9da538, recon#1 05:19:18:
+# `gdb-multiarch -batch … -ex 'disassemble ecall' | head -60` came back as
+# the banner, costing a retry). Resolve the underlying gdb instead.
 
 set -o pipefail
+
+# Which gdb to wrap: explicit $GDB_BIN wins, else derive from how we were
+# invoked (gdb-multiarch-clean -> gdb-multiarch), else plain gdb.
+_gdb="${GDB_BIN:-}"
+if [ -z "$_gdb" ]; then
+    case "${0##*/}" in
+        *multiarch*) _gdb=/usr/bin/gdb-multiarch ;;
+        *)           _gdb=/usr/bin/gdb ;;
+    esac
+fi
+if [ ! -x "$_gdb" ]; then
+    echo "gdb-clean: $_gdb is not executable" >&2
+    exit 127
+fi
 
 # Forward all args to gdb. Output is sanitized via two filters:
 #   1. sed strips
@@ -30,6 +53,6 @@ set -o pipefail
 #          because the line starts with \x01\x02G).
 #   2. grep -v drops GEF's banner lines + the boot stats line that
 #      starts with "<N> commands loaded".
-exec /usr/bin/gdb "$@" 2>&1 | \
+exec "$_gdb" "$@" 2>&1 | \
     sed -r 's/\x1b\[[0-9;]*[mGKHfABCDEFsuJ]//g; s/\x1b\][^\x07]*\x07//g; s/[\x01\x02]//g' | \
     grep -Ev '^(GEF for linux ready|[0-9]+ commands loaded and [0-9]+ functions added|\[!\] To get gef-extras)' || true

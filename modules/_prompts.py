@@ -813,8 +813,16 @@ will answer.
     # a backgrounded qemu instance.
 
   Dynamic analysis (host arch — x86_64 / native):
-    gdb -batch -ex 'b *0x400500' -ex 'r' -ex 'info reg' ./bin
-    gdb-multiarch -batch -ex 'set arch i386' …  # 32-bit on 64-bit host
+    # ALWAYS pass -nx to a batch gdb. /etc/gdb/gdbinit auto-loads GEF, and
+    # its banner ("GEF for linux ready …", "N commands loaded …") plus a
+    # terminfo warning land in stdout AHEAD of what you asked for — on a
+    # `| head -60` that is the whole reply. -nx skips the init entirely.
+    # Only drop -nx when you actually want GEF's own commands (vmmap, heap
+    # chunks); for that use `gdb-clean`, which keeps GEF and strips the
+    # banner — but note gdb-clean wraps /usr/bin/gdb, so for a foreign arch
+    # use `GDB_BIN=/usr/bin/gdb-multiarch gdb-clean …`.
+    gdb -nx -batch -ex 'b *0x400500' -ex 'r' -ex 'info reg' ./bin
+    gdb-multiarch -nx -batch -ex 'set arch i386' …  # 32-bit on 64-bit host
     strace -f -e openat ./bin <input>
     ltrace -f ./bin <input>
 

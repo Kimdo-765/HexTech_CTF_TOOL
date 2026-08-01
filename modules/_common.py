@@ -2201,6 +2201,7 @@ async def run_pre_recon(
             AssistantMessage,
             ClaudeSDKClient,
             ResultMessage,
+            UserMessage,
         )
     except Exception as e:
         log_fn(f"[{tag}] SDK import failed ({e}); skipping pre-recon")
@@ -2238,6 +2239,30 @@ async def run_pre_recon(
                                 job_id,
                                 f"[{tag}] TOOL {nm}: {preview}",
                             )
+                elif isinstance(msg, UserMessage):
+                    # Tool RESULTS arrive as UserMessage/ToolResultBlock. This
+                    # branch did not exist, so pre-recon logged every command
+                    # it ran and not one of their outputs — job 62531f9da538
+                    # counted 18 TOOL calls and 0 TOOL_RESULT for this phase
+                    # (main 46/772, the recon subagent 21/21). The cost is not
+                    # cosmetic: pre-recon runs the FIRST dynamic probes of a
+                    # job, so when one of them silently returns nothing there
+                    # is no way afterwards to tell "the tool failed" from "it
+                    # worked and the agent moved on" — which is exactly the
+                    # question a post-mortem asks. Same formatter the isolated
+                    # subagents use, so the 200 KB disaster valve applies here
+                    # too and a huge objdump cannot flood run.log.
+                    for block in (getattr(msg, "content", None) or []):
+                        if type(block).__name__ != "ToolResultBlock":
+                            continue
+                        try:
+                            line = format_tool_result(
+                                getattr(block, "content", None),
+                                bool(getattr(block, "is_error", False)),
+                            )
+                        except Exception:
+                            continue
+                        log_line(job_id, f"[{tag}] {line}")
                 elif isinstance(msg, ResultMessage):
                     result_is_error = bool(getattr(msg, "is_error", False))
                     cost = getattr(msg, "total_cost_usd", None)
