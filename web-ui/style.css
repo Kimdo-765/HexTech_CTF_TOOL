@@ -1,25 +1,148 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Palette — Windows Terminal "Grok Build" scheme.
+
+   MATCHED verbatim from the scheme: --bg (background/black), --fg
+   (foreground/white), --fg-bright (brightWhite), the six hue pairs and
+   --selection.  The scheme's brightBlack (#6c6c6c) is used as-is only in
+   terminal.html's ANSI table — on a raised chip it drops to 2.96:1, so the
+   UI's dim text is a lifted neutral instead (--fg-dim).
+
+   DERIVED here (the scheme defines no such values): the neutral surface
+   ramp, --orange and the *-soft tiers, the darkened *-solid variants that
+   back opaque buttons carrying light text, and the *-bg hue-tinted banner
+   surfaces (blended onto --bg so alert colours survive a neutral scheme).
+
+   Solid values are pinned by contrast, not by eye: every *-solid that backs
+   light text clears 4.5:1 against --fg-bright, and no pair regresses below
+   what the GitHub-dark palette it replaces achieved.
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  /* ── matched: Grok Build ──────────────────────────────────────── */
+  --bg:                  #141414;  /* background / black */
+  --fg:                  #c8c8c8;  /* foreground / white */
+  --fg-bright:           #e1e1e1;  /* brightWhite */
+  --red:                 #f7768e;
+  --red-bright:          #ff899d;
+  --green:               #9ece6a;
+  --green-bright:        #9fe044;
+  --yellow:              #e0af68;  /* also cursorColor */
+  --yellow-bright:       #faba4a;
+  --blue:                #7aa2f7;
+  --blue-bright:         #8db0ff;
+  --purple:              #bb9af7;
+  --purple-bright:       #c7a9ff;
+  --cyan:                #7dcfff;
+  --cyan-bright:         #a4daff;
+  --selection:           #283457;  /* selectionBackground */
+
+  /* ── derived: neutral surface ramp ──────────────────────────────── */
+  --bg-deep:             #0b0b0b;
+  --bg-sunken:           #101010;
+  --surface:             #1b1b1b;
+  --surface-2:           #242424;
+  --grad-hi:             #222222;
+  --grad-mid:            #191919;
+  --grad-lo:             #151515;  /* stays just above --bg, as #11151a did */
+  --line-soft:           #262626;
+  --line:                #333333;
+  --line-hi:             #4a4a4a;
+  --fg-dim:              #787878;  /* lifted off brightBlack — see header */
+  --fg-muted:            #8a8a8a;
+  --fg-max:              #f2f2f2;
+  --on-accent:           #141414;
+
+  /* ── derived: in-family extensions ──────────────────────────────── */
+  --orange:              #ff9e64;
+  --orange-soft:         #ffc79e;
+  --red-soft:            #ffd0d8;
+  --green-soft:          #c3e88d;
+  --yellow-soft:         #f0dfae;
+  --purple-soft:         #ded4f5;
+
+  /* ── derived: darkened solids (opaque bg under light text) ──────── */
+  --blue-solid:          #3d59a1;
+  --blue-solid-hi:       #4360a6;
+  --blue-solid-alt:      #33497f;
+  --blue-solid-deep:     #223350;
+  --blue-solid-deep-hi:  #2f4770;
+  --green-solid:         #456d2f;
+  --green-solid-hi:      #4d7c34;
+  --teal-solid:          #2e6d5f;
+  --yellow-solid:        #7b5e29;
+  --orange-solid:        #b56b3c;
+  --red-solid:           #9c4754;
+  --red-solid-hi:        #8f3f4c;
+  --red-solid-deep:      #5c2f39;
+  --red-solid-deep-hi:   #8a3d4a;
+  --purple-solid:        #5b4a94;
+  --purple-solid-hi:     #6e569d;
+
+  /* ── derived: hue-tinted banner surfaces ────────────────────────── */
+  --red-bg:              #3b2529;
+  --red-bg-deep:         #261c1e;
+  --yellow-bg:           #372e22;
+  --yellow-bg-lo:        #2f281f;
+  --orange-bg:           #3c2b22;
+  --orange-bg-hi:        #513829;
+  --purple-bg:           #2f2938;
+  --purple-bg-lo:        #232028;
+  --green-bg:            #2a3222;
+  --green-bg-lo:         #22271d;
+  --cyan-bg:             #1e272c;
+  --blue-bg:             #1e222b;
+
+  /* ── derived: alpha washes and hairlines ────────────────────────── */
+  --blue-tint:           #7aa2f722;
+  --blue-fill:           #7aa2f73a;
+  --blue-line:           #7aa2f755;
+  --red-tint:            #f7768e22;
+  --red-line:            #f7768e55;
+  --red-line-hi:         #f7768e99;
+  --green-tint:          #9ece6a22;
+  --green-line:          #9ece6a5e;
+  --green-soft-tint:     #c3e88d22;
+  --green-soft-line:     #c3e88d55;
+  --green-bright-line:   #9fe04466;
+  --yellow-wash:         #e0af6812;
+  --yellow-wash-hi:      #e0af6820;
+  --yellow-fill:         #e0af6826;
+  --yellow-tint:         #e0af6833;
+  --yellow-line:         #e0af6866;
+  --purple-tint:         #bb9af71a;
+  --purple-fill:         #bb9af733;
+  --purple-line:         #bb9af766;
+  --purple-bright-tint:  #c7a9ff22;
+  --purple-bright-line:  #c7a9ff55;
+  --cyan-tint:           #7dcfff22;
+  --cyan-line:           #7dcfff5e;
+  --orange-tint:         #ff9e6422;
+  --orange-line:         #ff9e645e;
+  --grey-tint:           #8a8a8a22;
+  --grey-line:           #8a8a8a55;
+}
+
 * { box-sizing: border-box; }
 body {
   font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
   margin: 0;
-  background: #0e1117;
-  color: #e6edf3;
+  background: var(--bg);
+  color: var(--fg-bright);
 }
 header {
   padding: 1rem 2rem;
-  border-bottom: 1px solid #30363d;
+  border-bottom: 1px solid var(--line);
 }
 header h1 { margin: 0 0 0.5rem 0; font-size: 1.25rem; }
 nav { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .tab {
-  background: #21262d;
-  color: #e6edf3;
-  border: 1px solid #30363d;
+  background: var(--surface-2);
+  color: var(--fg-bright);
+  border: 1px solid var(--line);
   padding: 0.4rem 0.8rem;
   border-radius: 6px;
   cursor: pointer;
 }
-.tab.active { background: #1f6feb; border-color: #1f6feb; }
+.tab.active { background: var(--blue-solid); border-color: var(--blue-solid); }
 .tab[disabled] { opacity: 0.4; cursor: not-allowed; }
 main { padding: 1.5rem 2rem; display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
@@ -33,21 +156,21 @@ label.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
 label.capture-flag-toggle {
   flex-wrap: wrap;
   padding: 0.4rem 0.6rem;
-  border: 1px solid #d2904233;
+  border: 1px solid var(--yellow-tint);
   border-radius: 6px;
-  background: #d2904212;
+  background: var(--yellow-wash);
 }
-label.capture-flag-toggle:hover { border-color: #e3b341; background: #d2904220; }
+label.capture-flag-toggle:hover { border-color: var(--yellow-bright); background: var(--yellow-wash-hi); }
 label.capture-flag-toggle:has(.capture-remote-flag-cb:checked) {
-  border-color: #e3b341;
-  background: #d2904226;
+  border-color: var(--yellow-bright);
+  background: var(--yellow-fill);
 }
-.capture-flag-note { color: #8b949e; font-size: 0.8rem; flex-basis: 100%; margin-left: 1.6rem; }
+.capture-flag-note { color: var(--fg-muted); font-size: 0.8rem; flex-basis: 100%; margin-left: 1.6rem; }
 input[type="file"], input[type="url"], input[type="text"], input[type="password"],
 textarea, select {
-  background: #161b22;
-  color: #e6edf3;
-  border: 1px solid #30363d;
+  background: var(--surface);
+  color: var(--fg-bright);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 0.5rem;
   font-family: inherit;
@@ -64,52 +187,52 @@ textarea, select {
 .target-remove {
   flex: 0 0 auto;
   width: 1.9rem;
-  background: #21262d;
-  color: #8b949e;
-  border: 1px solid #30363d;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  border: 1px solid var(--line);
   border-radius: 6px;
   cursor: pointer;
   line-height: 1;
   font-size: 1rem;
 }
-.target-remove:hover { color: #f85149; border-color: #f85149; }
+.target-remove:hover { color: var(--red); border-color: var(--red); }
 .target-add {
   align-self: flex-start;
   background: transparent;
-  color: #3fb950;
-  border: 1px dashed #2ea04366;
+  color: var(--green);
+  border: 1px dashed var(--green-line);
   border-radius: 6px;
   padding: 0.25rem 0.6rem;
   cursor: pointer;
   font-size: 0.8rem;
 }
-.target-add:hover { background: #2ea04318; border-style: solid; }
+.target-add:hover { background: var(--green-tint); border-style: solid; }
 /* "+N more" badge next to the primary target in the job detail header. */
 .target-more {
   display: inline-block;
   padding: 0 0.35rem;
   border-radius: 4px;
-  background: #1f6feb33;
-  color: #58a6ff;
+  background: var(--blue-fill);
+  color: var(--blue);
   cursor: help;
 }
 .hbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .cost-banner {
   display: flex; align-items: center; gap: 0.75rem;
-  font-size: 0.85rem; color: #8b949e;
+  font-size: 0.85rem; color: var(--fg-muted);
 }
-#cost-total { color: #58a6ff; font-weight: 600; }
+#cost-total { color: var(--blue); font-weight: 600; }
 
 /* Operator "used / budget" pill (top bar). Color escalates with fraction
    consumed: default (under 80%), amber (>=80%), red (>=100%). */
 .usage-pill {
-  font-weight: 600; color: #3fb950;
-  border: 1px solid #238636; border-radius: 10px;
+  font-weight: 600; color: var(--green);
+  border: 1px solid var(--green-solid); border-radius: 10px;
   padding: 0.05rem 0.5rem; white-space: nowrap;
 }
 .usage-pill[hidden] { display: none; }
-.usage-pill--warn { color: #d29922; border-color: #9e6a03; }
-.usage-pill--over { color: #f85149; border-color: #da3633; }
+.usage-pill--warn { color: var(--yellow); border-color: var(--yellow-solid); }
+.usage-pill--over { color: var(--red); border-color: var(--red-solid); }
 
 /* Account rate-limit status chip (subscription usage window). */
 .rl-chip {
@@ -117,16 +240,16 @@ textarea, select {
   padding: 0.05rem 0.5rem; white-space: nowrap;
 }
 .rl-chip[hidden] { display: none; }
-.rl-chip--ok { color: #3fb950; border: 1px solid #238636; }
-.rl-chip--warn { color: #d29922; border: 1px solid #9e6a03; }
-.rl-chip--rejected { color: #f85149; border: 1px solid #da3633; }
+.rl-chip--ok { color: var(--green); border: 1px solid var(--green-solid); }
+.rl-chip--warn { color: var(--yellow); border: 1px solid var(--yellow-solid); }
+.rl-chip--rejected { color: var(--red); border: 1px solid var(--red-solid); }
 .logout {
-  background: transparent; color: #8b949e; border: 1px solid #30363d;
+  background: transparent; color: var(--fg-muted); border: 1px solid var(--line);
   padding: 0.2rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.75rem;
 }
-.logout:hover { color: #e6edf3; border-color: #58a6ff; }
+.logout:hover { color: var(--fg-bright); border-color: var(--blue); }
 .delete-btn {
-  background: #da3633; color: white; border: 0;
+  background: var(--red-solid); color: var(--fg-bright); border: 0;
   padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
   font-size: 0.75rem; margin-left: 0.5rem;
 }
@@ -135,68 +258,68 @@ textarea, select {
   margin-bottom: 0.5rem;
 }
 .bulk-delete-btn {
-  background: #b62324; color: white; border: 0;
+  background: var(--red-solid-hi); color: var(--fg-bright); border: 0;
   padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem;
 }
-.bulk-delete-btn:hover { background: #da3633; }
+.bulk-delete-btn:hover { background: var(--red-solid); }
 
 .run-now-btn {
-  background: #1f6feb; color: white; border: 0;
+  background: var(--blue-solid); color: var(--fg-bright); border: 0;
   padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem; margin-right: 0.5rem;
 }
-.run-now-btn:hover { background: #388bfd; }
-.run-now-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.run-now-btn:hover { background: var(--blue-solid-hi); }
+.run-now-btn:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 
 .retry-btn {
-  background: #6e3eaa; color: white; border: 0;
+  background: var(--purple-solid); color: var(--fg-bright); border: 0;
   padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem; margin-right: 0.5rem;
 }
-.retry-btn:hover { background: #8957e5; }
-.retry-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.retry-btn:hover { background: var(--purple-solid-hi); }
+.retry-btn:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 /* Continue-in-place: teal accent so it reads as "resume, not a fresh retry". */
-.retry-btn.continue-open-btn { background: #1f6f5c; }
-.retry-btn.continue-open-btn:hover { background: #2ea043; }
-.continue-form .continue-submit { background: #1f6f5c; }
-.continue-form .continue-submit:hover { background: #2ea043; }
+.retry-btn.continue-open-btn { background: var(--teal-solid); }
+.retry-btn.continue-open-btn:hover { background: var(--green-solid-hi); }
+.continue-form .continue-submit { background: var(--teal-solid); }
+.continue-form .continue-submit:hover { background: var(--green-solid-hi); }
 /* "fresh context" toggle — a pill chip that mirrors the purple retry tone.
    Native checkbox is visually hidden; .fresh-box is the custom check. */
 .fresh-toggle {
   display: inline-flex; align-items: center; gap: 0.4rem;
-  font-size: 0.8rem; color: #b083f0; cursor: pointer;
+  font-size: 0.8rem; color: var(--purple); cursor: pointer;
   margin-right: 0.5rem; user-select: none;
   padding: 0.32rem 0.7rem; border-radius: 999px;
-  border: 1px solid #6e3eaa; background: #6e3eaa1a;
+  border: 1px solid var(--purple-solid); background: var(--purple-tint);
   transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
   vertical-align: middle;
 }
-.fresh-toggle:hover { background: #6e3eaa33; border-color: #8957e5; }
+.fresh-toggle:hover { background: var(--purple-fill); border-color: var(--purple); }
 /* visually-hidden but still focusable/clickable native input */
 .fresh-toggle .fresh-ctx-cb {
   position: absolute; opacity: 0; width: 0; height: 0; margin: 0; pointer-events: none;
 }
 .fresh-box {
   width: 15px; height: 15px; border-radius: 4px;
-  border: 1.5px solid #8957e5; background: transparent;
+  border: 1.5px solid var(--purple); background: transparent;
   display: inline-flex; align-items: center; justify-content: center;
   flex: 0 0 auto; transition: background .15s, border-color .15s;
 }
 .fresh-box::after {
   content: "✓"; font-size: 11px; line-height: 1; font-weight: 700;
-  color: #fff; opacity: 0; transform: scale(0.5); transition: opacity .15s, transform .15s;
+  color: var(--fg-bright); opacity: 0; transform: scale(0.5); transition: opacity .15s, transform .15s;
 }
 .fresh-label { white-space: nowrap; }
 /* checked state — :has() for modern engines, .checked class as JS fallback */
 .fresh-toggle:has(.fresh-ctx-cb:checked),
 .fresh-toggle.checked {
-  background: #6e3eaa; border-color: #8957e5; color: #fff;
-  box-shadow: 0 0 0 2px #8957e533, 0 0 8px #6e3eaa66;
+  background: var(--purple-solid); border-color: var(--purple); color: var(--fg-bright);
+  box-shadow: 0 0 0 2px var(--purple-fill), 0 0 8px var(--purple-line);
 }
 .fresh-toggle:has(.fresh-ctx-cb:checked) .fresh-box,
 .fresh-toggle.checked .fresh-box {
-  background: #2ea043; border-color: #2ea043;
+  background: var(--green-solid-hi); border-color: var(--green-solid-hi);
 }
 .fresh-toggle:has(.fresh-ctx-cb:checked) .fresh-box::after,
 .fresh-toggle.checked .fresh-box::after {
@@ -204,12 +327,12 @@ textarea, select {
 }
 /* keyboard focus ring */
 .fresh-toggle:has(.fresh-ctx-cb:focus-visible) {
-  box-shadow: 0 0 0 2px #8957e5;
+  box-shadow: 0 0 0 2px var(--purple);
 }
 
 .retry-panel {
-  background: #161b22;
-  border: 1px solid #6e3eaa;
+  background: var(--surface);
+  border: 1px solid var(--purple-solid);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.5rem 0;
@@ -217,100 +340,106 @@ textarea, select {
 }
 .retry-panel h4 {
   margin: 0 0 0.3rem 0;
-  color: #b083f0; font-size: 0.8rem;
+  color: var(--purple); font-size: 0.8rem;
   letter-spacing: 0.5px; text-transform: uppercase;
 }
 .retry-panel .stage {
-  font-size: 0.75rem; color: #8b949e; margin-bottom: 0.4rem;
+  font-size: 0.75rem; color: var(--fg-muted); margin-bottom: 0.4rem;
 }
 .retry-panel .stage .dot {
   display: inline-block; width: 0.5rem; height: 0.5rem;
-  border-radius: 50%; background: #b083f0; margin-right: 0.3rem;
+  border-radius: 50%; background: var(--purple); margin-right: 0.3rem;
   animation: blink 1s ease-in-out infinite;
 }
+/* Terminal states, toggled by class rather than element.style: assigning a
+   var() reference through the CSSOM is engine-dependent, the cascade is not. */
+.retry-panel .stage .dot.dot--error { background: var(--red); animation: none; }
+.retry-panel .stage .dot.dot--done  { background: var(--green-bright); animation: none; }
+#oauth-status { color: var(--fg-muted); }
+#oauth-status.oauth-ok { color: var(--green); }
 @keyframes blink {
   0%, 100% { opacity: 0.3; }
   50% { opacity: 1; }
 }
 .retry-panel pre {
-  background: #0d1117; border-radius: 4px; padding: 0.5rem;
+  background: var(--bg-sunken); border-radius: 4px; padding: 0.5rem;
   margin: 0; font-size: 0.78rem; max-height: 220px;
-  overflow-y: auto; white-space: pre-wrap; color: #c9d1d9;
+  overflow-y: auto; white-space: pre-wrap; color: var(--fg);
 }
 .retry-panel.retry-panel-error {
-  border-color: #f85149;
-  background: #2a0e0e;
+  border-color: var(--red);
+  background: var(--red-bg);
 }
-.retry-panel.retry-panel-error h4 { color: #ff7b72; }
-.retry-panel.retry-panel-error .stage-text { color: #ffd5d3; }
+.retry-panel.retry-panel-error h4 { color: var(--red-bright); }
+.retry-panel.retry-panel-error .stage-text { color: var(--red-soft); }
 .retry-panel.retry-panel-error pre {
-  background: #1a0707;
-  border: 1px solid #f8514955;
-  color: #ffd5d3;
+  background: var(--red-bg-deep);
+  border: 1px solid var(--red-line);
+  color: var(--red-soft);
 }
 
 /* Soft-timeout decision banner: appears when the worker watchdog has fired
    and the user must pick continue / kill. Styled as a yellow alert. */
 .timeout-banner {
-  background: #2d2208;
-  border: 1px solid #d4a72c;
+  background: var(--yellow-bg);
+  border: 1px solid var(--yellow);
   border-radius: 8px;
   padding: 0.7rem 0.9rem;
   margin: 0.6rem 0;
   animation: timeoutPulse 2s ease-in-out infinite;
 }
 @keyframes timeoutPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 167, 44, 0.0); }
-  50%      { box-shadow: 0 0 0 4px rgba(212, 167, 44, 0.18); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 175, 104, 0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(224, 175, 104, 0.18); }
 }
 .timeout-banner h4 {
   margin: 0 0 0.3rem 0;
   font-size: 0.88rem;
-  color: #f5d062;
+  color: var(--yellow-bright);
   letter-spacing: 0.3px;
 }
 .timeout-banner .timeout-msg {
-  font-size: 0.82rem; color: #e6dfb8; margin-bottom: 0.5rem;
+  font-size: 0.82rem; color: var(--yellow-soft); margin-bottom: 0.5rem;
 }
 .timeout-banner .timeout-actions {
   display: flex; gap: 0.5rem; flex-wrap: wrap;
 }
 .timeout-continue-btn {
-  background: #1f6feb; color: white; border: 0;
+  background: var(--blue-solid); color: var(--fg-bright); border: 0;
   padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem;
 }
-.timeout-continue-btn:hover { background: #388bfd; }
-.timeout-continue-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.timeout-continue-btn:hover { background: var(--blue-solid-hi); }
+.timeout-continue-btn:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 .timeout-kill-btn {
-  background: #b62324; color: white; border: 0;
+  background: var(--red-solid-hi); color: var(--fg-bright); border: 0;
   padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem;
 }
-.timeout-kill-btn:hover { background: #da3633; }
-.timeout-kill-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.timeout-kill-btn:hover { background: var(--red-solid); }
+.timeout-kill-btn:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 
 /* Pure-stop button (halt-but-keep) — danger red, distinct from the purple
    retry/resume buttons so it reads as "this ends the run". */
 .stop-job-btn {
-  background: #b62324; color: white; border: 0;
+  background: var(--red-solid-hi); color: var(--fg-bright); border: 0;
   padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem; font-weight: 600;
 }
-.stop-job-btn:hover { background: #da3633; }
-.stop-job-btn:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.stop-job-btn:hover { background: var(--red-solid); }
+.stop-job-btn:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 
 /* Forensic log-miner findings panel */
 .log-findings-panel {
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.5rem 0;
 }
 .log-findings-panel h4 {
   margin: 0 0 0.4rem 0;
-  font-size: 0.78rem; color: #8b949e;
+  font-size: 0.78rem; color: var(--fg-muted);
   text-transform: uppercase; letter-spacing: 0.5px;
 }
 .lf-chips {
@@ -322,90 +451,90 @@ textarea, select {
   border: 1px solid transparent;
 }
 .lf-chip.hit {
-  background: #2d2208; color: #f5d062; border-color: #d4a72c66;
+  background: var(--yellow-bg); color: var(--yellow-bright); border-color: var(--yellow-line);
 }
 .lf-chip.zero {
-  background: #0d1117; color: #6e7681; border-color: #30363d;
+  background: var(--bg-sunken); color: var(--fg-dim); border-color: var(--line);
 }
 
 /* Job description block (above the retry/run buttons) */
 .description-block {
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0.5rem 0.75rem;
   margin: 0.5rem 0;
 }
 .description-block summary {
   cursor: pointer; font-size: 0.75rem;
-  color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.5px;
   user-select: none;
 }
-.description-block summary:hover { color: #c9d1d9; }
+.description-block summary:hover { color: var(--fg); }
 .description-retry-chip {
-  display: inline-block; background: #6e3eaa33; color: #b083f0;
-  border: 1px solid #6e3eaa; border-radius: 999px;
+  display: inline-block; background: var(--purple-fill); color: var(--purple);
+  border: 1px solid var(--purple-solid); border-radius: 999px;
   padding: 0 0.4rem; font-size: 0.65rem;
   margin-left: 0.25rem; letter-spacing: 0.3px;
 }
 .description-text {
-  background: #0d1117; border: 1px solid #21262d;
+  background: var(--bg-sunken); border: 1px solid var(--surface-2);
   border-radius: 4px; padding: 0.5rem;
   margin: 0.4rem 0 0 0;
-  font-size: 0.82rem; color: #c9d1d9;
+  font-size: 0.82rem; color: var(--fg);
   white-space: pre-wrap; word-break: break-word;
   font-family: inherit;
 }
 .description-hint {
   margin-top: 0.4rem;
-  border: 1px solid #6e3eaa; border-radius: 4px;
-  padding: 0.4rem 0.5rem; background: #1a1226;
+  border: 1px solid var(--purple-solid); border-radius: 4px;
+  padding: 0.4rem 0.5rem; background: var(--purple-bg-lo);
 }
 .description-hint-label {
-  font-size: 0.68rem; color: #b083f0;
+  font-size: 0.68rem; color: var(--purple);
   text-transform: uppercase; letter-spacing: 0.5px;
 }
 .description-hint .description-text {
   background: transparent; border: 0; padding: 0.2rem 0 0 0;
-  color: #e6dffa;
+  color: var(--purple-soft);
 }
 
 /* Manual-hint inline form (opens when "✏ Retry with my hint" is clicked) */
 .retry-manual-form {
-  background: #0d1117;
-  border: 1px solid #6e3eaa;
+  background: var(--bg-sunken);
+  border: 1px solid var(--purple-solid);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.5rem 0;
   display: flex; flex-direction: column; gap: 0.45rem;
 }
 .retry-manual-label {
-  font-size: 0.75rem; color: #b083f0;
+  font-size: 0.75rem; color: var(--purple);
   text-transform: uppercase; letter-spacing: 0.5px;
 }
 .retry-manual-form textarea {
   width: 100%; box-sizing: border-box;
-  background: #161b22; color: #e6edf3;
-  border: 1px solid #30363d; border-radius: 6px;
+  background: var(--surface); color: var(--fg-bright);
+  border: 1px solid var(--line); border-radius: 6px;
   padding: 0.5rem; font-family: inherit; font-size: 0.85rem;
   resize: vertical; min-height: 5.5rem;
 }
 .retry-manual-form textarea:focus {
-  outline: none; border-color: #8957e5;
+  outline: none; border-color: var(--purple);
 }
 .retry-manual-form textarea.invalid {
-  border-color: #da3633; animation: shake 0.3s ease-in-out;
+  border-color: var(--red-solid); animation: shake 0.3s ease-in-out;
 }
 .retry-manual-form input.retry-manual-target {
   width: 100%; box-sizing: border-box;
-  background: #161b22; color: #e6edf3;
-  border: 1px solid #30363d; border-radius: 6px;
+  background: var(--surface); color: var(--fg-bright);
+  border: 1px solid var(--line); border-radius: 6px;
   padding: 0.4rem 0.55rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.82rem;
 }
 .retry-manual-form input.retry-manual-target:focus {
-  outline: none; border-color: #8957e5;
+  outline: none; border-color: var(--purple);
 }
 @keyframes shake {
   0%, 100% { transform: translateX(0); }
@@ -415,41 +544,41 @@ textarea, select {
 .retry-manual-row {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
 }
-.retry-manual-row small { color: #8b949e; font-size: 0.72rem; }
+.retry-manual-row small { color: var(--fg-muted); font-size: 0.72rem; }
 .retry-manual-row code {
-  background: #161b22; padding: 0.05rem 0.3rem;
+  background: var(--surface); padding: 0.05rem 0.3rem;
   border-radius: 3px; font-size: 0.7rem;
 }
 .retry-manual-submit {
-  background: #6e3eaa; color: white; border: 0;
+  background: var(--purple-solid); color: var(--fg-bright); border: 0;
   padding: 0.35rem 0.85rem; border-radius: 6px; cursor: pointer;
   font-size: 0.82rem;
 }
-.retry-manual-submit:hover { background: #8957e5; }
-.retry-manual-submit:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.retry-manual-submit:hover { background: var(--purple-solid-hi); }
+.retry-manual-submit:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 .retry-manual-cancel {
-  background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  background: var(--surface-2); color: var(--fg); border: 1px solid var(--line);
   padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer;
   font-size: 0.82rem;
 }
-.retry-manual-cancel:hover { background: #30363d; }
+.retry-manual-cancel:hover { background: var(--line); }
 /* Stop & resume button — danger-ish color so it's visibly distinct
    from the green/purple retry buttons. */
 .retry-stop-resume-btn {
-  background: #b62324;
+  background: var(--red-solid-hi);
 }
-.retry-stop-resume-btn:hover { background: #da3633; }
-.stop-resume-form { border-color: #d4a72c; }
-.stop-resume-form .retry-manual-label { color: #f5d062; }
+.retry-stop-resume-btn:hover { background: var(--red-solid); }
+.stop-resume-form { border-color: var(--yellow); }
+.stop-resume-form .retry-manual-label { color: var(--yellow-bright); }
 .stop-resume-submit {
-  background: #b62324;
+  background: var(--red-solid-hi);
 }
-.stop-resume-submit:hover { background: #da3633; }
-.stop-resume-submit:disabled { background: #21262d; color: #6e7681; cursor: wait; }
+.stop-resume-submit:hover { background: var(--red-solid); }
+.stop-resume-submit:disabled { background: var(--surface-2); color: var(--fg-dim); cursor: wait; }
 
 .flag-banner {
-  background: #1c2f1c;
-  border: 1px solid #238636;
+  background: var(--green-bg);
+  border: 1px solid var(--green-solid);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.6rem 0;
@@ -457,15 +586,15 @@ textarea, select {
 .flag-banner h4 {
   margin: 0 0 0.4rem 0;
   font-size: 0.85rem;
-  color: #56d364;
+  color: var(--green-bright);
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
 /* [FLAG?] — tentative candidate box (amber), distinct from the confirmed
    green Flag-found banner. Surfaced mid-run for fast CTF submission. */
 .flag-cand-banner {
-  background: #2b2511;
-  border: 1px dashed #d29922;
+  background: var(--yellow-bg);
+  border: 1px dashed var(--yellow);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.6rem 0;
@@ -473,75 +602,75 @@ textarea, select {
 .flag-cand-banner h4 {
   margin: 0 0 0.4rem 0;
   font-size: 0.8rem;
-  color: #e3b341;
+  color: var(--yellow-bright);
   display: flex;
   align-items: baseline;
   gap: 0.5rem;
 }
-.flag-cand-banner h4 small { color: #8b949e; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.flag-cand-banner h4 small { color: var(--fg-muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
 .flag-cand-banner .flag-q { font-weight: 700; letter-spacing: 0.5px; }
-.flag-cand-banner code { color: #e3b341; }
+.flag-cand-banner code { color: var(--yellow-bright); }
 .flag-row {
   display: flex; align-items: center; gap: 0.5rem;
   margin: 0.25rem 0;
 }
 .flag-row code {
-  background: #0d1117; padding: 0.3rem 0.5rem;
+  background: var(--bg-sunken); padding: 0.3rem 0.5rem;
   border-radius: 4px; flex: 1; font-size: 0.95rem;
-  color: #ffa657; user-select: all; word-break: break-all;
+  color: var(--orange); user-select: all; word-break: break-all;
 }
 .copy-btn {
-  background: #238636; color: white; border: 0;
+  background: var(--green-solid); color: var(--fg-bright); border: 0;
   padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer;
   font-size: 0.8rem; min-width: 60px;
 }
-.copy-btn:hover { background: #2ea043; }
-.copy-btn.copied { background: #0969da; }
+.copy-btn:hover { background: var(--green-solid-hi); }
+.copy-btn.copied { background: var(--blue-solid-alt); }
 /* Small inline "copy job id" button (⧉) next to a job id in list cards
    and the detail header. Subtle until hovered. */
 .copy-jobid-btn {
-  background: transparent; border: 0; cursor: pointer; color: #8b949e;
+  background: transparent; border: 0; cursor: pointer; color: var(--fg-muted);
   font-size: 0.85em; padding: 0 0.25rem; margin-left: 0.15rem;
   line-height: 1; vertical-align: baseline; border-radius: 3px;
 }
-.copy-jobid-btn:hover { color: #c9d1d9; background: #30363d; }
-.copy-jobid-btn.copied { color: #3fb950; }
+.copy-jobid-btn:hover { color: var(--fg); background: var(--line); }
+.copy-jobid-btn.copied { color: var(--green); }
 .jobid-text { user-select: all; }
 .flag-del-btn, .flag-keep-btn {
   border: 0; padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer;
-  font-size: 0.8rem; white-space: nowrap; color: #fff;
+  font-size: 0.8rem; white-space: nowrap; color: var(--fg-bright);
 }
-.flag-del-btn { background: #6e2230; }
-.flag-del-btn:hover { background: #a4303f; }
-.flag-keep-btn { background: #1f3a5f; }
-.flag-keep-btn:hover { background: #2b5288; }
+.flag-del-btn { background: var(--red-solid-deep); }
+.flag-del-btn:hover { background: var(--red-solid-deep-hi); }
+.flag-keep-btn { background: var(--blue-solid-deep); }
+.flag-keep-btn:hover { background: var(--blue-solid-deep-hi); }
 .flag-del-btn:disabled, .flag-keep-btn:disabled { opacity: 0.5; cursor: default; }
 .flag-hint {
-  display: block; color: #8b949e; margin: 0.1rem 0 0.5rem; font-size: 0.8rem;
+  display: block; color: var(--fg-muted); margin: 0.1rem 0 0.5rem; font-size: 0.8rem;
 }
 .refusal-banner {
-  background: #3b1d12;
-  border: 1px solid #b9491b;
+  background: var(--orange-bg-hi);
+  border: 1px solid var(--orange-solid);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.6rem 0;
   font-size: 0.9rem;
 }
 .refusal-banner h4 {
-  margin: 0 0 0.3rem 0; color: #ffa657; font-size: 0.85rem;
+  margin: 0 0 0.3rem 0; color: var(--orange); font-size: 0.85rem;
   text-transform: uppercase; letter-spacing: 0.5px;
 }
 .refusal-banner code {
-  background: #0d1117; padding: 0.1rem 0.35rem; border-radius: 3px;
+  background: var(--bg-sunken); padding: 0.1rem 0.35rem; border-radius: 3px;
 }
 .flag-pill {
-  display: inline-block; background: #238636; color: white;
+  display: inline-block; background: var(--green-solid); color: var(--fg-bright);
   font-size: 0.7rem; padding: 0.05rem 0.35rem; border-radius: 3px;
   margin-left: 0.4rem; vertical-align: middle;
 }
 button[type="submit"], #refresh-jobs {
-  background: #238636;
-  color: white;
+  background: var(--green-solid);
+  color: var(--fg-bright);
   border: 0;
   padding: 0.5rem 1rem;
   border-radius: 6px;
@@ -557,32 +686,35 @@ button[type="submit"], #refresh-jobs {
 .form-actions button[type="submit"] { align-self: auto; }
 .form-actions button[type="reset"] {
   background: transparent;
-  color: #8b949e;
-  border: 1px solid #30363d;
+  color: var(--fg-muted);
+  border: 1px solid var(--line);
   padding: 0.5rem 1rem;
   border-radius: 6px;
   cursor: pointer;
 }
 .form-actions button[type="reset"]:hover {
-  color: #c9d1d9;
-  border-color: #58a6ff;
+  color: var(--fg);
+  border-color: var(--blue);
 }
 #jobs-list { list-style: none; padding: 0; margin: 1rem 0; }
 #jobs-list li {
   padding: 0.5rem;
-  border: 1px solid #30363d;
+  border: 1px solid var(--line);
   border-radius: 6px;
   margin-bottom: 0.5rem;
   cursor: pointer;
 }
-#jobs-list li.selected { border-color: #1f6feb; }
+#jobs-list li.selected { border-color: var(--blue-solid); }
 .status { font-size: 0.8rem; padding: 0.1rem 0.4rem; border-radius: 4px; margin-left: 0.5rem; }
-.status.queued { background: #6e7681; }
-.status.running { background: #d29922; }
-.status.finished { background: #238636; }
-.status.no_flag { background: #b08800; color: #1c1500; }
-.status.failed { background: #da3633; }
-.status.stopped { background: #6e3eaa; }
+/* dimmest state of the family; names its text so it isn't the one badge
+   left inheriting --fg-bright onto a mid grey (3.38:1) */
+.status.queued { background: var(--line-hi); color: var(--fg-bright); }
+/* bright badge, so it names its own dark text instead of inheriting --fg-bright */
+.status.running { background: var(--yellow); color: var(--on-accent); }
+.status.finished { background: var(--green-solid); }
+.status.no_flag { background: var(--yellow); color: var(--on-accent); }
+.status.failed { background: var(--red-solid); }
+.status.stopped { background: var(--purple-solid); }
 
 /* Elapsed (running) / duration (terminal) pill, lives next to the
    status badge in the job header. Visible alone, not buried in the
@@ -599,24 +731,24 @@ button[type="submit"], #refresh-jobs {
   white-space: nowrap;
 }
 .timing-pill.live {
-  background: #2d2208; color: #f5d062; border-color: #d4a72c66;
+  background: var(--yellow-bg); color: var(--yellow-bright); border-color: var(--yellow-line);
   animation: timing-pulse 1.6s ease-in-out infinite;
 }
 .timing-pill.done {
-  background: #0d2715; color: #56d364; border-color: #23863666;
+  background: var(--green-bg-lo); color: var(--green-bright); border-color: var(--green-line);
 }
 .timing-pill.queued {
-  background: #161b22; color: #8b949e; border-color: #30363d;
+  background: var(--surface); color: var(--fg-muted); border-color: var(--line);
 }
 .timing-pill .timing-tag {
   font-size: 0.68rem; padding: 0.02rem 0.35rem;
   border-radius: 6px;
-  background: #d29922; color: #1c1500;
+  background: var(--yellow); color: var(--on-accent);
   letter-spacing: 0.3px; font-weight: 600;
 }
 @keyframes timing-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 167, 44, 0.0); }
-  50%      { box-shadow: 0 0 0 3px rgba(212, 167, 44, 0.18); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 175, 104, 0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(224, 175, 104, 0.18); }
 }
 
 /* Liveness ground-truth pill — combines two heartbeats:
@@ -637,16 +769,16 @@ button[type="submit"], #refresh-jobs {
   letter-spacing: 0.2px;
 }
 .liveness-active {
-  background: #0d2715; color: #56d364; border-color: #23863666;
+  background: var(--green-bg-lo); color: var(--green-bright); border-color: var(--green-line);
 }
 .liveness-silent {
-  background: #2d2208; color: #f5d062; border-color: #d4a72c66;
+  background: var(--yellow-bg); color: var(--yellow-bright); border-color: var(--yellow-line);
 }
 .liveness-warming {
-  background: #161b22; color: #79c0ff; border-color: #1f6feb55;
+  background: var(--surface); color: var(--cyan); border-color: var(--blue-line);
 }
 .liveness-dead {
-  background: #2a0e0e; color: #ff7b72; border-color: #f8514999;
+  background: var(--red-bg); color: var(--red-bright); border-color: var(--red-line-hi);
   font-weight: 700;
   animation: liveness-blink 1.4s ease-in-out infinite;
 }
@@ -665,8 +797,8 @@ button[type="submit"], #refresh-jobs {
   flex-wrap: wrap;
   gap: 0.4rem;
   padding: 0.35rem 0.75rem 0.4rem;
-  border-top: 1px solid #1f2933;
-  background: linear-gradient(#14181f, #11151a);
+  border-top: 1px solid var(--line-soft);
+  background: linear-gradient(var(--grad-mid), var(--grad-lo));
   font-size: 0.75rem;
 }
 .run-log-window .run-log-footer .liveness-pill,
@@ -684,9 +816,9 @@ button[type="submit"], #refresh-jobs {
   border-radius: 999px;
   font-size: 0.74rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: #0d1d26;
-  color: #79c0ff;
-  border: 1px solid #1f6feb55;
+  background: var(--cyan-bg);
+  color: var(--cyan);
+  border: 1px solid var(--blue-line);
   vertical-align: middle;
   white-space: nowrap;
   letter-spacing: 0.2px;
@@ -699,14 +831,14 @@ button[type="submit"], #refresh-jobs {
 .tokens-pill .tokens-delta {
   margin-left: 0.45em;
   font-weight: 600;
-  color: #3fb950;
+  color: var(--green);
 }
 .tokens-pill .tokens-delta.idle {
-  color: #6e7681;
+  color: var(--fg-dim);
   font-weight: 400;
 }
 #job-detail pre {
-  background: #161b22;
+  background: var(--surface);
   padding: 0.75rem;
   border-radius: 6px;
   max-height: 400px;
@@ -722,7 +854,7 @@ button[type="submit"], #refresh-jobs {
   max-height: none;
   overflow: visible;
 }
-.file-links a { color: #58a6ff; margin-right: 1rem; }
+.file-links a { color: var(--blue); margin-right: 1rem; }
 .file-links a.file-preview-link { cursor: pointer; }
 .file-links a.file-preview-link:hover { text-decoration: underline; }
 
@@ -741,8 +873,8 @@ button[type="submit"], #refresh-jobs {
   position: relative;
   width: min(1500px, 95vw);
   height: min(820px, 88vh);
-  background: #0d1117;
-  border: 1px solid #30363d;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
   border-radius: 10px;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
   display: flex; flex-direction: column;
@@ -751,33 +883,33 @@ button[type="submit"], #refresh-jobs {
 .file-modal-header {
   display: flex; align-items: center; gap: 0.5rem;
   padding: 0.55rem 0.85rem;
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
   font-size: 0.85rem;
 }
 .file-modal-name {
-  font-weight: 600; color: #e6edf3;
+  font-weight: 600; color: var(--fg-bright);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.file-modal-meta { color: #8b949e; font-size: 0.75rem; }
+.file-modal-meta { color: var(--fg-muted); font-size: 0.75rem; }
 .file-modal-actions {
   margin-left: auto;
   display: flex; align-items: center; gap: 0.4rem;
 }
 .file-modal-actions a, .file-modal-actions button {
-  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--fg);
   padding: 0.25rem 0.6rem; border-radius: 5px;
   font-size: 0.75rem; cursor: pointer; text-decoration: none;
 }
 .file-modal-actions a:hover, .file-modal-actions button:hover {
-  background: #30363d;
+  background: var(--line);
 }
 .file-modal-close { padding: 0.25rem 0.5rem !important; }
 .file-modal-body {
   flex: 1 1 auto;
   overflow: auto;
   padding: 0.6rem 0.9rem;
-  background: #0d1117;
+  background: var(--bg-sunken);
 }
 .file-modal-body pre {
   margin: 0;
@@ -790,18 +922,18 @@ button[type="submit"], #refresh-jobs {
   padding: 0;
 }
 .file-modal-error {
-  background: #2a0e0e; border: 1px solid #f8514955;
-  padding: 0.6rem; border-radius: 6px; color: #ffd5d3;
+  background: var(--red-bg); border: 1px solid var(--red-line);
+  padding: 0.6rem; border-radius: 6px; color: var(--red-soft);
 }
 
 /* Markdown-rendered output (report.md etc.) */
 .markdown-rendered {
-  color: #e6edf3; font-size: 0.92rem; line-height: 1.6;
+  color: var(--fg-bright); font-size: 0.92rem; line-height: 1.6;
 }
 .markdown-rendered h1, .markdown-rendered h2, .markdown-rendered h3,
 .markdown-rendered h4, .markdown-rendered h5 {
-  color: #e6edf3;
-  border-bottom: 1px solid #30363d;
+  color: var(--fg-bright);
+  border-bottom: 1px solid var(--line);
   padding-bottom: 0.2rem;
   margin: 1.3rem 0 0.6rem;
 }
@@ -809,32 +941,32 @@ button[type="submit"], #refresh-jobs {
 .markdown-rendered h2 { font-size: 1.25rem; }
 .markdown-rendered h3 { font-size: 1.05rem; border-bottom: 0; }
 .markdown-rendered code {
-  background: #161b22; padding: 0.05rem 0.35rem;
+  background: var(--surface); padding: 0.05rem 0.35rem;
   border-radius: 4px; font-size: 0.8rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .markdown-rendered pre {
-  background: #161b22; padding: 0.7rem; border-radius: 6px;
-  overflow-x: auto; border: 1px solid #21262d;
+  background: var(--surface); padding: 0.7rem; border-radius: 6px;
+  overflow-x: auto; border: 1px solid var(--surface-2);
 }
 .markdown-rendered pre code {
   background: transparent; padding: 0; font-size: 0.8rem;
 }
-.markdown-rendered a { color: #58a6ff; }
+.markdown-rendered a { color: var(--blue); }
 .markdown-rendered blockquote {
-  border-left: 3px solid #6e3eaa;
+  border-left: 3px solid var(--purple-solid);
   margin: 0.6rem 0; padding: 0.1rem 0.8rem;
-  color: #c9d1d9; background: #161b22;
+  color: var(--fg); background: var(--surface);
 }
 .markdown-rendered table {
   border-collapse: collapse; margin: 0.6rem 0;
 }
 .markdown-rendered th, .markdown-rendered td {
-  border: 1px solid #30363d; padding: 0.3rem 0.6rem;
+  border: 1px solid var(--line); padding: 0.3rem 0.6rem;
 }
-.markdown-rendered th { background: #161b22; }
+.markdown-rendered th { background: var(--surface); }
 .markdown-rendered hr {
-  border: 0; border-top: 1px solid #30363d; margin: 1rem 0;
+  border: 0; border-top: 1px solid var(--line); margin: 1rem 0;
 }
 
 /* Live SDK activity panel — fixed-height log-tail above the run-log.
@@ -843,19 +975,19 @@ button[type="submit"], #refresh-jobs {
    animations — the panel size never reflows when new events arrive. */
 .sdk-live {
   margin: 0 0 0.6rem;
-  background: #0d1117;
-  border: 1px solid #1f2933;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-soft);
   border-radius: 8px;
   overflow: hidden;
 }
 .sdk-live.collapsed .sdk-live-feed { display: none; }
 .sdk-live-head {
   display: flex; align-items: center; gap: 0.45rem;
-  background: linear-gradient(#1d232c, #14181f);
-  border-bottom: 1px solid #1f2933;
+  background: linear-gradient(var(--grad-hi), var(--grad-mid));
+  border-bottom: 1px solid var(--line-soft);
   padding: 0.3rem 0.65rem;
   font-size: 0.72rem;
-  color: #8b949e;
+  color: var(--fg-muted);
   letter-spacing: 0.4px;
   user-select: none;
 }
@@ -863,7 +995,7 @@ button[type="submit"], #refresh-jobs {
 .sdk-live-dot {
   display: inline-block; width: 0.5rem; height: 0.5rem;
   border-radius: 50%;
-  background: #58a6ff;
+  background: var(--blue);
   opacity: 0.85;
 }
 .sdk-live-label {
@@ -872,9 +1004,9 @@ button[type="submit"], #refresh-jobs {
 }
 .sdk-live-toggle {
   margin-left: auto;
-  background: #21262d;
-  color: #c9d1d9;
-  border: 1px solid #30363d;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0.05rem 0.5rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -882,13 +1014,13 @@ button[type="submit"], #refresh-jobs {
   cursor: pointer;
   user-select: none;
 }
-.sdk-live-toggle:hover { background: #30363d; color: #f0f6fc; }
+.sdk-live-toggle:hover { background: var(--line); color: var(--fg-max); }
 .sdk-live-feed {
   display: block;
   padding: 0.35rem 0.6rem;
   height: 200px;            /* fixed — no reflow when new events arrive */
   overflow-y: auto;
-  background: #0b0d12;
+  background: var(--bg-deep);
   font-family: ui-monospace, "JetBrains Mono", "Fira Code",
                SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.74rem;
@@ -899,25 +1031,25 @@ button[type="submit"], #refresh-jobs {
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 0;
-  color: #d6d3c0;
+  color: var(--fg);
 }
-.sdk-line-tag   { color: #8b949e; }
-.sdk-line-body  { color: #d6d3c0; }
-.sdk-text  .sdk-line-label { color: #58a6ff; font-weight: 600; }
-.sdk-think .sdk-line-label { color: #6e7681; }
-.sdk-think .sdk-line-body  { color: #8b949e; font-style: italic; }
-.sdk-tool  .sdk-line-label { color: #d29922; font-weight: 600; }
-.sdk-result .sdk-line-label { color: #3fb950; font-weight: 600; }
-.sdk-error  .sdk-line-label { color: #f85149; font-weight: 600; }
-.sdk-error  .sdk-line-body  { color: #ff7b72; }
+.sdk-line-tag   { color: var(--fg-muted); }
+.sdk-line-body  { color: var(--fg); }
+.sdk-text  .sdk-line-label { color: var(--blue); font-weight: 600; }
+.sdk-think .sdk-line-label { color: var(--fg-dim); }
+.sdk-think .sdk-line-body  { color: var(--fg-muted); font-style: italic; }
+.sdk-tool  .sdk-line-label { color: var(--yellow); font-weight: 600; }
+.sdk-result .sdk-line-label { color: var(--green); font-weight: 600; }
+.sdk-error  .sdk-line-label { color: var(--red); font-weight: 600; }
+.sdk-error  .sdk-line-body  { color: var(--red-bright); }
 
 
 /* Run log "terminal" chrome: a window frame around the <pre>, with a
    macOS-style traffic-light header. Plain visual upgrade — does not
    change semantics or selection behavior. */
 .run-log-window {
-  background: #0b0d12;
-  border: 1px solid #1f2933;
+  background: var(--bg-deep);
+  border: 1px solid var(--line-soft);
   border-radius: 8px;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
               0 8px 24px rgba(0, 0, 0, 0.35);
@@ -926,11 +1058,11 @@ button[type="submit"], #refresh-jobs {
 }
 .run-log-titlebar {
   display: flex; align-items: center; gap: 0.45rem;
-  background: linear-gradient(#1d232c, #14181f);
-  border-bottom: 1px solid #1f2933;
+  background: linear-gradient(var(--grad-hi), var(--grad-mid));
+  border-bottom: 1px solid var(--line-soft);
   padding: 0.35rem 0.65rem;
   font-size: 0.75rem;
-  color: #8b949e;
+  color: var(--fg-muted);
   user-select: none;
 }
 .run-log-dot {
@@ -951,33 +1083,33 @@ button[type="submit"], #refresh-jobs {
   margin-left: auto;
   flex: 0 1 200px;
   min-width: 90px;
-  background: #0d1117;
-  color: #c9d1d9;
-  border: 1px solid #30363d;
+  background: var(--bg-sunken);
+  color: var(--fg);
+  border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0.12rem 0.45rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
 }
-.run-log-search:focus { outline: none; border-color: #58a6ff; }
+.run-log-search:focus { outline: none; border-color: var(--blue); }
 .run-log-search-count {
   flex: 0 0 auto;
-  color: #8b949e;
+  color: var(--fg-muted);
   font-size: 0.68rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
 }
 mark.log-hit {
-  background: #9e6a03;
-  color: #fff;
+  background: var(--yellow-solid);
+  color: var(--fg-bright);
   border-radius: 2px;
   padding: 0 1px;
 }
 .run-log-tz-toggle {
   margin-left: 0.4rem;
-  background: #21262d;
-  color: #c9d1d9;
-  border: 1px solid #30363d;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0.1rem 0.5rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -988,34 +1120,34 @@ mark.log-hit {
   flex: 0 0 auto;
 }
 .run-log-tz-toggle:hover {
-  background: #30363d;
-  border-color: #484f58;
-  color: #f0f6fc;
+  background: var(--line);
+  border-color: var(--line-hi);
+  color: var(--fg-max);
 }
 .run-log-tz-toggle:active {
-  background: #161b22;
+  background: var(--surface);
 }
 
 /* --- Monitor view: Run-log|Monitor tabs, language select, feed -------- */
 .rl-viewtabs { display: inline-flex; gap: 2px; margin-left: 0.5rem; flex: 0 0 auto; }
 .rl-viewtab {
-  background: #161b22; color: #8b949e;
-  border: 1px solid #30363d; border-radius: 5px;
+  background: var(--surface); color: var(--fg-muted);
+  border: 1px solid var(--line); border-radius: 5px;
   padding: 0.12rem 0.6rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.7rem; cursor: pointer; user-select: none;
 }
-.rl-viewtab:hover { color: #f0f6fc; border-color: #484f58; }
-.rl-viewtab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.rl-viewtab:hover { color: var(--fg-max); border-color: var(--line-hi); }
+.rl-viewtab.active { background: var(--blue-solid); color: var(--fg-bright); border-color: var(--blue-solid); }
 .monitor-lang {
   margin-left: 0.4rem; flex: 0 0 auto;
-  background: #21262d; color: #c9d1d9;
-  border: 1px solid #30363d; border-radius: 4px;
+  background: var(--surface-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 4px;
   padding: 0.1rem 0.35rem; font-size: 0.7rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   cursor: pointer;
 }
-.monitor-lang:focus { outline: none; border-color: #58a6ff; }
+.monitor-lang:focus { outline: none; border-color: var(--blue); }
 
 /* view switching: show the raw log OR the monitor feed, plus the controls
    relevant to each. .run-log-search pushes right via margin-left:auto, so
@@ -1028,14 +1160,14 @@ mark.log-hit {
 .run-log-window[data-view="monitor"] .monitor-lang { margin-left: auto; }
 
 .monitor-feed {
-  background: #0b0d12;
+  background: var(--bg-deep);
   max-height: 520px; min-height: 120px;
   overflow-y: auto;
   padding: 0.5rem 0.6rem 1rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8rem; line-height: 1.5;
 }
-.mon-empty { color: #6e7681; padding: 1.2rem 0.4rem; text-align: center; }
+.mon-empty { color: var(--fg-dim); padding: 1.2rem 0.4rem; text-align: center; }
 .mon-row {
   display: flex; align-items: baseline; gap: 0.5rem;
   padding: 0.28rem 0.35rem;
@@ -1044,26 +1176,26 @@ mark.log-hit {
 }
 .mon-row:hover { background: rgba(255, 255, 255, 0.02); }
 .mon-ico { flex: 0 0 auto; font-size: 0.7rem; }
-.mon-time { flex: 0 0 auto; color: #6e7681; font-size: 0.7rem; }
+.mon-time { flex: 0 0 auto; color: var(--fg-dim); font-size: 0.7rem; }
 .mon-kind {
   flex: 0 0 auto; font-size: 0.62rem; text-transform: uppercase;
-  letter-spacing: 0.4px; color: #8b949e;
-  background: #161b22; border: 1px solid #21262d; border-radius: 3px;
+  letter-spacing: 0.4px; color: var(--fg-muted);
+  background: var(--surface); border: 1px solid var(--surface-2); border-radius: 3px;
   padding: 0 0.3rem;
 }
-.mon-text { flex: 1 1 auto; color: #d6d3c0; word-break: break-word; }
-.mon-good { border-left-color: #2ea043; }
-.mon-good .mon-text { color: #7ee787; }
-.mon-warn { border-left-color: #d29922; }
-.mon-warn .mon-text { color: #e3b341; }
-.mon-err  { border-left-color: #f85149; }
-.mon-err  .mon-text { color: #ff7b72; }
-.mon-info { border-left-color: #30363d; }
+.mon-text { flex: 1 1 auto; color: var(--fg); word-break: break-word; }
+.mon-good { border-left-color: var(--green); }
+.mon-good .mon-text { color: var(--green-soft); }
+.mon-warn { border-left-color: var(--yellow); }
+.mon-warn .mon-text { color: var(--yellow-bright); }
+.mon-err  { border-left-color: var(--red); }
+.mon-err  .mon-text { color: var(--red-bright); }
+.mon-info { border-left-color: var(--line); }
 
 /* The <pre.run-log> sitting inside the window frame */
 .run-log-window .run-log {
-  background: #0b0d12;
-  color: #d6d3c0;
+  background: var(--bg-deep);
+  color: var(--fg);
   font-family: ui-monospace, "JetBrains Mono", "Fira Code", SFMono-Regular,
                Menlo, Consolas, monospace;
   font-size: 0.78rem;
@@ -1082,7 +1214,7 @@ mark.log-hit {
 .run-log-window .run-log[data-status="running"]::after,
 .run-log-window .run-log[data-status="queued"]::after {
   content: "▍";
-  color: #56d364;
+  color: var(--green-bright);
   animation: run-log-caret 1.05s steps(2, end) infinite;
   margin-left: 0.15rem;
 }
@@ -1095,30 +1227,30 @@ mark.log-hit {
    The base <pre.run-log> already has font + scrolling from the global
    <pre> rule; these classes only add semantic colors. */
 .run-log .rl-ts {
-  color: #6e7681;
+  color: var(--fg-dim);
 }
 .run-log .rl-system {
-  color: #8b949e; font-style: italic;
+  color: var(--fg-muted); font-style: italic;
 }
 .run-log .rl-label {
   font-weight: 600;
   letter-spacing: 0.2px;
 }
 .run-log .rl-toolname {
-  color: #ffa657; font-weight: 600;
+  color: var(--orange); font-weight: 600;
 }
-.run-log .rl-tool         { color: #79c0ff; }   /* TOOL */
-.run-log .rl-tool-result  { color: #56d364; }   /* TOOL_RESULT */
-.run-log .rl-tool-error   { color: #ff7b72; }   /* TOOL_ERROR */
-.run-log .rl-agent        { color: #d2a8ff; }   /* AGENT */
-.run-log .rl-think        { color: #f5d062; }   /* THINK */
-.run-log .rl-done         { color: #a5d6ff; }   /* DONE */
+.run-log .rl-tool         { color: var(--cyan); }   /* TOOL */
+.run-log .rl-tool-result  { color: var(--green-bright); }   /* TOOL_RESULT */
+.run-log .rl-tool-error   { color: var(--red-bright); }   /* TOOL_ERROR */
+.run-log .rl-agent        { color: var(--purple-bright); }   /* AGENT */
+.run-log .rl-think        { color: var(--yellow-bright); }   /* THINK */
+.run-log .rl-done         { color: var(--cyan-bright); }   /* DONE */
 .run-log .rl-error,
-.run-log .rl-agent-error  { color: #ff7b72; }   /* AGENT_ERROR / ERROR */
-.run-log .rl-body         { color: #c9d1d9; }
-.run-log .rl-think-body   { color: #d4a72c; font-style: italic; }
-.run-log .rl-done-body    { color: #a5d6ff; }
-.run-log .rl-error-body   { color: #ffd5d3; }
+.run-log .rl-agent-error  { color: var(--red-bright); }   /* AGENT_ERROR / ERROR */
+.run-log .rl-body         { color: var(--fg); }
+.run-log .rl-think-body   { color: var(--yellow); font-style: italic; }
+.run-log .rl-done-body    { color: var(--cyan-bright); }
+.run-log .rl-error-body   { color: var(--red-soft); }
 
 /* Lifecycle / system events emitted by the analyzer or watchdog
    (not by the SDK message stream). Distinct accent colors so the
@@ -1127,26 +1259,26 @@ mark.log-hit {
 .run-log .rl-lifecycle {
   font-weight: 500;
 }
-.run-log .rl-info     { color: #a5d6ff; }   /* boot / fork / spawn */
-.run-log .rl-warn     { color: #f5d062; font-weight: 600; }
-.run-log .rl-decision { color: #d2a8ff; font-weight: 600; }
-.run-log .rl-cyan     { color: #79c0ff; }
+.run-log .rl-info     { color: var(--cyan-bright); }   /* boot / fork / spawn */
+.run-log .rl-warn     { color: var(--yellow-bright); font-weight: 600; }
+.run-log .rl-decision { color: var(--purple-bright); font-weight: 600; }
+.run-log .rl-cyan     { color: var(--cyan); }
 .run-log .rl-budget {
-  color: #ff7b72; background: #2a0e0e;
+  color: var(--red-bright); background: var(--red-bg);
   padding: 0 0.35rem; border-radius: 4px;
   font-weight: 700; letter-spacing: 0.3px;
 }
-.run-log .rl-budget-body { color: #ffd5d3; }
+.run-log .rl-budget-body { color: var(--red-soft); }
 /* Runaway-output detection — same family as BUDGET_ABORT but the
    tripwire is from the SDK side, not the orchestrator. Use a brighter
    amber so it pops above the regular tool-result stream. */
 .run-log .rl-runaway {
-  color: #f0883e; background: #2a1a08;
-  border: 1px solid #f0883e66; border-radius: 4px;
+  color: var(--orange); background: var(--orange-bg);
+  border: 1px solid var(--orange-line); border-radius: 4px;
   padding: 0 0.35rem; margin-right: 0.35rem;
   font-weight: 700; letter-spacing: 0.3px;
 }
-.run-log .rl-runaway-body { color: #ffd29c; font-weight: 600; }
+.run-log .rl-runaway-body { color: var(--orange-soft); font-weight: 600; }
 
 /* Agent identity chip — distinguishes main writer vs recon / judge
    subagents. Subagent lines (recon and judge) also get a small ↳
@@ -1163,19 +1295,19 @@ mark.log-hit {
   border: 1px solid transparent;
 }
 .run-log .rl-agent-tag-main {
-  color: #d2a8ff; background: #1c0d2e; border-color: #6e3eaa66;
+  color: var(--purple-bright); background: var(--purple-bg); border-color: var(--purple-line);
 }
 .run-log .rl-agent-tag-recon {
-  color: #ffa657; background: #2a1b08; border-color: #ffa65766;
+  color: var(--orange); background: var(--orange-bg); border-color: var(--orange-line);
 }
 .run-log .rl-agent-tag-judge {
-  color: #56d364; background: #0e2415; border-color: #56d36466;
+  color: var(--green-bright); background: var(--green-bg-lo); border-color: var(--green-bright-line);
 }
 .run-log .rl-agent-tag-debugger {
-  color: #79c0ff; background: #0c1827; border-color: #79c0ff66;
+  color: var(--cyan); background: var(--blue-bg); border-color: var(--cyan-line);
 }
 .run-log .rl-recon-indent {
-  color: #6e7681; margin-right: 0.1rem;
+  color: var(--fg-dim); margin-right: 0.1rem;
 }
 
 /* Job detail modal — full job render lifted out of the page into an
@@ -1195,8 +1327,8 @@ body.modal-open { overflow: hidden; }
   position: relative;
   width: min(1600px, 96vw);
   height: min(880px, 92vh);
-  background: #0d1117;
-  border: 1px solid #30363d;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
   border-radius: 10px;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
   display: flex; flex-direction: column;
@@ -1205,12 +1337,12 @@ body.modal-open { overflow: hidden; }
 .job-modal-header {
   display: flex; align-items: center; gap: 0.6rem;
   padding: 0.55rem 0.95rem;
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
   font-size: 0.9rem;
 }
 .job-modal-title {
-  font-weight: 600; color: #e6edf3;
+  font-weight: 600; color: var(--fg-bright);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .job-modal-actions {
@@ -1218,17 +1350,17 @@ body.modal-open { overflow: hidden; }
   display: flex; align-items: center; gap: 0.4rem;
 }
 .job-modal-actions button {
-  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--fg);
   padding: 0.25rem 0.6rem; border-radius: 5px;
   font-size: 0.8rem; cursor: pointer;
 }
-.job-modal-actions button:hover { background: #30363d; }
+.job-modal-actions button:hover { background: var(--line); }
 .job-modal-close { padding: 0.25rem 0.55rem !important; }
 .job-modal-body {
   flex: 1 1 auto;
   overflow: auto;
   padding: 0.9rem 1rem;
-  background: #0d1117;
+  background: var(--bg-sunken);
 }
 
 /* --- Exploit Library tab ---------------------------------------------- */
@@ -1238,23 +1370,23 @@ body.modal-open { overflow: hidden; }
 }
 .exp-toolbar input[type="search"],
 .exp-toolbar select {
-  background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+  background: var(--bg-sunken); border: 1px solid var(--line); color: var(--fg);
   padding: 0.35rem 0.6rem; border-radius: 5px; font-size: 0.85rem;
 }
 .exp-toolbar button,
 .exp-toolbar a {
-  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--fg);
   padding: 0.45rem 0.9rem; border-radius: 6px; cursor: pointer;
   font-size: 0.85rem;
 }
 .exp-toolbar button:hover,
-.exp-toolbar a:hover { background: #30363d; }
+.exp-toolbar a:hover { background: var(--line); }
 .exp-list {
   list-style: none; padding: 0; margin: 0;
   display: grid; gap: 0.6rem;
 }
 .exp-card {
-  background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+  background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 8px;
   padding: 0.7rem 0.9rem;
 }
 .exp-card-head {
@@ -1263,71 +1395,71 @@ body.modal-open { overflow: hidden; }
 }
 .exp-id {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #58a6ff; font-weight: 600;
+  color: var(--blue); font-weight: 600;
 }
 .exp-module {
-  background: #1f6feb22; color: #58a6ff;
-  border: 1px solid #1f6feb55; padding: 0.05rem 0.45rem;
+  background: var(--blue-tint); color: var(--blue);
+  border: 1px solid var(--blue-line); padding: 0.05rem 0.45rem;
   border-radius: 4px; font-size: 0.75rem; text-transform: uppercase;
 }
-.exp-module.pwn      { color: #f85149; border-color: #f8514955; background: #f8514922; }
-.exp-module.crypto   { color: #d2a8ff; border-color: #d2a8ff55; background: #d2a8ff22; }
-.exp-module.web      { color: #7ee787; border-color: #7ee78755; background: #7ee78722; }
-.exp-module.rev      { color: #ffa657; border-color: #ffa65755; background: #ffa65722; }
-.exp-module.forensic { color: #79c0ff; border-color: #79c0ff55; background: #79c0ff22; }
-.exp-module.misc     { color: #8b949e; border-color: #8b949e55; background: #8b949e22; }
+.exp-module.pwn      { color: var(--red); border-color: var(--red-line); background: var(--red-tint); }
+.exp-module.crypto   { color: var(--purple-bright); border-color: var(--purple-bright-line); background: var(--purple-bright-tint); }
+.exp-module.web      { color: var(--green-soft); border-color: var(--green-soft-line); background: var(--green-soft-tint); }
+.exp-module.rev      { color: var(--orange); border-color: var(--orange-line); background: var(--orange-tint); }
+.exp-module.forensic { color: var(--cyan); border-color: var(--cyan-line); background: var(--cyan-tint); }
+.exp-module.misc     { color: var(--fg-muted); border-color: var(--grey-line); background: var(--grey-tint); }
 .exp-saved {
-  margin-left: auto; color: #8b949e;
+  margin-left: auto; color: var(--fg-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem;
 }
-.exp-card-meta { font-size: 0.82rem; line-height: 1.55; color: #c9d1d9; }
-.exp-card-meta b { color: #e6edf3; }
+.exp-card-meta { font-size: 0.82rem; line-height: 1.55; color: var(--fg); }
+.exp-card-meta b { color: var(--fg-bright); }
 .exp-card-meta code { font-size: 0.78rem; }
 .exp-tag {
   display: inline-block;
-  background: #21262d; color: #8b949e;
-  border: 1px solid #30363d; border-radius: 4px;
+  background: var(--surface-2); color: var(--fg-muted);
+  border: 1px solid var(--line); border-radius: 4px;
   padding: 0.05rem 0.45rem; font-size: 0.72rem; margin-right: 0.25rem;
 }
 .exp-flag {
-  background: #21262d; color: #7ee787;
+  background: var(--surface-2); color: var(--green-soft);
   padding: 0.05rem 0.35rem; border-radius: 3px;
   font-size: 0.75rem;
 }
 .exp-notes {
-  background: #161b22; border-left: 2px solid #30363d;
+  background: var(--surface); border-left: 2px solid var(--line);
   padding: 0.3rem 0.55rem; margin-top: 0.3rem;
-  color: #c9d1d9; font-size: 0.8rem; white-space: pre-wrap;
+  color: var(--fg); font-size: 0.8rem; white-space: pre-wrap;
 }
 .exp-card-actions {
   display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.55rem;
 }
 .exp-card-actions a,
 .exp-card-actions button {
-  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--fg);
   padding: 0.3rem 0.65rem; border-radius: 5px;
   font-size: 0.78rem; cursor: pointer; text-decoration: none;
 }
 .exp-card-actions a:hover,
-.exp-card-actions button:hover { background: #30363d; color: #e6edf3; }
-.exp-del-btn:hover { background: #6e1e1e !important; border-color: #f85149 !important; }
+.exp-card-actions button:hover { background: var(--line); color: var(--fg-bright); }
+.exp-del-btn:hover { background: var(--red-solid-deep) !important; border-color: var(--red) !important; }
 .exp-empty {
-  color: #8b949e; padding: 1rem; text-align: center;
-  border: 1px dashed #30363d; border-radius: 6px;
+  color: var(--fg-muted); padding: 1rem; text-align: center;
+  border: 1px dashed var(--line); border-radius: 6px;
 }
 /* Save-to-DB button inside the job detail flag banner */
 .exp-save-btn {
   margin-left: 0.6rem; vertical-align: middle;
-  background: #1f6feb22; color: #58a6ff;
-  border: 1px solid #1f6feb55;
+  background: var(--blue-tint); color: var(--blue);
+  border: 1px solid var(--blue-line);
   padding: 0.25rem 0.7rem; border-radius: 5px;
   font-size: 0.78rem; cursor: pointer;
 }
-.exp-save-btn:hover { background: #1f6feb44; }
+.exp-save-btn:hover { background: var(--blue-fill); }
 .exp-save-btn:disabled { opacity: 0.6; cursor: wait; }
 .exp-save-btn.copied {
-  background: #2ea04322; color: #7ee787; border-color: #2ea04355;
+  background: var(--green-tint); color: var(--green-soft); border-color: var(--green-line);
 }
 
 /* ── Flag alarm toasts (bottom-right) ─────────────────────────────── */
@@ -1349,43 +1481,43 @@ body.modal-open { overflow: hidden; }
 .flag-toast {
   pointer-events: auto;
   position: relative;
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-left-width: 4px;
   border-radius: 8px;
   padding: 10px 30px 10px 12px;
   box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
-  color: #e6edf3;
+  color: var(--fg-bright);
   cursor: pointer;
   animation: flagToastIn 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .flag-toast.flag {
-  border-left-color: #2ea043;
-  background: linear-gradient(90deg, #14261a, #161b22 55%);
+  border-left-color: var(--green);
+  background: linear-gradient(90deg, var(--green-bg-lo), var(--surface) 55%);
 }
 .flag-toast.cand {
-  border-left-color: #d29922;
-  background: linear-gradient(90deg, #2a2310, #161b22 55%);
+  border-left-color: var(--yellow);
+  background: linear-gradient(90deg, var(--yellow-bg-lo), var(--surface) 55%);
 }
 .flag-toast.leaving { animation: flagToastOut 0.4s ease forwards; }
 .flag-toast-h { font-size: 0.92rem; letter-spacing: 0.2px; }
-.flag-toast.flag .flag-toast-h strong { color: #7ee787; }
-.flag-toast.cand .flag-toast-h strong { color: #e3b341; }
-.flag-toast-sub { font-size: 0.72rem; color: #8b949e; margin-top: 2px; }
+.flag-toast.flag .flag-toast-h strong { color: var(--green-soft); }
+.flag-toast.cand .flag-toast-h strong { color: var(--yellow-bright); }
+.flag-toast-sub { font-size: 0.72rem; color: var(--fg-muted); margin-top: 2px; }
 .flag-toast-id { font-family: ui-monospace, monospace; }
 .flag-toast-body { margin-top: 6px; }
 .flag-toast-body code {
   font-size: 0.74rem; word-break: break-all;
-  background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 4px;
   padding: 2px 5px; display: inline-block; max-width: 100%;
 }
-.flag-toast.flag .flag-toast-body code { color: #7ee787; }
+.flag-toast.flag .flag-toast-body code { color: var(--green-soft); }
 .flag-toast-x {
   position: absolute; top: 4px; right: 6px;
-  background: none; border: none; color: #8b949e;
+  background: none; border: none; color: var(--fg-muted);
   font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 2px;
 }
-.flag-toast-x:hover { color: #f85149; }
+.flag-toast-x:hover { color: var(--red); }
 @keyframes flagToastIn {
   from { transform: translateX(40px); opacity: 0; }
   to   { transform: translateX(0);    opacity: 1; }
@@ -1405,7 +1537,7 @@ body.modal-open { overflow: hidden; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   line-height: 1;
-  color: #8a93a6;
+  color: var(--fg-muted);
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 6px;
@@ -1417,18 +1549,18 @@ body.modal-open { overflow: hidden; }
 }
 .version-badge:empty { display: none; }
 .version-badge--dirty {
-  color: #e0a33a;
-  border-color: rgba(224, 163, 58, 0.45);
-  background: rgba(224, 163, 58, 0.10);
+  color: var(--yellow);
+  border-color: rgba(224, 175, 104, 0.45);
+  background: rgba(224, 175, 104, 0.10);
 }
 
 /* --- Model presets (Settings tab) --------------------------------------- */
 .preset-block {
   margin-top: 1.25rem;
   padding-top: 1rem;
-  border-top: 1px solid #30363d;
+  border-top: 1px solid var(--line);
 }
-.preset-block code { color: #e6edf3; background: #161b22; padding: 0 3px; border-radius: 4px; }
+.preset-block code { color: var(--fg-bright); background: var(--surface); padding: 0 3px; border-radius: 4px; }
 .preset-row {
   display: flex;
   gap: 0.5rem;
@@ -1439,23 +1571,23 @@ body.modal-open { overflow: hidden; }
 .preset-btns { display: flex; gap: 0.4rem; }
 .preset-block select {
   width: 100%;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  color: #e6edf3;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  color: var(--fg-bright);
   padding: 0.45rem 0.5rem;
   border-radius: 6px;
 }
 .preset-block button {
-  background: #21262d;
-  border: 1px solid #30363d;
-  color: #e6edf3;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--fg-bright);
   padding: 0.45rem 0.9rem;
   border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
 }
-.preset-block button#preset-save { background: #238636; border-color: #2ea043; }
-.preset-block button#preset-delete { color: #f85149; }
+.preset-block button#preset-save { background: var(--green-solid); border-color: var(--green); }
+.preset-block button#preset-delete { color: var(--red); }
 .preset-block button:hover { filter: brightness(1.15); }
 #preset-roles {
   display: grid;
@@ -1471,18 +1603,18 @@ body.modal-open { overflow: hidden; }
 .preset-role-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85rem;
-  color: #d29922;
+  color: var(--yellow);
 }
-.preset-empty { color: #8b949e; font-size: 0.85rem; margin: 0.4rem 0; }
+.preset-empty { color: var(--fg-muted); font-size: 0.85rem; margin: 0.4rem 0; }
 
 /* --- Cloudflared tunnel (Settings) -------------------------------------- */
-#tunnel-block #tunnel-activate { background: #238636; border-color: #2ea043; }
-#tunnel-block #tunnel-stop { color: #f85149; }
+#tunnel-block #tunnel-activate { background: var(--green-solid); border-color: var(--green); }
+#tunnel-block #tunnel-stop { color: var(--red); }
 #tunnel-block #tunnel-chip { align-self: center; }
 .tunnel-warning {
-  border: 1px solid #da3633;
-  background: rgba(248, 81, 73, 0.10);
-  color: #ff9a92;
+  border: 1px solid var(--red-solid);
+  background: rgba(247, 118, 142, 0.10);
+  color: var(--red-bright);
   border-radius: 6px;
   padding: 0.5rem 0.7rem;
   margin: 0.5rem 0;
@@ -1490,4 +1622,4 @@ body.modal-open { overflow: hidden; }
   line-height: 1.4;
 }
 .tunnel-warning[hidden] { display: none; }
-.tunnel-warning code { color: #ffb3ad; background: #2d1414; padding: 0 3px; border-radius: 4px; }
+.tunnel-warning code { color: var(--red-bright); background: var(--red-bg); padding: 0 3px; border-radius: 4px; }

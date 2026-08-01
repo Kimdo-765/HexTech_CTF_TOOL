@@ -823,7 +823,7 @@ async function loadSettings() {
   document.getElementById("oauth-status").textContent = s.claude_oauth_detected
     ? "✓ Claude Code OAuth detected — works without API key"
     : "✗ no OAuth credentials — run `claude login` on the host";
-  document.getElementById("oauth-status").style.color = s.claude_oauth_detected ? "#3fb950" : "#8b949e";
+  document.getElementById("oauth-status").classList.toggle("oauth-ok", !!s.claude_oauth_detected);
   document.getElementById("auth-status").textContent = s.auth_token_set
     ? `set (${s.auth_token_masked})`
     : (s.auth_token_env_set ? "using AUTH_TOKEN from env" : "not set (auth disabled)");
@@ -899,13 +899,13 @@ function renderWorkerMemLive(live) {
   const el = document.getElementById("worker-mem-live");
   if (!el) return;
   if (!live || !live.available) {
-    el.innerHTML = '<br><b style="color:#d29922">live value unavailable</b> (docker socket not reachable from the api container)';
+    el.innerHTML = '<br><b style="color:var(--yellow)">live value unavailable</b> (docker socket not reachable from the api container)';
     return;
   }
   const lim = fmtBytes(live.limit_bytes);
   const use = live.usage_bytes ? fmtBytes(live.usage_bytes) : "?";
   const warn = (!live.limit_bytes || live.limit_bytes <= 0)
-    ? ' <b style="color:#d29922">— uncapped: one runaway job can freeze the host</b>' : "";
+    ? ' <b style="color:var(--yellow)">— uncapped: one runaway job can freeze the host</b>' : "";
   el.innerHTML = '<br>container right now: <b>' + lim + '</b> limit, ' + use + ' in use' + warn;
 }
 
@@ -1555,20 +1555,16 @@ function renderReviewerPanel(jobId) {
   const dot = panel.querySelector(".dot");
 
   panel.classList.toggle("retry-panel-error", st.status === "error");
+  dot.classList.toggle("dot--error", st.status === "error");
+  dot.classList.toggle("dot--done", st.status === "done");
   if (st.status === "error") {
     headerEl.textContent = `${st.flowEmoji} ${label} — error (no new job created)`;
-    dot.style.background = "#f85149";
-    dot.style.animation = "none";
   } else if (st.status === "done") {
     headerEl.textContent = `${st.flowEmoji} ${label} — ${st.isManual ? "your hint" : "reviewer"} submitted`;
-    dot.style.background = "#56d364";
-    dot.style.animation = "none";
   } else {
     headerEl.textContent = st.isManual
       ? `${st.flowEmoji} ${label} — your hint`
       : `${st.flowEmoji} ${label} — reviewer in progress`;
-    dot.style.background = "";
-    dot.style.animation = "";
   }
   stageEl.textContent = st.stageText || "";
 
@@ -2113,13 +2109,13 @@ async function refreshJobs() {
     // DH{32alphanumeric}), so badging them would be pure noise. This promotes
     // nothing — curation stays MANUAL — it just makes the candidate visible.
     const candPill = (!(job.flags && job.flags.length) && job.flag_candidates && job.flag_candidates.length)
-      ? `<span class="flag-pill" style="background:#7a5a00;color:#ffd479"
+      ? `<span class="flag-pill" style="background:var(--yellow-solid);color:var(--yellow-soft)"
            title="${escapeHtml(job.flag_candidates.join('\n'))}\n\nUNVERIFIED — the sandbox never reproduced these. Confirm against the challenge, then pin in the UI.">⚑ ${job.flag_candidates.length}</span>`
       : "";
     li.innerHTML = `<strong>${job.module}</strong> · ${escapeHtml(job.filename || "")}
       <span class="status ${job.status}">${job.status}</span>${flagPill}${candPill}
       <button class="delete-btn">×</button>
-      <div style="font-size:0.75rem;color:#8b949e;"><span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button> ${cost}</div>`;
+      <div style="font-size:0.75rem;color:var(--fg-muted);"><span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button> ${cost}</div>`;
     li.addEventListener("click", () => selectJob(job.id));
     li.querySelector(".delete-btn").addEventListener("click", (e) => deleteJob(job.id, e));
     li.querySelector(".copy-jobid-btn").addEventListener("click", (e) => copyJobId(job.id, e));
@@ -2557,7 +2553,7 @@ async function renderJob(id, opts = {}) {
     runBlock = `<div class="retry-row" style="margin:0.5rem 0">
       ${stopHtml} ${runHtml} ${targetHtml} ${retryHtml} ${continueHtml} ${stopResumeHtml}
       ${freshToggleHtml}
-      <small style="color:#8b949e">${helperBits.join(" · ")}</small>
+      <small style="color:var(--fg-muted)">${helperBits.join(" · ")}</small>
     </div>`;
   }
 
@@ -2597,12 +2593,12 @@ async function renderJob(id, opts = {}) {
         `<span class="lf-chip ${v > 0 ? "hit" : "zero"}">${escapeHtml(label)}: ${v}</span>`
       ).join(" ");
     const scanned = typeof c.scanned_files === "number"
-      ? `<small style="color:#8b949e">scanned ${c.scanned_files} log/history files</small>` : "";
+      ? `<small style="color:var(--fg-muted)">scanned ${c.scanned_files} log/history files</small>` : "";
     logFindingsBlock = `<div class="log-findings-panel">
       <h4>🔎 Log mining</h4>
       <div class="lf-chips">${chips}</div>
       ${scanned}
-      <small style="color:#8b949e;margin-left:0.5rem">
+      <small style="color:var(--fg-muted);margin-left:0.5rem">
         full report: <a href="${API}/jobs/${id}/file/log_findings.json" target="_blank">log_findings.json</a>
       </small>
     </div>`;
@@ -2684,7 +2680,7 @@ async function renderJob(id, opts = {}) {
       </div>
       <div class="sdk-live-feed"></div>
     </div>
-    <h4>Run log <small style="color:#8b949e;font-weight:normal">(auto-follows when scrolled to bottom)</small></h4>
+    <h4>Run log <small style="color:var(--fg-muted);font-weight:normal">(auto-follows when scrolled to bottom)</small></h4>
     <div class="run-log-window" data-view="${monitorView ? "monitor" : "log"}">
       <div class="run-log-titlebar">
         <span class="run-log-dot run-log-dot-r"></span>
@@ -2844,7 +2840,7 @@ async function renderJob(id, opts = {}) {
         <div style="display:flex;gap:0.5rem;align-items:center">
           <button class="retry-manual-submit change-target-save" type="button">Save target</button>
           <button class="retry-manual-cancel change-target-cancel" type="button">Cancel</button>
-          <small style="color:#8b949e">updates meta only · run / retry afterwards picks up the new value</small>
+          <small style="color:var(--fg-muted)">updates meta only · run / retry afterwards picks up the new value</small>
         </div>
       `;
       changeTargetBtn.parentNode.insertBefore(form, changeTargetBtn.nextSibling);
@@ -3336,7 +3332,7 @@ function applyLogSearch(id) {
   const lines = raw.split("\n");
   const matching = lines.filter((l) => l.toLowerCase().includes(ql));
   if (!matching.length) {
-    pre.innerHTML = '<span style="color:#8b949e">(no matching lines)</span>';
+    pre.innerHTML = '<span style="color:var(--fg-muted)">(no matching lines)</span>';
     if (countEl) countEl.textContent = "0";
     return;
   }

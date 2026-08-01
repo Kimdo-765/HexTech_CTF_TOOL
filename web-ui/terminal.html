@@ -6,27 +6,29 @@
   <title>CTFmanager — Terminal</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; background: #0e1117; color: #e6edf3;
+    /* This page does not load style.css, so the "Grok Build" palette is
+       spelled out literally here — keep it in step with style.css :root. */
+    html, body { margin: 0; padding: 0; height: 100%; background: #141414; color: #e1e1e1;
                  font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
     header {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0.4rem 0.9rem; border-bottom: 1px solid #30363d;
+      padding: 0.4rem 0.9rem; border-bottom: 1px solid #333333;
     }
-    header .meta { color: #8b949e; font-size: 0.85rem; }
-    header .meta strong { color: #e6edf3; }
+    header .meta { color: #8a8a8a; font-size: 0.85rem; }
+    header .meta strong { color: #e1e1e1; }
     header .conn { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 4px; }
-    header .conn.up { background: #238636; color: white; }
-    header .conn.down { background: #da3633; color: white; }
+    header .conn.up { background: #456d2f; color: #e1e1e1; }
+    header .conn.down { background: #9c4754; color: #e1e1e1; }
     #term-container { height: calc(100vh - 38px); padding: 0.4rem 0.6rem; }
     .xterm-viewport::-webkit-scrollbar { width: 10px; }
-    .xterm-viewport::-webkit-scrollbar-thumb { background: #30363d; border-radius: 5px; }
+    .xterm-viewport::-webkit-scrollbar-thumb { background: #333333; border-radius: 5px; }
   </style>
 </head>
 <body>
   <header>
     <div class="meta">
       <strong>Terminal</strong> · job <code id="jid">-</code>
-      <span style="color:#8b949e">· cwd <code>/work</code> · runner image</span>
+      <span style="color:#8a8a8a">· cwd <code>/work</code> · runner image</span>
     </div>
     <span id="conn" class="conn down">disconnected</span>
   </header>
@@ -43,11 +45,22 @@
       cursorBlink: true,
       fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
       fontSize: 13,
+      // Windows Terminal "Grok Build", 16-colour ANSI palette copied verbatim.
+      // xterm 5.x names the selection key `selectionBackground` — the pre-5.0
+      // `selection` key is silently ignored, which is why it never applied.
       theme: {
-        background: "#0e1117",
-        foreground: "#e6edf3",
-        cursor: "#58a6ff",
-        selection: "#1f6feb50",
+        background: "#141414",
+        foreground: "#c8c8c8",
+        cursor: "#e0af68",
+        selectionBackground: "#283457",
+        black: "#141414", brightBlack: "#6c6c6c",
+        red: "#f7768e", brightRed: "#ff899d",
+        green: "#9ece6a", brightGreen: "#9fe044",
+        yellow: "#e0af68", brightYellow: "#faba4a",
+        blue: "#7aa2f7", brightBlue: "#8db0ff",
+        magenta: "#bb9af7", brightMagenta: "#c7a9ff",
+        cyan: "#7dcfff", brightCyan: "#a4daff",
+        white: "#c8c8c8", brightWhite: "#e1e1e1",
       },
     });
     const fit = new FitAddon.FitAddon();

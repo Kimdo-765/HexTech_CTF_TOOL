@@ -7,7 +7,7 @@
   <style>
     .login-card {
       max-width: 320px; margin: 6rem auto; padding: 1.5rem;
-      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
     }
     .login-card h2 { margin-top: 0; }
   </style>
@@ -15,7 +15,7 @@
 <body>
   <div class="login-card">
     <h2>CTFmanager</h2>
-    <p style="color:#8b949e;font-size:0.85rem">Token required to access this instance.</p>
+    <p style="color:var(--fg-muted);font-size:0.85rem">Token required to access this instance.</p>
     <form method="post" action="/login">
       <label>
         Token
