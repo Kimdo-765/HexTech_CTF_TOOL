@@ -109,6 +109,9 @@ services:
       # Grok Build binary lives under the mounted ~/.grok tree.
       PATH: /root/.grok/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       GROK_HOME: /root/.grok
+      # Default cap the docker shim injects into an agent-started container
+      # that omits --memory (worker/docker_memguard.sh). Empty or 0 disables.
+      CHAL_CONTAINER_MEM: ${CHAL_CONTAINER_MEM:-2g}
       # Tell the bundled `claude` CLI it is running in a sandbox so it allows
       # --dangerously-skip-permissions even though the container runs as root.
       IS_SANDBOX: "1"

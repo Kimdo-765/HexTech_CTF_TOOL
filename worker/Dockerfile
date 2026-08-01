@@ -336,6 +336,13 @@ RUN ln -sf /app/worker/heap_probe.py /usr/local/bin/heap-probe \
 # color codes) so the debugger subagent gets clean, terse output.
 # Source `gdb-init.py` first inside a probe to additionally disable
 # GEF's auto-printed context panel on every stop.
+# `docker` shim — injects --memory into an uncapped `docker run`/`create`.
+# /usr/local/bin precedes /usr/bin on the worker PATH, so this wins. The worker
+# cgroup does NOT bound sibling containers, and an uncapped chal image took the
+# whole WSL VM down on 2026-08-01 (job 0ddd62708d39). See the script header.
+RUN ln -sf /app/worker/docker_memguard.sh /usr/local/bin/docker \
+ && chmod +x /app/worker/docker_memguard.sh
+
 RUN ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-clean \
  && ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-multiarch-clean \
  && chmod +x /app/worker/gdb_clean.sh \
