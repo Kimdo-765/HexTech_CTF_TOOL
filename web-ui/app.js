@@ -141,10 +141,24 @@ let _metaRefreshTimer = null;
 // ── Flag alarm: bottom-right toast + beep on a NEW [FLAG?] candidate or
 // a NEW promoted 🚩 flag, for ANY job (works even with no detail panel
 // open, via the global poller added at startup). _flagSeen tracks the
-// per-job counts so we only alarm on a 0→N transition; the FIRST poll
-// seeds the baseline silently so we never alarm for jobs already flagged
-// when the page loads.
-const _flagSeen = {};            // jobId -> { flags: N, cands: M }
+// VALUES already alarmed per job; the FIRST poll seeds the baseline
+// silently so we never alarm for jobs already flagged when the page loads.
+//
+// Values, not counts. The count version alarmed on `nCands > prev.cands`,
+// which produced BOTH of the symptoms the operator reported:
+//   * DUPLICATES — refreshJobs() has no in-flight guard and is driven by two
+//     timers plus ~10 call sites, so two fetches can land out of order. The
+//     older response lowers the stored count, and the next poll re-detects
+//     the same transition and re-toasts the SAME flag. A set only ever grows,
+//     so a stale response is now a subset that adds nothing.
+//   * MISSED — the old code toasted `fc[fc.length - 1]` once per pass and
+//     used `else if`, so if a poll brought two candidates only the last one
+//     alarmed, and if it brought a flag AND a candidate the candidate was
+//     swallowed. Both were then recorded as seen, so they never fired later.
+//     Now every fresh value alarms, and flags and candidates are independent.
+// (The comment on _showFlagToast already claimed "per-candidate dedup in
+// _detectFlagTransitions" — this is that dedup finally existing.)
+const _flagSeen = {};            // jobId -> { flags: Set<string>, cands: Set<string> }
 let _flagAlarmReady = false;     // becomes true after the baseline pass
 let _flagAudioCtx = null;        // lazy WebAudio context for the beep
 
@@ -1978,7 +1992,17 @@ function openContinueForm(jobId, anchorBtn) {
 // suspend the context until the first user gesture — the visual toast
 // always shows regardless; the beep just catches up once the page has
 // been interacted with.
+let _flagBeepAt = 0;             // last beep, for the burst throttle below
+
 function _flagBeep() {
+  // One pass can now legitimately raise several toasts (that is the fix —
+  // every fresh value alarms, not just the last). Without this guard those
+  // would start N overlapping oscillators in the same audio frame and stack
+  // into one loud blast. The toasts are all still shown; only the sound is
+  // coalesced.
+  const now = Date.now();
+  if (now - _flagBeepAt < 1200) return;
+  _flagBeepAt = now;
   try {
     _flagAudioCtx = _flagAudioCtx ||
       new (window.AudioContext || window.webkitAudioContext)();
@@ -2061,29 +2085,28 @@ function _showFlagToast(kind, job, text) {
   } catch (_) {}
 }
 
-// [FLAG?] candidates = flag_candidates not yet promoted to flags (mirrors
-// the [FLAG?] box logic so the alarm and the box agree).
-function _candCount(job) {
-  const flags = job.flags || [];
-  return (job.flag_candidates || []).filter((x) => !flags.includes(x)).length;
-}
-
 function _detectFlagTransitions(jobs) {
   for (const job of jobs || []) {
-    const nFlags = (job.flags || []).length;
-    const nCands = _candCount(job);
-    const prev = _flagSeen[job.id] || { flags: 0, cands: 0 };
-    if (_flagAlarmReady) {
-      if (nFlags > prev.flags) {
-        const fresh = (job.flags || []).slice(prev.flags);
-        _showFlagToast("flag", job, fresh[fresh.length - 1] || "");
-      } else if (nCands > prev.cands) {
-        const flags = job.flags || [];
-        const fc = (job.flag_candidates || []).filter((x) => !flags.includes(x));
-        _showFlagToast("cand", job, fc[fc.length - 1] || "");
-      }
+    if (!job || !job.id) continue;
+    let seen = _flagSeen[job.id];
+    if (!seen) {
+      seen = { flags: new Set(), cands: new Set() };
+      _flagSeen[job.id] = seen;
     }
-    _flagSeen[job.id] = { flags: nFlags, cands: nCands };
+    const flags = job.flags || [];
+    // Candidates already promoted to real flags are not candidates any more —
+    // same rule the [FLAG?] box uses, so the alarm and the box agree.
+    const cands = (job.flag_candidates || []).filter((x) => !flags.includes(x));
+    // Tracked per KIND, so a value that was alarmed as a candidate alarms once
+    // more when it is promoted to a flag. Promotion is news; a re-poll is not.
+    const freshFlags = flags.filter((v) => v && !seen.flags.has(v));
+    const freshCands = cands.filter((v) => v && !seen.cands.has(v));
+    if (_flagAlarmReady) {
+      for (const v of freshFlags) _showFlagToast("flag", job, v);
+      for (const v of freshCands) _showFlagToast("cand", job, v);
+    }
+    for (const v of freshFlags) seen.flags.add(v);
+    for (const v of freshCands) seen.cands.add(v);
   }
   _flagAlarmReady = true;   // baseline seeded after the first pass
 }
