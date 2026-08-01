@@ -905,18 +905,27 @@ async def patch_target(job_id: str, request: Request):
     if new_target is None:
         note = "Target cleared."
     elif status == "running":
-        # As of the mid-run target watchdog the orchestrator DOES tell a live
-        # agent: at the next turn boundary it compares meta.target_url against
-        # the value it started with and injects a notice naming both endpoints.
-        # The old text here said the opposite and steered the operator into a
-        # Retry that discards the run — keep those two in sync.
+        # Two mechanisms reach a LIVE agent, and the difference matters to the
+        # operator because one of them can lag for hours:
+        #   * the PreToolUse stale-target guard (modules/_common.
+        #     stale_target_reason) runs MID-TURN — it denies the agent's very
+        #     next Bash call at the superseded endpoint and names the new one.
+        #   * the orchestrator's turn-boundary watchdog only runs after
+        #     `receive_response()` returns, and ONE receive_response spans the
+        #     agent's whole agentic turn. Job 6e434e820b3f sat inside a single
+        #     turn for two hours, so it never fired at all.
+        # An earlier version of this note promised only the boundary path "so
+        # no Retry is needed", which read as "it landed" while main went on
+        # polling the dead port. Say what actually bounds the delay.
         note = (
-            f"Target set to {new_target}. This job is running: the orchestrator "
-            "hands the new endpoint to the agent at its NEXT TURN BOUNDARY, so "
-            "no Retry is needed. That can lag a long turn (a multi-minute "
-            "exploit run finishes first). The sandbox runner also re-reads the "
-            "target, so an exploit that takes argv[1] picks it up automatically "
-            "— a hardcoded host:port still needs the agent to edit it."
+            f"Target set to {new_target}. This job is running: the agent's next "
+            "connection attempt at the old endpoint is blocked mid-turn and told "
+            "to use this one, so the change lands by the next remote Bash call — "
+            "not instantly, and not while it is only thinking. The sandbox runner "
+            "also re-reads the target, so an argv[1]-driven exploit picks it up "
+            "with no edit; a hardcoded host:port needs the agent to rewrite it. "
+            "If the agent is deep in a long non-remote stretch and you need the "
+            "switch now, Stop then Continue re-spawns it with the new target."
         )
     elif live:
         note = (

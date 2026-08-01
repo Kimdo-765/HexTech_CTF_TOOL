@@ -140,17 +140,138 @@ async def _bash_kill_guard(input_data, tool_use_id, context):
 # policy is ever reversed again.
 
 
+# ---------------------------------------------------------------------------
+# Stale-target guard (PreToolUse hook on Bash)
+# ---------------------------------------------------------------------------
+# The orchestrator already notices a mid-run `Change Target` and injects a
+# notice — but ONLY at a loop boundary, i.e. after `async for msg in
+# client.receive_response()` returns. One receive_response() spans the agent's
+# ENTIRE agentic turn, every tool call included, so on a long job that boundary
+# can be hours away. Job 6e434e820b3f: the operator moved the target at
+# 01:03:47 (:19231 -> :12949); at 01:10:27 main wrote a 90-iteration poll loop
+# against the DEAD :19231, and the watchdog had still not fired once — the job
+# had been inside a single turn since 23:18.
+#
+# A PreToolUse hook is the only thing in this codebase that runs MID-TURN, and
+# the deny reason demonstrably reaches the model: in job 99cf1ec14d48 the
+# kill-guard denied a Bash call at 01:41:40 and main re-issued the corrected
+# command at 01:41:45.
+#
+# Staleness is derived from meta.target_url read fresh on every call — no new
+# meta key, no "history" that only exists for changes made after this deploys,
+# and it works for a job that was already running when the code landed.
+_STALE_TARGET_MSG = (
+    "BLOCKED: that endpoint is STALE. The operator changed this job's remote "
+    "target mid-run:\n"
+    "    OLD (now dead): {stale}\n"
+    "    NEW (use this): {current}\n\n"
+    "A challenge instance that expires and is restarted comes back on a "
+    "different port, so any 'target is down / connection refused' conclusion "
+    "you drew from the old value is WRONG — the service is most likely up "
+    "right now. Re-point every remote()/connect/nc at {current} and re-run. "
+    "Read the endpoint from sys.argv[1] rather than a hardcoded literal: the "
+    "sandbox runner rewrites argv[1] from live meta on every run, so an "
+    "argv-driven exploit survives the next change with no edit.\n\n"
+    "Your analysis, work tree and files are all still valid — ONLY the "
+    "endpoint moved. Do NOT restart the investigation."
+)
+
+
+def _split_host_port(target: str):
+    """('host3.dreamhack.games', '19231') from a `host:port` target, else None."""
+    m = re.fullmatch(r"\s*(?:\w+://)?([A-Za-z0-9._-]+):(\d{1,5})/?\s*", target or "")
+    return (m.group(1), m.group(2)) if m else None
+
+
+def stale_target_reason(command: str, current: str | None,
+                        live_targets=()) -> str | None:
+    """Deny reason if `command` aims at an endpoint the operator has superseded.
+
+    Two shapes, both anchored on the CURRENT target so a generic host:port
+    elsewhere in the command is never touched:
+      A. port drift — the current host followed by a different port. Covers
+         `host:PORT`, pwntools `remote("host", PORT)` and `nc host PORT`.
+      B. host drift — a different host under the same registrable domain,
+         e.g. host3.dreamhack.games -> host1.dreamhack.games.
+
+    Never fires when the command also names the live target (so prose like
+    "moved from X to Y", and a multi-target job's other endpoints, pass), and
+    never for a target that is not host:port shaped.
+    """
+    hp = _split_host_port(current or "")
+    if not command or not hp:
+        return None
+    host, port = hp
+    ok = {t.strip() for t in (current, *(live_targets or ())) if t and t.strip()}
+    if any(t in command for t in ok):
+        return None
+    stale = []
+    # A — current host, some other port. The separator covers `:`, `", ` and ` `.
+    for p in re.findall(re.escape(host) + r"""['"]?\s*[:,]\s*['"]?(\d{2,5})\b"""
+                        r"""|""" + re.escape(host) + r"""\s+(\d{2,5})\b""", command):
+        got = p[0] or p[1]
+        if got and got != port:
+            stale.append(f"{host}:{got}")
+    # B — sibling host under the same last-two-label domain. Hostnames only:
+    # on a bare IP the "domain" would be its last two octets, so 10.0.3.4 and
+    # 192.168.3.4 would look like siblings.
+    domain = ".".join(host.split(".")[-2:])
+    if host.count(".") >= 2 and not re.fullmatch(r"[\d.]+", host):
+        for h, p in re.findall(r"\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\."
+                               + re.escape(domain) + r"):(\d{2,5})\b", command):
+            if f"{h}:{p}" not in ok and (h != host or p != port):
+                stale.append(f"{h}:{p}")
+    if not stale:
+        return None
+    # Dedupe but keep first-seen order so the message names what it saw first.
+    seen, ordered = set(), []
+    for s in stale:
+        if s not in seen:
+            seen.add(s)
+            ordered.append(s)
+    return _STALE_TARGET_MSG.format(stale=", ".join(ordered), current=current)
+
+
+def _stale_target_guard(job_id: str | None):
+    """Factory → PreToolUse hook denying a Bash call aimed at a superseded
+    endpoint. Reads meta on every invocation so it tracks live changes."""
+    async def _guard(input_data, tool_use_id, context):
+        if not job_id:
+            return {}
+        try:
+            if (input_data or {}).get("tool_name") != "Bash":
+                return {}
+            cmd = ((input_data.get("tool_input") or {}).get("command")) or ""
+            meta = read_meta(job_id) or {}
+            reason = stale_target_reason(
+                cmd, meta.get("target_url"), meta.get("target_urls") or ())
+        except Exception:
+            return {}
+        if not reason:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+    return _guard
+
+
 def kill_guard_hooks(job_id: str | None = None):
     """Hooks dict for ClaudeAgentOptions(hooks=...) that blocks self-killing
-    Bash commands on the agent owning the session (main + isolated subagents).
+    Bash commands on the agent owning the session (main + isolated subagents),
+    plus the stale-target guard so a subagent probing the remote also gets
+    corrected mid-turn.
 
     The web-research block (WebSearch/WebFetch deny) was REMOVED here on
     2026-07-22 per operator decision — web research is now enabled (recon owns
-    the web tools; see _AGENT_TOOLS_BY_TYPE). `job_id` is retained for
-    signature stability (callers still pass it) though it is no longer used."""
+    the web tools; see _AGENT_TOOLS_BY_TYPE)."""
     from claude_agent_sdk import HookMatcher
     return {"PreToolUse": [
-        HookMatcher(matcher="Bash", hooks=[_bash_kill_guard]),
+        HookMatcher(matcher="Bash",
+                    hooks=[_bash_kill_guard, _stale_target_guard(job_id)]),
     ]}
 
 
@@ -242,7 +363,11 @@ def main_session_hooks(add_dirs, work_dir, job_id: str | None = None):
     from claude_agent_sdk import HookMatcher
     guard = _readonly_write_guard(add_dirs, work_dir)
     return {"PreToolUse": [
-        HookMatcher(matcher="Bash", hooks=[_bash_kill_guard]),
+        # Bash only for the stale-target guard: the failure mode is CONNECTING
+        # to a dead endpoint, and a report.md that narrates the old port is a
+        # legitimate write we must not block.
+        HookMatcher(matcher="Bash",
+                    hooks=[_bash_kill_guard, _stale_target_guard(job_id)]),
         HookMatcher(matcher="Write", hooks=[guard]),
         HookMatcher(matcher="Edit", hooks=[guard]),
     ]}
@@ -6512,6 +6637,16 @@ async def run_main_agent_session(
             # (_runner._refresh_target_from_meta) — this closes the same gap
             # for the agent, using the injection mechanism already proven by
             # the four user-turns below.
+            #
+            # SCOPE — this fires only HERE, at a loop boundary, i.e. after
+            # receive_response() has returned. One receive_response() spans the
+            # agent's entire agentic turn, so on a long job the boundary can be
+            # hours away: job 6e434e820b3f changed target at 01:03:47 and this
+            # had still not run by 01:11 (single turn since 23:18) while main
+            # polled the dead port. The mid-turn half of the fix is the
+            # PreToolUse stale-target guard (stale_target_reason above); this
+            # stays as the belt to its braces — it also covers a change made
+            # while the agent is between turns and issues no Bash call at all.
             #
             # NEVER query a session that is already dying. When the bundled
             # CLI has been SIGKILLed the transport is gone, and the SDK's
