@@ -34,6 +34,38 @@ def _validate_job_id(job_id: str) -> str:
     return job_id
 
 
+def rq_job_id_for(job_id: str, meta: dict | None = None) -> str:
+    """The RQ id CURRENTLY backing `job_id` — which is not always `job_id`.
+
+    A continue-in-place re-runs the same job under a NEW RQ id: RQ ids are
+    unique and the original has already finished, so `_continue_in_place`
+    enqueues under ``<job_id>-c<continue_count>`` (api/routes/retry.py) while
+    the job directory, the meta and every URL keep the bare id.
+
+    Everything that reaches into RQ must resolve through here. Signalling the
+    bare id after a continue hits the *finished* original, which RQ ignores —
+    Stop and Delete then report success while the live agent keeps running and
+    keeps spending.
+    """
+    if meta is None:
+        meta = read_job_meta(job_id) or {}
+    try:
+        n = int((meta or {}).get("continue_count") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return f"{job_id}-c{n}" if n > 0 else job_id
+
+
+def _rq_id_candidates(job_id: str, meta: dict | None = None) -> list[str]:
+    """Resolved RQ id first, bare job id second (deduped).
+
+    The bare id stays as a fallback so a meta whose `continue_count` ran ahead
+    of what was actually enqueued — a continue that wrote meta and then failed
+    to enqueue — cannot leave the original permanently unstoppable.
+    """
+    return list(dict.fromkeys([rq_job_id_for(job_id, meta), job_id]))
+
+
 def _hard_stop_job(job_id: str) -> dict:
     """Try to actually halt work on a running job:
     1. Send STOP_JOB command to whichever worker is running it (RQ pub-sub).
@@ -41,26 +73,33 @@ def _hard_stop_job(job_id: str) -> dict:
        force-remove them (decompiler / forensic / misc / runner).
     Errors are swallowed — best-effort.
     """
-    info: dict = {"sent_stop": False, "containers_killed": 0, "rq_cancelled": False}
+    info: dict = {"sent_stop": False, "containers_killed": 0,
+                  "rq_cancelled": False, "rq_ids": []}
     conn = get_redis()
     # 1) Tell RQ to interrupt the running job. send_stop_job_command works only
     #    on running jobs; for queued ones, plain cancel() is enough.
-    try:
-        from rq.command import send_stop_job_command
-        send_stop_job_command(conn, job_id)
-        info["sent_stop"] = True
-    except Exception:
-        pass
-    try:
-        from rq.job import Job
-        rq_job = Job.fetch(job_id, connection=conn)
+    #    Both candidate ids are signalled: the extra call costs one round trip
+    #    and every failure mode here (no such job, already finished) raises and
+    #    is swallowed, so it cannot make the stop worse — whereas guessing the
+    #    wrong single id makes it a silent no-op.
+    for rq_id in _rq_id_candidates(job_id):
+        info["rq_ids"].append(rq_id)
         try:
-            rq_job.cancel()
-            info["rq_cancelled"] = True
+            from rq.command import send_stop_job_command
+            send_stop_job_command(conn, rq_id)
+            info["sent_stop"] = True
         except Exception:
             pass
-    except Exception:
-        pass
+        try:
+            from rq.job import Job
+            rq_job = Job.fetch(rq_id, connection=conn)
+            try:
+                rq_job.cancel()
+                info["rq_cancelled"] = True
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     # 2) Kill any sibling containers spawned for this job
     try:
@@ -245,7 +284,15 @@ def get_job(job_id: str):
     rq_worker_heartbeat = None
     try:
         q = get_queue()
-        rq_job = q.fetch_job(job_id)
+        # Same resolution as the stop path: after a continue the live RQ record
+        # is <job_id>-c<n>, so probing the bare id reported rq_status=None and
+        # no worker — which the UI reads as "no worker heartbeat" on a job that
+        # is in fact running.
+        rq_job = None
+        for _rq_id in _rq_id_candidates(job_id, meta):
+            rq_job = q.fetch_job(_rq_id)
+            if rq_job is not None:
+                break
         if rq_job is not None:
             rq_status = rq_job.get_status(refresh=True)
             rq_worker_name = rq_job.worker_name
