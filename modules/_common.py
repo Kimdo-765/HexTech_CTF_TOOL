@@ -3331,7 +3331,7 @@ empty artifacts.
 SCAFFOLD_MISSING_USER_TURN = """\
 🪜 SCAFFOLD NUDGE — this is a HEAP / FSOP / tcache / UAF challenge
 (detected from your description or recon's CANDIDATES) but you've
-made N tool calls without using any of the /opt/scaffold/ templates.
+made {n} tool calls without using any of the /opt/scaffold/ templates.
 The scaffolds encode invariants that judge has historically flagged
 as HIGH severity when written from scratch:
 
@@ -6259,6 +6259,7 @@ async def run_main_agent_session(
             return
         scaffold_nudge_fired["value"] = True
         scaffold_nudge_pending["value"] = True
+        scaffold_nudge_pending["n"] = tool_calls
         log_fn(
             f"SCAFFOLD_NUDGE: {tool_calls} tool calls into a heap chal "
             f"without /opt/scaffold/ in exploit.py. Will inject nudge "
@@ -6770,7 +6771,12 @@ async def run_main_agent_session(
             if scaffold_nudge_pending["value"]:
                 scaffold_nudge_pending["value"] = False
                 log_fn("[orchestrator] injecting scaffold-missing nudge")
-                await client.query(SCAFFOLD_MISSING_USER_TURN)
+                # The constant carried a literal `N` that nothing ever
+                # substituted, so the agent read "you've made N tool calls".
+                # The run.log line right above it was an f-string and did show
+                # the real number — only the text the MODEL sees was unfilled.
+                await client.query(SCAFFOLD_MISSING_USER_TURN.format(
+                    n=scaffold_nudge_pending.get("n", "several")))
                 continue
 
             # ---- Contrarian reframe injection (Tooth 1) ----
