@@ -269,6 +269,17 @@ RUN ARCH=$(dpkg --print-architecture) \
 # fastbin output is hard to parse (pwndbg's `bins` / `vis_heap_chunks`
 # is more visual). Defaults OFF so the build doesn't regress for users
 # who don't care.
+#
+# The `rm -f /root/.gdbinit` below is load-bearing, not tidiness: pwndbg's
+# setup.sh appends `source /opt/pwndbg/gdbinit.py` there, which DEFEATS the
+# GDB_USE_PWNDBG switch — /etc/gdb/gdbinit loads GEF, then ~/.gdbinit loads
+# pwndbg on top of it regardless, and pwndbg's command registration then hits
+# an AssertionError on a name GEF already owns. Measured in the live worker:
+# a bare `gdb-multiarch -batch` emitted 37 lines (GEF banner + a 33-line
+# Python traceback) against 4 lines with -nx, and 6 clean lines with
+# GDB_NO_GEF=1. That noise landed in every agent tool result. The file's only
+# content is that one source line, so dropping it leaves /etc/gdb/gdbinit as
+# the single loader the switch actually controls.
 ARG INSTALL_PWNDBG=1
 RUN curl -fsSL https://gef.blah.cat/py -o /opt/gef.py \
  && if [ "$INSTALL_PWNDBG" = "1" ]; then \
@@ -279,6 +290,7 @@ RUN curl -fsSL https://gef.blah.cat/py -o /opt/gef.py \
             echo "[WARN] pwndbg install failed; GEF will be the only plugin" 1>&2; \
             rm -rf /opt/pwndbg; \
         }; \
+        rm -f /root/.gdbinit; \
     fi \
  && printf '%s\n' \
         '# Auto-load GEF (default) or pwndbg when GDB_USE_PWNDBG=1.' \
@@ -325,6 +337,7 @@ RUN ln -sf /app/worker/heap_probe.py /usr/local/bin/heap-probe \
 # Source `gdb-init.py` first inside a probe to additionally disable
 # GEF's auto-printed context panel on every stop.
 RUN ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-clean \
+ && ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-multiarch-clean \
  && chmod +x /app/worker/gdb_clean.sh \
  && mkdir -p /opt/scaffold \
  && ln -sf /app/worker/gdb_init.py /opt/scaffold/gdb-init.py
