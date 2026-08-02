@@ -916,13 +916,44 @@ def reap_job_siblings(job_id: str) -> dict:
                 out["errors"].append(f"{name}: {type(e).__name__}")
         # Networks AFTER containers — a network with an attached container
         # cannot be removed, so ordering is what makes this work at all.
+        #
+        # Ordering alone is NOT enough, though, and the first live run proved
+        # it: job 7955d4ad066a reaped protoss-app and protoss-db cleanly and
+        # then failed on the network with "protossnet: APIError". The agent had
+        # run `docker network connect protossnet <worker>` so the challenge
+        # stack was reachable from its own container — and the WORKER is not
+        # ours to remove, so that endpoint outlives every container we delete
+        # and blocks the network forever. Left alone this leaks one dead
+        # network per docker-challenge job, and docker's default address pool
+        # is finite: enough of them and new job setups fail outright with "could
+        # not find an available, non-overlapping IPv4 address pool" — the exact
+        # failure this sweep exists to prevent.
+        #
+        # So: on failure, force-disconnect whatever is still attached and try
+        # once more. Safe because the network carries THIS job's label — it was
+        # created for this job, and anything still on it is either a container
+        # we could not remove or an outsider the agent attached. Disconnecting
+        # a live worker from a dead challenge network costs nothing.
         for n in client.networks.list(filters=flt):
             name = getattr(n, "name", "?")
             try:
                 n.remove()
                 out["networks"].append(name)
+                continue
             except Exception as e:
-                out["errors"].append(f"{name}: {type(e).__name__}")
+                first = type(e).__name__
+            try:
+                n.reload()
+                for cid in list((n.attrs.get("Containers") or {}).keys()):
+                    try:
+                        n.disconnect(cid, force=True)
+                    except Exception:
+                        pass
+                n.remove()
+                out["networks"].append(name)
+            except Exception as e:
+                out["errors"].append(
+                    f"{name}: {first}, then after disconnect {type(e).__name__}")
     except Exception as e:
         out["errors"].append(f"docker unreachable: {type(e).__name__}")
     return out

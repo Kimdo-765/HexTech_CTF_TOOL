@@ -742,6 +742,56 @@ def test_reap() -> None:
     chk("the network is still swept", res["networks"] == ["net2"], res)
     chk("the failure is reported, not raised", any("stuck" in e for e in res["errors"]), res)
 
+    # THE live failure: a network the WORKER is still attached to. Job
+    # 7955d4ad066a reaped both challenge containers and then died on
+    # "protossnet: APIError", because the agent had run
+    # `docker network connect protossnet <worker>` and the worker is not ours
+    # to remove. Ordering containers-before-networks does not help there; only
+    # force-disconnecting the survivors does.
+    class _StuckNet:
+        def __init__(self, name):
+            self.name = name
+            self.attrs = {"Containers": {"workercid": {}, "othercid": {}}}
+            self.tries = 0
+            self.disconnected: list[str] = []
+
+        def remove(self, **kw):
+            self.tries += 1
+            if self.tries == 1:                    # endpoints still attached
+                raise RuntimeError("APIError")
+            order.append(self.name)
+
+        def reload(self):
+            pass
+
+        def disconnect(self, cid, force=False):
+            assert force, "must force — a live worker will not leave politely"
+            self.disconnected.append(cid)
+
+    order.clear()
+    stuck = _StuckNet("protossnet")
+    fake_docker.from_env = lambda: _Client([], [stuck])
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("a network with a stuck endpoint is retried, not abandoned",
+        res["networks"] == ["protossnet"], res)
+    chk("  every survivor was force-disconnected first",
+        sorted(stuck.disconnected) == ["othercid", "workercid"], stuck.disconnected)
+    chk("  and it took exactly two remove attempts", stuck.tries == 2, stuck.tries)
+    chk("  no error is reported once it succeeds", res["errors"] == [], res)
+
+    # ...and when even that fails, BOTH failures are reported.
+    class _HopelessNet(_StuckNet):
+        def remove(self, **kw):
+            self.tries += 1
+            raise RuntimeError("APIError")
+
+    hopeless = _HopelessNet("wedged")
+    fake_docker.from_env = lambda: _Client([], [hopeless])
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("a truly wedged network reports both attempts",
+        res["networks"] == [] and res["errors"]
+        and "then after disconnect" in res["errors"][0], res)
+
     # docker unreachable
     def _boom():
         raise RuntimeError("no socket")
