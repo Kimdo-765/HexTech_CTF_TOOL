@@ -2698,6 +2698,124 @@ async def run_report_phase(
 PRE_RECON_MAX_CHARS = 32000
 
 
+class PreReconReply(str):
+    """The reply that reaches main, carrying the PRE-CLIP original.
+
+    A str subclass rather than a tuple return: run_pre_recon has five callers
+    (web / pwn x2 / rev / crypto) and only ONE of them — pwn's mandatory-section
+    gate — needs the original, so widening the signature would churn four call
+    sites for nothing. Every existing caller keeps treating this as the string
+    it always was.
+
+    Read `.full` BEFORE any string operation: `.strip()` and friends return a
+    plain str and drop the attribute. `getattr(reply, "full", reply)` is the
+    safe access and degrades to the clipped text if it ever isn't one of these.
+    """
+
+    __slots__ = ("full",)
+
+    def __new__(cls, clipped: str, full: str):
+        obj = super().__new__(cls, clipped)
+        obj.full = full
+        return obj
+
+
+def _elide_preserving(out: str, cap: int, keep: tuple[str, ...],
+                      log_fn, tag: str) -> str:
+    """Clip `out` to ~`cap`, cutting from the gaps BETWEEN `keep` titles.
+
+    The blind head-70%/tail-30% cut this replaces destroys whatever sits in the
+    middle, and on job 71edd90398f4 that was `ENV-AWARE PATHS` — one of the
+    four titles pwn's gate requires. Cutting around the titles keeps the
+    sections main is supposed to receive.
+
+    Falls back to the plain middle cut when the protected titles alone leave no
+    droppable gap big enough. That is survivable now only because the caller
+    also carries the pre-clip text: the gate reads THAT, so a fallback costs
+    main some content but no longer provokes a respawn loop.
+    """
+    need = len(out) - cap
+    if need <= 0:
+        return out
+
+    # Protect the title itself plus a little following context, so a cut never
+    # starts immediately after a heading and swallows its first line.
+    _CTX = 200
+    prot: list[tuple[int, int]] = []
+    for t in keep:
+        start = 0
+        while True:
+            i = out.find(t, start)
+            if i < 0:
+                break
+            prot.append((i, min(len(out), i + len(t) + _CTX)))
+            start = i + 1
+    prot.sort()
+    merged: list[tuple[int, int]] = []
+    for a, z in prot:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], z))
+        else:
+            merged.append((a, z))
+
+    # Gaps = everything not protected. Keep a head so ARCH/PROTECTIONS/LIBC
+    # survive even when no title appears early.
+    head_reserve = min(4000, len(out) // 4)
+    gaps: list[tuple[int, int]] = []
+    cursor = head_reserve
+    for a, z in merged:
+        if a > cursor:
+            gaps.append((cursor, a))
+        cursor = max(cursor, z)
+    if cursor < len(out):
+        gaps.append((cursor, len(out)))
+
+    gaps.sort(key=lambda g: g[1] - g[0], reverse=True)
+    cuts: list[tuple[int, int]] = []
+    freed = 0
+    for a, z in gaps:
+        if freed >= need:
+            break
+        take = min(z - a, need - freed)
+        if take <= 0:
+            continue
+        cuts.append((a, a + take))
+        freed += take
+
+    if freed < need:
+        # The mandatory sections alone overflow the budget. Keep the historic
+        # behaviour rather than inventing a worse one; the gate is protected by
+        # the pre-clip text either way.
+        head = out[: int(cap * 0.7)]
+        tail = out[-(cap - len(head)):]
+        dropped = len(out) - len(head) - len(tail)
+        log_fn(
+            f"[{tag}] reply was {len(out)} chars — could not elide {need} "
+            f"chars without cutting a mandatory section; fell back to a middle "
+            f"cut and dropped {dropped}. The section gate reads the PRE-CLIP "
+            f"text, so this will not trigger a respawn."
+        )
+        return (head + f"\n\n…({dropped} chars elided from the MIDDLE to fit "
+                f"the {cap // 1000} KB pre-recon budget)…\n\n" + tail)
+
+    cuts.sort()
+    pieces: list[str] = []
+    prev = 0
+    for a, z in cuts:
+        pieces.append(out[prev:a])
+        pieces.append(f"\n\n…({z - a} chars elided here to fit the "
+                      f"{cap // 1000} KB pre-recon budget; mandatory sections "
+                      f"kept intact)…\n\n")
+        prev = z
+    pieces.append(out[prev:])
+    log_fn(
+        f"[{tag}] reply was {len(out)} chars — elided {freed} chars from "
+        f"{len(cuts)} gap(s) BETWEEN mandatory sections to fit the "
+        f"{cap // 1000} KB budget (all {len(keep)} section titles kept)"
+    )
+    return "".join(pieces)
+
+
 async def run_pre_recon(
     *,
     job_id: str,
@@ -2706,6 +2824,7 @@ async def run_pre_recon(
     prompt: str,
     log_fn,
     tag: str = "pre-recon",
+    keep_sections: tuple[str, ...] = (),
 ) -> str:
     """Run a recon subagent BEFORE main's first turn so main starts with
     the static-analysis summary already in its user_prompt. Eliminates
@@ -2948,27 +3067,28 @@ async def run_pre_recon(
     # costs ~$1.20 and ~5 minutes, i.e. ~47x more, and the loop runs up to 4
     # times. The cap was never a cost control; it was a tidiness rule that
     # became a self-inflicted retry loop.
+    # The gate that checks for mandatory sections must judge what the MODEL
+    # wrote, not what our budget left of it — so the pre-clip text rides along
+    # on the return value. Job 71edd90398f4 is the worked example: three
+    # respawns, every one logged at exactly len=32166 (= 32000 + a 166-char
+    # marker) with missing=['ENV-AWARE PATHS'], because the section sat at
+    # bytes 22400-26252, precisely the band the head-70%/tail-30% cut removes.
+    # Respawning cannot fix truncation: each attempt regenerates a ~35 KB
+    # report, the same band is cut, the same title vanishes. ~$1.20 and ~5 min
+    # per attempt, up to 4, against ~$0.047 for passing the whole thing once.
+    full_text = out
     if len(out) > PRE_RECON_MAX_CHARS:
-        full_len = len(out)
-        head = out[: int(PRE_RECON_MAX_CHARS * 0.7)]
-        tail = out[-(PRE_RECON_MAX_CHARS - len(head)) :]
-        dropped = full_len - len(head) - len(tail)
-        out = (
-            head
-            + f"\n\n…({dropped} chars elided from the MIDDLE to fit the "
-              f"{PRE_RECON_MAX_CHARS // 1000} KB pre-recon budget — the "
-              "sections above and below are intact; spawn a recon subagent "
-              "if you need what was cut)…\n\n"
-            + tail
-        )
-        # Log the PRE-cap length: without it a truncation-induced respawn loop
-        # looks identical to a model that keeps omitting sections.
-        log_fn(
-            f"[{tag}] reply was {full_len} chars — elided {dropped} from the "
-            f"middle to fit the {PRE_RECON_MAX_CHARS // 1000} KB budget "
-            "(head+tail kept)"
-        )
-    return out
+        out = _elide_preserving(out, PRE_RECON_MAX_CHARS, keep_sections,
+                                log_fn, tag)
+    # Persist the ORIGINAL. Until now it lived only in memory, so a truncation
+    # loop left nothing behind but a length in run.log — this investigation had
+    # to reconstruct the cut band by arithmetic. 35 KB is too big for run.log
+    # but trivial as a file next to the other artifacts.
+    try:
+        (Path(work_dir) / "pre_recon_raw.md").write_text(full_text)
+    except Exception:
+        pass
+    return PreReconReply(out, full_text)
 
 
 _VALID_EFFORTS_BACKEND = frozenset(("low", "medium", "high", "xhigh", "max"))

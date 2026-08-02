@@ -2151,6 +2151,7 @@ async def _run_agent(
             )
             log_line(job_id, "[pre-recon] spawning static-triage recon subagent")
             recon_reply = await run_pre_recon(
+                keep_sections=_HEAP_MANDATORY_SECTIONS,
                 job_id=job_id,
                 work_dir=work_dir,
                 model=model,
@@ -2165,8 +2166,14 @@ async def _run_agent(
             # explicit "you missed these" message is cheaper than a
             # downstream main session re-deriving the same facts.
             if heap_kw and recon_reply is not None:
+                # The gate asks "did the MODEL omit a section?", so it must
+                # read the model's own output — not what the budget left of it.
+                # Reading the clipped text made our own middle-elision look
+                # like a model omission and provoked a respawn loop that could
+                # never converge (job 71edd90398f4: 3 attempts, all len=32166).
                 missing = _missing_pre_recon_sections(
-                    recon_reply, _HEAP_MANDATORY_SECTIONS,
+                    getattr(recon_reply, "full", recon_reply),
+                    _HEAP_MANDATORY_SECTIONS,
                 )
                 # Degraded-reply detector. Two distinct failure modes get
                 # collapsed here:
@@ -2235,6 +2242,7 @@ async def _run_agent(
                             f"len={len((recon_reply or '').strip())})"
                         )
                         candidate = await run_pre_recon(
+                            keep_sections=_HEAP_MANDATORY_SECTIONS,
                             job_id=job_id,
                             work_dir=work_dir,
                             model=model,
@@ -2242,7 +2250,8 @@ async def _run_agent(
                             log_fn=lambda s: log_line(job_id, s),
                         )
                         cand_missing = _missing_pre_recon_sections(
-                            candidate, _HEAP_MANDATORY_SECTIONS,
+                            getattr(candidate, "full", candidate),
+                            _HEAP_MANDATORY_SECTIONS,
                         )
                         cand_len = len((candidate or "").strip())
                         cand_degraded = (
