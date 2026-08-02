@@ -824,46 +824,11 @@ button[type="submit"], #refresh-jobs {
   50%      { box-shadow: 0 0 0 3px rgba(224, 175, 104, 0.18); }
 }
 
-/* Liveness ground-truth pill — combines two heartbeats:
-   A. meta.last_agent_event_at  (analyzer writes per SDK msg, throttled 5s)
-   B. RQ worker.last_heartbeat  (worker process alive)
-   Tells "agent making progress" apart from "thinking" apart from
-   "process dead". Updated every second by the same livePillTimer. */
-.liveness-pill {
-  display: inline-flex; align-items: center;
-  margin-left: 0.4rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.74rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  border: 1px solid transparent;
-  vertical-align: middle;
-  white-space: nowrap;
-  letter-spacing: 0.2px;
-}
-.liveness-active {
-  background: var(--green-bg-lo); color: var(--green-bright); border-color: var(--green-line);
-}
-.liveness-silent {
-  background: var(--yellow-bg); color: var(--yellow-bright); border-color: var(--yellow-line);
-}
-.liveness-warming {
-  background: var(--surface); color: var(--cyan); border-color: var(--blue-line);
-}
-.liveness-dead {
-  background: var(--red-bg); color: var(--red-bright); border-color: var(--red-line-hi);
-  font-weight: 700;
-  animation: liveness-blink 1.4s ease-in-out infinite;
-}
-@keyframes liveness-blink {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.55; }
-}
-
 /* Run-log footer — sits inside .run-log-window directly under <pre>.
-   Hosts the liveness + tokens pills so the user can see agent state
-   without leaving the run-log area. macOS-style frame around the
-   row keeps the terminal-window feel. */
+   Hosts the tokens pill so the user can see spend without leaving the
+   run-log area. macOS-style frame around the row keeps the
+   terminal-window feel. (A liveness pill lived here too and was removed —
+   see the note in app.js: healthy jobs read amber 75% of the time.) */
 .run-log-window .run-log-footer {
   display: flex;
   align-items: center;
@@ -874,7 +839,6 @@ button[type="submit"], #refresh-jobs {
   background: linear-gradient(var(--grad-mid), var(--grad-lo));
   font-size: 0.75rem;
 }
-.run-log-window .run-log-footer .liveness-pill,
 .run-log-window .run-log-footer .tokens-pill {
   margin-left: 0;
 }
@@ -899,8 +863,8 @@ button[type="submit"], #refresh-jobs {
 /* Live Δ inside the tokens pill — refreshed every poll cycle so the
    run-log footer feels like Claude Code's "↓ X tokens" status line.
    `.idle` is when the poll cycle saw zero growth — a quick visual
-   hint that the agent is silent (paired with the liveness pill's
-   silent/dead state). */
+   hint that the agent is quiet. Note it is only a hint: a healthy job
+   spends most of its wall clock between emissions. */
 .tokens-pill .tokens-delta {
   margin-left: 0.45em;
   font-weight: 600;

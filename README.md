@@ -192,13 +192,25 @@ into a curated, per-language commentary feed (see
 - **One container per SLOT.** `worker-1`, `worker-2`, ... are separate compose services (see the `x-worker-*` anchors in `docker-compose.yml`), each running exactly ONE RQ process named `htct-s<slot>-w0`. `WORKER_CONCURRENCY` is forced to 1 inside a slot and the stored setting is ignored — parallel jobs is now the slot COUNT.
 - On boot each slot sweeps stale `rq:worker:htct-s<slot>-w*` keys from a SIGKILL'd previous life, then registers afresh. The sweep is **scoped to the slot's own prefix**: the pre-split version matched `htct-w*` unconditionally, which becomes a live-data deletion with two slots — slot 2 booting would wipe slot 1's registration mid-job. Slot 1 additionally reaps legacy flat `htct-w*` keys, which nothing else would ever clean up.
 - Each process picks a job from redis, runs the module pipeline, and drives the **main Claude agent** (writer) which produces deliverables in `/data/jobs/<id>/work/`.
-- Liveness signals consumed by the browser:
+- Signals consumed by the browser:
   - `agent_heartbeat()` → `meta.last_agent_event_at` per SDK message (5 s throttle).
-  - RQ worker key `rq:worker:<name>` (~10 s heartbeat).
   - Token + cost meter — `result.usage` summed across every turn.
-  - RQ job key `rq:job:<id>` (per-job heartbeat, 30 s) — the only *job-scoped*
-    liveness signal. `rq_worker_heartbeat_at` resolves through a REUSED worker
-    name, so it proves "a worker called htct-sN-w0 is alive", not "this job is".
+  - `rq_status` from RQ, per job.
+
+  **There is deliberately no liveness chip.** One existed (active / silent /
+  warming / dead) and was removed. Measured on job `e601cd358ad6` — 3303 agent
+  events over 5.7 h — emission gaps have a median of 0 s but a p99 of 121 s and
+  a max of 16 min, and eighteen silences over five minutes make up 52 % of the
+  run. Time-weighted, a perfectly healthy job showed amber "silent" **75.3 %**
+  of the time and green "active" only 24.7 %. A warning colour that is the
+  normal state for three quarters of a run is noise, and no single threshold
+  separates "thinking" from "stuck" on a distribution that skewed.
+  Its one actionable state, "dead", was also the least trustworthy: it read
+  `rq:worker:<name>`, a name permanently bound to a slot and reused by every
+  job that runs there, so it answered "is `htct-sN-w0` alive?" rather than "is
+  this job alive?". If a per-job heartbeat is ever needed, RQ keeps one at
+  `rq:job:<id>.last_heartbeat` (written by `Worker.maintain_heartbeats` for
+  that job) — read that, not the worker's.
   - `meta.worker_slot` — stamped by `write_meta()` from the slot's `WORKER_SLOT`
     env. This is what `deploy.sh` reads to restart only the idle slots;
     `rq_worker_name` cannot serve that purpose because it is computed live by

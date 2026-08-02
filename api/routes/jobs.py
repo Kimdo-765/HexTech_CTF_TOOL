@@ -286,7 +286,6 @@ def get_job(job_id: str):
 
     rq_status = None
     rq_worker_name = None
-    rq_worker_heartbeat = None
     try:
         q = get_queue()
         # Same resolution as the stop path: after a continue the live RQ record
@@ -304,18 +303,19 @@ def get_job(job_id: str):
     except Exception:
         pass
 
-    # Pull the assigned worker's last_heartbeat directly from Redis so
-    # the UI can tell "agent silent but worker alive" apart from
-    # "worker process dead". RQ refreshes this every ~10s while the
-    # worker is healthy.
-    if rq_worker_name:
-        try:
-            conn = get_redis()
-            hb = conn.hget(f"rq:worker:{rq_worker_name}", "last_heartbeat")
-            if hb:
-                rq_worker_heartbeat = hb.decode() if isinstance(hb, bytes) else hb
-        except Exception:
-            pass
+    # `rq_worker_heartbeat_at` used to be computed here, from
+    # `rq:worker:<name>.last_heartbeat`, purely to drive the UI's liveness
+    # chip. Both are gone. The field was semantically wrong as well as unused:
+    # a worker name is permanently bound to a slot and reused by every job that
+    # runs there, so it answered "is the process called htct-sN-w0 alive?" and
+    # not "is THIS job alive?" — after a work horse is SIGKILLed without
+    # writing a terminal status, the slot's container returns under the same
+    # name and heartbeats every 30 s, so the field stayed fresh for a job that
+    # was gone. `rq_status` (below) is the honest per-job signal and is kept.
+    #
+    # If a per-job heartbeat is ever wanted, RQ does keep one:
+    # `rq:job:<id>.last_heartbeat`, written by Worker.maintain_heartbeats for
+    # that specific job. Read THAT, not the worker's.
 
     # Always derive a `runnable_script` field from the filesystem so the UI
     # can show the run-now button even on jobs whose meta was written before
@@ -336,8 +336,8 @@ def get_job(job_id: str):
     return {
         **meta,
         "rq_status": rq_status,
+        # kept: scripts/job-status.sh prints it, and it identifies the slot
         "rq_worker_name": rq_worker_name,
-        "rq_worker_heartbeat_at": rq_worker_heartbeat,
         "runnable_script": runnable_script,
         "has_why_stopped": has_why_stopped,
     }
