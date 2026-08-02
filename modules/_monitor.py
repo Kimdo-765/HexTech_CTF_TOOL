@@ -117,28 +117,89 @@ _SEV_RANK = {"info": 0, "good": 1, "warn": 2, "err": 3}
 
 _RE_TOOLECHO = re.compile(r"\bTOOL (Bash|Read|Edit|Write|mcp)\b|TOOL_RESULT|\bTHINK\b")
 _RE_ARTIFACT = re.compile(r"TOOL (Write|Edit)[^\n]*(exploit|solver)\.py")
+
+# Lines the AGENT ITSELF authored: its tool INPUT (`TOOL Bash: {"command": ...}`,
+# `TOOL mcp__team__spawn_subagent: {"prompt": ...}`) and its own prose
+# (`AGENT: ...`). Nothing here is an error EVENT — it is the agent talking.
+#
+# This distinction is the single biggest correctness fix in this file. Measured
+# on job 7955d4ad066a: 5 of 7 kind=error entries were false, and every one was
+# the error regex hitting text the agent had WRITTEN rather than output it
+# RECEIVED —
+#   "Exception:"  inside a Python heredoc the agent was composing
+#   "SIGSEGV"     inside a tool `description` ("Trigger SIGSEGV and capture …")
+#   "SIGSEGV"     inside a subagent prompt the agent was drafting
+#   "SIGSEGV"     in prose stating there is NO SIGSEGV handler — the opposite
+# An err badge that is wrong 5 times out of 7 is worse than no badge: the two
+# REAL errors in that run (a Traceback and a BrokenPipeError) were unfindable.
+_RE_AGENT_AUTHORED = re.compile(r"\] (?:TOOL (?:Bash|Read|Edit|Write|mcp)\S*:|AGENT:)")
+
+# Genuine failure output. `Exception:` alone used to be here and was far too
+# loose; requiring the Python exception-class SHAPE keeps BrokenPipeError /
+# ValueError / bare Exception while ignoring the word in prose.
 _RE_ERROR = re.compile(
-    r"traceback|exception:|budget_abort|\bkilled\b|connection refused|"
-    r"could not connect|broken pipe|sigsegv|segfault|core dumped",
+    # TOOL_ERROR is the orchestrator's own marker for a failed tool call. It
+    # happens to match the exception-class pattern below, but naming it makes
+    # that intentional rather than a coincidence of spelling. Two real
+    # pre-recon failures ("TOOL_ERROR: Exit code 1") were previously filed as
+    # phase/info and lost.
+    r"TOOL_ERROR\b|traceback \(most recent call last\)|"
+    r"\b[A-Za-z_]\w*(?:Error|Exception)\s*:|"
+    r"budget_abort|\bkilled\b|connection refused|could not connect|broken pipe",
     re.I,
 )
+
+# A crash is the GOAL in pwn/rev, not a fault: the agent deliberately segfaults
+# the target to read /proc/self/maps or to prove a primitive. Reporting that as
+# an error inverts the meaning of the run's most important progress signal, so
+# these get their own kind and a severity that depends on the module.
+_RE_CRASH = re.compile(r"sigsegv|segfault|core dumped", re.I)
+_CRASH_IS_EXPECTED = {"pwn", "rev"}
+
 _RE_JUDGE = re.compile(r"prejudge|postjudge|\bjudge\b|verdict|blocked ship", re.I)
-_RE_RETRY = re.compile(r"attempt \d+/|auto-retry|retry_hint|contrarian|redirect|halting", re.I)
+# `attempt 0/` is the FIRST attempt — a plain turn boundary, not a retry. The
+# old `attempt \d+/` matched it, so every run emitted a warn-level "retry"
+# entry narrated from the single line "Main session turn (attempt 0/∞)", which
+# the narrator could only render as "no signal data".
+_RE_RETRY = re.compile(r"attempt [1-9]\d*/|auto-retry|retry_hint|contrarian|redirect|halting", re.I)
+# Pure bookkeeping — carries no information a narration could add to.
+_RE_TURN_MARKER = re.compile(r"^main session turn \(attempt \d+/", re.I)
 _RE_NUDGE = re.compile(r"scaffold_nudge|scaffold", re.I)
 _RE_SUBAGENT = re.compile(r"\[orchestrator\]|spawning|isolated ", re.I)
 _RE_AGENT = re.compile(r"\] AGENT:")
 _RE_PHASE = re.compile(r"\[(runner|report|sandbox|autoboot|pre-recon)\]", re.I)
 
 
-def classify(body: str) -> tuple[str, str] | None:
+def classify(body: str, module: str = "") -> tuple[str, str] | None:
+    """(kind, severity) for one run.log body, or None to drop it.
+
+    `module` selects crash semantics — see _RE_CRASH.
+    """
+    # Bookkeeping with nothing to narrate.
+    if _RE_TURN_MARKER.match(body.strip()):
+        return None
     # FLAG and ERROR are checked BEFORE the tool-echo skip: a captured flag or a
     # crash/connection error often surfaces inside a TOOL_RESULT line (e.g.
     # "[main] TOOL_RESULT: Could not connect to host"), and dropping those as
     # "tool echo" would lose the two most important signals.
     if "FLAG_CANDIDATE:" in body and "{" in body:
         return ("flag", "good")
-    if _RE_ERROR.search(body):
+    # Only output the agent RECEIVED can be a FAILURE. Text the agent WROTE —
+    # a command body, a subagent prompt, its own prose — is intent, not event.
+    agent_authored = bool(_RE_AGENT_AUTHORED.search(body))
+    if not agent_authored and _RE_ERROR.search(body):
         return ("error", "err")
+    # Crash detection runs on agent-authored lines TOO, because in pwn the
+    # agent announcing "Trigger SIGSEGV and capture /proc/self/maps" IS the
+    # interesting moment. Restricting it to received output dropped that entry
+    # from the feed entirely — trading a wrong badge for a missing event, which
+    # is not an improvement. Reported as its own kind at info: informative,
+    # not alarming.
+    if _RE_CRASH.search(body):
+        if module in _CRASH_IS_EXPECTED:
+            return ("crash", "info")
+        if not agent_authored:
+            return ("error", "err")
     if _RE_TOOLECHO.search(body):
         # tool echo is noise — except an exploit/solver write, which is a real
         # milestone worth surfacing.
@@ -374,7 +435,35 @@ async def _narrate(signal_lines: list[str], model: str) -> dict:
     return {}
 
 
-async def _flush_batch(job_id: str, batch: list[tuple[str, tuple[str, str]]], model: str) -> None:
+def _norm_for_dedup(t: str) -> str:
+    """Comparison form for near-duplicate detection: letters and digits only."""
+    return re.sub(r"[^0-9a-z\uac00-\ud7a3]+", "", (t or "").lower())
+
+
+def _too_similar(a: str, b: str) -> bool:
+    """True when two narrations say the same thing.
+
+    Character-bigram Jaccard, not equality: the narrator rephrases. On job
+    7955d4ad066a two entries 108 s apart both described the same event-ID fix
+    in different words, and there was no suppression of any kind.
+    """
+    na, nb = _norm_for_dedup(a), _norm_for_dedup(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if min(len(na), len(nb)) < 12:
+        return False
+    ga = {na[i:i + 2] for i in range(len(na) - 1)}
+    gb = {nb[i:i + 2] for i in range(len(nb) - 1)}
+    inter = len(ga & gb)
+    union = len(ga | gb) or 1
+    return inter / union >= 0.80
+
+
+async def _flush_batch(job_id: str, batch: list[tuple[str, tuple[str, str]]],
+                       model: str, *, turns: int | None = None,
+                       recent: list[str] | None = None) -> None:
     """batch = [(body, (kind, sev)), ...]. Narrate + emit ONE entry."""
     if not batch:
         return
@@ -394,7 +483,20 @@ async def _flush_batch(job_id: str, batch: list[tuple[str, tuple[str, str]]], mo
         # Tiny ko-only prefix so operators can tell fallback from real narration.
         if "ko" in text:
             text["ko"] = f"(원문) {snippet}"
-    _emit(job_id, _entry(kind, sev, text, raw=bodies))
+    else:
+        # Drop a narration that merely restates the previous one. Only real
+        # narrations are compared — a raw fallback stub is already distinct
+        # enough, and suppressing those would hide the degraded-feed signal.
+        probe = text.get("en") or text.get("ko") or ""
+        if recent and any(_too_similar(probe, r) for r in recent):
+            return
+        if recent is not None:
+            recent.append(probe)
+            del recent[:-6]
+    # `turns` lets the operator see the run's PACE, not just its events. It was
+    # already read from meta for stage entries but never reached the narrated
+    # ones, so every prose line in the feed showed a blank.
+    _emit(job_id, _entry(kind, sev, text, raw=bodies, turns=turns))
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +558,13 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
     prev_status = None
     pending: list[tuple[str, tuple[str, str]]] = []
     last_flush = time.monotonic()
+    # Module decides crash semantics (a segfault is the goal in pwn, a fault in
+    # web). Read once per iteration below; seeded here so the very first ingest
+    # before any meta read still classifies.
+    job_module = ""
+    # Last few narrations, for near-duplicate suppression.
+    recent_texts: list[str] = []
+    turns = None
 
     while True:
         # --- ingest new run.log bytes --------------------------------------
@@ -494,7 +603,7 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
                 # without reaching into a Read of the exploit's own source.
                 if len(body) > _MONITOR_BODY_MAX:
                     body = body[:_MONITOR_BODY_MAX] + " …(monitor-clipped)"
-                kc = classify(body)
+                kc = classify(body, job_module)
                 if kc:
                     pending.append((body, kc))
             try:
@@ -508,6 +617,7 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
         stage = meta.get("stage")
         turns = meta.get("agent_turns")
         flags = meta.get("flag_candidates")
+        job_module = str(meta.get("module") or job_module or "")
 
         if stage and stage != prev_stage:
             _emit(job_id, _entry("stage", "info",
@@ -525,12 +635,14 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
         if pending and (len(pending) >= BATCH_MAX or now - last_flush >= BATCH_MAX_S):
             batch, pending = pending, []
             last_flush = now
-            await _flush_batch(job_id, batch, model)
+            await _flush_batch(job_id, batch, model,
+                               turns=turns, recent=recent_texts)
 
         # --- terminal? -----------------------------------------------------
         if status and status in _TERMINAL:
             if pending:
-                await _flush_batch(job_id, pending, model)
+                await _flush_batch(job_id, pending, model,
+                                   turns=turns, recent=recent_texts)
                 pending = []
             _emit(job_id, _entry("terminal", "good" if status == "finished" else "warn",
                   {"ko": f"■ 종료: {status}", "en": f"■ terminal: {status}"},
