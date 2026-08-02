@@ -1515,17 +1515,59 @@ def scan_job_for_flags(
     return sorted(narrative)
 
 
-def build_exploit_library_hint(module: str, *, max_entries: int = 12) -> str:
+_UUIDISH = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def _norm_chal(s: str) -> str:
+    """Comparison form for a challenge identity: basename, no archive
+    extension, alphanumerics only."""
+    s = (s or "").strip().lower().rsplit("/", 1)[-1]
+    for ext in (".tar.gz", ".tgz", ".tar", ".zip", ".gz", ".elf", ".bin", ".exe"):
+        if s.endswith(ext):
+            s = s[: -len(ext)]
+            break
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _library_display_name(meta: dict) -> str:
+    """What to CALL an entry in the hint.
+
+    `chal_filename` is an upload UUID (`58294f50-bf6c-…zip`) for every entry
+    saved from the UI, so preferring it — as this used to — rendered all twelve
+    lines as anonymous hashes. `chal_name` is the human name the saver derives
+    from the description or binary, which is the only field an agent can match
+    its own challenge against.
+    """
+    name = (meta.get("chal_name") or "").strip()
+    if name:
+        return name
+    fn = (meta.get("chal_filename") or "").strip()
+    return "?" if not fn or _UUIDISH.match(fn) else fn
+
+
+def build_exploit_library_hint(module: str, *, max_entries: int = 12,
+                               chal_name: str = "") -> str:
     """Return a short paragraph nudging the agent to consult
     `/data/exploits/` when stuck on technique / leak-vector choice, or
     `""` when the library is empty or the operator has turned the hint
     off via `enable_exploit_library_hint`.
 
     Filtering: same-module entries only (a pwn chal sees only pwn
-    exploits, etc.). Cap at `max_entries` newest entries so the prompt
-    doesn't blow up on large libraries. The agent is expected to `ls
-    /data/exploits/` + `cat` the relevant report.md itself — we just
-    surface what's available and what each one solved.
+    exploits, etc.). Cap at `max_entries` entries so the prompt doesn't blow up
+    on large libraries. The agent is expected to `ls /data/exploits/` + `cat`
+    the relevant report.md itself — we just surface what's available and what
+    each one solved.
+
+    Ranking is by RELEVANCE, not recency, and `chal_name` is what makes that
+    possible. Job e601cd358ad6 is the worked example: an advanced version of a
+    protoss chal already in the library as pwn-506c22dd0b8d, with a 10 KB
+    report and a working 15 KB exploit. The agent re-derived the identical
+    primitive — unchecked `std::vector::operator[]` indexed by a DB primary key
+    into a forged std::string for an AAR — over 88 turns and $23.77. Recency
+    ordering would not have helped even with the hint enabled: with 147 entries
+    the match can sit anywhere, and every line rendered as an upload UUID so
+    there was nothing to match ON.
     """
     try:
         from modules.settings_io import get_setting
@@ -1557,7 +1599,29 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12) -> str:
     if not entries:
         return ""
 
+    # Relevance first, recency only as a tiebreak. A same-name entry is the
+    # strongest signal available here: an advanced/variant version of a chal
+    # keeps the name while the binary hash changes, so hashing would MISS
+    # exactly the case this is for.
+    want = _norm_chal(chal_name)
+
+    def _score(m: dict) -> int:
+        """2 = same challenge name, 1 = one name contains the other, 0 = no
+        relation. Substring counts because variants get suffixed ('protoss2',
+        'protoss-rev2')."""
+        if not want:
+            return 0
+        got = _norm_chal(m.get("chal_name") or "")
+        if not got:
+            return 0
+        if got == want:
+            return 2
+        return 1 if (got in want or want in got) else 0
+
+    # Two stable sorts: recency first, then score. The second preserves the
+    # recency order within each score band.
     entries.sort(key=lambda m: m.get("saved_at") or "", reverse=True)
+    entries.sort(key=_score, reverse=True)
     entries = entries[:max_entries]
 
     lines = [
@@ -1567,12 +1631,14 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12) -> str:
         "PRIMITIVE NAME + version-specific gotcha. Do NOT blindly "
         "copy — re-derive that primitive in YOUR chal's context.",
         "",
-        f"Entries for module `{mod_norm}` (newest first, "
-        f"{len(entries)} shown):",
+        f"Entries for module `{mod_norm}` "
+        + (f"(most relevant first, {len(entries)} shown):"
+           if want else f"(newest first, {len(entries)} shown):"),
     ]
     for m in entries:
         eid = m.get("id") or "?"
-        chal = m.get("chal_filename") or m.get("chal_name") or "?"
+        chal = _library_display_name(m)
+        same = _score(m) > 0
         arch = m.get("arch") or "?"
         glibc = m.get("glibc_version") or "?"
         technique = m.get("technique_name") or "?"
@@ -1583,9 +1649,13 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12) -> str:
             notes = notes[:117] + "..."
         tags_part = f" tags=[{tags}]" if tags else ""
         notes_part = f" — {notes}" if notes else ""
+        bullet = "★" if same else "•"
+        flag = ("  <<< SAME CHALLENGE NAME as yours — read its report.md and "
+                "exploit.py FIRST, then re-derive for THIS variant"
+                if same else "")
         lines.append(
-            f"  • {eid}  chal={chal}  arch={arch}  glibc={glibc}  "
-            f"bug={bug}  technique={technique}{tags_part}{notes_part}"
+            f"  {bullet} {eid}  chal={chal}  arch={arch}  glibc={glibc}  "
+            f"bug={bug}  technique={technique}{tags_part}{notes_part}{flag}"
         )
     lines.append("")
     lines.append(
