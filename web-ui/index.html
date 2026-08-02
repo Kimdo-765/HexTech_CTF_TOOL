@@ -519,16 +519,23 @@
         </label>
         <label>
           Worker concurrency (parallel jobs)
-          <input type="number" name="worker_concurrency" min="1" max="32" placeholder="3" />
-          <small style="color:var(--fg-muted)">requires <code>docker compose restart worker</code> to apply</small>
+          <input type="number" name="worker_concurrency" min="1" max="32" placeholder="3" disabled />
+          <small style="color:var(--fg-muted)">
+            <b>Read-only.</b> Parallel jobs is now the number of <code>worker-N</code>
+            services in <code>docker-compose.yml</code> — each slot is its own container
+            running exactly one job. Add or remove a slot there, then
+            <code>docker compose up -d</code>.
+          </small>
         </label>
         <label>
-          Worker memory limit
-          <input type="text" name="worker_mem_limit" placeholder="12g" />
+          Worker memory limit (per slot)
+          <input type="text" name="worker_slot_mem" placeholder="4g" />
           <small style="color:var(--fg-muted)">
-            cgroup cap on the worker container (<code>12g</code>, <code>8192m</code>, or bytes).
-            Applied to the RUNNING container immediately — no recreate needed.
-            Keeps a runaway job's OOM kill inside the container instead of freezing the whole WSL VM.
+            cgroup cap on EACH worker slot container (<code>4g</code>, <code>4096m</code>, or bytes).
+            Applied to every running slot immediately — no recreate needed.
+            Keeps a runaway job's OOM kill inside its own slot instead of freezing the whole WSL VM.
+            Refused if slots × this value would not fit the VM, or if it would leave a
+            running job no headroom.
             <span id="worker-mem-live"></span>
           </small>
         </label>

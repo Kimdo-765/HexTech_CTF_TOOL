@@ -38,16 +38,31 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     ("auth_token", "AUTH_TOKEN", str, ""),
     ("job_ttl_days", "JOB_TTL_DAYS", int, 7),
     ("job_timeout_seconds", "JOB_TIMEOUT", int, 900),
+    # Read-only in slot mode: concurrency is now the NUMBER OF worker-N
+    # services in docker-compose.yml, and worker/runner.py forces 1 process per
+    # slot container regardless of what is stored here. Kept in the schema so
+    # an older single-container compose file still works.
     ("worker_concurrency", "WORKER_CONCURRENCY", int, 3),
-    # Cgroup memory cap for the worker container, as a docker size string
-    # ("12g", "8192m", or plain bytes). Restored 2026-07-29 after a real
+    # Cgroup memory cap for EACH worker slot container, as a docker size string
+    # ("4g", "4096m", or plain bytes). Restored 2026-07-29 after a real
     # `global_oom` (one python3 at 15.0 GB inside a 15.5 GB VM) froze the whole
     # WSL VM: the cap does not save a runaway job, it keeps the kill LOCAL to
     # the container instead of taking the host session down. Unlike every other
     # key here this one is NOT read at job start — it is a container-create
     # property — so PUT /api/settings applies it LIVE via the Docker API, and
-    # docker-compose.yml reads WORKER_MEM_LIMIT from .env as the boot default.
-    ("worker_mem_limit", "WORKER_MEM_LIMIT", str, "12g"),
+    # docker-compose.yml reads WORKER_SLOT_MEM from .env as the boot default.
+    #
+    # RENAMED from worker_mem_limit / WORKER_MEM_LIMIT on the slot split, and
+    # the rename is load-bearing, not cosmetic. That key meant "cap for the ONE
+    # worker container" and both /data/settings.json and .env held 8g. Reusing
+    # it would have silently reinterpreted 8g as PER SLOT, and the first
+    # settings save would have pushed 8g onto every slot via `docker update` —
+    # 16 GiB of cap inside a 15.99 GiB VM, i.e. exactly the unbounded condition
+    # that froze WSL twice. A renamed key falls back to this safe default; a
+    # reinterpreted one fails to 2x. The stale `worker_mem_limit` entry left in
+    # /data/settings.json is inert: lookups iterate SCHEMA, so a key that is not
+    # here is never read and never shown.
+    ("worker_slot_mem", "WORKER_SLOT_MEM", str, "4g"),
     ("callback_url", "CALLBACK_URL", str, ""),
     # Operator spend budget (USD) for the top-bar "used / budget" usage pill.
     # 0 = no budget set → the pill shows cumulative spend only (no bar / %).

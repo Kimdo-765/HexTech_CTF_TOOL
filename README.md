@@ -189,7 +189,8 @@ into a curated, per-language commentary feed (see
 
 ### main worker (`worker/runner.py`)
 
-- Forks `WORKER_CONCURRENCY` (default 3) independent RQ processes named `htct-w0..N`. On boot, sweeps stale `rq:worker:htct-w*` keys from a SIGKILL'd previous life, then registers afresh.
+- **One container per SLOT.** `worker-1`, `worker-2`, ... are separate compose services (see the `x-worker-*` anchors in `docker-compose.yml`), each running exactly ONE RQ process named `htct-s<slot>-w0`. `WORKER_CONCURRENCY` is forced to 1 inside a slot and the stored setting is ignored — parallel jobs is now the slot COUNT.
+- On boot each slot sweeps stale `rq:worker:htct-s<slot>-w*` keys from a SIGKILL'd previous life, then registers afresh. The sweep is **scoped to the slot's own prefix**: the pre-split version matched `htct-w*` unconditionally, which becomes a live-data deletion with two slots — slot 2 booting would wipe slot 1's registration mid-job. Slot 1 additionally reaps legacy flat `htct-w*` keys, which nothing else would ever clean up.
 - Each process picks a job from redis, runs the module pipeline, and drives the **main Claude agent** (writer) which produces deliverables in `/data/jobs/<id>/work/`.
 - Liveness signals consumed by the browser:
   - `agent_heartbeat()` → `meta.last_agent_event_at` per SDK message (5 s throttle).
@@ -197,7 +198,11 @@ into a curated, per-language commentary feed (see
   - Token + cost meter — `result.usage` summed across every turn.
   - RQ job key `rq:job:<id>` (per-job heartbeat, 30 s) — the only *job-scoped*
     liveness signal. `rq_worker_heartbeat_at` resolves through a REUSED worker
-    name, so it proves "a worker called htct-wN is alive", not "this job is".
+    name, so it proves "a worker called htct-sN-w0 is alive", not "this job is".
+  - `meta.worker_slot` — stamped by `write_meta()` from the slot's `WORKER_SLOT`
+    env. This is what `deploy.sh` reads to restart only the idle slots;
+    `rq_worker_name` cannot serve that purpose because it is computed live by
+    `GET /api/jobs` and never persisted to disk.
 
 ### peer subagents — isolated `claude` CLI subprocesses, transient per spawn
 
@@ -416,7 +421,7 @@ and, unlike the worker, mounts no docker socket. Under the targeted profile
 `setarch -R` succeeds while `unshare -U` and `keyctl` stay blocked.
 
 > `security_opt` applies at container CREATE. `docker compose restart` will
-> NOT pick it up — the worker needs `docker compose up -d worker`.
+> NOT pick it up — the worker needs `docker compose up -d worker-1 worker-2`.
 
 ### judge (`modules/_judge.py`)
 
@@ -981,10 +986,10 @@ All knobs live in two places:
    | Variable | Default | Purpose |
    |---|---|---|
    | `HOST_DATA_DIR` | `./data` | absolute host path for sibling-container bind mounts |
-   | `WORKER_CONCURRENCY` | `3` | parallel job slots |
+   | `WORKER_CONCURRENCY` | `3` | **legacy / ignored.** Parallel jobs is the number of `worker-N` services in `docker-compose.yml`; each slot runs exactly one. Kept only for a pre-split compose file. |
    | `JOB_TTL_DAYS` | `7` | auto-delete jobs older than N days (`0`=keep) |
    | `JOB_TIMEOUT` | `900` | **not a deadline** — only scales RQ's hard ceiling (`×4`, floor 24 h, cap 7 d). See [Timeouts](#timeouts) |
-   | `WORKER_MEM_LIMIT` | `12g` | cgroup cap on the worker container. Also editable live from Settings (a change there applies via `docker update`, no restart). A 15 GB `python3` once froze the whole WSL VM with no cap. |
+   | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. |
    | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude` (Agent SDK) or `grok` (Grok Build over ACP). See [Agent providers](#agent-providers) |
    | `GROK_MODEL` / `GROK_EFFORT` | `grok-build` / empty | model + reasoning effort used when `AGENT_PROVIDER=grok` |
    | `HOST_GROK_HOME` | `${HOME}/.grok` | host path of the Grok Build config, bind-mounted into api + worker. **Pin it explicitly.** A snap-confined `docker` CLI reports `HOME` as `~/snap/docker/<rev>`, so `docker compose up -d` through `/snap/bin/docker` resolves the default to an empty directory and silently mounts that — the worker then has no `grok` binary and no auth, with no error anywhere. (`docker compose restart` keeps the old mount, so only a *recreate* exposes it.) Same reason `HOST_CLAUDE_HOME` is pinned. |
@@ -1012,7 +1017,7 @@ All knobs live in two places:
    **Enable judge**, **Use Exploit Library hints**, **Agent provider**
    (`claude` / `grok`) and **Worker memory limit**. It also hosts the
    **Model presets** and **Cloudflared tunnel** panels (below).
-   (Concurrency change requires `docker compose restart worker`. The memory
+   (Concurrency is the slot COUNT — edit `docker-compose.yml`. The memory
    limit is applied live via `docker update` — no restart.)
 
 Precedence: `settings.json` > `.env` > defaults.
@@ -1087,12 +1092,35 @@ cookie-based). Empty = no auth (dev mode).
 
 ## Concurrency
 
-The worker container forks `WORKER_CONCURRENCY` independent RQ worker
-processes, all subscribed to the same Redis queue. Jobs distribute
-automatically. Each job can launch its own sibling sandbox container, so the
-practical upper bound is host RAM/CPU (5–8 is usually fine).
+The worker is **N containers, one per slot** (`worker-1`, `worker-2`, ...),
+each running a single RQ worker subscribed to the same Redis queue. Jobs
+distribute automatically. Add or remove a slot by copying a service block in
+`docker-compose.yml` — there is no runtime setting for it.
 
 The UI header shows `<busy>/<total> workers · <queued>` in real time.
+
+**Why slots and not one container with N processes:**
+
+| | shared container | per-slot containers |
+|---|---|---|
+| memory bound | one cgroup over the SUM of jobs; a heavy job starves the others | one cgroup per job |
+| PID isolation | `ps` sees every concurrent job's processes, and every orphan they left | a job sees only its own |
+| deploy | restarting the worker kills every in-flight job | `deploy.sh` restarts only the idle slots |
+
+`rq.Worker` already forks a work horse per job, so process isolation *within* a
+job was never the gap. The gap was that when the horse exits, everything the
+agent spawned (wine, Xvfb, bash, python3) is reparented to PID 1 and never
+reaped — 29 zombies out of 42 processes, measured 2026-08-02 — and those
+leftovers stay visible to the NEXT job in that container. Job `fd844946db78`
+ran `ps | awk | kill -9` and killed its own `claude` CLI. `init: true` (tini as
+PID 1) reaps the orphans; slots stop a job from seeing a concurrent job's.
+
+**Sizing.** `WORKER_SLOT_MEM` × slot count must fit the VM alongside the
+challenge containers, which are SIBLING cgroups (`worker/docker_memguard.sh`,
+`CHAL_CONTAINER_MEM` = 2g each) and are *not* charged to any slot. On a 16 GB
+VM that is 2 slots × 4g. A single heavy pwn job peaked at 3222 MiB, so 4096
+clears it; an even 3-way split of 8g would not have. Settings enforces the
+total.
 
 ## Job lifecycle
 
@@ -1513,7 +1541,7 @@ docker compose ps                 # status
                                   #  any Dockerfile, any requirements*.txt)
 # ...or restart by hand:
 docker compose restart api        # api/routes/*, api/main.py changes
-docker compose restart worker     # modules/*, worker/runner.py changes
+./deploy.sh --worker              # modules/*, worker/runner.py — idle slots only
 
 # IMPORTANT — verify a deploy via a LIVE HOST route, not `docker exec
 # python3` (which always fresh-imports and masks a stale serving
@@ -1625,7 +1653,7 @@ the existing tag aliases until step 6's `prune` removes them.
 | Container | Mounted from host | Purpose |
 |---|---|---|
 | `api` | `./api:/app/api:ro`, `./modules:/app/modules:ro`, `./web-ui:/app/web-ui:ro` | hot-reload source on `restart api` |
-| `worker` | `./worker:/app/worker:ro`, `./modules:/app/modules:ro` | hot-reload source on `restart worker` |
+| `worker-N` | `./worker:/app/worker:ro`, `./modules:/app/modules:ro` | hot-reload source on a slot restart |
 | both | `./data:/data` (rw), `~/.claude:/root/.claude` (rw — session jsonl carry on /retry) | persistence |
 
 Without `./api:/app/api:ro` an `api/routes/*.py` edit silently has
@@ -1650,7 +1678,7 @@ collide there. Two layers of defense:
    `$TMPDIR/probe.py` in Bash rather than the absolute
    `/tmp/probe.py`.
 2. **Boot sweep** — `worker/runner.py:_sweep_stale_tmp()` runs
-   once on every `docker compose restart worker` and removes files
+   once on every worker slot restart and removes files
    in `/tmp` older than 24h. Skips dirs + symlinks +
    `.X*`/`systemd-*`/`snap-*` patterns. Logs `[worker] swept N
    stale /tmp file(s) (N.N KB freed)` on cleanup.
@@ -2154,7 +2182,7 @@ token. Treat the job_id as a secret if you care.
   be `true`, OR a real `ANTHROPIC_API_KEY` should be set. The placeholder
   `sk-ant-...` is automatically ignored.
 - **Long-running job stuck**: `GET /api/jobs/queue` shows worker state. If a
-  worker is in `busy` for too long, `docker compose restart worker` to recycle.
+  worker is in `busy` for too long, `./deploy.sh --worker --force` to recycle.
 
 ## License
 

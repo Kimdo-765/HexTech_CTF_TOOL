@@ -1068,6 +1068,15 @@ def _continue_in_place(prev_meta: dict, comment: str,
         # re-opens the job, so the old verdict no longer describes it.
         "judge_next_action": None,
         "judge_stop_reason": None,
+        # ...and which worker SLOT served the previous run. This spreads
+        # `**prev_meta`, so without this the re-queued job would advertise the
+        # OLD slot while sitting in the queue, and the continue can be picked
+        # up by any slot. deploy.sh only trusts worker_slot on status=running
+        # (a queued job defers every slot), so this is belt-and-braces rather
+        # than a live bug — but a meta that claims a slot it may not get is
+        # exactly the kind of stale field that later reads as authoritative.
+        # The serving slot re-stamps it on its first write_meta.
+        "worker_slot": None,
     })
 
     q = get_queue()
@@ -1592,6 +1601,35 @@ _STALE_PATH_WARNING_TMPL = (
 )
 
 
+# What the carry does NOT bring across, stated where the preamble already
+# enumerates what it DOES.
+#
+# The work tree and the forked conversation both survive a slot change: /data
+# and /root/.claude are shared mounts, and _carry_session_jsonl keys the
+# transcript by project_key_for_directory(cwd), which is the new job dir — the
+# same path on any slot. Globally-installed packages do NOT survive, and that
+# is new: the worker used to be ONE container shared by every job, so a
+# `pip install` from the previous attempt was always still there on a retry.
+# It is now one container per slot, and a retry goes back to the queue, so it
+# may well run somewhere else. modules/rev/prompts.py explicitly tells rev
+# agents to install bytecode decompilers on demand, which is exactly the case
+# that breaks.
+#
+# Deliberately framed as "re-install, don't assume" rather than as a warning
+# about slots: the agent cannot see which slot it is on, and the same advice is
+# correct on a fresh container for any other reason. It also matches what the
+# sandbox does — the runner image never had those packages either, so anything
+# silently depending on one would have failed at auto-run regardless.
+_CARRY_LIMITS_NOTE = (
+    "CARRIED vs NOT: your cwd and (unless stated otherwise above) the prior "
+    "conversation came with you. Anything the previous attempt installed "
+    "GLOBALLY — `pip install`, `apt-get install` — did NOT, and neither did "
+    "its /tmp files; you may be on a fresh container. Re-run the install if "
+    "you need the tool, prefer installing into the work tree, and keep a path "
+    "that works without it (the sandbox that auto-runs your exploit never had "
+    "those packages either).\n\n"
+)
+
 def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
     """Preamble for the standard retry path (failed / no_flag /
     finished). The new agent is launched with `resume=<prev_session>` +
@@ -1635,7 +1673,8 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
             "the prior attempt got to, THEN apply the hint below. Every "
             "Write/Edit MUST use bare or `./`-relative paths per the rules "
             "above.\n\n"
-            f"{_sanitize_hint(hint)}"
+            + _CARRY_LIMITS_NOTE
+            + f"{_sanitize_hint(hint)}"
         )
     return (
         _CTF_CONTEXT_HEADER
@@ -1652,7 +1691,8 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
         f"per the rules above. If the SDK couldn't locate the prior "
         f"session (rare), `ls` once and read whichever file matters "
         f"before applying the hint.\n\n"
-        f"{_sanitize_hint(hint)}"
+        + _CARRY_LIMITS_NOTE
+            + f"{_sanitize_hint(hint)}"
     )
 
 
@@ -1688,7 +1728,8 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
             "continue it in light of the guidance below — do not restart the "
             "analysis from scratch. Every Write/Edit MUST use bare or "
             "`./`-relative paths per the rules above.\n\n"
-            f"{_sanitize_hint(hint)}"
+            + _CARRY_LIMITS_NOTE
+            + f"{_sanitize_hint(hint)}"
         )
     return (
         _CTF_CONTEXT_HEADER
@@ -1705,7 +1746,8 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
         f"If the SDK couldn't locate the prior session (rare), `ls` "
         f"once and read whichever file matters before applying the "
         f"hint.\n\n"
-        f"{_sanitize_hint(hint)}"
+        + _CARRY_LIMITS_NOTE
+            + f"{_sanitize_hint(hint)}"
     )
 
 

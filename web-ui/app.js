@@ -888,10 +888,19 @@ async function loadSettings() {
     s.job_ttl_days != null ? s.job_ttl_days : "";
   f.querySelector("[name=job_timeout_seconds]").value =
     s.job_timeout_seconds != null ? s.job_timeout_seconds : "";
+  // Show the LIVE slot count, not the stored `worker_concurrency`. That
+  // setting is inert under the slot split (runner.py forces 1 process per slot
+  // container) and /data/settings.json still holds its pre-split value, so
+  // rendering it would tell the operator "3 parallel jobs" while two slots are
+  // running. Fall back to the stored value only when the live count is
+  // unavailable — i.e. a pre-split deployment, where it is still the truth.
+  const liveSlots = s.worker_mem_live && s.worker_mem_live.available
+    ? s.worker_mem_live.slot_count : null;
   f.querySelector("[name=worker_concurrency]").value =
-    s.worker_concurrency != null ? s.worker_concurrency : "";
-  const memInput = f.querySelector("[name=worker_mem_limit]");
-  if (memInput) memInput.value = s.worker_mem_limit != null ? s.worker_mem_limit : "";
+    liveSlots != null ? liveSlots
+      : (s.worker_concurrency != null ? s.worker_concurrency : "");
+  const memInput = f.querySelector("[name=worker_slot_mem]");
+  if (memInput) memInput.value = s.worker_slot_mem != null ? s.worker_slot_mem : "";
   renderWorkerMemLive(s.worker_mem_live);
   const budgetInput = f.querySelector("[name=budget_usd]");
   if (budgetInput) budgetInput.value = s.budget_usd ? s.budget_usd : "";
@@ -983,7 +992,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       payload[k] = null;  // null = clear the override
       continue;
     }
-    if (k === "worker_mem_limit") {
+    if (k === "worker_slot_mem") {
       payload[k] = String(v).trim();
     } else if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "worker_concurrency" || k === "budget_usd") {
       payload[k] = Number(v);
@@ -1023,11 +1032,12 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
     ? "Agent provider: Grok Build (ACP) — next job uses Grok."
     : "Agent provider: Claude (Agent SDK) — next job uses Claude.";
   if (applied && applied.applied === false) {
-    alert("Saved, but the worker memory limit was NOT applied to the running container:\n\n" +
-          applied.reason + "\n\nIt will take effect on the next `docker compose up -d worker`.\n\n" +
+    alert("Saved, but the per-slot memory limit was NOT applied to the running slots:\n\n" +
+          applied.reason + "\n\nIt will take effect on the next `docker compose up -d worker-1 worker-2`.\n\n" +
           providerLine);
   } else if (applied && applied.applied) {
-    alert("Saved. Worker memory limit applied to the running container immediately.\n\n" + providerLine);
+    alert("Saved. Per-slot memory limit applied to all " + (applied.slot_count || "") +
+          " running slot(s) immediately.\n\n" + providerLine);
   } else {
     alert("Saved. Changes apply to the next job.\n\n" + providerLine);
   }
@@ -1049,11 +1059,34 @@ function renderWorkerMemLive(live) {
     el.innerHTML = '<br><b style="color:var(--yellow)">live value unavailable</b> (docker socket not reachable from the api container)';
     return;
   }
+  // The cap is PER SLOT and there are N slots, so the number that matters for
+  // "does this fit the VM" is the product. Showing only the per-slot value is
+  // how an 8g-per-container setting quietly became 16 GiB of cap.
+  const n = live.slot_count || (live.slots ? live.slots.length : 1);
   const lim = fmtBytes(live.limit_bytes);
   const use = live.usage_bytes ? fmtBytes(live.usage_bytes) : "?";
-  const warn = (!live.limit_bytes || live.limit_bytes <= 0)
-    ? ' <b style="color:var(--yellow)">— uncapped: one runaway job can freeze the host</b>' : "";
-  el.innerHTML = '<br>container right now: <b>' + lim + '</b> limit, ' + use + ' in use' + warn;
+  const total = fmtBytes(live.total_limit_bytes || live.limit_bytes);
+  let html = '<br>right now: <b>' + n + ' slot' + (n === 1 ? "" : "s") +
+             ' &times; ' + lim + '</b> = ' + total + ' total cap, ' + use + ' in use';
+
+  if (live.host_mem_total_bytes) {
+    html += ' &middot; VM has ' + fmtBytes(live.host_mem_total_bytes);
+  }
+  if (!live.limit_bytes || live.limit_bytes <= 0) {
+    html += ' <b style="color:var(--yellow)">— uncapped: one runaway job can freeze the host</b>';
+  }
+  if (live.limits_uniform === false) {
+    html += ' <b style="color:var(--yellow)">— slots disagree on their cap' +
+            ' (showing the smallest, which OOMs first); recreate to normalise</b>';
+  }
+  if (live.slots && live.slots.length > 1) {
+    html += '<br>' + live.slots.map(function (s) {
+      const u = s.usage_bytes ? fmtBytes(s.usage_bytes) : "?";
+      return '&nbsp;&nbsp;slot ' + (s.slot || "?") + ': ' + fmtBytes(s.limit_bytes) +
+             ' cap, ' + u + ' in use';
+    }).join('<br>');
+  }
+  el.innerHTML = html;
 }
 
 document.getElementById("settings-reload").addEventListener("click", loadSettings);

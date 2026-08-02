@@ -17,7 +17,46 @@ JOBS_DIR = Path("/data/jobs")
 CLEANUP_INTERVAL_S = 3600
 
 
+# --- slot identity -----------------------------------------------------------
+# Set by docker-compose (WORKER_SLOT=1|2). Empty means the legacy single-worker
+# container: one process tree forking WORKER_CONCURRENCY children. Both shapes
+# are supported so this file still runs against an older compose file.
+SLOT = (os.environ.get("WORKER_SLOT") or "").strip()
+
+
+def _name_prefix() -> str:
+    """RQ worker-name prefix OWNED BY THIS CONTAINER.
+
+    Slot mode namespaces the name (`htct-s1-w0`) for one reason that matters
+    more than readability: `_sweep_stale_workers()` deletes every registration
+    matching the prefix on boot. With the legacy flat `htct-w*` every slot
+    would wipe the OTHER slot's LIVE registration on restart, and RQ would
+    treat a perfectly healthy worker as dead.
+    """
+    return f"htct-s{SLOT}-w" if SLOT else "htct-w"
+
+
+def _worker_name(idx: int) -> str:
+    return f"{_name_prefix()}{idx}"
+
+
 def _resolve_concurrency() -> int:
+    # Slot mode: exactly one RQ process per container, non-negotiable. The
+    # `worker_concurrency` SETTING cannot be honoured here — settings_io's
+    # precedence is file > env > default, and /data/settings.json still holds
+    # the pre-split value (3), which would put three jobs back inside every
+    # slot and defeat both the per-job memory bound and the PID isolation.
+    if SLOT:
+        val = get_setting("worker_concurrency")
+        if str(val or "") not in ("", "1"):
+            print(
+                f"[worker] slot {SLOT}: ignoring worker_concurrency={val} "
+                f"(one job per slot container; concurrency is the SLOT COUNT "
+                f"in docker-compose.yml, not a per-container setting)",
+                flush=True,
+            )
+        return 1
+
     val = get_setting("worker_concurrency")
     try:
         n = int(val) if val is not None else 0
@@ -64,27 +103,45 @@ def run_one_worker(idx: int, scheduler: bool) -> None:
 
     conn = Redis.from_url(REDIS_URL)
     q = Queue("hextech_ctf_tool", connection=conn)
-    name = f"htct-w{idx}"
+    name = _worker_name(idx)
     print(f"[worker] {name} starting (scheduler={scheduler})", flush=True)
     Worker([q], connection=conn, name=name).work(with_scheduler=scheduler)
 
 
 def _sweep_stale_workers() -> None:
-    """Wipe leftover `rq:worker:htct-w*` registrations from a prior
-    container life.
+    """Wipe leftover RQ registrations from a prior life OF THIS CONTAINER.
 
-    Worker names are fixed (htct-w0..N) and there is exactly one worker
-    container, so on every boot any pre-existing `rq:worker:htct-w*` in
-    redis is a corpse from a SIGKILL'd previous life. RQ's
-    `register_birth()` refuses to start when the key still exists,
-    sending the parent into an infinite "exited code=1; respawning"
-    loop. Best-effort delete; don't fail boot if redis is unreachable.
+    Worker names are fixed, so on boot any pre-existing `rq:worker:<our
+    prefix>*` in redis is a corpse from a SIGKILL'd previous life. RQ's
+    `register_birth()` refuses to start when the key still exists, sending the
+    parent into an infinite "exited code=1; respawning" loop.
+
+    SCOPE IS THE WHOLE POINT. The sweep must match only names this container
+    owns. The pre-slot version matched `htct-w*` unconditionally, which was
+    correct when there was exactly one worker container and is a live-data
+    deletion the moment there are two: slot 2 booting (a routine deploy, since
+    deploy.sh now restarts idle slots individually) would delete slot 1's
+    REGISTRATION WHILE IT RUNS A JOB.
+
+    Slot 1 additionally sweeps the legacy flat `htct-w*` prefix — those keys
+    are left over from the single-container era and, once every slot uses a
+    namespaced prefix, nothing else would ever reap them. They would sit in
+    `rq:workers` forever and inflate restart.sh's worker count.
+
+    Best-effort delete; don't fail boot if redis is unreachable.
     """
+    patterns = [f"rq:worker:{_name_prefix()}*"]
+    if SLOT == "1":
+        patterns.append("rq:worker:htct-w*")
+
     try:
         from redis import Redis
 
         conn = Redis.from_url(REDIS_URL)
-        keys = list(conn.scan_iter(match="rq:worker:htct-w*"))
+        keys: list = []
+        for pat in patterns:
+            keys.extend(conn.scan_iter(match=pat))
+        keys = list(dict.fromkeys(keys))
         if not keys:
             return
         names = [k.decode().rsplit(":", 1)[1] for k in keys]
@@ -245,13 +302,39 @@ def _preinit_wine_prefix() -> None:
     )
 
 
+def _runs_scheduler(idx: int) -> bool:
+    """Exactly ONE RQ scheduler across the whole deployment.
+
+    Pinned to slot 1 (or worker 0 in legacy single-container mode). Slot 1 is
+    now restarted independently by deploy.sh, so the scheduler is briefly down
+    on those deploys.
+
+    That is harmless TODAY because nothing in this codebase gives the scheduler
+    anything to do. Checked, and all three ways it could matter are absent:
+      * no `enqueue_in` / `enqueue_at` caller anywhere;
+      * no `retry=Retry(...)` on any `q.enqueue()` — every call site passes
+        only `job_id` and `job_timeout` (RQ re-enqueues an interval-based
+        Retry from the scheduler thread, so this one is easy to miss);
+      * no cron / repeat registration.
+    Add any of those and this pin becomes a real availability question.
+    """
+    if SLOT:
+        return SLOT == "1" and idx == 0
+    return idx == 0
+
+
 def main() -> int:
     n = _resolve_concurrency()
-    print(f"[worker] launching {n} worker process(es)", flush=True)
+    where = f"slot {SLOT}" if SLOT else "single-container mode"
+    print(
+        f"[worker] {where}: launching {n} worker process(es) "
+        f"as {_name_prefix()}0..{n - 1}",
+        flush=True,
+    )
 
-    # Clear any stale `rq:worker:htct-w*` from a SIGKILL'd previous boot
-    # before children try to register their birth — otherwise RQ throws
-    # "There exists an active worker named ... already" and the parent
+    # Clear this container's own stale `rq:worker:*` keys from a SIGKILL'd
+    # previous boot before children try to register their birth — otherwise RQ
+    # throws "There exists an active worker named ... already" and the parent
     # respawns forever.
     _sweep_stale_workers()
     # Clean leftover /tmp debris from previous container lives. Empty
@@ -273,8 +356,8 @@ def main() -> int:
     for i in range(n):
         p = ctx.Process(
             target=run_one_worker,
-            args=(i, i == 0),  # only worker 0 runs the RQ scheduler
-            name=f"htct-w{i}",
+            args=(i, _runs_scheduler(i)),
+            name=_worker_name(i),
         )
         p.start()
         procs.append(p)
@@ -288,7 +371,7 @@ def main() -> int:
                 pass
         # Give children up to 10s to call RQ's register_death() —
         # without this the parent exits, container teardown SIGKILLs
-        # the children, and `rq:worker:htct-w*` keys leak into redis;
+        # the children, and this slot's `rq:worker:*` keys leak into redis;
         # next boot then loops on "name already exists".
         deadline = time.time() + 10
         for p in procs:
@@ -310,8 +393,8 @@ def main() -> int:
                 print(f"[worker] {p.name} exited code={p.exitcode}; respawning", flush=True)
                 np = ctx.Process(
                     target=run_one_worker,
-                    args=(i, i == 0),
-                    name=f"htct-w{i}",
+                    args=(i, _runs_scheduler(i)),
+                    name=_worker_name(i),
                 )
                 np.start()
                 procs[i] = np

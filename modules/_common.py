@@ -888,6 +888,27 @@ def write_meta(job_id: str, **updates: Any) -> None:
     if new_status in _TERMINAL_STATUSES and not meta.get("finished_at"):
         updates.setdefault("finished_at", now_iso)
 
+    # Which worker SLOT container is serving this job. Stamped from the
+    # environment because the process doing this write IS the work horse on
+    # that slot — the api container has no WORKER_SLOT and so never stamps.
+    #
+    # deploy.sh needs this to restart only the idle slots. It cannot use
+    # `rq_worker_name`: that field is computed live by GET /api/jobs from RQ
+    # and never persisted, so every meta.json on disk lacks it and a
+    # disk-based scan would see EVERY running job as unplaced and defer all
+    # slots — the deploy win, silently gone. Verified against live job
+    # 72f960d9628c, whose meta.json had no worker/rq key at all.
+    # Guard on the VALUE, not just key presence. /continue clears the field by
+    # re-queueing with an explicit `worker_slot: None`, but that None lands in
+    # `meta`, not in `updates`, so `updates.setdefault(...)` would in fact
+    # still stamp correctly today — this is defence against a future caller
+    # that passes worker_slot=None through write_meta itself, where setdefault
+    # would see the key present and leave the job with no slot recorded for
+    # its whole life (deploy.sh would then defer every slot until it ended).
+    _slot = (os.environ.get("WORKER_SLOT") or "").strip()
+    if _slot and not updates.get("worker_slot"):
+        updates["worker_slot"] = _slot
+
     meta.update(updates)
     meta["updated_at"] = now_iso
     f.write_text(json.dumps(meta, indent=2))
@@ -6121,8 +6142,13 @@ def write_why_stopped(
                 "1. **`/retry`** — fork a fresh SDK session against the "
                 "carried work tree. Usually clears transient SDK / API "
                 "issues.",
+                # Name the slot that actually ran this job. The worker is one
+                # container per slot now, so a hard-coded `-worker-1` would
+                # point at the wrong container's logs for anything on slot 2+.
                 "2. **Check worker container health**: `docker logs "
-                "hextech_ctf_tool-worker-1 --tail 100`.",
+                f"hextech_ctf_tool-worker-"
+                f"{(os.environ.get('WORKER_SLOT') or '1').strip()} "
+                "--tail 100`.",
             ]
         elif stop_kind == "policy_refusal":
             out += [

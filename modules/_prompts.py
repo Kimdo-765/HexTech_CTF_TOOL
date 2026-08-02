@@ -692,6 +692,45 @@ def adapt_system_prompt_for_grok(system_prompt: str) -> str:
     return text
 
 
+# Memory limit of the sandbox that auto-runs the exploit. Kept in step with
+# modules/_runner.DEFAULT_MEM by scripts/test_worker_slots.py rather than by an
+# import: _runner pulls in docker-py, and a prompt module must not acquire a
+# heavy dependency just to quote a number.
+_SANDBOX_MEM_TEXT = "2 GiB"
+
+
+def _mem_budget_block() -> str:
+    """One paragraph telling the agent its actual memory ceiling, or "".
+
+    Worth stating only since the per-slot split: before it, WORKER_CONCURRENCY
+    jobs shared one cgroup, so no per-job figure existed to quote. Now each job
+    owns its slot's container and the number is exact.
+
+    Read from the live cgroup rather than hardcoded — WORKER_SLOT_MEM is an
+    operator knob and a stale literal in a prompt is worse than no literal.
+    Returns "" on anything unexpected (cgroup v1, `max`, an implausible value):
+    saying nothing beats telling the agent a wrong number it will size against.
+    """
+    try:
+        with open("/sys/fs/cgroup/memory.max") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return ""
+    if not raw.isdigit():
+        return ""          # "max" (uncapped) — no budget to state
+    gib = int(raw) / float(1 << 30)
+    if not 0.25 <= gib <= 512:
+        return ""          # implausible; don't guess
+    shown = f"{gib:.0f}" if abs(gib - round(gib)) < 0.05 else f"{gib:.1f}"
+    return (
+        f"MEMORY: this container has a hard {shown} GiB cgroup cap, and the "
+        f"sandbox that\nauto-runs your exploit has {_SANDBOX_MEM_TEXT}. "
+        "Crossing either is an instant OOM\nkill mid-run, not a slowdown. "
+        "Stream large output to a file and read it\nback in slices rather "
+        "than accumulating it in RAM.\n\n"
+    )
+
+
 CTF_PREAMBLE = """\
 CONTEXT: You are assisting with a legitimate Capture-The-Flag (CTF) challenge.
 CTF challenges are deliberately vulnerable training artifacts hosted for
@@ -706,8 +745,13 @@ the educational purpose of the challenge.
 SCRATCH FILES: $TMPDIR is pre-set to a per-job directory (./tmp/ under
 your cwd). Write every temporary file there or under cwd directly.
 NEVER write to /tmp/<filename> with a hardcoded absolute path, never
-pass dir='/tmp' to tempfile.*, and never `cd /tmp`. Concurrent jobs
-share the worker's /tmp; only $TMPDIR keeps them apart.
+pass dir='/tmp' to tempfile.*, and never `cd /tmp`. $TMPDIR resolves
+to the SAME path in the sandbox that auto-runs your exploit, because
+it lives inside the work tree; /tmp does not exist there with your
+files in it. So a script that wrote /tmp/x during investigation and
+reads it back at auto-run finds nothing — the solver fails in the
+sandbox having worked for you. /tmp also persists between jobs on
+this container, so yesterday's debris is visible to you today.
 
 PATH DISCIPLINE — your cwd starts at the job work-tree root (`./`),
 but the Bash tool's cwd PERSISTS across calls. After ANY `cd <subdir>`
@@ -758,6 +802,14 @@ can never be mistaken for a capture and pollute FLAG FOUND. Reserve the
 real prefix exclusively for a genuine flag pulled off the target.
 
 """
+
+# Splice the live memory budget in with the other environment facts
+# (right before PATH DISCIPLINE) instead of appending it at the end, and
+# without turning the constant into a template — it contains literal
+# braces that .format() would choke on. A no-op when the block is empty.
+CTF_PREAMBLE = CTF_PREAMBLE.replace(
+    "PATH DISCIPLINE —", _mem_budget_block() + "PATH DISCIPLINE —", 1
+)
 
 _TOOLS_BASE = """\
 Bash CLIs always available in this worker container:
@@ -935,9 +987,11 @@ Hard rules:
    tell it you're recon-only.
 4.5. Scratch path discipline: when Bash needs a temp file (e.g.,
    `objdump > /tmp/dis.txt`), write via `$TMPDIR/dis.txt` NOT
-   `/tmp/dis.txt`. The container's `/tmp` is shared across jobs
-   and accumulates stale debris; `$TMPDIR` is the per-job isolated
-   scratch dir the orchestrator pre-set on your env.
+   `/tmp/dis.txt`. `$TMPDIR` is the per-job scratch dir the
+   orchestrator pre-set on your env; it lives inside the work tree,
+   so it is the only scratch path that also exists in the sandbox
+   that auto-runs the exploit. `/tmp` is container-local and
+   accumulates debris from earlier jobs on this container.
 5. Cite sources: when reporting an offset, include `<file>:<offset>`
    so the main can verify. When reporting a code construct, include
    `<file>:<line>` (or the offset for disasm).
@@ -1481,9 +1535,11 @@ and to the recon subagent (which absorbs heavy investigation). Both
 the orchestrator AND the main agent can invoke you.
 
 Scratch path discipline: when Bash needs a temp file, write via
-`$TMPDIR/<name>` NOT `/tmp/<name>`. The container's `/tmp` is shared
-across jobs and accumulates stale debris; `$TMPDIR` is the per-job
-isolated scratch dir the orchestrator pre-set on your env.
+`$TMPDIR/<name>` NOT `/tmp/<name>`. `$TMPDIR` is the per-job scratch
+dir the orchestrator pre-set on your env; it lives inside the work
+tree, so it is the only scratch path that also exists in the sandbox
+that auto-runs the exploit. `/tmp` is container-local and accumulates
+debris from earlier jobs on this container.
 
 Two invocation modes:
 
@@ -1681,7 +1737,9 @@ vulnerability candidates that the recon / pre-recon pass surfaced.
 
 Scratch path discipline: when Bash needs a temp file (rare for
 triage — usually just Read/Grep), write via `$TMPDIR/<name>` NOT
-`/tmp/<name>`. The container's `/tmp` is shared across jobs.
+`/tmp/<name>`. `$TMPDIR` lives inside the work tree, so it is the
+only scratch path that also exists in the sandbox that auto-runs the
+exploit; `/tmp` is container-local and holds debris from earlier jobs.
 
 CONTRACT (cookbook "triage" phase pattern):
 - Inputs (passed in your prompt): a candidate list with file:line +

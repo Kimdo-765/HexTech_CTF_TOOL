@@ -3,9 +3,9 @@
 # / `docker create` when the caller did not set one.
 #
 # WHY THIS EXISTS
-# The worker container is capped by a cgroup (WORKER_MEM_LIMIT), but every
-# container the AGENT starts is a SIBLING — a separate cgroup the worker's cap
-# does not bound. Nothing taught the agent to pass --memory, so challenge
+# Each worker slot container is capped by a cgroup (WORKER_SLOT_MEM), but every
+# container the AGENT starts is a SIBLING — a separate cgroup no slot's cap
+# bounds. Nothing taught the agent to pass --memory, so challenge
 # containers ran unlimited.
 #
 # 2026-08-01, job 0ddd62708d39: the chal image ran
