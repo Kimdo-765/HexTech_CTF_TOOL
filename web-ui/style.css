@@ -1696,3 +1696,84 @@ body.modal-open { overflow: hidden; }
 }
 .tunnel-warning[hidden] { display: none; }
 .tunnel-warning code { color: var(--red-bright); background: var(--red-bg); padding: 0 3px; border-radius: 4px; }
+
+/* --- Containers tab -------------------------------------------------------
+   Inventory + manual cleanup. The colour work is doing one job: making
+   "safe to delete" separable from "this will break something" at a glance,
+   because the delete is irreversible and the rows look otherwise alike. */
+.containers-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin: 0.6rem 0 0.8rem;
+  flex-wrap: wrap;
+}
+.containers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.containers-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--line-hi);
+  padding: 0.4rem 0.6rem;
+  white-space: nowrap;
+}
+.containers-table td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+.containers-table tbody tr:hover { background: var(--surface-2); }
+.containers-table code { font-size: 0.85rem; color: var(--fg-bright); }
+
+.c-dim  { color: var(--fg-dim); font-size: 0.78rem; }
+.c-hot  { color: var(--red-bright); font-weight: 600; }
+.c-warn { color: var(--yellow-bright); }
+
+.c-state--up   { color: var(--green-bright); }
+.c-state--down { color: var(--fg-dim); }
+
+/* Kind badges. `challenge` is deliberately the loudest: those are the
+   containers nothing reaps, so they are what the operator came here to find. */
+.c-badge {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border: 1px solid transparent;
+}
+.c-badge--challenge { background: var(--yellow-bg);  color: var(--yellow-bright); border-color: var(--yellow-line); }
+.c-badge--sandbox   { background: var(--blue-bg);    color: var(--blue-bright);   border-color: var(--blue-line); }
+.c-badge--tunnel    { background: var(--purple-bg);  color: var(--purple-bright); border-color: var(--purple-bright-line); }
+.c-badge--core      { background: var(--green-bg);   color: var(--green-bright);  border-color: var(--green-line); }
+
+/* A flagged row and its reason read as ONE unit — the warning sits directly
+   under the row it belongs to with no separating border. */
+.c-row--warn td { border-bottom: none; }
+.c-warnrow td {
+  padding: 0.1rem 0.6rem 0.5rem;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--yellow-bright);
+  font-size: 0.78rem;
+}
+
+.btn-sm {
+  padding: 0.18rem 0.55rem;
+  font-size: 0.78rem;
+  border-radius: 3px;
+  border: 1px solid var(--line-hi);
+  background: var(--surface-2);
+  color: var(--fg);
+  cursor: pointer;
+}
+.btn-sm:hover:not(:disabled) {
+  border-color: var(--red-line-hi);
+  color: var(--red-bright);
+  background: var(--red-bg);
+}
+.btn-sm:disabled { opacity: 0.45; cursor: not-allowed; }

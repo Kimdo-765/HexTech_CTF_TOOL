@@ -3880,3 +3880,120 @@ setInterval(async () => {
     })
     .catch(() => { el.textContent = ''; });
 })();
+
+// --- Containers tab ---------------------------------------------------------
+// Inventory + manual cleanup. Exists because agent-started challenge containers
+// have no lifecycle owner: `_hard_stop_job` reaps a job's siblings by the
+// `hextech_ctf_tool_job_id` label, and a container the agent starts from Bash
+// carries no label, so nothing ever removes it. Three from job fd844946db78
+// were still running 11-19h after it finished, each holding a 2 GiB cgroup
+// reservation. This is the operator's way to see and clear that.
+let _containersPoll = null;
+
+function _fmtPct(v) { return v == null ? "—" : v.toFixed ? v.toFixed(1) + "%" : v + "%"; }
+
+function _memCell(c) {
+  if (c.state !== "running") return '<span class="c-dim">—</span>';
+  const use = c.mem_usage ? fmtBytes(c.mem_usage) : "?";
+  const cap = c.mem_cap ? fmtBytes(c.mem_cap) : "uncapped";
+  // A high `usage` that is mostly reclaimable page cache is not a container
+  // about to OOM, so only the unreclaimable figure drives the warning colour.
+  const real = c.mem_unreclaimable || c.mem_usage || 0;
+  const hot = c.mem_cap && real > c.mem_cap * 0.8;
+  const nocap = !c.mem_cap;
+  const cls = hot ? "c-hot" : nocap ? "c-warn" : "";
+  return `<span class="${cls}">${use} / ${cap}</span>` +
+         (c.mem_pct != null ? ` <span class="c-dim">(${_fmtPct(c.mem_pct)})</span>` : "");
+}
+
+function _catBadge(cat) {
+  return `<span class="c-badge c-badge--${cat}">${cat}</span>`;
+}
+
+function renderContainers(data) {
+  const el = document.getElementById("containers-list");
+  if (!el) return;
+  const cs = data.containers || [];
+  const sum = document.getElementById("containers-summary");
+  if (sum) {
+    const k = data.counts || {};
+    sum.textContent = `${cs.length} total — ${k.challenge || 0} challenge · ` +
+      `${k.sandbox || 0} sandbox · ${k.tunnel || 0} tunnel · ${k.core || 0} core` +
+      (data.running_jobs && data.running_jobs.length
+        ? ` · running jobs: ${data.running_jobs.join(", ")}` : "");
+  }
+  if (!cs.length) { el.innerHTML = '<p style="color:var(--fg-muted)">No containers.</p>'; return; }
+
+  const rows = cs.map((c) => {
+    const disk = c.size_rw != null ? fmtBytes(c.size_rw) : "—";
+    const running = c.state === "running";
+    const btn = c.protected
+      ? `<button class="btn btn-sm" disabled title="${escapeHtml(c.warn || "protected")}">protected</button>`
+      : `<button class="btn btn-sm c-del" data-id="${escapeHtml(c.id)}" data-name="${escapeHtml(c.name)}"` +
+        ` data-warn="${escapeHtml(c.warn || "")}">delete</button>`;
+    return `<tr class="${c.warn ? "c-row--warn" : ""}">
+      <td><code>${escapeHtml(c.name)}</code><br><span class="c-dim">${escapeHtml(c.id)}</span></td>
+      <td>${_catBadge(c.category)}${c.compose_service ? `<br><span class="c-dim">${escapeHtml(c.compose_service)}</span>` : ""}</td>
+      <td><span class="c-state c-state--${running ? "up" : "down"}">${escapeHtml(c.state)}</span></td>
+      <td>${_memCell(c)}</td>
+      <td>${running ? _fmtPct(c.cpu_pct) : '<span class="c-dim">—</span>'}</td>
+      <td>${disk}</td>
+      <td><span class="c-dim">${escapeHtml(c.image || "")}</span><br><span class="c-dim">${escapeHtml(c.created || "")}</span></td>
+      <td>${btn}</td>
+    </tr>` + (c.warn ? `<tr class="c-warnrow"><td colspan="8">⚠ ${escapeHtml(c.warn)}</td></tr>` : "");
+  }).join("");
+
+  el.innerHTML = `<table class="containers-table">
+    <thead><tr><th>Name / id</th><th>Kind</th><th>State</th><th>Memory</th><th>CPU</th>
+    <th>Disk (rw)</th><th>Image / created</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+
+  el.querySelectorAll(".c-del").forEach((b) => {
+    b.addEventListener("click", () => deleteContainer(b.dataset.id, b.dataset.name, b.dataset.warn));
+  });
+}
+
+async function loadContainers() {
+  const el = document.getElementById("containers-list");
+  try {
+    const res = await fetch("/api/containers");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderContainers(await res.json());
+  } catch (e) {
+    if (el) el.innerHTML = `<p style="color:var(--red)">Could not list containers: ${escapeHtml(String(e))}</p>`;
+  }
+}
+
+async function deleteContainer(id, name, warn) {
+  // Two-step ONLY when the backend flagged a cost — an unflagged leftover is
+  // the common case and should not need a second click.
+  let msg = `Delete container ${name} (${id})?`;
+  if (warn) msg += `\n\n⚠ ${warn}\n\nThis cannot be undone. Continue?`;
+  if (!confirm(msg)) return;
+  if (warn && !confirm(`Really delete ${name}?\n\n${warn}`)) return;
+  try {
+    const res = await fetch(`/api/containers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(`Delete failed:\n\n${body.detail || res.status}`); return; }
+    if (body.note) alert(`Removed ${body.removed}.\n\n${body.note}`);
+  } catch (e) {
+    alert(`Delete failed: ${e}`);
+  }
+  loadContainers();
+}
+
+function _stopContainersPoll() {
+  if (_containersPoll) { clearInterval(_containersPoll); _containersPoll = null; }
+}
+
+document.getElementById("containers-refresh")?.addEventListener("click", loadContainers);
+document.getElementById("containers-auto")?.addEventListener("change", (e) => {
+  _stopContainersPoll();
+  // 15s, not the usual few seconds: each refresh costs ~2s of docker stats
+  // calls on the daemon (one sample per running container, in parallel).
+  if (e.target.checked) _containersPoll = setInterval(() => {
+    if (document.getElementById("panel-containers").classList.contains("active")) loadContainers();
+    else _stopContainersPoll();
+  }, 15000);
+});
+document.querySelector('.tab[data-tab="containers"]')?.addEventListener("click", loadContainers);

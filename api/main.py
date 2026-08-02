@@ -15,6 +15,7 @@ from api.routes import collector as collector_routes
 from api.routes import retry as retry_routes
 from api.routes import terminal as terminal_routes
 from api.routes import exploits as exploits_routes
+from api.routes import containers as containers_routes
 from api.routes import (
     crypto_module,
     forensic_module,
@@ -79,6 +80,7 @@ app.include_router(terminal_routes.router, prefix="/api/terminal", tags=["termin
 app.include_router(collector_routes.router, prefix="/api/collector", tags=["collector"])
 app.include_router(retry_routes.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(exploits_routes.router, prefix="/api/exploits", tags=["exploits"])
+app.include_router(containers_routes.router, prefix="/api/containers", tags=["containers"])
 
 
 # --- live per-job MONITOR --------------------------------------------------

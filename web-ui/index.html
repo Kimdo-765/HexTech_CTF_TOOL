@@ -33,6 +33,7 @@
       <button class="tab" data-tab="crypto">Crypto</button>
       <button class="tab" data-tab="rev">Rev</button>
       <button class="tab" data-tab="exploits" style="margin-left:auto">📚 Exploits</button>
+      <button class="tab" data-tab="containers">🐳 Containers</button>
       <button class="tab" data-tab="settings">⚙ Settings</button>
     </nav>
   </header>
@@ -424,6 +425,24 @@
       <ul id="exp-list" class="exp-list"></ul>
     </section>
 
+    <section id="panel-containers" class="panel">
+      <h2>Containers</h2>
+      <p style="color:var(--fg-muted);font-size:0.85rem">
+        Every container on the daemon, newest-risk-first. <b>Challenge</b> containers are
+        the ones the agent starts by hand for a challenge's own stack — nothing reaps those
+        automatically, so they outlive their job and keep holding a memory reservation.
+        <b>Sandbox</b> are per-job tool containers, <b>core</b> is the stack itself.
+        Memory shows live usage against the container's cgroup cap.
+      </p>
+      <div class="containers-bar">
+        <button id="containers-refresh" class="btn">Refresh</button>
+        <label style="font-size:0.85rem;color:var(--fg-muted)">
+          <input type="checkbox" id="containers-auto" /> auto-refresh (15s)
+        </label>
+        <span id="containers-summary" style="font-size:0.85rem;color:var(--fg-muted)"></span>
+      </div>
+      <div id="containers-list"><p style="color:var(--fg-muted)">Loading…</p></div>
+    </section>
     <section id="panel-settings" class="panel">
       <h2>Settings</h2>
       <p style="color:var(--fg-muted);font-size:0.85rem">
