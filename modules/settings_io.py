@@ -63,6 +63,12 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # /data/settings.json is inert: lookups iterate SCHEMA, so a key that is not
     # here is never read and never shown.
     ("worker_slot_mem", "WORKER_SLOT_MEM", str, "4g"),
+    # Remove the containers and networks a job created once it reaches a
+    # terminal status. Default ON: agent-started containers have no other
+    # owner, and containers from 2026-06 were still running in 2026-08, each
+    # holding a 2 GiB cgroup ceiling. Turn OFF to keep a failed job's challenge
+    # stack up for debugging — the Containers tab can then clear it by hand.
+    ("reap_job_containers", "REAP_JOB_CONTAINERS", bool, True),
     ("callback_url", "CALLBACK_URL", str, ""),
     # Operator spend budget (USD) for the top-bar "used / budget" usage pill.
     # 0 = no budget set → the pill shows cumulative spend only (no bar / %).

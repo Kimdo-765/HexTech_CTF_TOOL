@@ -51,6 +51,36 @@ for a in "$@"; do
         *) sub="$a"; break ;;
     esac
 done
+# `docker network create` leaks the same way containers do, and worse in one
+# respect: docker's default address pool is finite, so accumulated
+# `chal_<id>_net` bridges eventually fail new job setups outright with "could
+# not find an available, non-overlapping IPv4 address pool". Three orphaned
+# networks with zero attached containers were found 2026-08-02. Labelling them
+# lets the end-of-job sweep in modules/_common.reap_job_siblings take them
+# back. No --memory here — a network has no cgroup.
+if [ "$sub" = "network" ] && [ -n "${JOB_ID:-}" ]; then
+    nsub=""; seen_network=0
+    for a in "$@"; do
+        case "$a" in
+            -*) ;;
+            network) [ "$seen_network" -eq 0 ] && seen_network=1 || { nsub="$a"; break; } ;;
+            *) if [ "$seen_network" -eq 1 ]; then nsub="$a"; break; fi ;;
+        esac
+    done
+    if [ "$nsub" = "create" ]; then
+        out=(); done_inject=0
+        for a in "$@"; do
+            out+=("$a")
+            if [ "$done_inject" -eq 0 ] && [ "$a" = "create" ]; then
+                out+=(--label "hextech_ctf_tool_job_id=$JOB_ID")
+                done_inject=1
+            fi
+        done
+        echo "[docker-memguard] tagged network with hextech_ctf_tool_job_id=$JOB_ID" >&2
+        exec "$REAL" "${out[@]}"
+    fi
+fi
+
 case "$sub" in
     run|create) ;;
     *) exec "$REAL" "$@" ;;

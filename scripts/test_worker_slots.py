@@ -668,6 +668,106 @@ def test_containers() -> None:
 
 
 
+# --------------------------------------------------------------------------
+# 11. end-of-job reap — containers AND networks, never fatal
+# --------------------------------------------------------------------------
+def test_reap() -> None:
+    """A job that finishes must take its containers and networks with it.
+
+    Order is the load-bearing part: a network with an attached container
+    cannot be removed, so containers have to go first or the network sweep
+    silently fails. And nothing here may raise — a cleanup that breaks a
+    finished job is worse than the leak it fixes.
+    """
+    section("end-of-job reap")
+    stub = types.ModuleType("modules.settings_io")
+    stub.get_setting = lambda k: True
+    pkg = types.ModuleType("modules")
+    pkg.__path__ = []  # type: ignore[attr-defined]
+    sys.modules["modules"] = pkg
+    sys.modules["modules.settings_io"] = stub
+
+    src = (ROOT / "modules" / "_common.py").read_text()
+    import ast as _ast
+    tree = _ast.parse(src)
+    want = {"reap_job_siblings", "_coerce_bool", "_JOB_LABEL"}
+    nodes = [n for n in tree.body
+             if (isinstance(n, _ast.FunctionDef) and n.name in want)
+             or (isinstance(n, _ast.Assign)
+                 and any(getattr(t, "id", "") in want for t in n.targets))]
+    ns: dict = {}
+    exec(compile(_ast.Module(body=nodes, type_ignores=[]), "<r>", "exec"), ns)
+
+    order: list[str] = []
+
+    class _Obj:
+        def __init__(self, name, fail=False):
+            self.name, self._fail = name, fail
+
+        def remove(self, **kw):
+            if self._fail:
+                raise RuntimeError("boom")
+            order.append(self.name)
+
+    class _Coll:
+        def __init__(self, items):
+            self.items = items
+
+        def list(self, **kw):
+            return self.items
+
+    class _Client:
+        def __init__(self, cs, ns_):
+            self.containers, self.networks = _Coll(cs), _Coll(ns_)
+
+    fake_docker = types.ModuleType("docker")
+    cs = [_Obj("chal_web"), _Obj("chal_db")]
+    nets = [_Obj("chal_net")]
+    fake_docker.from_env = lambda: _Client(cs, nets)
+    sys.modules["docker"] = fake_docker
+
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("both containers removed", res["containers"] == ["chal_web", "chal_db"], res)
+    chk("the network removed too", res["networks"] == ["chal_net"], res)
+    chk("no errors on the happy path", res["errors"] == [], res)
+    chk("containers are removed BEFORE networks (else the network is in use)",
+        order.index("chal_db") < order.index("chal_net"), order)
+
+    # a failure on one item must not abort the sweep or raise
+    order.clear()
+    cs2 = [_Obj("stuck", fail=True), _Obj("fine")]
+    fake_docker.from_env = lambda: _Client(cs2, [_Obj("net2")])
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("one stuck container does not stop the others", "fine" in res["containers"], res)
+    chk("the network is still swept", res["networks"] == ["net2"], res)
+    chk("the failure is reported, not raised", any("stuck" in e for e in res["errors"]), res)
+
+    # docker unreachable
+    def _boom():
+        raise RuntimeError("no socket")
+    fake_docker.from_env = _boom
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("docker unreachable is reported, never raised",
+        res["errors"] and "unreachable" in res["errors"][0], res)
+
+    cb = ns["_coerce_bool"]
+    chk("reap toggle: unset -> default on", cb(None, True) is True)
+    chk("reap toggle: '0' -> off", cb("0", True) is False)
+    chk("reap toggle: 'false' -> off", cb("false", True) is False)
+    chk("reap toggle: True -> on", cb(True, True) is True)
+
+    # the write_meta gate must fire on the TRANSITION only
+    wm = (ROOT / "modules" / "_common.py").read_text()
+    chk("gate compares against the PREVIOUS on-disk status",
+        'meta.get("status") not in _TERMINAL_STATUSES' in wm)
+    chk("the reap runs AFTER meta.json is written",
+        wm.index("_reap_after_terminal(job_id)") > wm.index("f.write_text(json.dumps(meta"), "")
+    chk("the sweep is time-bounded", "_REAP_TIMEOUT_S" in wm)
+
+    for name in ("modules.settings_io", "modules", "docker"):
+        sys.modules.pop(name, None)
+
+
 def main() -> int:
     test_runner()
     test_slot_scan()
@@ -679,6 +779,7 @@ def main() -> int:
     test_mem_budget_block()
     test_carry_limits_note()
     test_containers()
+    test_reap()
     failed = [r for r in _results if not r[0]]
     print(f"\n{len(_results)} checks, {len(failed)} failed")
     return 1 if failed else 0

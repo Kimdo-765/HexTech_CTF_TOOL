@@ -873,6 +873,107 @@ _SSE_META_KEYS = {
 }
 
 
+_JOB_LABEL = "hextech_ctf_tool_job_id"
+# Jobs already reaped in THIS process. write_meta can be called again after a
+# terminal status (a late cost-counter flush, a collector callback), and the
+# disk-state gate below already handles that — this is the cheap second belt.
+_REAPED_JOBS: set[str] = set()
+# Hard bound on the whole sweep. A wedged docker call here would hang the RQ
+# work horse AFTER the job is done, which blocks the slot from taking the next
+# job — the same class of failure as the /retry copytree that froze uvicorn on
+# a device node. Better to leak a container than to wedge a slot.
+_REAP_TIMEOUT_S = 30.0
+
+
+def reap_job_siblings(job_id: str) -> dict:
+    """Remove every container and network labelled for this job.
+
+    The label is set at creation: the orchestrator tags the sandbox containers
+    it spawns, and worker/docker_memguard.sh tags whatever the AGENT starts
+    from Bash. Before that shim there was no tag at all, which is why
+    containers from June were still running in August.
+
+    Networks are swept too, and they are not a nicety: docker's default
+    address pool is finite, so an accumulation of `chal_<id>_net` bridges
+    eventually fails new job setups outright with "could not find an
+    available, non-overlapping IPv4 address pool".
+
+    Never raises. A cleanup that breaks a finished job would be worse than the
+    leak it fixes.
+    """
+    out = {"containers": [], "networks": [], "errors": []}
+    try:
+        import docker
+
+        client = docker.from_env()
+        flt = {"label": f"{_JOB_LABEL}={job_id}"}
+        for c in client.containers.list(all=True, filters=flt):
+            name = getattr(c, "name", "?")
+            try:
+                c.remove(force=True)
+                out["containers"].append(name)
+            except Exception as e:
+                out["errors"].append(f"{name}: {type(e).__name__}")
+        # Networks AFTER containers — a network with an attached container
+        # cannot be removed, so ordering is what makes this work at all.
+        for n in client.networks.list(filters=flt):
+            name = getattr(n, "name", "?")
+            try:
+                n.remove()
+                out["networks"].append(name)
+            except Exception as e:
+                out["errors"].append(f"{name}: {type(e).__name__}")
+    except Exception as e:
+        out["errors"].append(f"docker unreachable: {type(e).__name__}")
+    return out
+
+
+def _reap_after_terminal(job_id: str) -> None:
+    """Fire-and-log the sweep when a job reaches a terminal status.
+
+    Runs AFTER meta.json is written, so a slow or wedged docker daemon can
+    never delay or lose the final status the UI is waiting on.
+    """
+    if job_id in _REAPED_JOBS:
+        return
+    _REAPED_JOBS.add(job_id)
+    try:
+        if not _coerce_bool(get_setting("reap_job_containers"), True):
+            return
+    except Exception:
+        pass
+    try:
+        import concurrent.futures as _cf
+
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            res = ex.submit(reap_job_siblings, job_id).result(
+                timeout=_REAP_TIMEOUT_S)
+    except Exception as e:
+        log_line(job_id, f"[reap] sweep did not finish ({type(e).__name__}) — "
+                         f"leaving containers in place; the Containers tab can "
+                         f"clear them")
+        return
+    if res["containers"] or res["networks"]:
+        parts = []
+        if res["containers"]:
+            parts.append(f"{len(res['containers'])} container(s): "
+                         + ", ".join(res["containers"]))
+        if res["networks"]:
+            parts.append(f"{len(res['networks'])} network(s): "
+                         + ", ".join(res["networks"]))
+        log_line(job_id, "[reap] removed " + "; ".join(parts))
+    if res["errors"]:
+        log_line(job_id, "[reap] could not remove: " + "; ".join(res["errors"]))
+
+
+def _coerce_bool(v: Any, default: bool) -> bool:
+    if v is None or v == "":
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() not in ("0", "false", "no", "off")
+
+
 def write_meta(job_id: str, **updates: Any) -> None:
     f = job_dir(job_id) / "meta.json"
     meta = {}
@@ -887,6 +988,11 @@ def write_meta(job_id: str, **updates: Any) -> None:
         updates.setdefault("started_at", now_iso)
     if new_status in _TERMINAL_STATUSES and not meta.get("finished_at"):
         updates.setdefault("finished_at", now_iso)
+    # Computed against the PREVIOUS on-disk status, so it is true exactly once
+    # per job — a later write while already terminal (a cost-counter flush, a
+    # collector callback) does not re-fire it.
+    _became_terminal = (new_status in _TERMINAL_STATUSES
+                        and meta.get("status") not in _TERMINAL_STATUSES)
 
     # Which worker SLOT container is serving this job. Stamped from the
     # environment because the process doing this write IS the work horse on
@@ -919,6 +1025,13 @@ def write_meta(job_id: str, **updates: Any) -> None:
     sse_payload = {k: updates[k] for k in _SSE_META_KEYS if k in updates}
     if sse_payload:
         _publish(job_id, "meta", {"status_update": sse_payload})
+
+    # The job is over: take back the containers and networks it created.
+    # LAST, deliberately — meta.json and the SSE event are already out, so a
+    # slow docker daemon cannot delay the status the UI is waiting on, and a
+    # failure here cannot lose it.
+    if _became_terminal:
+        _reap_after_terminal(job_id)
 
 
 def read_meta(job_id: str) -> dict[str, Any]:
