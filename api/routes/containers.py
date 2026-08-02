@@ -28,6 +28,7 @@ SAFETY IS THE HARD PART, not the listing. Three rules, in decreasing severity:
 from __future__ import annotations
 
 import os
+import re
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -121,6 +122,31 @@ def _category(c) -> str:
     return "challenge"                      # agent-started; nothing reaps these
 
 
+# Job ids are `uuid4().hex[:12]`, and agents habitually name a container after
+# the job — either the full id (`chal_e994cf7cad22`) or its first 8
+# (`protoss_fd844946`, `db_fd844946`). That is the ONLY attribution signal an
+# unlabelled container has: measured 2026-08-02, none of the orphans carried a
+# JOB_ID env var or a bind mount naming /data/jobs/<id>, and the jobs that made
+# them had already been deleted, so their run.log was gone too.
+_HEX_RUN = re.compile(r"(?<![0-9a-f])([0-9a-f]{8,12})(?![0-9a-f])")
+
+
+def _job_from_name(name: str) -> str | None:
+    """Job id guessed from a container name, or None.
+
+    Explicitly a GUESS — it is surfaced as such rather than as fact, because an
+    8-hex run is short enough to occur by accident (a container called
+    `deadbeef` would match). The label set by worker/docker_memguard.sh is the
+    authoritative source; this only exists for containers created before that
+    labelling shipped.
+    """
+    for m in _HEX_RUN.finditer((name or "").lower()):
+        tok = m.group(1)
+        if len(tok) in (8, 12):
+            return tok
+    return None
+
+
 def _running_jobs() -> list[dict]:
     """Jobs the UI would show as live, with just what the heuristics need."""
     import json
@@ -141,6 +167,19 @@ def _running_jobs() -> list[dict]:
                         "started_at": m.get("started_at") or "",
                         "worker_slot": str(m.get("worker_slot") or "")})
     return out
+
+
+def _age_days(created: str) -> int | None:
+    """Whole days since creation, or None. The single most useful column for
+    triage: a container from six weeks ago is unambiguously garbage no matter
+    which job made it."""
+    t = _parse_ts(created)
+    if not t:
+        return None
+    try:
+        return max(0, (datetime.now(timezone.utc) - t).days)
+    except Exception:
+        return None
 
 
 def _parse_ts(s: str):
@@ -256,7 +295,12 @@ def _list_sync(with_sizes: bool) -> dict:
             "created": created,
             "category": cat,
             "compose_service": svc or None,
-            "job_id": lab.get(_JOB_LABEL) or None,
+            # Attribution, with its PROVENANCE — an operator deleting things
+            # needs to know whether "job X" is a fact or a guess off the name.
+            "job_id": lab.get(_JOB_LABEL) or _job_from_name(c.name),
+            "job_source": ("label" if lab.get(_JOB_LABEL)
+                           else ("name" if _job_from_name(c.name) else None)),
+            "age_days": _age_days(c.attrs.get("Created") or ""),
             "mem_cap": ((c.attrs.get("HostConfig") or {}).get("Memory") or 0)
                        or None,
             "is_self": _is_self(c),
@@ -278,7 +322,8 @@ def _list_sync(with_sizes: bool) -> dict:
                     "worker slot — idle now, but a queued job can land on it")
         elif svc == "redis" and _is_core_service(svc):
             warn = "the job queue — deleting it loses queued jobs"
-        elif item["job_id"] and item["job_id"] in job_ids:
+        elif (item["job_source"] == "label" and item["job_id"]
+              and item["job_id"] in job_ids):
             warn = f"sandbox container for RUNNING job {item['job_id']}"
         elif cat == "challenge":
             # Agent-started containers carry no label, so this is a guess.

@@ -3910,6 +3910,24 @@ function _catBadge(cat) {
   return `<span class="c-badge c-badge--${cat}">${cat}</span>`;
 }
 
+// Attribution, with its provenance made visible. `label` is authoritative —
+// the container was tagged at creation. `name` is a GUESS off an 8-12 hex run
+// in the container name, which is all an older container has, so it is marked
+// with ~ and says so on hover. Anything else genuinely cannot be attributed:
+// the containers carry no JOB_ID env and no /data/jobs bind, and by the time
+// they are noticed the job that made them has usually been deleted.
+function _jobCell(c) {
+  if (!c.job_id) {
+    return '<span class="c-dim" title="no job label, and the name carries no job id — ' +
+           'created before container labelling shipped">unknown</span>';
+  }
+  if (c.job_source === "label") {
+    return `<code>${escapeHtml(c.job_id)}</code>`;
+  }
+  return `<code class="c-guess" title="guessed from the container name, not a label — verify before acting on it">` +
+         `~${escapeHtml(c.job_id)}</code>`;
+}
+
 function renderContainers(data) {
   const el = document.getElementById("containers-list");
   if (!el) return;
@@ -3930,9 +3948,13 @@ function renderContainers(data) {
     const btn = c.protected
       ? `<button class="btn btn-sm" disabled title="${escapeHtml(c.warn || "protected")}">protected</button>`
       : `<button class="btn btn-sm c-del" data-id="${escapeHtml(c.id)}" data-name="${escapeHtml(c.name)}"` +
-        ` data-warn="${escapeHtml(c.warn || "")}">delete</button>`;
+        ` data-warn="${escapeHtml(c.warn || "")}"` +
+        ` data-job="${escapeHtml(c.job_id ? (c.job_source === "label" ? c.job_id : "~" + c.job_id) : "")}">delete</button>`;
+    const age = c.age_days == null ? "" :
+      `<br><span class="${c.age_days >= 7 ? "c-warn" : "c-dim"}">${c.age_days}d old</span>`;
     return `<tr class="${c.warn ? "c-row--warn" : ""}">
       <td><code>${escapeHtml(c.name)}</code><br><span class="c-dim">${escapeHtml(c.id)}</span></td>
+      <td>${_jobCell(c)}${age}</td>
       <td>${_catBadge(c.category)}${c.compose_service ? `<br><span class="c-dim">${escapeHtml(c.compose_service)}</span>` : ""}</td>
       <td><span class="c-state c-state--${running ? "up" : "down"}">${escapeHtml(c.state)}</span></td>
       <td>${_memCell(c)}</td>
@@ -3940,16 +3962,16 @@ function renderContainers(data) {
       <td>${disk}</td>
       <td><span class="c-dim">${escapeHtml(c.image || "")}</span><br><span class="c-dim">${escapeHtml(c.created || "")}</span></td>
       <td>${btn}</td>
-    </tr>` + (c.warn ? `<tr class="c-warnrow"><td colspan="8">⚠ ${escapeHtml(c.warn)}</td></tr>` : "");
+    </tr>` + (c.warn ? `<tr class="c-warnrow"><td colspan="9">⚠ ${escapeHtml(c.warn)}</td></tr>` : "");
   }).join("");
 
   el.innerHTML = `<table class="containers-table">
-    <thead><tr><th>Name / id</th><th>Kind</th><th>State</th><th>Memory</th><th>CPU</th>
+    <thead><tr><th>Name / id</th><th>Job / age</th><th>Kind</th><th>State</th><th>Memory</th><th>CPU</th>
     <th>Disk (rw)</th><th>Image / created</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 
   el.querySelectorAll(".c-del").forEach((b) => {
-    b.addEventListener("click", () => deleteContainer(b.dataset.id, b.dataset.name, b.dataset.warn));
+    b.addEventListener("click", () => deleteContainer(b.dataset.id, b.dataset.name, b.dataset.warn, b.dataset.job));
   });
 }
 
@@ -3964,10 +3986,11 @@ async function loadContainers() {
   }
 }
 
-async function deleteContainer(id, name, warn) {
+async function deleteContainer(id, name, warn, job) {
   // Two-step ONLY when the backend flagged a cost — an unflagged leftover is
   // the common case and should not need a second click.
   let msg = `Delete container ${name} (${id})?`;
+  if (job) msg += `\nJob: ${job}${job.startsWith("~") ? "  (guessed from the name)" : ""}`;
   if (warn) msg += `\n\n⚠ ${warn}\n\nThis cannot be undone. Continue?`;
   if (!confirm(msg)) return;
   if (warn && !confirm(`Really delete ${name}?\n\n${warn}`)) return;

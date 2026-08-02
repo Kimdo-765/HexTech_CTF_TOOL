@@ -69,15 +69,33 @@ esac
 # Only --memory is injected, never --memory-swap: a caller passing --memory 8g
 # would otherwise be paired with our 2g swap and docker rejects memory-swap <
 # memory. RAM is what we are bounding; swap defaults still apply.
+#
+# The job label rides along for two reasons, and the second one is the bigger
+# win. It makes the container ATTRIBUTABLE in the Containers tab — without it
+# an agent-started container carries no trace of which job made it, and once
+# that job's directory is deleted the link is gone for good (measured
+# 2026-08-02: of 12 orphaned challenge containers, only the 3 whose names
+# happened to embed a job id could be attributed at all). And it makes the
+# container REAPABLE: api/routes/jobs.py `_hard_stop_job` already force-removes
+# every sibling labelled `hextech_ctf_tool_job_id=<id>`, so labelling closes
+# the leak itself rather than only reporting it.
+#
+# JOB_ID is exported into the agent's environment by the orchestrator and this
+# shim runs as a descendant of the agent's Bash, so it is inherited (verified
+# live on job 926773a15d8b). Omitted entirely when unset — an unlabelled
+# container is the status quo, whereas a label reading `=` would be a lie that
+# `_hard_stop_job` could match against the wrong thing.
 out=(); done_inject=0
 for a in "$@"; do
     out+=("$a")
     if [ "$done_inject" -eq 0 ] && [ "$a" = "$sub" ]; then
         out+=(--memory "$LIMIT")
+        [ -n "${JOB_ID:-}" ] && out+=(--label "hextech_ctf_tool_job_id=$JOB_ID")
         done_inject=1
     fi
 done
 
 echo "[docker-memguard] default --memory $LIMIT applied" \
+     "${JOB_ID:+plus label hextech_ctf_tool_job_id=$JOB_ID }" \
      "(pass --memory yourself to override, or set CHAL_CONTAINER_MEM=0)" >&2
 exec "$REAL" "${out[@]}"

@@ -1777,3 +1777,6 @@ body.modal-open { overflow: hidden; }
   background: var(--red-bg);
 }
 .btn-sm:disabled { opacity: 0.45; cursor: not-allowed; }
+/* A guessed job id must not read the same as a labelled one — the operator is
+   about to delete something on the strength of it. */
+.c-guess { color: var(--yellow-bright); opacity: 0.9; }

@@ -648,6 +648,25 @@ def test_containers() -> None:
     chk("_is_core_service includes every slot",
         all(ct._is_core_service(f"worker-{i}") for i in (1, 2, 3)))
 
+    # --- job attribution + provenance -----------------------------------
+    chk("full 12-hex job id in a name is found",
+        ct._job_from_name("chal_e994cf7cad22") == "e994cf7cad22",
+        ct._job_from_name("chal_e994cf7cad22"))
+    chk("8-hex job prefix in a name is found",
+        ct._job_from_name("protoss_fd844946") == "fd844946")
+    chk("db_ prefix does not confuse it",
+        ct._job_from_name("db_fd844946") == "fd844946")
+    for n in ("confident_euler", "simold", "web", "valk", "uniqtmp",
+              "dazzling_poitras", "exciting_ishizaka", "sender"):
+        chk(f"{n:20s} yields no false job id", ct._job_from_name(n) is None,
+            ct._job_from_name(n))
+    chk("a compose container name yields nothing",
+        ct._job_from_name("hextech_ctf_tool-worker-1") is None)
+    # a hex run that is the WRONG length must not match
+    chk("7 hex chars is too short", ct._job_from_name("x_abcdef1") is None)
+    chk("13 hex chars is too long", ct._job_from_name("x_abcdef0123456") is None)
+
+
 
 def main() -> int:
     test_runner()
