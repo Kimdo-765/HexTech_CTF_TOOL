@@ -542,6 +542,113 @@ def test_carry_limits_note() -> None:
         "without it" in note)
 
 
+# --------------------------------------------------------------------------
+# 10. Containers tab — classification and the delete guards
+# --------------------------------------------------------------------------
+class _FakeC:
+    def __init__(self, name, labels, cid="deadbeefcafe0000", status="running"):
+        self.name, self.labels, self.id, self.status = name, labels, cid, status
+        self.attrs = {"Config": {"Image": "img:latest"}, "Created": "2026-08-02T00:00:00Z",
+                      "HostConfig": {"Memory": 0}, "State": {"Status": status}}
+
+
+def _load_containers_mod():
+    fa = types.ModuleType("fastapi")
+
+    class _R:
+        def get(self, *a, **k):
+            return lambda f: f
+
+        def delete(self, *a, **k):
+            return lambda f: f
+
+    class HTTPException(Exception):
+        def __init__(self, status_code=None, detail=None):
+            self.status_code, self.detail = status_code, detail
+
+    fa.APIRouter = lambda *a, **k: _R()
+    fa.HTTPException = HTTPException
+    fa.Query = lambda default=None, **k: default
+    sys.modules["fastapi"] = fa
+    sc = types.ModuleType("starlette.concurrency")
+
+    async def _rit(fn, *a):
+        return fn(*a)
+    sc.run_in_threadpool = _rit
+    sys.modules.setdefault("starlette", types.ModuleType("starlette"))
+    sys.modules["starlette.concurrency"] = sc
+    st = types.ModuleType("api.storage")
+    st.JOBS_DIR = ROOT / "data" / "jobs"
+    sys.modules.setdefault("api", types.ModuleType("api"))
+    sys.modules["api.storage"] = st
+    spec = importlib.util.spec_from_file_location(
+        "_ct", ROOT / "api" / "routes" / "containers.py")
+    assert spec and spec.loader
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m, HTTPException
+
+
+def test_containers() -> None:
+    """The categories drive an IRREVERSIBLE delete, so a mislabel is a real
+    hazard in both directions: `core` on a leftover hides it from cleanup, and
+    `challenge` on a stack service invites deleting the stack."""
+    section("Containers tab — classification + guards")
+    ct, HTTPExc = _load_containers_mod()
+    P = "com.docker.compose.project"
+    S = "com.docker.compose.service"
+    proj = ct._COMPOSE_PROJECT
+
+    cases = [
+        ("api",       {P: proj, S: "api"},                          "core"),
+        ("redis",     {P: proj, S: "redis"},                        "core"),
+        ("worker-1",  {P: proj, S: "worker-1"},                     "core"),
+        ("worker-2",  {P: proj, S: "worker-2"},                     "core"),
+        # THE bug this test exists for: profiles:["tools"] services inherit a
+        # compose service label onto per-job containers.
+        ("decompiler-leftover", {P: proj, S: "decompiler",
+                                 ct._JOB_LABEL: "a15ff70a6ed5"},    "sandbox"),
+        ("runner-leftover",     {P: proj, S: "runner",
+                                 ct._JOB_LABEL: "ef8c5eb95d15"},    "sandbox"),
+        ("tunnel",    {ct._ROLE_LABEL: "tunnel"},                   "tunnel"),
+        ("db_fd844946", {},                                         "challenge"),
+        # a compose label from a DIFFERENT project must not read as ours
+        ("other-project", {P: "somethingelse", S: "api"},           "challenge"),
+    ]
+    for name, labels, want in cases:
+        got = ct._category(_FakeC(name, labels))
+        chk(f"{name:22s} -> {want}", got == want, got)
+
+    # self-identification: the guard that must never silently fail
+    ct._SELF_HOSTNAME = "f1f06c7e8a11"
+    chk("hostname prefix identifies self",
+        ct._is_self(_FakeC("api", {}, cid="f1f06c7e8a11abcdef")))
+    chk("compose service=api is the fallback self-id",
+        ct._is_self(_FakeC("api", {P: proj, S: "api"}, cid="zzzz")))
+    chk("an unrelated container is NOT self",
+        not ct._is_self(_FakeC("db_fd844946", {}, cid="0011223344")))
+
+    # delete refuses self, hard
+    class _Client:
+        class containers:
+            @staticmethod
+            def get(cid):
+                return _FakeC("api", {P: proj, S: "api"}, cid="f1f06c7e8a11abc")
+    ct._client = lambda: _Client()
+    try:
+        ct._delete_sync("f1f06c7e8a11abc", True)
+        chk("DELETE of the api container is refused", False, "no exception")
+    except HTTPExc as e:
+        chk("DELETE of the api container is refused", e.status_code == 409, e.status_code)
+        chk("  the refusal explains WHY", "UI would die" in str(e.detail), e.detail)
+
+    # a non-core service must not be promised a compose recreate
+    chk("_is_core_service excludes tool services",
+        not ct._is_core_service("decompiler") and not ct._is_core_service("runner"))
+    chk("_is_core_service includes every slot",
+        all(ct._is_core_service(f"worker-{i}") for i in (1, 2, 3)))
+
+
 def main() -> int:
     test_runner()
     test_slot_scan()
@@ -552,6 +659,7 @@ def main() -> int:
     test_prompt_tmp_claims()
     test_mem_budget_block()
     test_carry_limits_note()
+    test_containers()
     failed = [r for r in _results if not r[0]]
     print(f"\n{len(_results)} checks, {len(failed)} failed")
     return 1 if failed else 0

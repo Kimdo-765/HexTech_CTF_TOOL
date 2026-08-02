@@ -93,13 +93,27 @@ def _image_name(c) -> str:
     return cfg.get("Image") or (c.attrs.get("Image") or "")[:19]
 
 
+def _is_core_service(svc: str) -> bool:
+    """True only for the LONG-LIVED stack services.
+
+    "has a compose service label" is NOT the same as "is core", and treating
+    them as equal was wrong: runner / decompiler / forensic / misc are
+    `profiles: ["tools"]` services, so compose builds their images and the
+    per-job containers spawned from them inherit
+    `com.docker.compose.service=decompiler`. Two such containers (from jobs
+    a15ff70a6ed5 and ef8c5eb95d15, dating to June and July) were being reported
+    as `core` — i.e. as part of the stack the operator must not touch — when
+    they are in fact abandoned per-job sandboxes, exactly what this tab is for.
+    """
+    return svc in ("api", "redis") or svc.startswith("worker")
+
+
 def _category(c) -> str:
     """What KIND of container this is — the field the operator actually sorts
     on when deciding what is safe to remove."""
-    svc = _svc(c)
-    if svc:
-        return "core"                       # api / redis / worker-N
     lab = _labels(c)
+    if _is_core_service(_svc(c)):
+        return "core"                       # api / redis / worker-N
     if lab.get(_ROLE_LABEL) == "tunnel":
         return "tunnel"
     if lab.get(_JOB_LABEL):
@@ -255,14 +269,14 @@ def _list_sync(with_sizes: bool) -> dict:
         if item["is_self"]:
             warn = ("this is the api container serving this page — deleting it "
                     "would kill the UI mid-request")
-        elif svc.startswith("worker"):
+        elif svc.startswith("worker") and _is_core_service(svc):
             on_slot = [j["id"] for j in jobs
                        if j["worker_slot"] and svc == f"worker-{j['worker_slot']}"]
             warn = (f"worker slot — currently running job {on_slot[0]}; "
                     f"deleting it kills that job"
                     if on_slot else
                     "worker slot — idle now, but a queued job can land on it")
-        elif svc == "redis":
+        elif svc == "redis" and _is_core_service(svc):
             warn = "the job queue — deleting it loses queued jobs"
         elif item["job_id"] and item["job_id"] in job_ids:
             warn = f"sandbox container for RUNNING job {item['job_id']}"
@@ -333,8 +347,11 @@ def _delete_sync(cid: str, force: bool) -> dict:
     return {"ok": True, "removed": name, "id": (c.id or "")[:12],
             "category": cat, "compose_service": svc or None,
             "was_running": was_running,
+            # Only the long-lived services come back on `up -d`. A per-job
+            # sandbox with a compose service label (profiles: ["tools"]) does
+            # NOT, so promising a recreate there would be a lie.
             "note": ("compose will recreate this on the next `up -d`"
-                     if svc else None)}
+                     if _is_core_service(svc) else None)}
 
 
 @router.delete("/{cid}")
