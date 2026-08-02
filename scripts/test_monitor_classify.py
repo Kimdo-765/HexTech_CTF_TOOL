@@ -99,6 +99,26 @@ def main() -> int:
     chk("web: a segfault the agent merely mentions is not",
         m.classify(seg, "web") is None, m.classify(seg, "web"))
 
+    # ------------------------------------------------------- file content
+    section("file content the agent READ is data, not an event")
+    chk("a Read line with 'except OSError:' is not an error",
+        m.classify("[main] TOOL_RESULT: 93\t            except OSError:", "pwn") is None,
+        m.classify("[main] TOOL_RESULT: 93\t            except OSError:", "pwn"))
+    chk("...nor at line 110", 
+        m.classify("[main] TOOL_RESULT: 110\t        except OSError:", "pwn") is None)
+    chk("a Read line mentioning SIGSEGV is not a crash event either",
+        m.classify("[main] TOOL_RESULT: 24\tCHAIN — ASLR is on and the SIGSEGV maps leak",
+                   "pwn") is None,
+        m.classify("[main] TOOL_RESULT: 24\tCHAIN — SIGSEGV maps leak", "pwn"))
+    chk("grep-shaped output is data too",
+        m.classify("[main] TOOL_RESULT: exploit.py:93:        except OSError:", "pwn") is None)
+    chk("but a REAL failure in TOOL_RESULT is still an error",
+        m.classify("[main] TOOL_RESULT: BrokenPipeError: [Errno 32] Broken pipe", "pwn")
+        == ("error", "err"))
+    chk("and a real traceback is still an error",
+        m.classify("[main] TOOL_RESULT: Traceback (most recent call last):", "pwn")
+        == ("error", "err"))
+
     # ---------------------------------------------------------------- noise
     section("bookkeeping is not narratable")
     chk("'attempt 0/' is a turn boundary, not a retry",

@@ -134,6 +134,24 @@ _RE_ARTIFACT = re.compile(r"TOOL (Write|Edit)[^\n]*(exploit|solver)\.py")
 # REAL errors in that run (a Traceback and a BrokenPipeError) were unfindable.
 _RE_AGENT_AUTHORED = re.compile(r"\] (?:TOOL (?:Bash|Read|Edit|Write|mcp)\S*:|AGENT:)")
 
+# FILE CONTENT the agent asked for, echoed back through TOOL_RESULT. Read
+# output is `<lineno>\t<source>`; grep output is `<path>:<lineno>:<source>`.
+# Neither is an EVENT — it is data — but both arrive on a TOOL_RESULT line,
+# which the agent-authored rule above counts as "received" and therefore
+# eligible to be an error.
+#
+# Job e601cd358ad6 shows the cost: the agent Read its own exploit.py and the
+# source lines
+#     [main] TOOL_RESULT: 93\t            except OSError:
+#     [main] TOOL_RESULT: 110\t        except OSError:
+# matched the exception-class pattern, so an entry whose narration is plainly
+# "agent initialising: anchoring cwd, reading prior artifacts" was badged err.
+# Code that HANDLES an error is not an error. The same line shape also carries
+# SIGSEGV mentions into the crash bucket for the same wrong reason.
+_RE_FILE_CONTENT = re.compile(
+    r"TOOL_RESULT:\s*(?:\d+\t|[^\s:]+:\d+:)"
+)
+
 # Genuine failure output. `Exception:` alone used to be here and was far too
 # loose; requiring the Python exception-class SHAPE keeps BrokenPipeError /
 # ValueError / bare Exception while ignoring the word in prose.
@@ -184,8 +202,22 @@ def classify(body: str, module: str = "") -> tuple[str, str] | None:
     # "tool echo" would lose the two most important signals.
     if "FLAG_CANDIDATE:" in body and "{" in body:
         return ("flag", "good")
-    # Only output the agent RECEIVED can be a FAILURE. Text the agent WROTE —
-    # a command body, a subagent prompt, its own prose — is intent, not event.
+    # THREE kinds of text, three treatments — conflating any two of them is
+    # what produced every false badge this classifier has had:
+    #
+    #   DATA    file content the agent READ back. Neither intent nor event;
+    #           drops to the tool-echo path below like any other echo. Must be
+    #           checked FIRST: it arrives on a TOOL_RESULT line, so the
+    #           "received" rule would otherwise let its source code — `except
+    #           OSError:`, a comment mentioning SIGSEGV — become an event.
+    #   INTENT  what the agent WROTE: a command body, a subagent prompt, its
+    #           own prose. Never a failure, but a crash mention here is worth
+    #           surfacing ("about to segfault the target").
+    #   EVENT   everything else — output the agent RECEIVED, orchestrator and
+    #           runner lines. Only these can be a failure.
+    if _RE_FILE_CONTENT.search(body):
+        return ("artifact", "info") if _RE_ARTIFACT.search(body) else None
+
     agent_authored = bool(_RE_AGENT_AUTHORED.search(body))
     if not agent_authored and _RE_ERROR.search(body):
         return ("error", "err")
@@ -633,10 +665,22 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
         # --- flush the prose batch through the LLM -------------------------
         now = time.monotonic()
         if pending and (len(pending) >= BATCH_MAX or now - last_flush >= BATCH_MAX_S):
-            batch, pending = pending, []
+            # Flush in CHUNKS of BATCH_MAX, not "everything pending".
+            #
+            # The ingest loop above appends every line a single poll produced
+            # before this check runs, so a burst delivered 10 signal lines at
+            # once and they became ONE entry. Job e601cd358ad6: libprotobuf
+            # decomp FAILED + libz decompiling + libz FAILED + libzstd
+            # decompiling + libzstd FAILED + AUTOBOOT.md written — six distinct
+            # events compressed into a single ~160-char sentence. The narrator
+            # was not writing badly; it was asked to summarise ten things in one
+            # line. Chunking keeps the compression ratio at what BATCH_MAX
+            # actually promises.
             last_flush = now
-            await _flush_batch(job_id, batch, model,
-                               turns=turns, recent=recent_texts)
+            while pending:
+                batch, pending = pending[:BATCH_MAX], pending[BATCH_MAX:]
+                await _flush_batch(job_id, batch, model,
+                                   turns=turns, recent=recent_texts)
 
         # --- terminal? -----------------------------------------------------
         if status and status in _TERMINAL:
