@@ -905,6 +905,16 @@ Rev-specific:
   - decompiler     : `ghiant <binary> [outdir]` (Ghidra headless, ./decomp/)
   - Python (import): pwn (ELF / asm / disasm), z3 (constraint solving for
                      check-input-style crackmes), Crypto, sympy, gmpy2
+  - symbolic/emul  : angr (symbolic execution, CFG recovery), unicorn (CPU
+                     emulation — run one obfuscated function without the rest
+                     of the program), capstone (disassembly from Python).
+                     All three ARE importable in this container.
+  - obfuscation    : against control-flow flattening, do NOT read the
+                     dispatcher by hand — recover the state->block map, then
+                     emulate (unicorn) or symbolically execute (angr) the
+                     blocks. Against MBA, z3 proves an identity but is slow to
+                     SIMPLIFY one; prefer emulating the expression over the
+                     input domain and fitting the observed table.
 """
 
 TOOLS_CRYPTO = _TOOLS_BASE + """\
