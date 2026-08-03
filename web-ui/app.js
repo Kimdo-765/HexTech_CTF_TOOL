@@ -2319,8 +2319,27 @@ async function refreshJobs() {
     const li = document.createElement("li");
     li.dataset.id = job.id;
     const cost = job.cost_usd ? `· $${Number(job.cost_usd).toFixed(3)}` : "";
+    // HOW the flag was obtained, not just that there is one. `marker` means the
+    // solver printed `FLAG_CANDIDATE: <flag>` — it declared that exact string as
+    // its capture. `runner_regex` means only that a flag-SHAPED string appeared
+    // somewhere in the runner's output; nobody declared anything. Job
+    // 0c04e636633c shipped its solver's own diagnostic banner that way, and this
+    // pill was indistinguishable from a real capture. Promotes and drops
+    // nothing — curation stays MANUAL; it just stops the two looking alike.
+    // `flag_sweep_suppressed` OVERRIDES the tier note and must be checked
+    // first. When the runner printed a flag-shaped string and the same output
+    // then declared failure, the scanner drops it and the NARRATIVE tier can
+    // re-find the string in report.md — leaving provenance honestly
+    // "narrative", whose note claims the runner's output does not contain it.
+    // It does. Two different facts; show the one that is not misleading.
+    const provNote = job.flag_sweep_suppressed
+      ? "\n\n⚑ The runner's own output DID contain this string — and the same output declares it found nothing. Dropped from the trusted tier; whatever promoted this flag was something else."
+      : ({
+          runner_regex: "\n\n⚑ SWEPT, not declared — the solver printed no `FLAG_CANDIDATE:` marker, so nothing asserts this IS the flag; only that it is flag-shaped.",
+          narrative: "\n\n⚑ From the agent's report.md / findings.json only — the runner's own stdout/stderr does not contain it.",
+        }[job.flag_provenance] || "");
     const flagPill = (job.flags && job.flags.length)
-      ? `<span class="flag-pill" title="${escapeHtml(job.flags.join('\n'))}">🚩 ${job.flags.length}</span>` : "";
+      ? `<span class="flag-pill" title="${escapeHtml(job.flags.join('\n') + provNote)}">🚩 ${job.flags.length}${provNote ? "⚑" : ""}</span>` : "";
     // Unreproduced candidate badge. A job can end no_flag while the REAL flag is
     // already in flag_candidates: only a TRUSTED source (runner stdout / OOB
     // collector) promotes a flag, so a sandbox run that died for an ENVIRONMENT

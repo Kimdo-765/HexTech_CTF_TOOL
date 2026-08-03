@@ -411,7 +411,21 @@ def _flag_regex(flag_format: str | None):
     prefix = flag_format.split("{", 1)[0].strip()
     if not (1 <= len(prefix) <= 16) or not re.fullmatch(r"[A-Za-z0-9_.\-]+", prefix):
         return None
-    return re.compile(re.escape(prefix).encode() + rb"\{[^}\n]{1,256}\}")
+    # `[^\s}]`, NOT `[^}\n]` — parity with `FLAG_RE` and `job_flag_format_re`
+    # in modules/_common.py. The old class admitted spaces, tabs and `\r`, so a
+    # decoding whose bytes happened to land as `DH{` + prose + `}` was accepted
+    # as the flag. That matters more here than anywhere else: per the block
+    # above, the format match IS this auto-solver's entire correctness proof —
+    # there is no second check to catch a wrong accept. Job 0c04e636633c is the
+    # same defect in the scanner (a whitespace-bearing description promoted to
+    # meta.flags).
+    #
+    # NOT sufficient on its own: a 256-key single-byte brute force over random
+    # blobs still wrong-accepts at a measured 0.16–0.62%, and that survivor
+    # ships straight through the marker tier. Narrowing the class shaves the
+    # tail; format-match-as-sole-proof is the real limitation and is stated
+    # plainly in the block above rather than papered over here.
+    return re.compile(re.escape(prefix).encode() + rb"\{[^\s}]{1,256}\}")
 
 
 def _harvest_ciphertext_blobs(src_root: Path) -> list[bytes]:

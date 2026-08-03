@@ -331,9 +331,20 @@ def run_job(
             except Exception:
                 pass
 
+        # `finished` means "a flag came out", the same as every other module.
+        # This line said `status="finished"` unconditionally, and the history
+        # shows that was an oversight rather than a decision: it predates flags
+        # entirely (initial commit), and when a0a0488 added flag detection to
+        # forensic it passed `flags=flags` here without revisiting the status
+        # beside it. misc — the other one-shot module, same shape — has always
+        # used `finished if flags else no_flag`. The difference is not cosmetic:
+        # web-ui/app.js gates the Save-to-exploit-library button on
+        # `status === "finished"`, so a flagless forensic run offered to save
+        # itself into the library as a solved challenge.
+        final_status = "finished" if flags else "no_flag"
         (_job_dir(job_id) / "result.json").write_text(json.dumps(result, indent=2, default=str))
         _write_meta(
-            job_id, status="finished", stage="done", cost_usd=cost,
+            job_id, status=final_status, stage="done", cost_usd=cost,
             flags=flags,
             log_findings_counts=log_findings_counts,
             result={"kind": kind, "had_claude": bool(result.get("claude"))},

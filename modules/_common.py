@@ -1347,7 +1347,24 @@ def job_flag_format_re(job_id: str) -> "re.Pattern | None":
     if not prefix:
         return None
     try:
-        return re.compile(re.escape(prefix) + r"\{[^}\r\n]{1,256}\}")
+        # `[^\s}]`, NOT `[^}\r\n]` — parity with FLAG_RE (:38), which has
+        # always excluded whitespace. The looser class made this feature, which
+        # the docstring above advertises as NARROWING the match, strictly
+        # WIDER on the whitespace axis: it admits spaces, brackets and plus
+        # signs, so an English sentence between the braces matched.
+        #
+        # Job 0c04e636633c is what that costs. Its solver printed the
+        # diagnostic banner
+        #     print("target: DH{ + 36 chars of [a-z0-9_] + }")
+        # as line 1 of its stdout; line 25 of the same file read "no flag
+        # found; tried 3383296 candidates in 1500s", report.md said "The flag
+        # itself was not captured", findings.json said exploit_status
+        # "tested-failed", and the solver emitted ZERO FLAG_CANDIDATE markers.
+        # The banner still matched, landed in meta.flags at the TRUSTED tier,
+        # and the job reported status=finished. Generic FLAG_RE rejects that
+        # string; only the operator's own safety feature accepted it — turning
+        # the guard on is what manufactured the false success.
+        return re.compile(re.escape(prefix) + r"\{[^\s}]{1,256}\}")
     except re.error:
         return None
 
@@ -1358,8 +1375,26 @@ def scan_job_for_flags(
     *,
     sandbox_result: dict | None = None,
     trusted_only: bool = False,
+    provenance_out: dict | None = None,
 ) -> list[str]:
     """Return real captured flags for a job.
+
+    `provenance_out`, when given, receives `{"tier": <name>}` naming WHICH
+    tier produced the return value:
+
+        "marker"       the solver printed `FLAG_CANDIDATE: <flag>` — it is
+                       declaring this exact string as its capture
+        "runner_regex" a flag-SHAPED string merely appeared somewhere in the
+                       runner's output; nobody declared anything
+        "narrative"    only the agent's own prose (report.md / findings.json)
+                       carries it
+        ""             no flags
+
+    The first two were indistinguishable before: both were recorded as
+    `flag_trusted_tier=True`, so no caller could tell "the solver said it
+    captured this" from "a flag-shaped string appeared in its output". Job
+    0c04e636633c fell through exactly that gap. Out-param rather than a changed
+    return type so the ~20 existing call sites are untouched.
 
     `trusted_only=True` skips the NARRATIVE tier entirely (run.log /
     report.md / findings.json) — the caller is asserting that the only
@@ -1405,6 +1440,25 @@ def scan_job_for_flags(
     """
     jd = job_dir(job_id)
 
+    def _prov(tier: str) -> None:
+        if provenance_out is not None:
+            provenance_out["tier"] = tier
+
+    def _prov_suppressed(denial: str) -> None:
+        """Record that the runner's output DID carry a flag-shaped string which
+        the denial rule then dropped.
+
+        Separate from `tier` because they are separate facts and the tier alone
+        gets the story backwards. When the sweep is suppressed and the NARRATIVE
+        tier then finds the same string in report.md, `tier` is honestly
+        "narrative" — but reporting only that tells the operator "the runner's
+        own output does not contain it", which is the opposite of what happened.
+        """
+        if provenance_out is not None:
+            provenance_out["suppressed"] = denial
+
+    _prov("")
+
     # Operator-declared flag format (per-job, optional). When set it
     # REPLACES the generic FLAG_RE for the scan tiers below: only flags
     # of the declared prefix shape (e.g. DH{...}) match, so local-test
@@ -1449,7 +1503,9 @@ def scan_job_for_flags(
                 # value carries a PREFIX{...} brace-flag, reduce to it;
                 # brace-less declared flags (raw hex / prefix-less) have no
                 # `{...}` and are kept verbatim.
-                _bf = re.search(r"\w{1,15}\{[^}\r\n]{1,256}\}", cand)
+                # Same whitespace parity as job_flag_format_re — a candidate
+                # whose braces contain prose is a description, not a capture.
+                _bf = re.search(r"\w{1,15}\{[^\s}]{1,256}\}", cand)
                 if _bf:
                     cand = _bf.group(0)
                 elif re.search(r"\s", cand):
@@ -1489,13 +1545,96 @@ def scan_job_for_flags(
         if not _is_placeholder_flag(c, trusted=True)
     }
     if marker:
+        _prov("marker")
         return sorted(marker)
+
+    # Below this line is a bare REGEX SWEEP of the same files, not an explicit
+    # declaration. Both outcomes are recorded as flag_trusted_tier=True, so
+    # nothing downstream can tell "the solver said it captured this" apart from
+    # "a flag-shaped string appeared in its output".
+    #
+    # Job 0c04e636633c fell exactly through this gap: the marker tier correctly
+    # returned EMPTY (the solver emits FLAG_CANDIDATE only inside verify()-gated
+    # branches, and it never verified anything), and the sweep then scraped the
+    # solver's own diagnostic banner. Two machine-readable negatives sat unread
+    # in the very stream being scanned — zero markers, and a final line reading
+    # "no flag found; tried 3383296 candidates in 1500s".
+    #
+    # A run that printed NO marker and then said it found nothing is not a
+    # capture. Treat the sweep as the weaker evidence it is: when the run's own
+    # output declares failure, do not promote a regex hit from that same output.
+    def _declares_failure(names) -> str:
+        """The run's own words for 'I did not find it', or "".
+
+        Read from the SAME files the sweep scans, so this can never disagree
+        with what was scraped. Deliberately narrow — these are phrases a solver
+        prints about ITSELF, not prose an agent might quote about the chal.
+
+        POSITION MATTERS. Only the tail of each file AFTER its last flag-shaped
+        hit is consulted. A denial is evidence about how the run ENDED; one
+        printed BEFORE a flag describes an earlier attempt, not the capture that
+        followed it. Reading the whole file would silently lose the flag of any
+        solver that reports per-attempt — `no flag found for k=1` … then the
+        real flag on attempt 2 — which is the exact shape of a brute-force loop,
+        and losing a genuine flag is the failure mode that cost job a3d4d448
+        (memory real_flag_dropped_as_placeholder). Job 0c04e636633c is still
+        suppressed: its banner is line 1 of 25 and its denial is line 25.
+        """
+        for name in names:
+            p = jd / name
+            if not p.is_file():
+                continue
+            try:
+                text = p.read_text(errors="replace")
+            except Exception:
+                continue
+            _tail_from = 0
+            for _m in scan_re.finditer(text):
+                _tail_from = _m.end()
+            for line in text[_tail_from:].splitlines():
+                low = line.strip().lower()
+                if not low:
+                    continue
+                for needle in ("no flag found", "flag not found",
+                               "no flag recovered", "failed to recover the flag",
+                               "could not recover the flag", "exhausted without"):
+                    if needle in low:
+                        return line.strip()[:200]
+        return ""
 
     trusted = {
         f for f in _scan(trusted_set)
         if not _is_placeholder_flag(f, trusted=True)
     }
     if trusted:
+        _denial = _declares_failure(trusted_set)
+        if _denial:
+            # The sweep found a flag-shaped string in output that says it found
+            # nothing. Believe the sentence, not the shape.
+            #
+            # NEVER silently: dropping a possible real capture without saying so
+            # is how job a3d4d448 lost a genuine DH{<64 hex>} to an over-eager
+            # width rule. The operator gets the candidate, the sentence that
+            # overrode it, and enough to disagree.
+            #
+            # The MARKER tier above is deliberately unaffected — a solver that
+            # explicitly declares FLAG_CANDIDATE on a verified capture is
+            # believed even if some earlier line said it had found nothing.
+            # Only the weaker bare-regex sweep defers to the denial.
+            try:
+                log_line(job_id, (
+                    "⚑ FLAG SWEEP SUPPRESSED — the run's own output declares "
+                    f"failure: {_denial!r}. Candidate(s) dropped from the "
+                    f"trusted tier: {sorted(trusted)}. If one of these is real, "
+                    f"the solver should print `FLAG_CANDIDATE: <flag>` on "
+                    f"capture — the marker tier is not subject to this rule."
+                ))
+            except Exception:
+                pass
+            _prov_suppressed(_denial)
+            trusted = set()
+    if trusted:
+        _prov("runner_regex")
         return sorted(trusted)
 
     # Skip narrative fallback when the sandbox never ran. Without a
@@ -1512,6 +1651,8 @@ def scan_job_for_flags(
         return []
 
     narrative = {f for f in _scan(_NARRATIVE_FLAG_SOURCES) if not _is_placeholder_flag(f)}
+    if narrative:
+        _prov("narrative")
     return sorted(narrative)
 
 
@@ -1772,7 +1913,17 @@ def _is_placeholder_flag(flag: str, trusted: bool = False) -> bool:
     # `flag = "DH{" + secret + "}"` out of run.log as the (wrong) capture.
     # `<%s>` stays caught by the `%` rule above; `<<_>>` has no letter after
     # any `<`, so it correctly survives.
-    if _re.search(r"<[a-z][\w ]*>", inner):
+    #
+    # The anchor is `[a-z0-9]`, not `[a-z]`: the most common metavariable an
+    # agent writes for a flag it has NOT captured is DIGIT-led — `DH{<64hex>}`,
+    # `DH{<32 hex chars>}`, `DH{<36 chars>}` — and a letter-only anchor passed
+    # every one of them at every tier. This is the gap the whitespace parity
+    # fix (job_flag_format_re) does NOT close: `<64hex>` contains no whitespace,
+    # so it is promoted on the plain FLAG_RE path too. `DH{<36 chars>}` was
+    # sitting in job 0c04e636633c's findings.json. Corpus-checked: zero of the
+    # 150 recorded real flags contain `<` at all, and `<<_>>` still survives
+    # because each `<` is followed by `<` or `_`.
+    if _re.search(r"<[a-z0-9][\w ]*>", inner):
         return True
     # A literal quote in the inner is a code fragment, never a flag (a real
     # flag can't contain the quote that delimits the string it is printed
@@ -4429,7 +4580,8 @@ def _accumulate_flag_candidates(job_id: str, msg) -> bool:
         cand = _MARKER_ESCAPE_RE.split(raw.strip(), 1)[0].strip().strip("\"'`").strip()
         # Reduce a prose-embedded marker to its PREFIX{...} brace-flag (see
         # _scan_markers in scan_job_for_flags); brace-less flags kept as-is.
-        _bf = re.search(r"\w{1,15}\{[^}\r\n]{1,256}\}", cand)
+        # Same whitespace parity as job_flag_format_re (see :1350).
+        _bf = re.search(r"\w{1,15}\{[^\s}]{1,256}\}", cand)
         if _bf:
             cand = _bf.group(0)
         elif re.search(r"\s", cand):
@@ -8105,9 +8257,11 @@ async def run_main_agent_session(
                 # (flag curation is the operator's, via the UI); just say which
                 # tier it came from, in the log and in meta.
                 _trusted_now: list = []
+                _prov_now: dict = {}
                 try:
                     _trusted_now = scan_job_for_flags(
                         job_id, sandbox_result=last_sandbox, trusted_only=True,
+                        provenance_out=_prov_now,
                     )
                 except Exception:
                     pass
@@ -8128,8 +8282,43 @@ async def run_main_agent_session(
                 # flag_trusted_tier=True there claims the most-trusted
                 # provenance for a job that captured nothing.
                 if flags_now:
+                    # `flag_trusted_tier` is a BOOL and cannot express the
+                    # distinction that mattered in 0c04e636633c: a solver that
+                    # DECLARED `FLAG_CANDIDATE: <flag>` and a regex that merely
+                    # found a flag-shaped string in the same stdout both set it
+                    # True. Record the tier by name beside it so the UI, the
+                    # library-save gate and any later status rule can key on
+                    # something better than a bool. Nothing is dropped here —
+                    # flag curation stays the operator's, via the UI.
+                    _tier = _prov_now.get("tier") or (
+                        "narrative" if _narrative_only else ""
+                    )
+                    # A suppressed sweep is NOT the same as "the runner never
+                    # printed it". Both end with an empty trusted tier, so
+                    # `_narrative_only` cannot tell them apart and would label
+                    # the first one "narrative" — asserting the runner's output
+                    # does not contain a string that it demonstrably does.
+                    _supp = _prov_now.get("suppressed") or ""
+                    if _supp:
+                        log_fn(
+                            f"[orchestrator] ⚑ the runner's output DID carry a "
+                            f"flag-shaped string, dropped because the same "
+                            f"output declares failure: {_supp!r}. The promoted "
+                            f"flag is therefore not the runner's word for it."
+                        )
+                    if _tier == "runner_regex":
+                        log_fn(
+                            f"[orchestrator] ⚑ the promoted flag was SWEPT from "
+                            f"the runner's output, not declared: the solver "
+                            f"printed no `FLAG_CANDIDATE:` marker, so nothing "
+                            f"asserts this string is the capture — only that it "
+                            f"is flag-SHAPED. Job 0c04e636633c shipped its own "
+                            f"diagnostic banner this way."
+                        )
                     try:
-                        write_meta(job_id, flag_trusted_tier=not _narrative_only)
+                        write_meta(job_id, flag_trusted_tier=not _narrative_only,
+                                   flag_provenance=_tier,
+                                   flag_sweep_suppressed=bool(_supp))
                     except Exception:
                         pass
 
