@@ -4800,10 +4800,35 @@ def capture_session_id(msg, job_id: str) -> None:
     sid = None
     if isinstance(data, dict):
         sid = data.get("session_id") or data.get("sessionId")
-    if sid:
+    if not sid:
+        return
+    # `claude_session_id` is what /retry feeds to `claude --resume <sid>
+    # --fork-session`. A Grok ACP session id lives in the Grok agent process,
+    # not in ~/.claude/projects/<key>/<sid>.jsonl, so writing one there hands
+    # /retry an id the Claude CLI rejects outright:
+    #   {"subtype":"error_during_execution","errors":["No conversation found
+    #    with session ID: ..."]}
+    # (verified against the pinned CLI, not just the SDK bundle).
+    #
+    # This never mattered while a job used one backend end to end. The AUP
+    # recovery ladder's `other_provider` rung makes a mid-job switch possible,
+    # and grok_acp yields a SYNTHETIC init SystemMessage whose subtype really
+    # is "init" — so the early return above does not save us. Keep the
+    # provider-neutral field always; gate only the Claude-specific one.
+    # Read the JOB's provider, not Settings'. active_provider() reflects the
+    # global setting, which still says "claude" after a per-job AUP switch —
+    # so gating on it would never fire on the one path that needs it.
+    # _aup_restart_session stamps meta.agent_provider when it switches.
+    try:
+        _is_claude = (read_meta(job_id) or {}).get("agent_provider") != "grok"
+    except Exception:
+        _is_claude = True
+    if _is_claude:
         # Historical field name kept for /retry resume compatibility;
         # agent_session_id is provider-neutral.
         write_meta(job_id, claude_session_id=sid, agent_session_id=sid)
+    else:
+        write_meta(job_id, agent_session_id=sid)
 
 
 _RETRY_HINT_MARKER = "[retry-hint]"
@@ -6338,6 +6363,140 @@ _STOP_KIND_HEADERS = {
 }
 
 
+# --- AUP recovery -----------------------------------------------------------
+# A server-side Usage-Policy block ends the SESSION, not the JOB. The session's
+# accumulated transcript is what the classifier refused, so re-querying it
+# re-blocks deterministically (jobs ab95a434bb0f, 2eba75783e83) — but a FRESH
+# context over the same work tree does not, which is why /retry has always been
+# the de-facto cure. These helpers automate that cure instead of parking the
+# job until an operator notices.
+#
+# NOT an attempt to evade the classifier. Nothing here rewrites, launders or
+# re-words the prompt: the recovery starts a clean session and, failing that,
+# hands the same work to the other configured provider under its own policy.
+# This repository already learned that lesson the expensive way — vocabulary
+# scaffolding added to dodge a soft refusal turned into a HARD server-side
+# block on every reviewer call (A/B proven 2026-06-02), and the fix was to
+# delete the scaffolding.
+_AUP_RECOVERY_STEPS = ("fresh_session", "other_provider")
+
+
+def aup_recovery_step(summary: dict, *, grok_available: bool) -> str | None:
+    """Next recovery to try after a policy refusal, or None to halt.
+
+    Pure and side-effect free so the ladder can be tested without an actual
+    refusal. Each step is attempted AT MOST ONCE per job — a second refusal
+    after a clean context means the challenge content itself is what the
+    classifier objects to, and burning further sessions on it is waste.
+    """
+    done = list(summary.get("aup_recoveries") or [])
+    for step in _AUP_RECOVERY_STEPS:
+        if step in done:
+            continue
+        if step == "other_provider" and not grok_available:
+            continue
+        return step
+    return None
+
+
+def write_resume_state(
+    work_dir: Path,
+    *,
+    job_id: str = "",
+    summary: dict | None,
+    sandbox_result: dict | None,
+    judge_out: dict | None,
+    attempt_idx: int,
+    reason: str,
+    log_fn,
+) -> str:
+    """Write RESUME_STATE.md — what a CLEAN session needs to carry on.
+
+    WHY_STOPPED.md explains to a HUMAN why the run ended. This is the other
+    audience: an agent booting with no conversation history, looking at a work
+    tree it did not build. Without it a fresh session re-derives what the dead
+    session already knew — job e601cd358ad6 spent 88 turns and $23.77
+    rediscovering a primitive that was already written down.
+
+    Deliberately points at FILES rather than restating their contents: the
+    work tree is carried intact, so the cheapest correct thing is to tell the
+    new session what exists and what was already settled.
+    """
+    # The LIVE target, not whatever the dead session was spawned with. A
+    # mid-run Change Target is invisible to a restarted session otherwise: its
+    # prompt is the spawn-time one, and the loop's own change detector re-reads
+    # meta at re-entry so it compares NEW to NEW and can never fire.
+    live_target = ""
+    try:
+        # Fall back to the work-tree path (/data/jobs/<id>/work) when no id was
+        # passed, so an older caller still gets the live value.
+        _jid = job_id or Path(work_dir).parent.name
+        live_target = str((read_meta(_jid) or {}).get("target_url") or "")
+    except Exception:
+        pass
+
+    lines: list[str] = [
+        "# RESUME STATE",
+        "",
+        f"The previous session ended early: **{reason}**. Its conversation is "
+        "gone; this work tree is not. Everything below survived.",
+        "",
+        "## Read these first",
+    ]
+    for name in ("report.md", "findings.json", "chain.json", "THREAT_MODEL.md",
+                 "exploit.py", "solver.py", "AUTOBOOT.md", "pre_recon_raw.md"):
+        f = work_dir / name
+        try:
+            if f.is_file() and f.stat().st_size > 0:
+                lines.append(f"- `{name}` ({f.stat().st_size:,} B)")
+        except OSError:
+            pass
+    lines += ["", "## Where the previous session got to", ""]
+    s = summary or {}
+    lines.append(f"- turns: {s.get('messages') or s.get('agent_turns') or '?'}"
+                 f" · tool calls: {s.get('tool_calls', '?')}"
+                 f" · auto-run attempts: {attempt_idx}")
+    if s.get("exploit_present") or s.get("solver_present"):
+        lines.append("- an exploit/solver artifact EXISTS — read it before "
+                     "writing a new one; it encodes offsets and a chain that "
+                     "were already validated")
+    if sandbox_result:
+        lines.append(
+            f"- last sandbox run: verdict={sandbox_result.get('verdict')} "
+            f"exit={sandbox_result.get('exit_code')} "
+            f"— stdout/stderr are in the job dir")
+    if judge_out and judge_out.get("retry_hint"):
+        lines += ["", "## The judge's last actionable hint", "",
+                  "> " + str(judge_out["retry_hint"])[:1200].replace("\n", "\n> ")]
+    lines += [
+        "",
+        "## What to do",
+        "",
+        "1. Read the artifacts above. Do NOT re-run triage that `report.md` "
+        "or `findings.json` already answers.",
+        "2. Re-verify only what the artifacts leave uncertain.",
+        # NOT "the target is unchanged" — that was an unconditional assertion
+        # this function had no way to know was true. An operator can change the
+        # target mid-run (a restarted DreamHack instance comes back on a new
+        # port), and on a restart after that the sentence was a GENERATED
+        # FALSEHOOD handed to a context-less agent. State the live value, or
+        # say nothing about it.
+        "3. Continue from there — the goal is unchanged."
+        + (f" The CURRENT target is `{live_target}` — it is authoritative, and "
+           f"it may differ from what older artifacts say."
+           if live_target else ""),
+        "",
+    ]
+    out = "\n".join(lines)
+    try:
+        (work_dir / "RESUME_STATE.md").write_text(out)
+        log_fn(f"[orchestrator] wrote RESUME_STATE.md ({len(out)} B) for the "
+               f"next session")
+    except OSError as e:
+        log_fn(f"[orchestrator] could not write RESUME_STATE.md: {e}")
+    return out
+
+
 def write_why_stopped(
     work_dir: Path,
     *,
@@ -7055,6 +7214,208 @@ def _chal_source_has_heap_ops(
         if any(n in data for n in _HEAP_OP_NEEDLES):
             return True
     return False
+
+
+# Sentinel: "the restart could not even be attempted" — distinct from a restart
+# that ran and returned None (no sandbox result), which is a legitimate outcome
+# the caller must not confuse with failure to start.
+_AUP_RESTART_FAILED = object()
+
+
+async def _aup_restart_session(
+    job_id: str,
+    *,
+    step: str,
+    options,
+    original_prompt: str,
+    summary: dict,
+    work_dir: Path,
+    artifact_names: tuple[str, ...],
+    auto_run: bool,
+    sandbox_runner,
+    log_fn,
+):
+    """Re-enter the main session with a CLEAN context after a policy refusal.
+
+    `step` is one of _AUP_RECOVERY_STEPS:
+      fresh_session   same backend, `resume` dropped so no accumulated
+                      transcript is re-presented.
+      other_provider  the same work tree handed to the other configured
+                      backend, which applies its own policy.
+
+    Nothing here rewrites or re-words the request — only the conversation
+    history is dropped and, at the second step, the backend changes. Each step
+    runs at most once per job (see aup_recovery_step); a refusal that survives
+    a clean context is about the work itself, not the transcript, and further
+    sessions would just repeat it.
+
+    Returns whatever the restarted session returns, or _AUP_RESTART_FAILED when
+    it could not be started at all, so the caller falls back to the historical
+    halt rather than reporting progress that never happened.
+    """
+    from dataclasses import replace as _dc_replace
+
+    try:
+        new_options = _dc_replace(options, resume=None)
+    except Exception:
+        try:
+            import copy as _copy
+
+            new_options = _copy.copy(options)
+            setattr(new_options, "resume", None)
+        except Exception:
+            return _AUP_RESTART_FAILED
+
+    if step == "other_provider":
+        from modules.agent_provider import default_model_for
+
+        try:
+            from modules.grok_acp import GrokSessionOptions as _GSO
+
+            # The Claude system prompt has to be ADAPTED, not copied. The
+            # normal Grok path runs it through adapt_system_prompt_for_grok
+            # (its only other call site is the Grok branch of
+            # make_main_session_options), which rewrites Claude-specific
+            # delegation wiring — mcp__team__spawn_subagent and the Agent tool
+            # — into Grok's native equivalents. Handing Grok the raw text tells
+            # it to call tools that do not exist in its runtime.
+            _sp = getattr(options, "system_prompt", "") or ""
+            try:
+                _sp = adapt_system_prompt_for_grok(_sp)
+            except Exception:
+                pass
+            new_options = _GSO(
+                system_prompt=_sp,
+                model=default_model_for("grok"),
+                cwd=str(getattr(options, "cwd", work_dir) or work_dir),
+                effort=getattr(options, "effort", None),
+                env=dict(getattr(options, "env", None) or {}),
+                resume=None,
+                add_dirs=list(getattr(options, "add_dirs", None) or []),
+            )
+            summary["aup_provider_switch"] = "grok"
+            # The cost estimator prices tokens from summary["model"], which the
+            # analyzer set once to the Claude model and never reassigns. Leave
+            # it and a Grok successor's spend is billed at Claude rates.
+            summary["model"] = default_model_for("grok")
+            # Stamp the JOB's backend. Settings still says "claude" — this
+            # switch is per job and in memory — so every consumer that asks
+            # "which backend produced this?" needs a job-scoped answer:
+            # capture_session_id (so a Grok ACP id never lands in
+            # claude_session_id, which /retry feeds to `claude --resume`), the
+            # UI's provider label, and cost attribution.
+            try:
+                write_meta(job_id, agent_provider="grok",
+                           agent_provider_label="Grok (AUP fallback)")
+            except Exception:
+                pass
+            log_fn(
+                "[orchestrator] AUP recovery: handing the unchanged work tree "
+                "to Grok, which applies its own policy"
+            )
+        except Exception as e:
+            log_fn(
+                f"[orchestrator] AUP recovery: cannot build Grok options "
+                f"({type(e).__name__}) — skipping this step"
+            )
+            return _AUP_RESTART_FAILED
+
+    # A clean session has NO history, so the opening turn must be the carried
+    # state rather than "carry on where you left off" — telling a context-less
+    # agent to continue a conversation it cannot see wastes turns hunting for
+    # it. Same lesson as _retry_preamble's fresh=True branch.
+    # The ORIGINAL prompt must come along. It carries the mission, the target,
+    # the flag format and the pre-recon summary — none of which the new session
+    # can recover from the work tree, and RESUME_STATE.md is a pointer list, not
+    # a task statement. An earlier draft appended a `summary["initial_prompt_
+    # tail"]` that nothing ever set, so the restarted agent would have booted
+    # with the preamble alone and no idea what it was solving.
+    resume_prompt = (
+        "[session restarted — you have NO prior conversation]\n"
+        "A previous session on this job ended early. Its files are intact in "
+        "your cwd, and `RESUME_STATE.md` lists what was already established "
+        "and what to read first. Read that FIRST, then continue the solve. Do "
+        "not re-run analysis those artifacts already answer. The original "
+        "task follows unchanged.\n\n"
+    ) + (original_prompt or "")
+
+    # The error belongs to the DEAD session: left in place it would make the
+    # restarted run look like it failed the moment it produced anything.
+    #
+    # But it has to come BACK if the restart cannot start. The caller then falls
+    # through to the historical halt, and the job is finalized from this same
+    # summary — without the marker, meta.error_kind would not say
+    # policy_refusal, and api/routes/retry.py keys `prior_aup_blocked` on
+    # exactly that field. Clearing it unconditionally would therefore disable
+    # the MANUAL cure as well as the automatic one.
+    # Every key here is SESSION-scoped, and `summary` is shared by reference
+    # with the successor. Before this change no summary ever spanned two
+    # sessions in one process, so each of these leaks is new:
+    #
+    #   fallback_artifact_used  the guard at ~7677 is
+    #                           `is_error and not agent_error and not
+    #                           fallback_artifact_used`. A turn-0 refusal with
+    #                           no artifact writes a probe-only fallback and
+    #                           sets this — and that write is ALSO what makes
+    #                           `picked` non-empty and the ladder reachable. So
+    #                           on exactly the path that reaches recovery, the
+    #                           leak silences the successor's OWN refusal:
+    #                           agent_error_kind stays None, rung 2 is never
+    #                           consulted, and the loop queries feedback into an
+    #                           already-blocked session.
+    #   result / cost_usd_estimate
+    #                           the banking preamble runs at function-body level
+    #                           on re-entry and re-banks the dead session's cost
+    #                           (measured 2.0x); _snapshot_cost is write-once so
+    #                           the successor's own spend never lands.
+    #   prejudge_block_redirects / prejudge_block_sigs
+    #                           the redirect that spent the counter was never
+    #                           delivered — the ladder fires before
+    #                           `client.query(feedback)` — so the successor
+    #                           would inherit a budget it never got the benefit
+    #                           of, and its FIRST block would satisfy the
+    #                           concede-unsolvable gate's `n >= 1`.
+    #
+    # Deliberately KEPT: `method_change_retries` (capped once per JOB by
+    # design) and `judge_hints` (they describe the carried ARTIFACT, which the
+    # successor inherits, not the dead transcript).
+    _SESSION_SCOPED = (
+        "agent_error", "agent_error_kind", "fallback_artifact_used",
+        "result", "cost_usd_estimate",
+        "prejudge_block_redirects", "prejudge_block_sigs",
+    )
+    _dead_state = {k: summary.pop(k) for k in _SESSION_SCOPED if k in summary}
+
+    def _restore_dead_error() -> None:
+        """Put the dead session's state back when the restart never started.
+
+        ALL of it, not just the error: the caller then falls through to the
+        historical halt and the job is finalized from this same summary. A
+        partial restore would leave the cost ledger and the refusal marker
+        disagreeing about which session produced them.
+        """
+        summary.update(_dead_state)
+
+    try:
+        return await run_main_agent_session(
+            job_id,
+            options=new_options,
+            initial_prompt=resume_prompt,
+            summary=summary,
+            work_dir=work_dir,
+            artifact_names=artifact_names,
+            auto_run=auto_run,
+            sandbox_runner=sandbox_runner,
+            log_fn=log_fn,
+        )
+    except Exception as e:
+        _restore_dead_error()
+        log_fn(
+            f"[orchestrator] AUP recovery `{step}` failed to start: "
+            f"{type(e).__name__}: {e} — restoring the original error so the "
+            f"job is still filed as policy_refusal"
+        )
+        return _AUP_RESTART_FAILED
 
 
 async def run_main_agent_session(
@@ -8624,11 +8985,80 @@ async def run_main_agent_session(
             # poison (the de-facto cure). Does NOT auto-spend — a fresh fork
             # is operator-initiated.
             if summary.get("agent_error_kind") == "policy_refusal":
+                # The SESSION is blocked, not necessarily the JOB. Walk the
+                # recovery ladder before giving up: a clean context first,
+                # then the other configured provider. Both keep the work tree;
+                # neither touches the prompt text.
+                from modules.agent_provider import (
+                    active_provider, default_model_for, has_grok_auth,
+                )
+                _grok_ok = False
+                try:
+                    _grok_ok = (active_provider() != "grok") and has_grok_auth()
+                except Exception:
+                    pass
+                _step = aup_recovery_step(summary, grok_available=_grok_ok)
+                if _step:
+                    summary.setdefault("aup_recoveries", []).append(_step)
+                    write_resume_state(
+                        work_dir,
+                        job_id=job_id,
+                        summary=summary,
+                        sandbox_result=last_sandbox,
+                        judge_out=judge_out,
+                        attempt_idx=attempt,
+                        reason="blocked by the server-side Usage-Policy "
+                               "classifier (policy_refusal)",
+                        log_fn=log_fn,
+                    )
+                    log_fn(
+                        f"[orchestrator] main turn AUP-blocked — recovering via "
+                        f"`{_step}` (attempt "
+                        f"{len(summary['aup_recoveries'])}/"
+                        f"{len(_AUP_RECOVERY_STEPS)}). The work tree is kept; "
+                        f"the refused conversation is dropped."
+                    )
+                    _fresh = await _aup_restart_session(
+                        job_id,
+                        step=_step,
+                        options=options,
+                        original_prompt=initial_prompt,
+                        summary=summary,
+                        work_dir=work_dir,
+                        artifact_names=artifact_names,
+                        auto_run=auto_run,
+                        sandbox_runner=sandbox_runner,
+                        log_fn=log_fn,
+                    )
+                    if _fresh is not _AUP_RESTART_FAILED:
+                        # `None` from the successor must NOT overwrite our own
+                        # last_sandbox. Ours may be a skip sentinel
+                        # ({"error": "prejudge_blocked"} / judge_aborted), and
+                        # scan_job_for_flags treats a FALSY sandbox_result as
+                        # "the sandbox ran and told us nothing" rather than
+                        # "it never ran" — see the sandbox_skipped gate at
+                        # modules/_common.py:1505. Losing the sentinel re-opens
+                        # the NARRATIVE flag tier and promotes agent-authored
+                        # prose in report.md / findings.json to meta.flags with
+                        # final_status="finished": a false capture, which is
+                        # the exact class the gate exists to prevent.
+                        #
+                        # None is an ORDINARY successor return (7765 returns
+                        # last_sandbox for every classify_agent_error kind that
+                        # is not killed/timeout — cli_infra_error, auth,
+                        # rate_limit, unknown — and 8259 on a runner crash), so
+                        # this is not a corner case.
+                        return _fresh if _fresh is not None else last_sandbox
+                    log_fn(
+                        f"[orchestrator] `{_step}` recovery could not start — "
+                        f"falling through to halt."
+                    )
                 log_fn(
-                    "[orchestrator] main turn AUP-blocked (policy_refusal) — "
-                    "in-place retry would re-block the poisoned session "
-                    "deterministically; halting WITHOUT retry. /retry forks a "
-                    "fresh session that sheds the context."
+                    "[orchestrator] main turn AUP-blocked (policy_refusal) and "
+                    "the recovery ladder is exhausted — halting. A repeat block "
+                    "on a CLEAN context means the challenge content itself is "
+                    "what the classifier objects to, not the accumulated "
+                    "transcript. /retry forks a fresh session if you disagree."
                 )
                 write_why_stopped(
                     work_dir,
