@@ -815,9 +815,13 @@ _TOOLS_BASE = """\
 Bash CLIs always available in this worker container:
   - core           : python3, bash, curl, wget, git, jq, less, file
   - archives       : unzip, zip, 7z, tar, gzip, xz, bzip2
-  - inspection     : xxd, hexdump, strings, nm, readelf, objdump, ldd, file
-  - editors        : vim-tiny, nano (use only when an interactive edit is
-                     genuinely required — Edit/Write tools are preferred)
+  - inspection     : xxd, strings, nm, readelf, objdump, ldd, file
+                     (no `hexdump` — Debian 13 split it into bsdextrautils,
+                     which is not installed; `xxd` covers the same ground)
+  - editors        : vim.tiny, nano (the binary is `vim.tiny`, not `vim` —
+                     `vim-tiny` is the PACKAGE name and running it fails.
+                     Use only when an interactive edit is genuinely
+                     required — Edit/Write tools are preferred)
   - build          : gcc, g++, make, pkg-config, python3-dev
 
 THIS CONTAINER IS NOT THE ONE THAT RUNS YOUR SOLVER.
@@ -908,7 +912,14 @@ Pwn-specific:
                      plan to mimic INSTEAD of reinventing chain math.
                      The applicable list is in libc_profile.json
                      `how2heap.techniques`.
-  - gadgets        : ROPgadget --binary ./bin/<name> --rop / --jop
+  - gadgets        : ROPgadget --binary ./bin/<name> [--only "pop|ret"]
+                     A bare invocation LISTS gadgets; there is no `--rop`
+                     or `--jop` flag on the installed build. `--jop` exits
+                     with a usage error, and `--rop` is worse — argparse
+                     accepts it as a prefix of `--ropchain` and silently
+                     switches to CHAIN GENERATION, so a pipe expecting a
+                     gadget list gets "Step 1 -- Write-what-where gadgets"
+                     instead. Use `--ropchain` when you actually want that.
   - decompiler     : `ghiant <binary> [outdir]` (Ghidra headless, ./decomp/)
   - symbolic exec  : `angr` — when you can't see WHICH input leads to
                      vuln(), or when one_gadget constraints need solver
@@ -918,14 +929,17 @@ Pwn-specific:
                        sm = p.factory.simulation_manager(
                            p.factory.entry_state())
                        sm.explore(find=<addr_of_win>, avoid=[<bad>])
-  - libc id (remote-only): `pwn libcdb find <sym> <leak>` — queries
-                     libc-database web API, returns matching versions.
+  - libc id (remote-only): `pwn libcdb lookup <sym> <offset> [<sym> <offset>…]`
+                     — queries the libc-database web API and returns
+                     matching versions. It takes SYMBOL/OFFSET PAIRS, e.g.
+                     `pwn libcdb lookup read 3e0 write 520`; more pairs
+                     narrow the match. (`find` is not a subcommand — the
+                     three that exist are lookup / hash / file.)
   - Python (import): pwn (pwntools — checksec / ELF / cyclic / asm /
                      shellcraft; pwn.fmtstr_payload; pwn.flat;
-                     pwn.libcdb.find_libc),
-                     libheap (parse malloc_chunk, walk arena / tcache
-                              from a raw heap dump without spawning gdb;
-                              import libheap; ...),
+                     pwnlib.libcdb.search_by_symbol_offsets — there is no
+                     `find_libc`; siblings are search_by_build_id and
+                     search_by_md5/sha1/sha256),
                      Crypto, gmpy2, sympy, z3 (constraint solver — pair
                      with angr or use solo when the heap-poison
                      alignment math is just modular arithmetic)
@@ -1056,12 +1070,15 @@ Hard rules:
    __stdio_write, FILE struct, va_arg dispatchers) unless explicitly
    asked. The main agent's standard ret2libc / ret2syscall path
    uses symbol tables + ROPgadget, not libc internals.
-7. TIME BUDGET: aim to finish within 5-6 minutes. The orchestrator
-   times out pre-recon at 8 minutes (env-tunable PRE_RECON_TIMEOUT_S).
-   If you near that wall, EMIT WHAT YOU HAVE — the orchestrator now
-   returns partial output to main when you time out, but if you never
-   yielded an assistant text block, main gets nothing. Draft your
-   reply as you go, finalize early.
+7. TIME BUDGET: aim to finish within 5-6 minutes. This is a budget you
+   keep yourself — there is NO orchestrator timeout on pre-recon, so
+   nothing will stop you, and every minute here is a minute main is not
+   working. (An earlier version of this line promised a hard 8-minute
+   wall and an env var to tune it; neither has ever existed, and a
+   deadline that does not exist still made recon cut its own work
+   short.) Draft your reply as you go and finalize early: main only
+   ever sees an assistant text block, so work that never reached one
+   is work main never gets.
 8. CANONICAL COMMANDS — use these EXACT forms; don't probe for
    variants. Each `?: …` lists the right way to ask the question
    so you don't burn turns finding the magic incantation.
@@ -1105,7 +1122,10 @@ will answer.
     aarch64-linux-gnu-readelf -s <bin> | grep -i ' func '
 
   Gadgets (ARM64 works — capstone>=5 in this image):
-    ROPgadget --binary <libc> --rop --depth 6 | grep 'ldr x0' | head
+    ROPgadget --binary <libc> --depth 6 | grep 'ldr x0' | head
+    # NOT `--rop`: argparse takes it as a prefix of `--ropchain` and
+    # generates a chain instead of listing gadgets, so this pipe would
+    # silently grep the wrong output.
     ROPgadget --binary <libc> --only "pop|ret" | head
     ROPgadget --binary <libc> --string '/bin/sh'
 
@@ -1229,9 +1249,12 @@ will answer.
 
   Remote-only libc identification (chal didn't ship a libc bundle):
     # If main already has a partial leak (e.g. printf, system, or any
-    # libc address with low bytes), `pwn libcdb find` queries the
+    # libc address with low bytes), `pwn libcdb lookup` queries the
     # libc-database web API and returns matching versions + symbols.
-    pwn libcdb find system 0x7f00...410   # last-3-nibble match works
+    # It takes SYMBOL/OFFSET PAIRS — `find` is not a subcommand (the
+    # three that exist are lookup / hash / file).
+    pwn libcdb lookup system 410          # last-3-nibble match works
+    pwn libcdb lookup read 3e0 write 520  # more pairs narrow the match
     # Once a match is identified, download the libc + ld and rerun
     # `chal-libc-fix ./bin/<n> --libs <download_dir>` to stage them.
 
@@ -1573,8 +1596,9 @@ facts:
       pre-recon prompt's catalogs (FSOP-AS-LEAK TABLE, RCE TARGET TABLE)
       and the local libc KB, which are keyed to the DETECTED libc
       version. If a value isn't in the catalog, RECOVER IT LOCALLY — read
-      the struct layout straight out of the target's own libc with gdb /
-      readelf / pahole; do not guess and do not reach for a blog.
+      the struct layout straight out of the target's own libc with gdb or
+      readelf; do not guess and do not reach for a blog. (No `pahole` —
+      the dwarves package is not installed in either image.)
     * Custom allocator wrappers (e.g. libsalloc, secure_malloc): reverse
       the wrapper's OWN code (decomp + a dynamic trace). The challenge
       deliberately modified it, so a generic writeup would be wrong
@@ -1653,19 +1677,19 @@ Edit — you cannot patch the script. Use Bash for short verifications
 shell-redirect to test a regex). Use Read directly on the script
 itself instead of asking main to paste it.
 
-Delegating to recon: when the answer requires heavy investigation
-(libc symbol lookup, ROPgadget search, ghiant decompile, multi-file
-source grep), call recon yourself via the isolated MCP tool:
-  mcp__team__spawn_subagent(
-    subagent_type="recon",
-    prompt="<one specific question with the path(s) to look at>"
-  )
-Recon returns ≤2 KB. Do NOT call yourself. Do NOT call main.
+You CANNOT delegate. There is no subagent-spawning tool in your session —
+judge subagents are built by `make_standalone_options()`, which passes no
+MCP servers at all. An earlier version of this block told you to call one
+anyway, so the attempt failed and the investigation was abandoned rather
+than done. If a question needs digging, dig with your own
+Read/Bash/Glob/Grep, or say plainly in your verdict that it is unresolved
+and why. An honest "I could not verify X" is worth more than a guess
+dressed as a finding.
 
 Cost discipline: the orchestrator pins your model to the latest
-(typically opus, expensive). Make ONE Read per script you review,
-ONE Bash for verification, AT MOST ONE recon delegation. Do not
-loop. Each stage should usually finish in 1-3 tool calls before the
+(typically opus, expensive). Make ONE Read per script you review and
+ONE Bash for verification. Do not loop. Each stage should usually
+finish in 1-3 tool calls before the
 final JSON / summary.
 
 REMOTE-PROTOCOL SMOKE CHECK (BINDING — pre / main-invoked modes):

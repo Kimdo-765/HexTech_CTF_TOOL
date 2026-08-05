@@ -29,11 +29,18 @@ dnfile==0.15.0
 # Keeping it out of the main requirements.txt means a bad angr release
 # can never break the worker — the conflicting `pip install angr` step
 # is `|| true`'d so the rest of the image build proceeds without it.
-# libheap (PyPI) — glibc heap inspection helpers (arena walking,
-# malloc_chunk parsing, tcache enumeration) usable from both gdb
-# Python API and standalone scripts. Complements pwndbg's `heap
-# chunks` for situations where the chal output already gave us a
-# raw heap dump and we want to parse it without running gdb again.
+# libheap (PyPI) — NOT what this comment used to claim. It was described
+# here, and in the pwn tool catalogue, as glibc heap inspection (arena
+# walking, malloc_chunk parsing, tcache enumeration). PyPI `libheap` is a
+# NAME COLLISION with the well-known gdb plugin of that name: the installed
+# 0.5 is "a general heap library" whose entire public API is
+# ['Heap', 'IndexHeap', 'UF'] plus heapify/peek/pop/push — a priority queue.
+# The failure mode was the worst kind: `import libheap` SUCCEEDS, so the
+# usual sanity check passes and the agent only discovers there is no
+# malloc_chunk parser after spending turns hunting for the API. The
+# catalogue claim is gone; glibc heap inspection is gdb + GEF/pwndbg.
+# Kept installed only because removing it needs an image rebuild and it is
+# harmless — nothing imports it. Drop it at the next rebuild.
 libheap==0.5
 # web — request shaping + parsing
 requests==2.32.3

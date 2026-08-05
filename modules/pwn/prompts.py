@@ -19,7 +19,9 @@ Goal: identify the bug, compute offsets/gadgets, write `./exploit.py`
 
 PWN-SPECIFIC TOOLS (full catalogue is in the BASH CLIs block above):
 - `pwn checksec --file ./bin/<n>`     canary / NX / PIE / RELRO
-- `ROPgadget --binary <elf> --rop`    works for ARM64 too
+- `ROPgadget --binary <elf>`          lists gadgets; works for ARM64 too
+                                      (no `--rop` flag — it is silently
+                                      taken as `--ropchain`)
 - `one_gadget <libc.so>`              libc one-shot RCE finder
 - `ghiant <bin> [outdir]`             Ghidra headless decomp into
                                       ./decomp/. Caches the Ghidra
@@ -102,7 +104,10 @@ WORKFLOW
    patterns:
        objdump -d -j .text ./bin/<n> | sed -n '/<func>:/,/^$/p' | head -80
        objdump -d -j .text ./bin/<n> | grep '<main\\.'   # Go filter
-   Anything broader → use `ghiant ./decomp/<func>.c` instead.
+   Anything broader → just Read `./decomp/<func>.c`, which pre-recon has
+   already produced. (NOT `ghiant ./decomp/<func>.c`: ghiant is the Ghidra
+   headless wrapper — `ghiant <binary> [outdir]` — so handing it a .c file
+   turns a free Read into a decompiler sidecar spawn of several minutes.)
 3. Non-trivial binary (custom VMs, large funcs, heavy crypto)? After
    `ghiant`, **DELEGATE TO RECON** before diving in yourself —
    `mcp__team__spawn_subagent(subagent_type="recon", prompt=…)`. Recon

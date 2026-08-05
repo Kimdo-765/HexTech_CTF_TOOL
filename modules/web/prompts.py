@@ -148,6 +148,16 @@ based on what's available — in this priority order:
      capture is success without it — `FLAG_CANDIDATE` is only for a flag
      your script reads directly in-band). This is the common case.
 
+     SEND THE FLAG RAW. Server-side extraction is a plain regex over the
+     recorded callback text; there is NO decoding step anywhere in it.
+     base64/hex-encoding the value — the reflex for web exfil — makes the
+     flag INVISIBLE to that scan, and because the value never returns to
+     your script and the fallbacks above are closed to you, the capture is
+     then lost outright. Percent-encoding is safe (the server decodes the
+     query string before recording). If the sink forces an encoding you
+     cannot avoid, that is the one case to say so and print
+     `FLAG_CANDIDATE` with the decoded value instead.
+
    • ITERATIVE ORACLE — you recover the flag one char (or bit) per round
      and must learn which conditional beacon fired to extend the next
      round (a CSP-constrained boolean / LIKE-search leak: each candidate
@@ -216,6 +226,22 @@ payload into the bot's URL unencoded, truncating it at the first `&`/`#`)
 silently breaks that. Locally you can WATCH the bot receive the payload
 and see whether the script runs — the only way to verify the execute side
 without guessing.
+
+BUT: a local instance proves your LOGIC, never your shipped exploit. The
+container you start here shares THIS worker's network; the sandbox that
+auto-runs your exploit.py is a different container on the default docker
+bridge and cannot reach it (the isolation is deliberate). So an
+exploit.py that hardcodes `http://localhost:<port>` passes every local
+test and then fails to connect at auto-run — which reads as a broken
+exploit and invites you to rewrite working logic. Point the SHIPPED
+script at the real target (argv/`TARGET`), and keep the local instance as
+the place you OBSERVE behaviour, not as the endpoint you ship against.
+
+Containers you start are capped at 2 GiB each — the worker's `docker`
+is a shim that injects `--memory`. A headless-Chrome bot plus app plus DB
+is three separate 2 GiB caps, and crossing one is an instant OOM kill,
+not a slowdown. If a service dies without explanation, suspect the cap
+before you suspect the challenge.
 
 Mechanics (the orchestrator reaps everything when the job ends — you do
 NOT need to tear down, but you MUST use these exact names/labels or
