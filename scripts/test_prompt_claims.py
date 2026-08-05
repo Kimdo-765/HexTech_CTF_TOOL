@@ -199,6 +199,36 @@ def main() -> int:
     chk("...and the shim that enforces it is on PATH",
         dshim.startswith("/usr/local/bin"), dshim)
 
+    # ------------------------------------------------------------- /tmp
+    section("scratch-path policy must not contradict itself")
+    # $TMPDIR is <work>/tmp, which resolves to the SAME path inside the
+    # auto-run sandbox because it lives in the job tree. /tmp does not: a
+    # script that writes /tmp/x while investigating and reads it back at
+    # auto-run finds nothing. /tmp is also shared by every job and subagent in
+    # this container. The prompt banned it in three places and then handed out
+    # copy-pasteable `/tmp/...` recipes in a dozen others — and a concrete
+    # example beats an abstract prohibition every time.
+    import re as _re
+    PROSE = ("NEVER", "never", "shared across", "does not exist", "used to say",
+             "clobber", "wrote /tmp/x", "hardcode", "forbids")
+    for m in ("crypto", "pwn", "rev", "web", "misc", "forensic"):
+        sp = getattr(importlib.import_module(f"modules.{m}.prompts"),
+                     "SYSTEM_PROMPT", "") or ""
+        bad = [l.strip() for l in sp.splitlines()
+               if "/tmp/" in l and "TMPDIR" not in l
+               and not any(k in l for k in PROSE)]
+        chk(f"  {m}: no command-shaped /tmp example survives", not bad, bad[:2])
+    base_sp = getattr(importlib.import_module("modules.pwn.prompts"),
+                      "SYSTEM_PROMPT", "") or ""
+    chk("REGRESSION: the sweep recipe — the most copy-pasteable of them all — "
+        "uses $TMPDIR", "tee $TMPDIR/sweep.out" in base_sp)
+    chk("REGRESSION: the debugger's scratch mandate no longer says /tmp, which "
+        "the same prompt's own rule forbids",
+        "MUST go under /tmp/" not in base)
+    chk("...and points at $TMPDIR instead", "MUST go under `$TMPDIR/`" in base)
+    chk("the ban itself still reads as a ban (prose keeps saying /tmp)",
+        "NEVER write to /tmp/<filename>" in base)
+
     # ------------------------------------------------------------ render
     section("all six modules still render")
     for m in ("crypto", "pwn", "rev", "web", "misc", "forensic"):

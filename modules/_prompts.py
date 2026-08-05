@@ -353,14 +353,14 @@ a single subagent turn.
    blocks eat 30-50 KB of cache_read per turn and inflate the
    prompt-cache cost for the rest of the run. Pattern:
 
-       <cmd> 2>&1 | tee /tmp/sweep.out | head -5   # peek
-       wc -l /tmp/sweep.out                         # size
-       grep -m 1 "winning_pattern" /tmp/sweep.out   # filter
+       <cmd> 2>&1 | tee $TMPDIR/sweep.out | head -5   # peek
+       wc -l $TMPDIR/sweep.out                        # size
+       grep -m 1 "winning_pattern" $TMPDIR/sweep.out  # filter
 
    For brute-force loops in Python, accumulate hits in a list and
    `print(json.dumps({{"hits": hits[:5], "n": len(hits)}}))` — emit a
    summary, not the firehose. If you genuinely need to see the
-   sweep, READ /tmp/sweep.out section by section instead of pulling
+   sweep, READ $TMPDIR/sweep.out section by section instead of pulling
    the whole thing into one tool result.
 
 6. RUNAWAY OUTPUT — STOP, DO NOT ANALYZE. If a Bash tool result
@@ -1110,7 +1110,7 @@ will answer.
 
   ELF / disasm (cross-arch aware):
     file <bin>                                 # arch + interp + stripped?
-    aarch64-linux-gnu-objdump -d <bin> > /tmp/d.txt   # save big disasm
+    aarch64-linux-gnu-objdump -d <bin> > $TMPDIR/d.txt   # save big disasm
     aarch64-linux-gnu-readelf -a <bin> | grep -E '...' # sections, syms
     aarch64-linux-gnu-nm -D <libc.so> | grep -E ' T system$| T execve$'
     arm-linux-gnueabi-objdump -d <bin>         # 32-bit ARM
@@ -1160,7 +1160,7 @@ will answer.
     qemu-aarch64-static ./bin/<name>           # run native, no kernel
     qemu-aarch64-static -strace ./bin/<name>   # syscall trace
     # gdbserver mode — let gdb attach and step through:
-    qemu-aarch64-static -g 1234 ./bin/<name> </tmp/in &
+    qemu-aarch64-static -g 1234 ./bin/<name> <$TMPDIR/in &
     gdb-multiarch -nx -batch \\
         -ex 'set architecture aarch64' \\
         -ex 'target remote :1234' \\
@@ -1169,7 +1169,7 @@ will answer.
         -ex 'detach'
     # use this to verify offsets, observe heap layout, dump
     # post-leak register state, etc. Send the binary's stdin via
-    # the shell redirection (`</tmp/in`) since you can't type into
+    # the shell redirection (`<$TMPDIR/in`) since you can't type into
     # a backgrounded qemu instance.
 
   Dynamic analysis (host arch — x86_64 / native):
@@ -1239,11 +1239,11 @@ will answer.
 
   Heap state at runtime — standard recipe via the heap-probe wrapper:
     # Capture tcache/fastbin/unsorted at every `free` hit, up to 10:
-    echo -e 'alloc 0x68 AAA\\nalloc 0x68 BBB\\nfree 0\\nfree 1' > /tmp/menu.in
-    heap-probe ./prob --input /tmp/menu.in \\
+    echo -e 'alloc 0x68 AAA\\nalloc 0x68 BBB\\nfree 0\\nfree 1' > $TMPDIR/menu.in
+    heap-probe ./prob --input $TMPDIR/menu.in \\
         --break 'free+8' --dump tcache,fastbin,unsorted,chunks \\
-        --max-hits 10 --out /tmp/hs.json
-    jq '.events[].dumps.tcache' /tmp/hs.json | head -40
+        --max-hits 10 --out $TMPDIR/hs.json
+    jq '.events[].dumps.tcache' $TMPDIR/hs.json | head -40
     # The output is a JSON timeline {events:[{pc,function,hit,dumps}]},
     # so you can grep specific events instead of re-running gdb.
 
@@ -1413,9 +1413,9 @@ divergences from POSIX/glibc":
   checks. The bug is INSIDE the wrapper, not in the main binary.
 - Pipeline:
     nm -D ./.chal-libs/<lib>.so | grep ' T ' | head      # exports
-    objdump -d ./.chal-libs/<lib>.so 2>&1 > /tmp/d.txt   # disasm
+    objdump -d ./.chal-libs/<lib>.so 2>&1 > $TMPDIR/d.txt   # disasm
     for sym in <each export>:
-      sed -n '/<sym>:/,/^00000000/p' /tmp/d.txt          # body
+      sed -n '/<sym>:/,/^00000000/p' $TMPDIR/d.txt          # body
 - For each export, write ONE line covering:
     <symbol>: <where it diverges from spec>, <exploit primitive
     class enabled by that divergence>
@@ -1561,8 +1561,10 @@ Bash gotchas:
   cd back. `pwd` to anchor if unsure.
 - Big stdout (>256 KB) auto-truncates to a preview. For huge
   disassembly, redirect to a file and `grep` / `sed -n` it. Saving
-  to /tmp/d.txt is fine even though you can't `Write` directly —
-  `>` redirect inside Bash is allowed.
+  to $TMPDIR/d.txt is fine even though you can't `Write` directly —
+  `>` redirect inside Bash is allowed. (Use $TMPDIR, not /tmp: see
+  the scratch-path rule — /tmp is shared across every job in this
+  container and does not exist with your files in the sandbox.)
 - RUNAWAY OUTPUT (multi-MB+) — STOP, DO NOT ANALYZE THE PREVIEW.
   If the tool result starts with "Output too large (NNN MB). Full
   output saved to ...":
@@ -1979,7 +1981,7 @@ Tool catalogue (Bash inside the worker container)
 
       gdb-clean -nh -batch \\
                 -x /opt/scaffold/gdb-init.py \\
-                -x /tmp/probe.py
+                -x $TMPDIR/probe.py
 
   Inside a probe.py, source the init explicitly:
       gdb.execute("source /opt/scaffold/gdb-init.py")
@@ -1994,7 +1996,7 @@ Tool catalogue (Bash inside the worker container)
 
     # Send a sequence of menu inputs, break on every free, dump
     # tcache + fastbin + unsorted + heap chunks at each hit.
-    cat > /tmp/in <<'EOF'
+    cat > $TMPDIR/in <<'EOF'
     1
     0
     0x68
@@ -2008,10 +2010,10 @@ Tool catalogue (Bash inside the worker container)
     2
     1
     EOF
-    heap-probe ./prob --input /tmp/in \\
+    heap-probe ./prob --input $TMPDIR/in \\
         --break 'free+8' --dump tcache,fastbin,unsorted,chunks \\
-        --max-hits 6 --out /tmp/hs.json
-    jq '.events[].dumps.tcache' /tmp/hs.json
+        --max-hits 6 --out $TMPDIR/hs.json
+    jq '.events[].dumps.tcache' $TMPDIR/hs.json
 
   --gdb gdb-multiarch for foreign-arch ELFs. Output JSON layout:
     {"events": [
@@ -2036,7 +2038,7 @@ Tool catalogue (Bash inside the worker container)
         -ex 'b *0x4011a4' -ex 'r' \\
         -ex 'p (void*)$fs_base+0x28' \\
         -ex 'info proc map' \\
-        ./bin/foo < /tmp/probe.in
+        ./bin/foo < $TMPDIR/probe.in
 
     # Heap state right after target malloc
     gdb -batch \\
@@ -2065,11 +2067,11 @@ Tool catalogue (Bash inside the worker container)
       access via the gdb module, and can branch on observed values.
       All GEF commands work via `gdb.execute(...)`.
 
-        cat > /tmp/probe.py <<'PY'
+        cat > $TMPDIR/probe.py <<'PY'
         import gdb
         gdb.execute("file ./bin/foo")
         gdb.execute("b *vuln+0x42")
-        gdb.execute("r < /tmp/in")
+        gdb.execute("r < $TMPDIR/in")
         rax = int(gdb.parse_and_eval("$rax")) & ((1 << 64) - 1)
         print(f"[probe] first leak rax = {hex(rax)}")
         # Conditional: only proceed if leak looks like a libc ptr
@@ -2083,7 +2085,7 @@ Tool catalogue (Bash inside the worker container)
             gdb.execute("info reg rdi rsi rdx")
             gdb.execute("x/4gx $rsp")
         PY
-        gdb -batch -x /tmp/probe.py
+        gdb -batch -x $TMPDIR/probe.py
 
       Loop over candidates? Just write a Python `for` in the script.
       Want to print structured JSON for main? `print(json.dumps({...}))`
@@ -2098,7 +2100,7 @@ Tool catalogue (Bash inside the worker container)
       breakpoints fresh.
 
         # Bash call 1: launch gdbserver, leave it
-        gdbserver --multi --once :1234 ./bin/foo < /tmp/in &
+        gdbserver --multi --once :1234 ./bin/foo < $TMPDIR/in &
 
         # Bash call 2: connect, run to a bp, disconnect (inferior
         # stays stopped under gdbserver)
@@ -2116,13 +2118,13 @@ Tool catalogue (Bash inside the worker container)
 * strace / ltrace — for "what syscalls fire" / "what libc calls
   fire" without learning gdb scripting. Faster for fingerprinting:
 
-    strace -f -e trace=read,write,open,connect ./bin/foo < /tmp/in
-    ltrace -f -n2 ./bin/foo < /tmp/in 2>&1 | head -100
+    strace -f -e trace=read,write,open,connect ./bin/foo < $TMPDIR/in
+    ltrace -f -n2 ./bin/foo < $TMPDIR/in 2>&1 | head -100
 
 * qemu-aarch64-static / qemu-arm-static — run foreign-arch ELFs.
   Combine with `-g <port>` + gdb-multiarch for cross-arch debug:
 
-    qemu-aarch64-static -g 1234 ./bin/foo < /tmp/in &
+    qemu-aarch64-static -g 1234 ./bin/foo < $TMPDIR/in &
     gdb-multiarch -nh -batch \\
         -ex 'set arch aarch64' \\
         -ex 'target remote :1234' \\
@@ -2210,13 +2212,21 @@ Hard rules
   your synthesis.
 * No Write to ./exploit.py / ./solver.py / ./report.md — those are
   main's artifacts. SCRATCH FILES (probe.py, harness drivers, gdb
-  scripts, dump files) MUST go under /tmp/ — ABSOLUTE path. NEVER
-  write to a relative path, NEVER `cd` into main's cwd, NEVER drop
-  a .py / .gdb / .bin / .log into `/data/jobs/<id>/work/`. Job
-  011a6d486d53 had `probe.py` left in main's work dir by an earlier
-  debugger turn; main then re-read it on a later turn and got
-  confused about which file was authoritative. /tmp is isolated;
-  use it.
+  scripts, dump files) MUST go under `$TMPDIR/` — ABSOLUTE path.
+  NEVER write to a relative path, NEVER `cd` into main's cwd, NEVER
+  drop a .py / .gdb / .bin / .log DIRECTLY into
+  `/data/jobs/<id>/work/`. Job 011a6d486d53 had `probe.py` left in
+  main's work dir by an earlier debugger turn; main then re-read it
+  on a later turn and got confused about which file was
+  authoritative.
+  $TMPDIR is `<work>/tmp/` — a SUBDIRECTORY of main's work tree, not
+  the top level main reads, so it satisfies that rule while staying
+  inside the job. This block used to say `/tmp/` instead, which the
+  scratch-path rule earlier in this same prompt explicitly forbids —
+  both were marked MUST, so either choice broke a rule. `/tmp` is
+  also shared across every job and subagent in this container, so it
+  is the opposite of isolated: two concurrent jobs writing
+  `/tmp/probe.py` clobber each other.
 * Do NOT run anything for >120s without a heartbeat. If the binary
   hangs, kill it and report ("hung after recv on fd 0; fed N bytes
   before hang").
@@ -2257,16 +2267,16 @@ Hard rules
   to-claude has a RUNAWAY_OUTPUT guard; STDOUT-REDIRECTED-TO-A-FILE
   does NOT. Whenever you redirect to a file:
     1. ALWAYS bound the command with a tight `timeout` AND a stdin
-       that explicitly closes (`< /tmp/probe.in` not `< /dev/stdin`).
+       that explicitly closes (`< $TMPDIR/probe.in` not `< /dev/stdin`).
     2. Cap the receiver. Pick ONE:
-         <cmd> | head -c 4194304 > /tmp/out.bin    # 4 MiB cap
-         timeout 5 <cmd> > /tmp/out.bin            # time cap
-       NEVER `<cmd> > /tmp/out.bin` without one of these.
+         <cmd> | head -c 4194304 > $TMPDIR/out.bin    # 4 MiB cap
+         timeout 5 <cmd> > $TMPDIR/out.bin            # time cap
+       NEVER `<cmd> > $TMPDIR/out.bin` without one of these.
     3. After any subprocess run, `pkill -9 -x <comm>` (NOT `-f`; see
        PROCESS HYGIENE above for why cmdline matching self-immolates)
        AND `ps -eo pid,comm,args | grep <prob>` to confirm no
        zombie/defunct procs are accumulating.
-    4. `du -sh /tmp/probe_*` before each new spawn — if any file
+    4. `du -sh $TMPDIR/probe_*` before each new spawn — if any file
        exceeds 100 MiB, `rm -f` it and re-run with a `head -c` cap.
 * heap-probe FIRST: when main's question is about heap state at N
   alloc/free, run `heap-probe` (one-shot, single gdb child, JSON

@@ -412,7 +412,7 @@ High-value debugger questions:
   page-aligned (i.e. did I read the right field?)"
 - "tcache chunks state after `alloc s1 0x68 / alloc s2 0x68 /
   free s1 / free s2` — use the `heap-probe` wrapper:
-      heap-probe ./prob --input /tmp/in --break 'free+8' \\
+      heap-probe ./prob --input $TMPDIR/in --break 'free+8' \\
           --dump tcache,fastbin,chunks --max-hits 4
   and return the parsed tcache entries + freed-chunk fd values so I
   can verify safe-linking XOR mask."
@@ -448,7 +448,7 @@ chal libc from `chal-libc-fix`. The worker's system libc is glibc
   ./rootfs/, return what etc/inetd.conf + etc/services say about
   the chal service."
 - QEMU dynamic trace: "qemu-aarch64-static -g 1234 ./bin/<n> with
-  stdin from /tmp/probe.in; gdb-multiarch (aarch64), break at
+  stdin from $TMPDIR/probe.in; gdb-multiarch (aarch64), break at
   <vmaddr>, dump x0..x7 + sp + 0x40 stack words."
 
 HEAP / FSOP CHEAT-SHEET (read carefully when tcache / unsorted /
