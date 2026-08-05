@@ -6551,6 +6551,91 @@ def write_resume_state(
     return out
 
 
+_RUNNER_MISSING_MODULE_RE = re.compile(
+    r"(?:ModuleNotFoundError|ImportError): No module named ['\"]([\w.]+)['\"]")
+# The four shapes a missing binary actually takes in the runner. Measured, not
+# assumed — `/bin/sh` there is a symlink to dash, and dash and bash disagree on
+# both halves of the message:
+#     sh: 1: nosuchtool: not found                      dash, exec'd directly
+#     /bin/sh: 1: nosuchtool: not found                 dash, via subprocess(shell=True)
+#     bash: line 1: nosuchtool: command not found       bash
+#     FileNotFoundError: [Errno 2] ... : 'nosuchtool'   subprocess with a list argv
+# A first pass required the literal "command not found" and a "/bin/" prefix,
+# which between them matched only the bash form — the one the runner does not
+# use by default.
+_RUNNER_MISSING_BIN_RE = re.compile(
+    r"FileNotFoundError: \[Errno 2\][^\n]*?['\"]([\w.\-/]+)['\"]"
+    r"|(?:^|\n)(?:/\S+/)?(?:ba)?sh: (?:(?:line )?\d+: )?([\w.\-/]+): "
+    r"(?:command )?not found")
+
+
+def runner_crash_hint(sandbox_result: dict | None) -> str:
+    """A retry hint for the crash classes that need no judgment, or "".
+
+    The auto-retry loop only continues when it holds a `retry_hint`, and the
+    only producer is the LLM judge. With `enable_judge` off — an operator
+    setting, not a fault — there is no producer, so the loop stops after turn 0
+    no matter how trivially fixable the failure was.
+
+    Job 06f3a326d453 is what that costs. 61 turns and $23.43 of UOV
+    cryptanalysis produced a 28 KB solver whose line 33 read `import numpy as
+    np`; the runner has no numpy, so it died in 2 seconds having executed none
+    of the attack, and the run ended `no_flag` with `verdict=None,
+    next_action=continue` and no retry. A missing import is the most actionable
+    failure there is — the fix does not need a model to think about it.
+
+    Deliberately narrow. Only failures whose remedy is mechanical and whose
+    diagnosis is a literal string in the runner's own stderr qualify; anything
+    needing an opinion about the ATTACK stays the judge's job and still stops
+    here. `prejudge_blocked` / `judge_aborted` sentinels are skipped — those
+    mean the sandbox never ran, so its stderr describes nothing.
+    """
+    sr = sandbox_result or {}
+    if not sr or sr.get("error") == "prejudge_blocked" or sr.get("judge_aborted"):
+        return ""
+    if sr.get("exit_code") in (0, None):
+        return ""
+    err = str(sr.get("stderr") or "")
+    if not err:
+        return ""
+
+    m = _RUNNER_MISSING_MODULE_RE.search(err)
+    if m:
+        mod = m.group(1)
+        return (
+            f"The RUNNER sandbox has no Python module `{mod}` — your solver "
+            f"died at import before executing any of the attack (exit "
+            f"{sr.get('exit_code')}, empty stdout).\n\n"
+            f"The worker you developed in is a DIFFERENT container from the "
+            f"runner your solver is executed in, and they are not guaranteed to "
+            f"carry the same packages: anything an earlier job pip-installed "
+            f"into the worker persists there and does NOT exist in the runner. "
+            f"That `{mod}` imported cleanly while you were working proves "
+            f"nothing about the sandbox.\n\n"
+            f"Rewrite the solver without `{mod}` (the standard library is "
+            f"present, and pure-Python integer/byte arithmetic is usually "
+            f"enough for GF(2^k) and modular work), or vendor the small part "
+            f"you need. Then verify the fix in the REAL sandbox before you "
+            f"finish:\n"
+            f"    python3 -m worker.solver_smoke <script> [args] --timeout N\n"
+            f"Do NOT re-ship until that reports exit_code 0."
+        )
+
+    m = _RUNNER_MISSING_BIN_RE.search(err)
+    if m:
+        tool = m.group(1) or m.group(2)
+        return (
+            f"The RUNNER sandbox has no `{tool}` — your solver shelled out to a "
+            f"binary that exists in the worker but not in the sandbox that "
+            f"actually executes it (exit {sr.get('exit_code')}).\n\n"
+            f"Reimplement that step in-process, or switch to a tool the runner "
+            f"has. Verify in the REAL sandbox before you finish:\n"
+            f"    python3 -m worker.solver_smoke <script> [args] --timeout N\n"
+            f"Do NOT re-ship until that reports exit_code 0."
+        )
+    return ""
+
+
 def write_why_stopped(
     work_dir: Path,
     *,
@@ -9008,6 +9093,32 @@ async def run_main_agent_session(
                     log_fn(
                         "[orchestrator] prejudge BLOCKED with no new actionable "
                         "issues (repeat / cap reached) — stopping auto-retry"
+                    )
+            # Last resort before giving up: a crash whose diagnosis is a literal
+            # string in the runner's own stderr does not need the judge. This is
+            # the ONLY hint producer that survives `enable_judge=False`, which
+            # otherwise makes auto-retry structurally impossible — no judge, no
+            # hint, stop at turn 0 (job 06f3a326d453: a missing `import numpy`
+            # ended a $23 run after 2 seconds of sandbox time).
+            if not retry_hint:
+                _crash_hint = runner_crash_hint(last_sandbox)
+                if _crash_hint:
+                    # Same shape the prejudge redirect above uses, so the
+                    # existing inject path carries it verbatim.
+                    retry_hint = _crash_hint
+                    last_sandbox = dict(last_sandbox or {})
+                    last_sandbox["judge"] = {
+                        "verdict": "runner_crash",
+                        "next_action": "continue",
+                        "retry_hint": retry_hint,
+                        "summary": "solver crashed in the runner — fix and re-ship",
+                    }
+                    judge_out = last_sandbox["judge"]
+                    log_fn(
+                        "[orchestrator] the runner's own stderr diagnoses this "
+                        "crash — synthesizing a retry hint without the judge "
+                        "(this path is what keeps auto-retry alive when "
+                        "enable_judge is off)"
                     )
             if not retry_hint:
                 log_fn(

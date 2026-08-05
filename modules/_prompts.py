@@ -819,6 +819,25 @@ Bash CLIs always available in this worker container:
   - editors        : vim-tiny, nano (use only when an interactive edit is
                      genuinely required — Edit/Write tools are preferred)
   - build          : gcc, g++, make, pkg-config, python3-dev
+
+THIS CONTAINER IS NOT THE ONE THAT RUNS YOUR SOLVER.
+You develop in the worker; the orchestrator auto-runs the finished script in a
+SEPARATE sandbox image. They are not guaranteed to carry the same packages or
+binaries, and the gap moves: anything an earlier job `pip install`ed into this
+worker persists here and does NOT exist in the sandbox. So "it imported fine
+while I was working" is not evidence about the run.
+
+  - verify it yourself: `python3 -m worker.solver_smoke <script> [args] --timeout N`
+                        runs your script in the REAL sandbox and prints wall
+                        seconds, exit_code and output. Do this BEFORE you
+                        finish, whenever the script imports a third-party
+                        module or shells out to a binary.
+  - a .sage script goes to the Sage sandbox instead; `worker.sage_smoke` is the
+    equivalent for it.
+
+Job 06f3a326d453 skipped this: 61 turns of cryptanalysis produced a solver whose
+line 33 was `import numpy as np`, the sandbox had no numpy, and it died in two
+seconds having executed none of the attack.
 """
 
 TOOLS_WEB = _TOOLS_BASE + """\
