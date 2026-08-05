@@ -298,17 +298,43 @@ WORKFLOW
    the costly mistake is the OTHER direction (default 8 hiding a
    thousand-byte primitive).
 
-   prejudge BLOCKS ship when:
+   prejudge BLOCKS ship when — the COMPLETE list, from
+   modules/pwn/chain_schema.py:
    - any step's `uses_primitives` references a primitive with
-     `verified: false` (chain depends on something probing said no to)
+     `verified: false` (chain depends on something probing said no to).
+     EXCEPTION: if `reason_failed` says the primitive is untestable
+     LOCALLY (vsyscall / CET / kernel — the worker physically cannot
+     test it), this drops to informational and the run is allowed as a
+     remote probe.
    - any step's `prereq` references an undefined or later step
    - primitives or steps list empty
-   If you're shipping a leak-only / partial chain, that's fine — mark
-   the blocked primitives `verified: false` and DO NOT reference them
-   in any step's `uses_primitives`. prejudge passes; postjudge will
-   correctly classify as 'partial' / no_flag. Lying with verified=true
-   makes operators chase your false trail on /retry — `verify_method`
-   is documentation that downstream reviewers READ.
+   - EVERY primitive has `verified: false` — a chain of nothing verified
+     is a documentation artifact, not an exploit
+   - `rce_target` self-declares no RCE: "leak only", "not achieved",
+     "no arbitrary-write", "not reachable", a bare "PARTIAL …" prefix,
+     and similar
+
+   READ THE LAST TWO AGAIN, because the naive way to ship a partial
+   chain trips both. A leak-only chain usually HAS no verified
+   primitive, and the honest thing to write in `rce_target` is exactly
+   the phrase that blocks it. Ship is blocked by DESIGN there: the
+   sandbox would only confirm what your own chain.json already
+   concluded, and that cycle is better spent elsewhere.
+
+   So do NOT dress it up. `rce_target` is not a status field — it names
+   the END GOAL the chain aims at, and it is read that way. Put what
+   you did and did not achieve in `report.md` and in each primitive's
+   `reason_failed`, which is where reviewers look and which nothing
+   blocks on.
+
+   A block here is not the end of the run. prejudge feeds its issues
+   back as a fix-and-retry turn (up to 3), so treat it as "this chain
+   is not ready" and use the turn — find the missing primitive, or
+   redesign around what you HAVE verified. What you must not do is
+   flip `verified` to true or soften `rce_target` to slip past: the
+   sandbox then runs a chain you know cannot fire, and `verify_method`
+   is documentation downstream reviewers READ — a false trail there
+   costs an operator a whole /retry.
 10. Pre-finalize: invoke the JUDGE GATE (see mission_block above).
 
 DELEGATE TO DEBUGGER (dynamic facts you cannot derive from disasm)

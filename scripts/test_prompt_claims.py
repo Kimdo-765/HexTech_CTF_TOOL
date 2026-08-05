@@ -258,6 +258,57 @@ def main() -> int:
     chk("the ban itself still reads as a ban (prose keeps saying /tmp)",
         "NEVER write to /tmp/<filename>" in base)
 
+    # -------------------------------------------------------- chain rules
+    section("the prejudge rules the prompt lists must be the real ones")
+    # The prompt listed 3 of prejudge's 6 critical rules and then said a
+    # leak-only chain ships fine if you mark the blocked primitives
+    # verified:false. Following that HONESTLY trips the two rules it omitted:
+    # a leak-only chain usually has no verified primitive, and the truthful
+    # rce_target ("leak only", "not achieved", "PARTIAL …") is exactly what
+    # _RCE_TARGET_NEGATIVE / _RCE_TARGET_PARTIAL_PREFIX block on. The prompt
+    # was penalising honesty — dress rce_target up and it passes.
+    from modules.pwn.chain_schema import validate_chain
+
+    def _crit(d):
+        return [m for sev, m in validate_chain(d) if sev == "critical"]
+
+    _base = dict(
+        primitives=[{"id": "P1", "name": "leak", "verified": True,
+                     "verify_method": "probe"},
+                    {"id": "P2", "name": "aaw", "verified": False,
+                     "reason_failed": "probe said no"}],
+        steps=[{"n": 1, "action": "leak libc", "uses_primitives": ["P1"],
+                "prereq": "none", "verify": "x&0xfff==0"}])
+
+    chk("REGRESSION: an honest 'leak only' rce_target IS blocked — the old "
+        "prompt promised it would pass",
+        bool(_crit(dict(_base, rce_target="__free_hook = system (leak only, "
+                                          "not achieved)"))))
+    chk("REGRESSION: a bare 'PARTIAL …' prefix is blocked too",
+        bool(_crit(dict(_base, rce_target="PARTIAL — leak works, no write"))))
+    chk("REGRESSION: an all-unverified primitive set is blocked",
+        bool(_crit(dict(
+            primitives=[{"id": "P1", "name": "a", "verified": False,
+                         "reason_failed": "no"}],
+            steps=[{"n": 1, "action": "x", "uses_primitives": [],
+                    "prereq": "none", "verify": "v"}],
+            rce_target="__free_hook = system"))))
+    chk("naming the GOAL — what the prompt now teaches — passes",
+        not _crit(dict(_base, rce_target="__free_hook = system")))
+
+    chain_txt = psp
+    for rule in ("EVERY primitive has `verified: false`",
+                 "self-declares no RCE",
+                 "untestable\n     LOCALLY"):
+        chk(f"  the prompt now states: {rule.splitlines()[0][:44]}…",
+            rule.replace("\n     ", " ") in chain_txt.replace("\n     ", " "))
+    chk("REGRESSION: it no longer promises a partial chain ships",
+        "prejudge passes; postjudge will" not in chain_txt)
+    chk("...and says where partial progress belongs instead",
+        "`reason_failed`" in chain_txt and "not a status field" in chain_txt)
+    chk("it tells the agent a block is a retry, not a dead end",
+        "fix-and-retry turn" in chain_txt)
+
     # ------------------------------------------------------------ render
     section("all six modules still render")
     for m in ("crypto", "pwn", "rev", "web", "misc", "forensic"):
