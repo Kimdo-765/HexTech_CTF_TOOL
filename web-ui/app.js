@@ -2616,13 +2616,14 @@ async function renderJob(id, opts = {}) {
     resultBlock = `<div class="file-links">${links.join(" ")}</div>`;
   }
 
-  const cost = job.cost_usd ? ` · cost: $${Number(job.cost_usd).toFixed(4)}` : "";
-  const stage = job.stage ? ` · stage: ${job.stage}` : "";
-  const timeout = job.job_timeout ? ` · timeout: ${job.job_timeout}s` : "";
-  const providerInfo = job.agent_provider
-    ? ` · agent: ${escapeHtml(job.agent_provider_label || job.agent_provider)}`
-    : "";
-  const modelInfo = job.model ? ` · model: ${escapeHtml(job.model)}` : "";
+  // Job facts as labelled chips rather than one `·`-joined sentence. Same
+  // fields, same order; the difference is that a chip can be found by shape.
+  // In a 1600px-wide modal the old line ran the full width and every value sat
+  // at a different x on every job, so reading "which model was this?" meant
+  // parsing the whole string left to right.
+  const _metaChip = (k, v, title = "") =>
+    `<span class="job-meta-chip"${title ? ` title="${escapeHtml(title)}"` : ""}
+      ><b>${escapeHtml(k)}</b>${escapeHtml(String(v))}</span>`;
 
   // Elapsed (running) / duration (terminal). Now rendered as a
   // standalone badge next to the status pill so it doesn't get
@@ -2994,15 +2995,34 @@ async function renderJob(id, opts = {}) {
       <span class="status ${job.status}">${job.status}</span>
       ${timingPill}${agentPill}
     </h3>
-    <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${targetExtra}${stage}${cost}${timeout}${providerInfo}${modelInfo}</small></div>
+    <div class="job-meta">
+      ${_metaChip("module ", job.module)}
+      ${_metaChip("file ", job.filename || "—", job.filename || "")}
+      ${_metaChip("target ", job.target_url || "(none)", _tgts.join("\n"))}${targetExtra}
+      ${job.stage ? _metaChip("stage ", job.stage) : ""}
+      ${job.cost_usd ? _metaChip("cost ", "$" + Number(job.cost_usd).toFixed(4)) : ""}
+      ${job.job_timeout ? _metaChip("timeout ", job.job_timeout + "s") : ""}
+      ${job.agent_provider ? _metaChip("agent ", job.agent_provider_label || job.agent_provider) : ""}
+      ${job.model ? _metaChip("model ", job.model) : ""}
+    </div>
     ${timeoutBlock}
-    ${descBlock}
-    ${candBlock}
     ${runBlock}
-    ${errorBlock}
-    ${flagBlock}
-    ${logFindingsBlock}
-    ${resultBlock}
+    <!-- Two columns, because the two things an operator wants are never the
+         same thing at the same time: while a job RUNS you want the log, and
+         once it ENDS you want the flag and the report. In one column each was
+         a scroll away from the other, in a modal 1600px wide whose right half
+         was empty. Outcome on the left, activity on the right; one column
+         again under 1150px. -->
+    <div class="job-grid">
+      <div class="job-col-outcome">
+        ${flagBlock}
+        ${candBlock}
+        ${errorBlock}
+        ${descBlock}
+        ${logFindingsBlock}
+        ${resultBlock}
+      </div>
+      <div class="job-col-activity">
     <div class="sdk-live" data-job-id="${id}" hidden>
       <div class="sdk-live-head">
         <span class="sdk-live-dot"></span>
@@ -3041,6 +3061,8 @@ async function renderJob(id, opts = {}) {
       <div class="run-log-footer">
         ${tokensPill}
       </div>` : ""}
+    </div>
+      </div>
     </div>
   `;
 

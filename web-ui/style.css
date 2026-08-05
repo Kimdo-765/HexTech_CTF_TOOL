@@ -1462,6 +1462,50 @@ body.modal-open { overflow: hidden; }
   background: var(--bg-sunken);
 }
 
+/* Job facts, as chips instead of one `·`-joined sentence. The label is dimmed
+   and the value is not, so the eye lands on the value. */
+.job-meta {
+  display: flex; flex-wrap: wrap; gap: 0.35rem 0.45rem;
+  margin: 0.5rem 0 0.9rem;
+}
+.job-meta-chip {
+  font-size: 0.76rem;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--fg);
+  max-width: 30rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-meta-chip b { color: var(--fg-muted); font-weight: 500; }
+
+/* Outcome (left) beside activity (right). The modal is min(1600px, 96vw) and
+   was rendering a single column into it, so long lines ran the full width and
+   the run log started below the fold on every job.
+   `align-items: start` keeps the two columns independent — without it the
+   shorter one stretches and its background runs to the bottom of the taller. */
+.job-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 42fr) minmax(400px, 58fr);
+  gap: 1rem 1.25rem;
+  align-items: start;
+}
+/* One column before the columns get too narrow to read. The run log is
+   monospace and wraps badly below ~400px, which is what sets this number. */
+@media (max-width: 1150px) {
+  .job-grid { grid-template-columns: 1fr; }
+}
+.job-col-outcome, .job-col-activity { min-width: 0; }   /* let children shrink */
+/* The log follows the job; the outcome column is read once. Sticking the
+   activity column means scrolling the left side does not scroll the log out of
+   view. `top` clears the modal's own padding. */
+@media (min-width: 1151px) {
+  .job-col-activity { position: sticky; top: 0; }
+  /* The column is sticky inside a scroll container, so the log has the whole
+     modal height to work with rather than the 60vh it needed when it sat at
+     the bottom of one long page. */
+  .job-col-activity .run-log-window .run-log,
+  .job-col-activity .monitor-feed { max-height: min(64vh, 760px); }
+}
+
 /* --- Exploit Library tab ---------------------------------------------- */
 .exp-toolbar {
   display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
