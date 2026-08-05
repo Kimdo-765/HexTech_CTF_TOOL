@@ -199,6 +199,35 @@ def main() -> int:
     chk("...and the shim that enforces it is on PATH",
         dshim.startswith("/usr/local/bin"), dshim)
 
+    # --------------------------------------------------------- scaffold
+    section("the scaffold import the prompt hands out must actually work")
+    # These are the three lines from modules/pwn/prompts.py, verbatim. All of
+    # them raised ModuleNotFoundError in both images: /opt is on no sys.path
+    # and there is no __init__.py, so `scaffold` was never importable — the
+    # section that exists to stop agents rewriting heap primitives died on its
+    # own first line. Both Dockerfiles now symlink it into site-packages.
+    try:
+        from scaffold.fsop_wfile import build_full_chain, VTABLE_OFFSET  # noqa: F401
+        from scaffold.tcache_poison import safe_link, key_bypass_needed  # noqa: F401
+        from scaffold.aslr_retry import aslr_retry, expected_attempts_for  # noqa: F401
+        ok, err = True, ""
+    except Exception as e:  # noqa: BLE001
+        ok, err = False, f"{type(e).__name__}: {e}"
+    chk("all three prompt-supplied imports resolve", ok, err)
+
+    import modules.pwn.prompts as _PW
+    psp = _PW.SYSTEM_PROMPT
+    chk("REGRESSION: the prompt names key_bypass_needed, the symbol that "
+        "exists — `needs_key_bypass` never did",
+        "key_bypass_needed" in psp and "needs_key_bypass" not in psp)
+    chk("...and that is what the scaffold actually defines",
+        hasattr(importlib.import_module("scaffold.tcache_poison"),
+                "key_bypass_needed"))
+    chk("REGRESSION: /opt is NOT on sys.path — putting it there would make "
+        "`import gef` resolve to the GEF gdb plugin",
+        "/opt" not in sys.path, [p for p in sys.path if p.startswith("/opt")])
+    chk("...so gef stays unimportable", importlib.util.find_spec("gef") is None)
+
     # ------------------------------------------------------------- /tmp
     section("scratch-path policy must not contradict itself")
     # $TMPDIR is <work>/tmp, which resolves to the SAME path inside the
