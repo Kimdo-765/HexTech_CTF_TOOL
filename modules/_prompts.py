@@ -838,6 +838,34 @@ while I was working" is not evidence about the run.
 Job 06f3a326d453 skipped this: 61 turns of cryptanalysis produced a solver whose
 line 33 was `import numpy as np`, the sandbox had no numpy, and it died in two
 seconds having executed none of the attack.
+
+NEED A LIBRARY THAT IS NOT INSTALLED? Install it INTO YOUR WORK DIR.
+A plain `pip install <pkg>` is the wrong move twice over: the package lands in
+this container only, so the sandbox that runs your solver still will not have
+it — and it PERSISTS here after your job ends, so the next job on this slot
+inherits a library the other slot lacks. That is not hypothetical; it is
+exactly how 06f3a326d453 came to believe numpy was available.
+
+    pip install --target ./.pydeps <pkg>        # from your work dir
+
+and then, as the FIRST thing your solver does:
+
+    import os, sys
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), ".pydeps"))
+
+This works because the sandbox mounts the job directory at the SAME path with
+your work dir as its cwd, and both images share one Python base — so even
+compiled wheels load there unchanged (verified end-to-end with a C-extension
+package). Derive the path from `__file__`, not from a relative "./.pydeps", so
+it survives being run from anywhere.
+
+NOT a virtualenv: `python3 -m venv` + `source .venv/bin/activate` changes YOUR
+shell and nothing else. The sandbox invokes its own `python3 <script>` and never
+sees your activation, so the import fails there exactly as if you had done
+nothing. `--target` + `sys.path` is what crosses the boundary.
+
+Confirm with solver_smoke before you finish either way.
 """
 
 TOOLS_WEB = _TOOLS_BASE + """\

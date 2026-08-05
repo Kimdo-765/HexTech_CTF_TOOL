@@ -152,6 +152,30 @@ def main() -> int:
         "NOT THE ONE THAT RUNS YOUR SOLVER"
         in (ROOT / "modules" / "_prompts.py").read_text().split("TOOLS_WEB")[0])
 
+    # ------------------------------------------------- the --target recipe
+    section("the escape hatch must be the one that actually crosses over")
+    # A plain `pip install` lands in the worker only AND persists for the next
+    # job on that slot — both halves of what broke 06f3a326d453. The prompt has
+    # to offer something that works, or the agent will just do the wrong thing
+    # again. `--target` + sys.path does cross: the sandbox mounts the job dir at
+    # the same path with work/ as cwd, and both images share one Python base, so
+    # even compiled wheels load (verified end-to-end with a C-extension package).
+    base = (ROOT / "modules" / "_prompts.py").read_text().split("TOOLS_WEB")[0]
+    chk("the shared block offers a way to add a library",
+        "pip install --target ./.pydeps" in base, base[-200:])
+    chk("REGRESSION: the solver is told to build the path from __file__, not "
+        "from a relative './.pydeps' that only resolves in one cwd",
+        "os.path.dirname(os.path.abspath(__file__))" in base)
+    chk("...and to insert it on sys.path", "sys.path.insert(0," in base)
+    chk("REGRESSION: it says a venv does NOT work — `source activate` changes "
+        "the agent's shell and the sandbox never sees it",
+        "NOT a virtualenv" in base and "never" in base.split("NOT a virtualenv")[1][:400])
+    chk("it explains the persistence half of the problem too",
+        "PERSISTS" in base or "persists" in base)
+    chk("the chosen directory avoids the name this repo already overloads "
+        "(_VENDOR_DIRS elects/skips 'vendor')",
+        "./.pydeps" in base and "--target ./vendor" not in base)
+
     failed = [r for r in _results if not r]
     print(f"\n{len(_results)} checks, {len(failed)} failed")
     return 1 if failed else 0
