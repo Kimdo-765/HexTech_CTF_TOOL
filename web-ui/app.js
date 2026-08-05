@@ -534,7 +534,27 @@ function _appendMonitorEntry(id, payload) {
 // re-renders the whole detail panel and is paused on selection /
 // open forms), so the elapsed counter stays smooth.
 let livePillTimer = null;
+// Age of the agent's last SDK event, in the same visual family as the elapsed
+// pill. Seconds are kept visible past the minute mark on purpose: the whole
+// point of this readout is watching it reset, and "8m" alone hides the reset
+// for up to a minute.
+function _fmtAgentAge(sec) {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
 function _tickLivePill() {
+  // Same 1s tick drives the agent-event age. It is a separate element from the
+  // elapsed pill because they answer different questions — how long the job has
+  // run, versus how long since the agent last said anything — and because the
+  // elapsed pill must keep ticking on a job whose agent has not started yet.
+  document.querySelectorAll(".agent-pill[data-agent-at]").forEach((pill) => {
+    const iso = pill.dataset.agentAt;
+    if (!iso) return;
+    const sec = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    pill.textContent = `⚡ ${_fmtAgentAge(sec)}`;
+  });
   document.querySelectorAll(".timing-pill.live").forEach((pill) => {
     const startedIso = pill.dataset.startedAt;
     if (!startedIso) return;
@@ -548,7 +568,12 @@ function _tickLivePill() {
     if (!tagEl) return;
     pill.firstChild && (pill.firstChild.nodeValue = `⏱ ${fmt} `);
   });
-  if (!document.querySelector(".timing-pill.live")) {
+  // Stop only when NEITHER live readout is on screen. Keying this on the
+  // elapsed pill alone would be right today (a running job always has
+  // started_at, so it is a superset) but silently wrong the moment that stops
+  // holding — and the failure is invisible: a frozen counter reads exactly like
+  // a wedged agent, which is the one thing this readout must never fake.
+  if (!document.querySelector(".timing-pill.live, .agent-pill[data-agent-at]")) {
     clearInterval(livePillTimer);
     livePillTimer = null;
   }
@@ -2614,6 +2639,41 @@ async function renderJob(id, opts = {}) {
   // Whether a job is still going is answered by the run log and the monitor
   // feed, both of which are already on screen.
 
+  // What DOES belong here is the underlying fact, stated without a verdict.
+  // The chip above failed because it CLASSIFIED — it painted a warning colour
+  // on a distribution whose normal state is silence. Age alone classifies
+  // nothing, and the operator reads liveness from the one event the chip could
+  // never show: the counter RESETTING to 0s. A number that snaps back is proof
+  // the stream is alive; a number that keeps climbing is the raw fact, not an
+  // accusation. So: no colour, no threshold, no label — deliberately.
+  //
+  // Measured on THIS UI's own data, job 729c62380722 while healthy: an 8m05s
+  // gap between agent events (09:33:26 → 09:41:31) with run.log silent the
+  // whole time. Gaps that long are ordinary — heap/crypto synthesis runs 15-40
+  // min silent (memory opus-long-think-not-wedged). The tooltip says so,
+  // because a bare "8m" invites exactly the panic the old chip trained.
+  //
+  // NO FALLBACK when the field is absent. During the pre-agent `analyze` phase
+  // nothing writes it, and every chain that substituted started_at / updated_at
+  // ended up measuring "time since the job started" — which crosses any
+  // threshold on literally every job. That is the bug that put Stop AND Retry
+  // on screen at once (43d896f). Absent means render nothing.
+  let agentPill = "";
+  if (job.status === "running" && job.last_agent_event_at) {
+    const agentSec = Math.max(0, Math.round(
+      (Date.now() - new Date(job.last_agent_event_at).getTime()) / 1000));
+    agentPill = `<span class="agent-pill" data-agent-at="${escapeHtml(job.last_agent_event_at)}"
+      title="${escapeHtml(
+        "Time since the agent's last SDK event (meta.last_agent_event_at, "
+        + "written on every message with a 5s throttle).\n\n"
+        + "Watch it RESET — that is the liveness signal. A climbing number is "
+        + "not a fault: a healthy run is silent for minutes at a time while the "
+        + "model thinks, and 15-40 min is normal for heap/crypto synthesis.\n\n"
+        + "last event: " + (job.last_event_kind || "?") + " at "
+        + job.last_agent_event_at)}"
+      >⚡ ${_fmtAgentAge(agentSec)}</span>`;
+  }
+
   // Live token meter — reflects meta.agent_tokens (Anthropic usage,
   // SUMMED across turns; cache_read is per-call too so we sum it as
   // well). Hidden until at least one token has been observed.
@@ -2899,7 +2959,7 @@ async function renderJob(id, opts = {}) {
   detail.innerHTML = `
     <h3>Job <span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button>
       <span class="status ${job.status}">${job.status}</span>
-      ${timingPill}
+      ${timingPill}${agentPill}
     </h3>
     <div><small>module: ${job.module} · file: ${escapeHtml(job.filename || "")} · target: ${escapeHtml(job.target_url || "(none)")}${targetExtra}${stage}${cost}${timeout}${providerInfo}${modelInfo}</small></div>
     ${timeoutBlock}

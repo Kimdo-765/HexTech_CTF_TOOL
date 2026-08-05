@@ -813,6 +813,29 @@ button[type="submit"], #refresh-jobs {
 .timing-pill.queued {
   background: var(--surface); color: var(--fg-muted); border-color: var(--line);
 }
+/* Age of the agent's last SDK event. Deliberately the QUIETEST pill on the
+   row: muted foreground, plain surface, no pulse, and no state classes at all.
+   Its predecessor (the liveness chip, bc55640) went amber for 75.3% of a
+   healthy run and taught the operator to ignore it; a colour that is the normal
+   state is not a signal. This one only ever reports a number — the operator
+   reads life from it RESETTING, not from how it looks. Resist adding a
+   .warn/.dead variant here without first measuring the gap distribution: the
+   median is 0s and the max on a healthy run is 16 min, so no short threshold
+   separates "thinking" from "stuck". */
+.agent-pill {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface); color: var(--fg-muted);
+  border: 1px solid var(--line);
+  vertical-align: middle;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .timing-pill .timing-tag {
   font-size: 0.68rem; padding: 0.02rem 0.35rem;
   border-radius: 6px;
