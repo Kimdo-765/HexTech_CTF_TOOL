@@ -41,7 +41,17 @@ RUN pip install --no-cache-dir \
     z3-solver==4.13.4.0 \
     ecdsa==0.19.0 \
     requests==2.32.3 \
-    httpx==0.27.2
+    httpx==0.27.2 \
+    numpy==2.5.1
+# numpy: same version as worker/requirements.txt, and it must stay that way —
+# this pair is the parity. It was in NEITHER image, which is how job
+# 46bc4387edff came to `pip install numpy` into worker-2's live container on
+# 2026-08-03; that install persisted, and on 2026-08-05 job 06f3a326d453 drew
+# the same slot, found numpy importable, and spent 61 turns / $23.43 on a UOV
+# forgery whose line 33 was `import numpy as np`. Here it died at import with
+# exit 1 and 0 bytes of stdout, none of the attack executed. Agents reach for
+# numpy unprompted on GF(2^k) linear algebra and blob reshaping; the fix is to
+# have it in both images, not to hope they avoid it.
 
 # fpylll + cysignals — lattice reduction (LLL/BKZ) so a lattice solver.py the
 # agent writes in the worker actually RUNS here in the sandbox-validation

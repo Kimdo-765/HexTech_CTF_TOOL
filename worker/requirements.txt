@@ -55,3 +55,21 @@ werkzeug==2.2.2
 # misc / forensic — image + binary inspection from Python
 Pillow==11.0.0
 python-magic==0.4.27
+# numpy — vectorised byte/matrix work. Agents reach for it unprompted on
+# GF(2^k) linear algebra (UOV / Rainbow / AES column mixing), bitmap and
+# stego carving, and any "reshape this blob and XOR a column" step, where the
+# pure-Python loop is 100x slower and much harder to read.
+#
+# It is here because it was NOT here. numpy was absent from BOTH images, so on
+# 2026-08-03 job 46bc4387edff simply ran `pip install numpy` inside worker-2's
+# LIVE container — and it persisted. Two days later job 06f3a326d453 drew that
+# same slot, found numpy importable, and spent 61 turns and $23.43 building a
+# UOV forgery on it; the runner had none, so the solver died on line 33 at
+# import with 0 bytes of stdout, having executed none of the attack. worker-1
+# never had numpy at all, so which slot a job drew decided what it could use.
+#
+# MUST be added to runner/Dockerfile in the same change. A library present in
+# only one of the two images is the dev/run-parity bug this whole file keeps
+# re-learning (gcc headers, cpp, gdb, fpylll, /opt/scaffold — every one of
+# those blocks is the same story with a different import).
+numpy==2.5.1
