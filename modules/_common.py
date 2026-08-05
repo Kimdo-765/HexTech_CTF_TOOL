@@ -9120,24 +9120,6 @@ async def run_main_agent_session(
                         "(this path is what keeps auto-retry alive when "
                         "enable_judge is off)"
                     )
-            if not retry_hint:
-                log_fn(
-                    f"[orchestrator] postjudge produced no retry_hint "
-                    f"(verdict={verdict}, next_action={next_action}) — "
-                    f"stopping auto-retry"
-                )
-                write_why_stopped(
-                    work_dir,
-                    stop_kind="no_hint",
-                    attempt_idx=attempt,
-                    max_attempts=max_retries,
-                    judge_out=judge_out,
-                    sandbox_result=last_sandbox,
-                    summary=summary,
-                    log_fn=log_fn,
-                )
-                return last_sandbox
-
             # AUP-poisoned-session guard. If the main turn that just ran was
             # blocked by the server-side Usage-Policy classifier
             # (policy_refusal), the conversation context is poisoned: the
@@ -9145,10 +9127,26 @@ async def run_main_agent_session(
             # re-blocks deterministically (ab95a434bb0f 07:30:18,
             # 2eba75783e83 11:39:46 — a guaranteed-fail re-block that wastes a
             # turn + $; the SHA-unchanged gate then halts one iteration too
-            # late). Skip the in-place retry; halt now. WHY_STOPPED routes the
-            # operator to /retry, which forks a FRESH session that sheds the
-            # poison (the de-facto cure). Does NOT auto-spend — a fresh fork
-            # is operator-initiated.
+            # late). Skip the in-place retry; recover or halt here. WHY_STOPPED
+            # routes the operator to /retry, which forks a FRESH session that
+            # sheds the poison (the de-facto cure).
+            #
+            # ORDER IS LOAD-BEARING: this must stay ABOVE the `if not
+            # retry_hint` give-up below. It used to sit under it, and that made
+            # the whole recovery ladder unreachable in the shipped
+            # configuration — the give-up returns first, so the ladder only ran
+            # when a hint EXISTED, and with `enable_judge` off the only hint
+            # producer is runner_crash_hint (missing module / missing binary).
+            # Job 3d8cca4e26de is the proof: main was AUP-blocked on turn 37
+            # holding an exploit that already connected and leaked, and the run
+            # ended `stop_kind=no_hint` with no ladder entry in the log at all.
+            # It must also stay BELOW the crash-hint synthesis, so a session
+            # that is both AUP-blocked and crashed carries that hint into
+            # RESUME_STATE.md for its successor.
+            #
+            # Moving it changes exactly one case — AUP with no hint, which used
+            # to die here. AUP-with-hint already reached the ladder; non-AUP
+            # falls through this `if` untouched in both orders.
             if summary.get("agent_error_kind") == "policy_refusal":
                 # The SESSION is blocked, not necessarily the JOB. Walk the
                 # recovery ladder before giving up: a clean context first,
@@ -9236,6 +9234,24 @@ async def run_main_agent_session(
                     log_fn=log_fn,
                 )
                 return last_sandbox
+            if not retry_hint:
+                log_fn(
+                    f"[orchestrator] postjudge produced no retry_hint "
+                    f"(verdict={verdict}, next_action={next_action}) — "
+                    f"stopping auto-retry"
+                )
+                write_why_stopped(
+                    work_dir,
+                    stop_kind="no_hint",
+                    attempt_idx=attempt,
+                    max_attempts=max_retries,
+                    judge_out=judge_out,
+                    sandbox_result=last_sandbox,
+                    summary=summary,
+                    log_fn=log_fn,
+                )
+                return last_sandbox
+
 
             # Inject postjudge feedback as next user turn and loop.
             attempt += 1

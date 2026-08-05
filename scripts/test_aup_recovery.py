@@ -173,6 +173,37 @@ def main() -> int:
     chk("the restart is only reached when the ladder returned a step",
         halt.index("aup_recovery_step(") < halt.index("_aup_restart_session("))
 
+    # ---------------------------------------------------------------- order
+    section("the ladder has to be REACHABLE, not merely present")
+    # Everything above proves the halt block is correct. None of it noticed
+    # that the block sat BELOW the `if not retry_hint:` give-up, which returns
+    # first — so the ladder only ran when a hint already existed. With
+    # `enable_judge` off (the shipped setting) the sole hint producer is
+    # runner_crash_hint, i.e. missing-module / missing-binary crashes, and the
+    # whole recovery path was dead for every other AUP block.
+    #
+    # Job 3d8cca4e26de: main AUP-blocked on turn 37 holding an exploit that
+    # had already connected and leaked a heap address; the run ended
+    # `stop_kind=no_hint` with no ladder entry in run.log at all.
+    #
+    # These assert POSITION, which is the only thing that was ever wrong.
+    _aup_at = src.index('if summary.get("agent_error_kind") == "policy_refusal":')
+    _giveup_at = src.index(
+        'log_fn(\n                    f"[orchestrator] postjudge produced no retry_hint ')
+    _crash_at = src.index("_crash_hint = runner_crash_hint(last_sandbox)")
+    chk("REGRESSION: the AUP branch is reached BEFORE the no-hint give-up",
+        _aup_at < _giveup_at, (_aup_at, _giveup_at))
+    chk("...and AFTER the crash-hint synthesis, so an AUP+crash session "
+        "carries that hint into RESUME_STATE for its successor",
+        _crash_at < _aup_at, (_crash_at, _aup_at))
+    chk("the give-up still exists for the non-AUP case",
+        "stop_kind=\"no_hint\"" in src)
+    chk("both AUP outcomes terminate the loop rather than falling through",
+        src[_aup_at:_giveup_at].count("return last_sandbox") >= 1
+        and "stop_kind=\"policy_refusal\"" in src[_aup_at:_giveup_at])
+    chk("the ordering constraint is written down where it can be read",
+        "ORDER IS LOAD-BEARING" in src)
+
     failed = [r for r in _results if not r]
     print(f"\n{len(_results)} checks, {len(failed)} failed")
     return 1 if failed else 0
