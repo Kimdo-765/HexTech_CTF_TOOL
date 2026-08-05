@@ -237,16 +237,36 @@ def main() -> int:
     # this container. The prompt banned it in three places and then handed out
     # copy-pasteable `/tmp/...` recipes in a dozen others — and a concrete
     # example beats an abstract prohibition every time.
-    import re as _re
+    # "instead of", "applies to", "must also go via" — a rule cannot forbid
+    # /tmp without naming it, so the prose that DOES the forbidding is exempt.
+    # Everything else is a command an agent can copy.
     PROSE = ("NEVER", "never", "shared across", "does not exist", "used to say",
-             "clobber", "wrote /tmp/x", "hardcode", "forbids")
+             "clobber", "wrote /tmp/x", "hardcode", "forbids",
+             "instead of", "rule applies to", "must also go via",
+             "under your cwd")
+
+    def _stray(text: str) -> list[str]:
+        return [l.strip() for l in text.splitlines()
+                if "/tmp/" in l and "TMPDIR" not in l
+                and not any(k in l for k in PROSE)]
+
     for m in ("crypto", "pwn", "rev", "web", "misc", "forensic"):
         sp = getattr(importlib.import_module(f"modules.{m}.prompts"),
                      "SYSTEM_PROMPT", "") or ""
-        bad = [l.strip() for l in sp.splitlines()
-               if "/tmp/" in l and "TMPDIR" not in l
-               and not any(k in l for k in PROSE)]
+        bad = _stray(sp)
         chk(f"  {m}: no command-shaped /tmp example survives", not bad, bad[:2])
+
+    # The six SYSTEM_PROMPTs are not the whole corpus: recon, debugger and
+    # judge are separate constants handed to separate sessions, and the
+    # debugger's block was the worst offender of the lot. Sweep every prompt
+    # string in the shared module so a subagent prompt cannot drift unnoticed.
+    import modules._prompts as _PP
+    for name in sorted(n for n in dir(_PP) if n.isupper()):
+        val = getattr(_PP, name)
+        if not isinstance(val, str) or len(val) < 200:
+            continue
+        bad = _stray(val)
+        chk(f"  {name}: clean", not bad, bad[:2])
     base_sp = getattr(importlib.import_module("modules.pwn.prompts"),
                       "SYSTEM_PROMPT", "") or ""
     chk("REGRESSION: the sweep recipe — the most copy-pasteable of them all — "
