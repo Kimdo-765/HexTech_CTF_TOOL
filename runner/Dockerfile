@@ -72,10 +72,23 @@ RUN pip install --no-cache-dir cysignals fpylll 2>&1 | tail -3 || true \
 # crash on import line 15, status=no_flag). Dev/run parity: worker Dockerfile
 # already `COPY scaffold /opt/scaffold`; keep the two images in lockstep.
 COPY scaffold /opt/scaffold
-RUN python3 -c "import sys; sys.path.insert(0, '/opt'); \
- from scaffold.tcache_poison import safe_link, alignment_ok; \
- from scaffold.aslr_retry import aslr_retry; \
- print('scaffold OK in runner')"
+# …and make it IMPORTABLE, which copying it never did. `/opt` is on no
+# sys.path in either image, so `from scaffold.X import Y` — the exact three
+# lines modules/pwn/prompts.py hands the agent — raised ModuleNotFoundError in
+# the worker AND here. The prompt was teaching an import that could not work.
+#
+# A symlink into site-packages rather than `ENV PYTHONPATH=/opt`: /opt also
+# holds gef.py, pwndbg/ and how2heap/ in the worker image, and putting it on
+# the path makes `import gef` resolve to the GEF gdb plugin (verified). This
+# exposes exactly one name, `scaffold`, and keeps /opt/scaffold as the single
+# source for the `cp /opt/scaffold/heap_menu.py ./exploit.py` workflow.
+RUN ln -sfn /opt/scaffold \
+      "$(python3 -c 'import site; print(site.getsitepackages()[0])')/scaffold" \
+ && python3 -c "\
+from scaffold.tcache_poison import safe_link, alignment_ok, key_bypass_needed; \
+from scaffold.aslr_retry import aslr_retry; \
+from scaffold.fsop_wfile import build_full_chain; \
+print('scaffold importable in runner (no sys.path juggling)')"
 
 WORKDIR /work
 # Default to bash so the web terminal works; orchestrators set their

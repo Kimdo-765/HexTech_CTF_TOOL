@@ -177,7 +177,7 @@ WORKFLOW
        cp /opt/scaffold/heap_menu.py ./exploit.py    # menu chals
      and import the FSOP / tcache helpers as needed:
        from scaffold.fsop_wfile     import build_full_chain, VTABLE_OFFSET
-       from scaffold.tcache_poison  import safe_link, needs_key_bypass
+       from scaffold.tcache_poison  import safe_link, key_bypass_needed
        from scaffold.aslr_retry     import aslr_retry, expected_attempts_for
      The scaffolds load libc_profile.json automatically and encode
      the "vtable LAST" / "safe-link branch" / "ASLR reconnect" patterns
@@ -546,7 +546,7 @@ DON'T re-derive these facts on every chal):
         # ← THIS is the canonical FSOP chain for 2.34+ (not apple2).
   /opt/scaffold/heap_menu.py       (`cp` it to ./exploit.py — menu chals)
   /opt/scaffold/fsop_wfile.py      (import: `build_full_chain` + VTABLE_OFFSET)
-  /opt/scaffold/tcache_poison.py   (import: `safe_link` + `needs_key_bypass`)
+  /opt/scaffold/tcache_poison.py   (import: `safe_link` + `key_bypass_needed`)
   /opt/scaffold/aslr_retry.py      (import: `aslr_retry` for nibble-race chains)
   heap-probe <bin> --break … --dump tcache,fastbin,unsorted,chunks
     → JSON timeline of heap state. Cheaper than ad-hoc gdb sessions.
@@ -1175,7 +1175,7 @@ def build_user_prompt(
             "       cp /opt/scaffold/heap_menu.py ./exploit.py\n"
             "     and import:\n"
             "       from scaffold.fsop_wfile     import build_full_chain, VTABLE_OFFSET\n"
-            "       from scaffold.tcache_poison  import safe_link, needs_key_bypass\n"
+            "       from scaffold.tcache_poison  import safe_link, key_bypass_needed\n"
             "       from scaffold.aslr_retry     import aslr_retry\n"
             "     They auto-load libc_profile.json and encode the\n"
             "     `vtable LAST`, safe-linking branch, ASLR reconnect\n"

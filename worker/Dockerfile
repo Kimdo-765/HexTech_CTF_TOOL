@@ -354,6 +354,25 @@ RUN ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-clean \
 # Scaffolds load ./.chal-libs/libc_profile.json automatically, so the
 # version-matrix branching is data-driven instead of prose-driven.
 COPY scaffold /opt/scaffold
+# Importable, not just present. `/opt` is on no sys.path, so the three import
+# lines the pwn prompt hands the agent —
+#     from scaffold.tcache_poison import safe_link, key_bypass_needed
+# — raised ModuleNotFoundError here and in the runner alike: the section that
+# exists to stop agents rewriting heap primitives from scratch died on its own
+# first line.
+#
+# Symlink into site-packages, NOT `ENV PYTHONPATH=/opt`: this same /opt holds
+# gef.py, pwndbg/ and how2heap/, and adding it to the path makes `import gef`
+# resolve to the GEF gdb plugin (verified in the built image). One name is
+# exposed; /opt/scaffold stays the source for `cp /opt/scaffold/heap_menu.py`.
+# runner/Dockerfile does the same — keep the two in lockstep.
+RUN ln -sfn /opt/scaffold \
+      "$(python3 -c 'import site; print(site.getsitepackages()[0])')/scaffold" \
+ && python3 -c "\
+from scaffold.tcache_poison import safe_link, alignment_ok, key_bypass_needed; \
+from scaffold.aslr_retry import aslr_retry; \
+from scaffold.fsop_wfile import build_full_chain; \
+print('scaffold importable in worker (no sys.path juggling)')"
 
 # shellphish/how2heap — canonical glibc-version-keyed PoC corpus for
 # every well-known heap technique (fastbin_dup, house_of_*,
