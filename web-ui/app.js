@@ -2669,8 +2669,10 @@ async function renderJob(id, opts = {}) {
         + "Watch it RESET — that is the liveness signal. A climbing number is "
         + "not a fault: a healthy run is silent for minutes at a time while the "
         + "model thinks, and 15-40 min is normal for heap/crypto synthesis.\n\n"
-        + "last event: " + (job.last_event_kind || "?") + " at "
-        + job.last_agent_event_at)}"
+        + "Covers every SDK loop, not just main: pre-recon, delegated "
+        + "subagents and the report phase all report here.\n\n"
+        + "last event: " + (job.last_event_actor || "main") + " · "
+        + (job.last_event_kind || "?") + " at " + job.last_agent_event_at)}"
       >⚡ ${_fmtAgentAge(agentSec)}</span>`;
   }
 

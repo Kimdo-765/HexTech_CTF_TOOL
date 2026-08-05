@@ -2844,6 +2844,7 @@ async def run_report_phase(
             import anyio
             with anyio.fail_after(timeout_s):
                 async for msg in query(prompt=report_prompt, options=options):
+                    phase_heartbeat(job_id, "report", msg)
                     cls = type(msg).__name__
                     if cls == "AssistantMessage":
                         for block in getattr(msg, "content", []) or []:
@@ -3105,6 +3106,7 @@ async def run_pre_recon(
             async with GrokACPClient(opts) as client:
                 await client.query(prompt)
                 async for msg in client.receive_response():
+                    phase_heartbeat(job_id, "pre-recon", msg)
                     if isinstance(msg, GrokAssistantMessage):
                         for block in (getattr(msg, "content", None) or []):
                             if type(block).__name__ == "TextBlock":
@@ -3152,6 +3154,7 @@ async def run_pre_recon(
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
                 async for msg in client.receive_response():
+                    phase_heartbeat(job_id, "pre-recon", msg)
                     if isinstance(msg, AssistantMessage):
                         for block in (getattr(msg, "content", None) or []):
                             if type(block).__name__ == "TextBlock":
@@ -3956,6 +3959,10 @@ def make_spawn_subagent_mcp(
                 await sub_client.query(sub_prompt_effective)
                 async for msg in sub_client.receive_response():
                     record_rate_limit_event(msg)  # account-global usage chip
+                    # Liveness only — the token ledger below is deliberately
+                    # the SUBAGENT's, not main's, so agent_heartbeat must not
+                    # be called here.
+                    phase_heartbeat(job_id, tag, msg)
                     # Logging mirrors log_assistant_blocks but tagged
                     # by the isolated subagent's identity. We don't
                     # call log_assistant_blocks because that helper
@@ -4239,6 +4246,10 @@ def budget_exceeded(tool_calls: int, work_dir: Path, expected: tuple[str, ...]) 
 
 _HEARTBEAT_MIN_INTERVAL_S = 5.0
 _heartbeat_state: dict[str, float] = {}
+# Separate throttle for phase_heartbeat. Keyed on job_id alone, NOT on the
+# actor: several subagents run concurrently and a per-actor key would multiply
+# the write rate by the fan-out.
+_phase_heartbeat_state: dict[str, float] = {}
 # Per-job accumulators. Each AssistantMessage emits a usage dict that
 # is the API call's own totals (NOT job-cumulative), so we have to
 # sum across turns to get the real spend. We also dedupe by
@@ -4606,6 +4617,46 @@ def _accumulate_flag_candidates(job_id: str, msg) -> bool:
     return len(acc) > before
 
 
+def phase_heartbeat(job_id: str, actor: str, msg) -> None:
+    """Liveness ONLY, for the SDK loops that are not the main session.
+
+    `agent_heartbeat` is main's loop. It also carries the token/cost ledger,
+    and that ledger is deliberately per-actor: the subagent loop's own comment
+    says subagent tool calls belong on the subagent's ledger, and summing a
+    stream twice is exactly how agent_tokens once came out at EXACTLY 2.0000x
+    (see _accumulate_tokens). So this writes the three liveness fields and
+    NOTHING else — no usage, no cost, no turns, no flag scan.
+
+    Without it, `meta.last_agent_event_at` freezes for the entire duration of
+    every subagent delegation, pre-recon, and report phase — the job is working
+    hard and the timestamp says it has been quiet for ten minutes. Observed on
+    job 06f3a326d453: main's last event 10:35:49, `recon#1` still emitting at
+    10:42:19, and the UI's age readout stuck at 6m40s throughout.
+
+    `actor` is what to CALL the thing that is alive ("main", "pre-recon",
+    "report", "recon#1"). Both this and agent_heartbeat always write it, so it
+    can never go stale and describe the wrong actor.
+    """
+    # `_time` is a function-local import everywhere else in this module; the
+    # broad `except` below would have swallowed the NameError and turned this
+    # whole function into a silent no-op.
+    import time as _time
+    try:
+        now = _time.monotonic()
+        if now - _phase_heartbeat_state.get(job_id, 0.0) < _HEARTBEAT_MIN_INTERVAL_S:
+            return
+        _phase_heartbeat_state[job_id] = now
+        write_meta(
+            job_id,
+            last_agent_event_at=datetime.now(timezone.utc).isoformat(),
+            last_event_kind=type(msg).__name__,
+            last_event_actor=actor,
+        )
+    except Exception:
+        # Liveness is cosmetic. It must never be able to break a running phase.
+        pass
+
+
 def agent_heartbeat(job_id: str, msg) -> None:
     """Throttled write of agent liveness + token/cost tracking to
     meta.json. Called from each analyzer's SDK message loop on every
@@ -4713,6 +4764,9 @@ def agent_heartbeat(job_id: str, msg) -> None:
         job_id,
         last_agent_event_at=datetime.now(timezone.utc).isoformat(),
         last_event_kind=kind,
+        # Always written, so a subagent's actor tag can never linger and
+        # mislabel main's own event (phase_heartbeat writes it too).
+        last_event_actor="main",
         agent_tokens=tokens or None,
         agent_turns=turns or None,
         flag_candidates=candidates or None,
