@@ -33,6 +33,7 @@
       <button class="tab" data-tab="crypto">Crypto</button>
       <button class="tab" data-tab="rev">Rev</button>
       <button class="tab" data-tab="exploits" style="margin-left:auto">📚 Exploits</button>
+      <button class="tab" data-tab="dashboard">📊 Dashboard</button>
       <button class="tab" data-tab="containers">🐳 Containers</button>
       <button class="tab" data-tab="settings">⚙ Settings</button>
     </nav>
@@ -425,6 +426,43 @@
       <ul id="exp-list" class="exp-list"></ul>
     </section>
 
+    <!-- Dashboard. The jobs list used to be a permanent second grid column
+         beside whichever module panel was open; it now lives here. The
+         toolbar ids and #jobs-list are DELIBERATELY unchanged so selectJob /
+         deleteJob / refreshJobs / the flag alarm keep working against the same
+         nodes — this moved the list, it did not rewrite it. -->
+    <section id="panel-dashboard" class="panel">
+      <h2>Dashboard</h2>
+      <div class="dash-mem">
+        <div class="dash-mem-host">
+          <div id="dash-host-ring"></div>
+          <div class="dash-mem-caption">
+            <strong>Host RAM</strong>
+            <div id="dash-host-detail" class="dash-sub">—</div>
+          </div>
+        </div>
+        <div id="dash-container-rings" class="dash-rings">
+          <p class="dash-sub">Loading…</p>
+        </div>
+      </div>
+      <div class="dash-jobs-head">
+        <h3>Jobs</h3>
+        <div class="jobs-toolbar">
+          <button id="refresh-jobs">Refresh</button>
+          <select id="bulk-filter">
+            <option value="">finished + failed + no_flag (safe)</option>
+            <option value="finished">only finished (flag found)</option>
+            <option value="no_flag">only no_flag</option>
+            <option value="failed">only failed</option>
+            <option value="queued">only queued</option>
+            <option value="running">only running</option>
+            <option value="__all__">ALL (cancel running)</option>
+          </select>
+          <button id="bulk-delete" class="bulk-delete-btn">Delete matching</button>
+        </div>
+      </div>
+      <ul id="jobs-list"></ul>
+    </section>
     <section id="panel-containers" class="panel">
       <h2>Containers</h2>
       <p style="color:var(--fg-muted);font-size:0.85rem">
@@ -651,23 +689,6 @@
       </div>
     </section>
 
-    <section id="jobs">
-      <h2>Jobs</h2>
-      <div class="jobs-toolbar">
-        <button id="refresh-jobs">Refresh</button>
-        <select id="bulk-filter">
-          <option value="">finished + failed + no_flag (safe)</option>
-          <option value="finished">only finished (flag found)</option>
-          <option value="no_flag">only no_flag</option>
-          <option value="failed">only failed</option>
-          <option value="queued">only queued</option>
-          <option value="running">only running</option>
-          <option value="__all__">ALL (cancel running)</option>
-        </select>
-        <button id="bulk-delete" class="bulk-delete-btn">Delete matching</button>
-      </div>
-      <ul id="jobs-list"></ul>
-    </section>
   </main>
 
   <!-- Job detail modal: clicking any job in the list opens this. The

@@ -1,0 +1,145 @@
+// Regression suite for the Dashboard panel.
+//
+// Run in a container with node 20 (the host's node is too old for this repo's
+// app.js — it uses optional chaining):
+//
+//   docker cp web-ui/app.js      <worker>:/tmp/app.js
+//   docker cp web-ui/index.html  <worker>:/tmp/index.html
+//   docker cp web-ui/style.css   <worker>:/tmp/style.css
+//   docker cp scripts/test_dashboard_ui.js <worker>:/tmp/t.js
+//   docker exec <worker> node /tmp/t.js
+//
+// WHAT MOVED
+// The jobs list used to be a permanent second column of `main`, beside
+// whichever module panel was open. It now lives in the Dashboard panel. The
+// toolbar ids and #jobs-list are deliberately UNCHANGED so selectJob,
+// deleteJob, refreshJobs and the flag alarm keep binding to the same nodes —
+// this was a move, not a rewrite. The checks below pin that down, because the
+// failure mode of getting it wrong is silent: `document.getElementById(...)`
+// returns null at load time and the listener is simply never attached.
+//
+// `main` also had to drop from `1fr 1fr` to `1fr`; with the second child gone
+// every panel would otherwise render into the left half of the window.
+
+const fs = require("fs");
+
+let bad = 0, ran = 0;
+const t = (label, cond, got) => {
+  ran++;
+  console.log((cond ? "PASS  " : "FAIL  ") + label + (cond ? "" : `  | got=${JSON.stringify(got)}`));
+  if (!cond) bad++;
+};
+const read = (names) => {
+  for (const p of names) if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
+  return null;
+};
+
+const SRC = read(["/tmp/app.js", "web-ui/app.js", "../web-ui/app.js"]);
+const HTML = read(["/tmp/index.html", "web-ui/index.html", "../web-ui/index.html"]);
+const CSS = read(["/tmp/style.css", "web-ui/style.css", "../web-ui/style.css"]);
+if (!SRC || !HTML || !CSS) { console.log("FATAL  web-ui sources not found"); process.exit(2); }
+
+// Pull the real ring/format helpers out of app.js and run them.
+function sliceFn(name) {
+  const start = SRC.indexOf(`function ${name}(`);
+  if (start === -1) return null;
+  let i = SRC.indexOf("{", start), depth = 0;
+  for (; i < SRC.length; i++) {
+    if (SRC[i] === "{") depth++;
+    else if (SRC[i] === "}" && --depth === 0) return SRC.slice(start, i + 1);
+  }
+  return null;
+}
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ringSrc = sliceFn("_dashRing"), bytesSrc = sliceFn("_dashBytes");
+t("_dashRing is present", !!ringSrc);
+t("_dashBytes is present", !!bytesSrc);
+if (!ringSrc || !bytesSrc) { console.log(`\n${ran} checks, ${bad} failed`); process.exit(1); }
+const api = new Function("escapeHtml",
+  `${bytesSrc}\n${ringSrc}\nreturn {_dashRing, _dashBytes};`)(escapeHtml);
+
+// ------------------------------------------------------------------ format
+console.log("\n--- byte formatting --------------------------------------");
+t("GiB above a gigabyte", api._dashBytes(2 * 1073741824) === "2.0 GiB", api._dashBytes(2147483648));
+t("MiB in between", api._dashBytes(373587968) === "356 MiB", api._dashBytes(373587968));
+t("REGRESSION: zero is a NUMBER here, not fmtBytes's \"unlimited\" — that "
+  + "string answers a different question (what is the cap)",
+  api._dashBytes(0) === "0 KiB", api._dashBytes(0));
+t("a missing value degrades to ?", api._dashBytes(null) === "?", api._dashBytes(null));
+
+// -------------------------------------------------------------------- ring
+console.log("\n--- the ring must encode the number it claims -------------");
+const arc = (html) => {
+  const m = html.match(/stroke-dasharray="([\d.]+) ([\d.]+)"/);
+  return m ? Number(m[1]) / Number(m[2]) : null;
+};
+t("0% draws no arc", Math.abs(arc(api._dashRing(0, "x", "")) - 0) < 1e-6);
+t("50% draws half the circumference",
+  Math.abs(arc(api._dashRing(50, "x", "")) - 0.5) < 1e-3, arc(api._dashRing(50, "x", "")));
+t("100% closes the ring",
+  Math.abs(arc(api._dashRing(100, "x", "")) - 1) < 1e-3, arc(api._dashRing(100, "x", "")));
+t("the percentage is also printed as text",
+  api._dashRing(37, "x", "").includes(">37%<"), api._dashRing(37, "x", ""));
+
+console.log("\n--- unmeasurable is not the same as zero -----------------");
+const unknown = api._dashRing(null, "x", "");
+t("REGRESSION: a null reading renders '—', not 0%",
+  unknown.includes(">—<") && !unknown.includes(">0%<"), unknown.slice(-260));
+t("...and gets no severity class",
+  !/dash-ring (warn|high)/.test(unknown), unknown.slice(0, 60));
+
+console.log("\n--- severity is earned, not decorative -------------------");
+t("a normal container is plain", !/dash-ring (warn|high)/.test(api._dashRing(40, "x", "")));
+t("75% warns", /dash-ring warn/.test(api._dashRing(75, "x", "")));
+t("90% is high", /dash-ring high/.test(api._dashRing(90, "x", "")));
+t("out-of-range input is clamped, never drawn past full",
+  Math.abs(arc(api._dashRing(140, "x", "")) - 1) < 1e-3, arc(api._dashRing(140, "x", "")));
+t("a hostile label cannot inject markup",
+  !api._dashRing(10, '<img src=x onerror=alert(1)>', "").includes("<img"),
+  api._dashRing(10, '<img src=x onerror=alert(1)>', "").slice(0, 200));
+
+// ------------------------------------------------------------------ markup
+console.log("\n--- the move must not orphan any listener ----------------");
+t("a Dashboard tab exists", /data-tab="dashboard"/.test(HTML));
+t("...positioned before Containers",
+  HTML.indexOf('data-tab="dashboard"') < HTML.indexOf('data-tab="containers"'));
+t("its panel exists with the id the tab switcher derives",
+  /id="panel-dashboard"/.test(HTML));
+t("REGRESSION: the standalone <section id=\"jobs\"> is gone",
+  !/<section id="jobs">/.test(HTML));
+const dash = HTML.slice(HTML.indexOf('id="panel-dashboard"'),
+  HTML.indexOf('id="panel-containers"'));
+for (const id of ["jobs-list", "refresh-jobs", "bulk-filter", "bulk-delete"]) {
+  t(`  #${id} still exists, inside the dashboard panel`,
+    dash.includes(`id="${id}"`), dash.includes(`id="${id}"`));
+  t(`  ...and app.js still binds it`, SRC.includes(`"${id}"`) || SRC.includes(`#${id}`));
+}
+t("the ring mount points exist",
+  dash.includes('id="dash-host-ring"') && dash.includes('id="dash-container-rings"'));
+
+console.log("\n--- layout ------------------------------------------------");
+const mainRule = CSS.slice(CSS.indexOf("main { padding"), CSS.indexOf("}", CSS.indexOf("main { padding")) + 1);
+t("REGRESSION: main is ONE column now that #jobs is not its second child",
+  /grid-template-columns:\s*1fr\s*;/.test(mainRule), mainRule);
+t(".dash-ring is styled", CSS.includes(".dash-ring {"));
+
+console.log("\n--- wiring ------------------------------------------------");
+t("the dashboard tab loads the rings",
+  /data-tab="dashboard"[\s\S]{0,200}loadDashboard\(\)/.test(SRC));
+t("loadDashboard reads host_mem from the API", SRC.includes("data.host_mem"));
+t("REGRESSION: it asks for sizes=false — the disk walk is the slow half and "
+  + "the rings only need memory", SRC.includes("containers?sizes=false"));
+t("only RUNNING containers get a ring (a stopped one reports no memory_stats)",
+  /state === "running"/.test(SRC));
+t("the poll stops when the panel is not active",
+  /panel-dashboard[\s\S]{0,120}_stopDashPoll\(\)/.test(SRC));
+t("REGRESSION: freshly rendered job rows restart the 1s tick, or the "
+  + "dashboard's own counters freeze between polls",
+  /status === "running"\)\) _ensureLivePillTimer\(\)/.test(SRC));
+t("row pills reuse the shared age formatter", /rowPills[\s\S]{0,600}_fmtAgentAge\(/.test(SRC));
+t("REGRESSION: the row's agent pill has no started_at fallback either",
+  /if \(job\.last_agent_event_at\) \{/.test(SRC));
+
+console.log(`\n${ran} checks, ${bad} failed`);
+process.exit(bad ? 1 : 0);

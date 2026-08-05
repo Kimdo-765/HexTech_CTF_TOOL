@@ -348,6 +348,47 @@ def _list_sync(with_sizes: bool) -> dict:
         "running_jobs": job_ids,
         "counts": {k: sum(1 for x in out if x["category"] == k)
                    for k in ("challenge", "sandbox", "tunnel", "core")},
+        "host_mem": _host_mem(),
+    }
+
+
+def _host_mem() -> dict:
+    """Host RAM, for the dashboard's total-usage ring.
+
+    /proc/meminfo inside a container reports the HOST's memory rather than this
+    container's cgroup limit, which is what the ring wants: the question is how
+    much of the MACHINE is gone, not how much of the api container.
+
+    `used` is derived from MemAvailable, not from `total - free`. MemAvailable
+    is the kernel's own estimate of what a new allocation could get, so page
+    cache — which is reclaimable and routinely fills all remaining RAM — does
+    not read as consumption. `total - free` would show a healthy machine at 95%
+    and mean nothing, which is the same "warning colour is the normal state"
+    failure the liveness chip was removed for (bc55640).
+
+    Returned as bytes with `available: false` when unreadable, so the frontend
+    can hide the ring rather than draw a ring of zeroes.
+    """
+    total = avail = 0
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
+                elif line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) * 1024
+                if total and avail:
+                    break
+    except Exception:
+        pass
+    if not total:
+        return {"available": False}
+    return {
+        "available": True,
+        "total_bytes": total,
+        "available_bytes": avail,
+        "used_bytes": max(0, total - avail),
+        "used_pct": round(100.0 * (total - avail) / total, 1) if avail else None,
     }
 
 

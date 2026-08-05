@@ -559,9 +559,11 @@ function _tickLivePill() {
     const startedIso = pill.dataset.startedAt;
     if (!startedIso) return;
     const sec = Math.max(0, Math.round((Date.now() - new Date(startedIso).getTime()) / 1000));
-    const fmt = sec < 60 ? `${sec}s`
-      : sec < 3600 ? `${Math.floor(sec/60)}m ${sec%60}s`
-      : `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m`;
+    // Same formatter as every other elapsed/age readout. This was an inline
+    // copy of the identical ternary; with the dashboard rendering these pills
+    // too there are now three call sites, and three copies of one format is
+    // three chances for them to drift apart on screen at the same time.
+    const fmt = _fmtAgentAge(sec);
     // Only replace the text node holding the time; keep the inner
     // "running" tag span untouched.
     const tagEl = pill.querySelector(".timing-tag");
@@ -2377,8 +2379,30 @@ async function refreshJobs() {
       ? `<span class="flag-pill" style="background:var(--yellow-solid);color:var(--yellow-soft)"
            title="${escapeHtml(job.flag_candidates.join('\n'))}\n\nUNVERIFIED — the sandbox never reproduced these. Confirm against the challenge, then pin in the UI.">⚑ ${job.flag_candidates.length}</span>`
       : "";
+    // Live readouts on the row itself, so the dashboard answers "is this one
+    // moving?" without opening it. Both tick on the shared 1s timer via
+    // _tickLivePill — the same elements the detail panel uses, so there is one
+    // implementation of the age format and one place it can be wrong.
+    let rowPills = "";
+    if (job.status === "running" && job.started_at) {
+      const sec = Math.max(0, Math.round((Date.now() - new Date(job.started_at).getTime()) / 1000));
+      rowPills += `<span class="timing-pill live" data-started-at="${escapeHtml(job.started_at)}"
+        title="started ${escapeHtml(job.started_at)}">⏱ ${_fmtAgentAge(sec)} <span class="timing-tag">running</span></span>`;
+      // Same rule as the detail panel: NO fallback when the agent has not
+      // emitted yet, because started_at in its place just measures the job's
+      // own age and would read as liveness on a job that has produced nothing.
+      if (job.last_agent_event_at) {
+        const asec = Math.max(0, Math.round(
+          (Date.now() - new Date(job.last_agent_event_at).getTime()) / 1000));
+        rowPills += `<span class="agent-pill" data-agent-at="${escapeHtml(job.last_agent_event_at)}"
+          title="${escapeHtml("last event: " + (job.last_event_actor || "main") + " · "
+            + (job.last_event_kind || "?") + "\n\nWatch it RESET — a climbing number is normal; "
+            + "a healthy run is silent for minutes while the model thinks.")}"
+          >⚡ ${_fmtAgentAge(asec)}</span>`;
+      }
+    }
     li.innerHTML = `<strong>${job.module}</strong> · ${escapeHtml(job.filename || "")}
-      <span class="status ${job.status}">${job.status}</span>${flagPill}${candPill}
+      <span class="status ${job.status}">${job.status}</span>${flagPill}${candPill}${rowPills}
       <button class="delete-btn">×</button>
       <div style="font-size:0.75rem;color:var(--fg-muted);"><span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button> ${cost}</div>`;
     li.addEventListener("click", () => selectJob(job.id));
@@ -2387,6 +2411,13 @@ async function refreshJobs() {
     if (job.id === selectedJob) li.classList.add("selected");
     ul.appendChild(li);
   }
+  // The rows above are re-created on every poll, so the pills they carry are
+  // brand-new nodes with a stale-by-up-to-2s value baked in. Without this the
+  // 1s tick only runs while a job DETAIL panel happens to be open, and the
+  // dashboard's own counters would sit frozen between polls — the exact
+  // "frozen counter reads like a wedged agent" failure the tick exists to
+  // avoid. _ensureLivePillTimer is a no-op when the timer is already running.
+  if (data.jobs.some((j) => j.status === "running")) _ensureLivePillTimer();
 }
 
 async function selectJob(id) {
@@ -4051,3 +4082,102 @@ document.getElementById("containers-auto")?.addEventListener("change", (e) => {
   }, 15000);
 });
 document.querySelector('.tab[data-tab="containers"]')?.addEventListener("click", loadContainers);
+
+/* ------------------------------------------------------------------ Dashboard
+   One place to watch a run: live job rows plus memory rings. The jobs list is
+   rendered by refreshJobs() into the same #jobs-list node it always used — it
+   moved panels, it was not rewritten — so this section only owns the rings. */
+
+// fmtBytes() answers "what is this container's CAP" and returns the string
+// "unlimited" for 0, which is right there and wrong here: 0 bytes used is a
+// number, not an absence of a limit.
+function _dashBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return "?";
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + " GiB";
+  if (n >= 1048576) return Math.round(n / 1048576) + " MiB";
+  return Math.round(n / 1024) + " KiB";
+}
+
+/** A donut. `pct` null renders an empty track rather than a zero-length arc,
+ *  so "we could not measure this" is visibly different from "this is at 0%". */
+function _dashRing(pct, label, value, size = 56) {
+  const r = (size - 8) / 2;
+  const c = 2 * Math.PI * r;
+  const known = Number.isFinite(pct);
+  const shown = known ? Math.max(0, Math.min(100, pct)) : 0;
+  const cls = !known ? "" : shown >= 90 ? " high" : shown >= 75 ? " warn" : "";
+  return `<div class="dash-ring${cls}">
+    <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img"
+         aria-label="${escapeHtml(label)} ${known ? shown + "%" : "unknown"}">
+      <circle class="dash-ring-track" cx="${size/2}" cy="${size/2}" r="${r}"
+              fill="none" stroke-width="6"></circle>
+      <circle class="dash-ring-fill" cx="${size/2}" cy="${size/2}" r="${r}"
+              fill="none" stroke-width="6" stroke-linecap="round"
+              stroke-dasharray="${(shown/100*c).toFixed(2)} ${c.toFixed(2)}"
+              transform="rotate(-90 ${size/2} ${size/2})"></circle>
+      <text x="50%" y="50%" text-anchor="middle" dominant-baseline="central"
+            class="dash-ring-value" fill="currentColor"
+            >${known ? Math.round(shown) + "%" : "—"}</text>
+    </svg>
+    <span class="dash-ring-label" title="${escapeHtml(label + (value ? " — " + value : ""))}"
+      >${escapeHtml(label)}</span>
+    ${value ? `<span class="dash-sub">${escapeHtml(value)}</span>` : ""}
+  </div>`;
+}
+
+let _dashPoll = null;
+
+async function loadDashboard() {
+  const ringsEl = document.getElementById("dash-container-rings");
+  const hostEl = document.getElementById("dash-host-ring");
+  const detailEl = document.getElementById("dash-host-detail");
+  if (!ringsEl || !hostEl) return;
+  let data;
+  try {
+    // sizes=false skips the per-container disk walk, which is the slow half of
+    // this endpoint. The rings only need memory.
+    const res = await fetch(`${API}/containers?sizes=false`);
+    data = await res.json();
+  } catch (_) {
+    ringsEl.innerHTML = '<p class="dash-sub">container stats unavailable</p>';
+    return;
+  }
+
+  const hm = data.host_mem || {};
+  if (hm.available) {
+    hostEl.innerHTML = _dashRing(hm.used_pct, "used", "", 92);
+    detailEl.textContent =
+      `${_dashBytes(hm.used_bytes)} of ${_dashBytes(hm.total_bytes)} · ` +
+      `${_dashBytes(hm.available_bytes)} available`;
+  } else {
+    hostEl.innerHTML = "";
+    detailEl.textContent = "host memory unreadable";
+  }
+
+  // Running only: a stopped container reports no memory_stats, so every ring
+  // would be an unmeasurable "—" and drown the ones that mean something.
+  const running = (data.containers || []).filter((c) => c.state === "running");
+  ringsEl.innerHTML = running.length
+    ? running.map((c) => _dashRing(
+        c.mem_pct,
+        c.job_id ? `${c.category}·${c.job_id.slice(0, 8)}` : (c.compose_service || c.name || "?"),
+        `${_dashBytes(c.mem_usage)} / ${fmtBytes(c.mem_limit)}`,
+      )).join("")
+    : '<p class="dash-sub">no running containers</p>';
+}
+
+function _stopDashPoll() {
+  if (_dashPoll) { clearInterval(_dashPoll); _dashPoll = null; }
+}
+
+document.querySelector('.tab[data-tab="dashboard"]')?.addEventListener("click", () => {
+  loadDashboard();
+  _stopDashPoll();
+  // 15s for the same reason the containers panel uses it: each refresh is a
+  // docker stats sample per running container, ~1s each on the daemon. The job
+  // rows are NOT on this timer — the global poll already refreshes them.
+  _dashPoll = setInterval(() => {
+    if (document.getElementById("panel-dashboard").classList.contains("active")) loadDashboard();
+    else _stopDashPoll();
+  }, 15000);
+});

@@ -145,8 +145,11 @@ nav { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 }
 .tab.active { background: var(--blue-solid); border-color: var(--blue-solid); }
 .tab[disabled] { opacity: 0.4; cursor: not-allowed; }
-main { padding: 1.5rem 2rem; display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+/* ONE column. This was `1fr 1fr` because #jobs was a permanent second child
+   sitting beside whichever module panel was active. The jobs list moved into
+   the Dashboard panel, so a two-column grid would now leave every panel
+   stranded in the left half with dead space to its right. */
+main { padding: 1.5rem 2rem; display: grid; grid-template-columns: 1fr; gap: 2rem; }
 .panel { display: none; }
 .panel.active { display: block; }
 form { display: flex; flex-direction: column; gap: 0.75rem; }
@@ -778,6 +781,42 @@ button[type="submit"], #refresh-jobs {
   cursor: pointer;
 }
 #jobs-list li.selected { border-color: var(--blue-solid); }
+
+/* ---------------------------------------------------------------- Dashboard
+   Memory rings are hand-rolled SVG: two concentric strokes and a
+   stroke-dasharray. No charting library — index.html already pulls two scripts
+   from a CDN and a third for four donuts would be the largest dependency in
+   the app by an order of magnitude. */
+.dash-mem {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 1.5rem 2rem;
+  padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+}
+.dash-mem-host { display: flex; align-items: center; gap: 1rem; }
+.dash-mem-caption strong { font-size: 0.95rem; }
+.dash-sub { font-size: 0.78rem; color: var(--fg-muted); }
+.dash-rings {
+  display: flex; flex-wrap: wrap; gap: 1.25rem;
+  padding-left: 1.5rem; border-left: 1px solid var(--line); flex: 1 1 320px;
+}
+.dash-ring { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; width: 5.5rem; }
+.dash-ring-label {
+  font-size: 0.7rem; color: var(--fg-muted); text-align: center;
+  max-width: 5.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dash-ring svg { display: block; }
+.dash-ring-track { stroke: var(--line); }
+/* The ring colour tracks HOW FULL it is, which is the one place in this UI
+   where a warning colour is earned: memory pressure is a real, actionable
+   state and a container at 90% of its cap is minutes from an OOM kill. Unlike
+   the removed liveness chip, the normal state here is green, not amber. */
+.dash-ring-fill { stroke: var(--green-bright); transition: stroke-dasharray 0.4s ease; }
+.dash-ring.warn  .dash-ring-fill { stroke: var(--yellow-bright); }
+.dash-ring.high  .dash-ring-fill { stroke: var(--red, #e5534b); }
+.dash-ring-value { font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+.dash-jobs-head { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.dash-jobs-head h3 { margin: 0; }
+.dash-jobs-head .jobs-toolbar { margin: 0; }
 .status { font-size: 0.8rem; padding: 0.1rem 0.4rem; border-radius: 4px; margin-left: 0.5rem; }
 /* dimmest state of the family; names its text so it isn't the one badge
    left inheriting --fg-bright onto a mid grey (3.38:1) */
