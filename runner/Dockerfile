@@ -4,6 +4,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgmp-dev libmpfr-dev libmpc-dev \
     binutils file curl \
+    # git: foundryup hard-requires it and exits "need 'git'" without ever
+    # fetching a binary (the worker image had it incidentally; this one did
+    # not, so the Foundry layer below failed here and only here).
+    git \
     build-essential cpp \
     gdb qemu-user-static ltrace strace \
     bash less vim-tiny nano \
@@ -89,6 +93,28 @@ from scaffold.tcache_poison import safe_link, alignment_ok, key_bypass_needed; \
 from scaffold.aslr_retry import aslr_retry; \
 from scaffold.fsop_wfile import build_full_chain; \
 print('scaffold importable in runner (no sys.path juggling)')"
+
+# ---------------------------------------------------------------- web3 -----
+# The SAME three Foundry binaries and the same pinned web3 stack as
+# worker/Dockerfile, for the reason every other block in this file exists: the
+# agent develops in the worker and its exploit is auto-run HERE. A `cast call`
+# or `import web3` that resolves in development and not in the sandbox is a
+# solver that dies at import with 0 bytes of stdout and a job that reads
+# no_flag — the numpy incident (job 06f3a326d453) in a different costume.
+#
+# Keep the version pins identical to the worker's. slither is NOT installed
+# here: it is a source-analysis tool the agent runs while reasoning, never
+# something a shipped exploit shells out to.
+ARG FOUNDRY_VERSION=v1.7.1
+RUN curl -fsSL https://foundry.paradigm.xyz | bash \
+ && /root/.foundry/bin/foundryup -i "${FOUNDRY_VERSION}" \
+ && cp /root/.foundry/bin/forge /root/.foundry/bin/cast /root/.foundry/bin/anvil \
+       /usr/local/bin/ \
+ && rm -rf /root/.foundry \
+ && forge --version && cast --version && anvil --version
+
+RUN pip install --no-cache-dir web3==7.16.0 eth-abi==5.2.0 eth-account==0.13.7 \
+ && python3 -c "from web3 import Web3; assert Web3.keccak(text='transfer(address,uint256)').hex().startswith('a9059cbb'), 'keccak wrong'; print('web3 OK in runner')"
 
 WORKDIR /work
 # Default to bash so the web terminal works; orchestrators set their

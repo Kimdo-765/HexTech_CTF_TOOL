@@ -780,10 +780,10 @@ def _resubmit(
     dropping the raw transcript is the cheaper, overflow-proof signal.
     """
     module = prev_meta.get("module")
-    if module not in ("web", "pwn", "crypto", "rev"):
+    if module not in ("web", "pwn", "crypto", "rev", "web3"):
         raise HTTPException(
             status_code=400,
-            detail=f"retry-with-hint is only supported for web/pwn/crypto/rev (got {module})",
+            detail=f"retry-with-hint is only supported for web/pwn/crypto/rev/web3 (got {module})",
         )
 
     new_id = new_job_id()
@@ -922,7 +922,7 @@ def _resubmit(
 
     q = get_queue()
 
-    if module in ("web", "crypto"):
+    if module in ("web", "crypto", "web3"):
         # Copy source dir
         src_extracted = prev_jd / "src" / "extracted"
         if src_extracted.is_dir():
@@ -938,6 +938,12 @@ def _resubmit(
         if module == "web":
             q.enqueue(
                 "modules.web.analyzer.run_job",
+                new_id, new_src_root, target, description, auto_run, model,
+                job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
+            )
+        elif module == "web3":
+            q.enqueue(
+                "modules.web3.analyzer.run_job",
                 new_id, new_src_root, target, description, auto_run, model,
                 job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
             )
@@ -1016,10 +1022,10 @@ def _continue_in_place(prev_meta: dict, comment: str,
     `target_override` updates the target (a restarted DreamHack instance often
     comes back on a NEW port); blank keeps the prior, "(none)" clears it."""
     module = prev_meta.get("module")
-    if module not in ("web", "pwn", "crypto", "rev"):
+    if module not in ("web", "pwn", "crypto", "rev", "web3"):
         raise HTTPException(
             status_code=400,
-            detail=f"continue is only supported for web/pwn/crypto/rev (got {module})",
+            detail=f"continue is only supported for web/pwn/crypto/rev/web3 (got {module})",
         )
     job_id = prev_meta.get("id")
     if not job_id:
@@ -1086,6 +1092,10 @@ def _continue_in_place(prev_meta: dict, comment: str,
         q.enqueue("modules.web.analyzer.run_job",
                   job_id, prev_meta.get("src_root"), target, description, auto_run, model,
                   job_id=rq_id, job_timeout=ht)
+    elif module == "web3":
+        q.enqueue("modules.web3.analyzer.run_job",
+                  job_id, prev_meta.get("src_root"), target, description, auto_run, model,
+                  job_id=rq_id, job_timeout=ht)
     elif module == "crypto":
         q.enqueue("modules.crypto.analyzer.run_job",
                   job_id, prev_meta.get("src_root"), target, description, auto_run, model,
@@ -1117,7 +1127,7 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
     if not jd.is_dir():
         raise HTTPException(status_code=404, detail="job not found")
     prev_meta = read_job_meta(safe) or {}
-    if prev_meta.get("module") not in ("web", "pwn", "crypto", "rev"):
+    if prev_meta.get("module") not in ("web", "pwn", "crypto", "rev", "web3"):
         raise HTTPException(
             status_code=400,
             detail="retry-with-hint only works for web/pwn/crypto/rev jobs",

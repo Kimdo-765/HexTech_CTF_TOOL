@@ -403,6 +403,41 @@ RUN pip install --no-cache-dir cysignals fpylll 2>&1 | tail -3 || true \
  && ( python3 -c "from fpylll import IntegerMatrix, LLL, GSO, Enumeration; import fpylll; print('fpylll OK', fpylll.__version__)" \
       || echo "[WARN] fpylll unavailable; lattice (LLL/BKZ/Coppersmith) tooling disabled" )
 
+# ---------------------------------------------------------------- web3 -----
+# Foundry — forge (build/test Solidity), cast (the RPC swiss-army knife:
+# call/send/storage/sig/keccak/abi-decode) and anvil (a local chain, and a FORK
+# of a remote one). This is the whole toolchain for both shapes of Web3
+# challenge: a local `Setup.sol` you deploy and break, and a remote instance
+# you drive over RPC.
+#
+# Binaries are copied out and ~/.foundry deleted: the installer leaves ~446 MB
+# of download cache behind, of which only these three (184 MB) are needed, and
+# `chisel` (a Solidity REPL, 42 MB) has no place in a non-interactive agent.
+# Pinned like everything else here — a toolchain that moves under the prompt is
+# the failure this repo keeps re-learning.
+#
+# MUST stay in lockstep with runner/Dockerfile: the agent develops here and its
+# exploit is auto-run THERE, so a `cast` call that works in development and is
+# missing in the sandbox is a job that dies at exit with 0 bytes of stdout.
+ARG FOUNDRY_VERSION=v1.7.1
+RUN curl -fsSL https://foundry.paradigm.xyz | bash \
+ && /root/.foundry/bin/foundryup -i "${FOUNDRY_VERSION}" \
+ && cp /root/.foundry/bin/forge /root/.foundry/bin/cast /root/.foundry/bin/anvil \
+       /usr/local/bin/ \
+ && rm -rf /root/.foundry \
+ && forge --version && cast --version && anvil --version
+
+# web3.py + the eth-* stack for Python exploits, and slither for static
+# analysis of the contract source (reentrancy, unchecked calls, access
+# control). slither is isolated + WARN-masked like the angr / fpylll layers: a
+# bad release must not be able to break the image, and its absence only costs
+# one analysis route.
+RUN pip install --no-cache-dir web3==7.16.0 eth-abi==5.2.0 eth-account==0.13.7 \
+ && python3 -c "from web3 import Web3; assert Web3.keccak(text='transfer(address,uint256)').hex().startswith('a9059cbb'), 'keccak wrong'; print('web3 OK')"
+RUN pip install --no-cache-dir slither-analyzer==0.11.6 2>&1 | tail -3 || true \
+ && ( slither --version >/dev/null 2>&1 && echo "slither OK $(slither --version 2>&1 | head -1)" \
+      || echo "[WARN] slither unavailable; Solidity static analysis disabled" )
+
 ENV PYTHONPATH=/app
 
 CMD ["python", "-m", "worker.runner"]

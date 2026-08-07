@@ -32,6 +32,7 @@
       <button class="tab" data-tab="misc">Misc</button>
       <button class="tab" data-tab="crypto">Crypto</button>
       <button class="tab" data-tab="rev">Rev</button>
+      <button class="tab" data-tab="web3">Web3</button>
       <button class="tab" data-tab="exploits" style="margin-left:auto">📚 Exploits</button>
       <button class="tab" data-tab="dashboard">📊 Dashboard</button>
       <button class="tab" data-tab="containers">🐳 Containers</button>
@@ -324,6 +325,65 @@
           <button type="reset" title="Clear file, target, and all other inputs">Reset</button>
         </div>
         <small style="color:var(--fg-muted)">Worker has pycryptodome, gmpy2, sympy, z3-solver, ecdsa, pwntools. Sage requires <code>docker compose --profile tools-sage pull sage</code>.</small>
+      </form>
+    </section>
+    <section id="panel-web3" class="panel">
+      <h2>Web3 — Smart-Contract Analysis + Exploit Generation</h2>
+      <form id="web3-form">
+        <label>
+          Contract sources (zip preferred — Setup.sol + target contracts) — <em>or skip for a chain-only target</em>
+          <input type="file" name="file" />
+        </label>
+        <label>
+          Remote instance (RPC URL or host:port — blank = local anvil only) <small>— click + to add more</small>
+          <div class="target-list" data-field="target" data-placeholder="http://chal.example.com:8545">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="http://chal.example.com:8545" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
+        </label>
+        <label>
+          Description / hints (optional)
+          <textarea name="description" rows="3" placeholder="paste the handout here — RPC URL, private key, Setup address; plus any hints"></textarea>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="auto_run" />
+          Auto-run generated exploit
+        </label>
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (stand up the challenge service/binary in its intended container). Leave off for a plain static/dynamic solve. Web & Pwn already do this by default.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
+        </label>
+        <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when the solver captures the REAL flag from the remote target/oracle. Local-only validation will NOT pass.">
+          <input type="checkbox" class="capture-remote-flag-cb" />
+          🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working solver</span>
+        </label>
+        <label>
+          Flag format (optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...} — only this format counts as a flag; blank = auto" />
+          <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
+        </label>
+        <label>
+          Claude model (blank = global Settings value)
+          <select name="model" data-role="model-select"></select>
+        </label>
+        <label>
+          Effort (blank = SDK default; controls reasoning depth)
+          <select name="effort" data-role="effort-select"></select>
+        </label>
+        <label>
+          Job timeout (seconds, blank = global setting)
+          <input type="number" name="job_timeout" min="60" placeholder="6000" />
+        </label>
+        <div class="form-actions">
+          <button type="submit">Analyze + Solve</button>
+          <button type="reset" title="Clear file, target, and all other inputs">Reset</button>
+        </div>
+        <small style="color:var(--fg-muted)">Worker and sandbox both have Foundry (forge / cast / anvil), web3.py, eth-abi and eth-account; slither is worker-only. A local anvil chain needs no network.</small>
       </form>
     </section>
 

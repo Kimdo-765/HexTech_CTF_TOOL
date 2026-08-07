@@ -22,6 +22,7 @@ from api.routes import (
     misc_module,
     pwn_module,
     rev_module,
+    web3_module,
     web_module,
 )
 from modules.settings_io import get_setting
@@ -73,6 +74,7 @@ app.include_router(forensic_module.router, prefix="/api/modules/forensic", tags=
 app.include_router(misc_module.router, prefix="/api/modules/misc", tags=["misc"])
 app.include_router(crypto_module.router, prefix="/api/modules/crypto", tags=["crypto"])
 app.include_router(rev_module.router, prefix="/api/modules/rev", tags=["rev"])
+app.include_router(web3_module.router, prefix="/api/modules/web3", tags=["web3"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
 app.include_router(model_presets_routes.router, prefix="/api/model-presets", tags=["settings"])
 app.include_router(tunnel_routes.router, prefix="/api/tunnel", tags=["tunnel"])
@@ -162,6 +164,7 @@ def list_modules():
             {"id": "misc", "name": "Misc / Stego", "status": "available"},
             {"id": "crypto", "name": "Crypto", "status": "available"},
             {"id": "rev", "name": "Reversing (ghiant)", "status": "available"},
+            {"id": "web3", "name": "Web3 / Smart Contract", "status": "available"},
         ]
     }
 

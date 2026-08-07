@@ -845,6 +845,9 @@ document.getElementById("crypto-form").addEventListener("submit", (e) => {
 document.getElementById("rev-form").addEventListener("submit", (e) => {
   e.preventDefault(); submitJob(e.target, "/modules/rev/analyze");
 });
+document.getElementById("web3-form").addEventListener("submit", (e) => {
+  e.preventDefault(); submitJob(e.target, "/modules/web3/analyze");
+});
 
 function _setModelField(f, name, customName, catalog, value) {
   const modelSel = f.querySelector(`[name=${name}]`);

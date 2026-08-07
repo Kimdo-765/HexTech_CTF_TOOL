@@ -329,9 +329,48 @@ def main() -> int:
     chk("it tells the agent a block is a retry, not a dead end",
         "fix-and-retry turn" in chain_txt)
 
+    # -------------------------------------------------------------- web3
+    section("web3: every tool the prompt names must run")
+    # Same contract as the rest of this file — the prompt says these exist, so
+    # they get executed. A Web3 module is worth nothing if `cast` is missing in
+    # the sandbox that runs the exploit, which is why the runner gets the same
+    # binaries (slither excepted: it is a reasoning aid, never shipped).
+    for tool, flag in (("forge", "--version"), ("cast", "--version"),
+                       ("anvil", "--version"), ("slither", "--version")):
+        rc, out = run(f"{tool} {flag}")
+        chk(f"  {tool} runs", rc == 0, out[-90:])
+    rc, out = run("cast sig 'transfer(address,uint256)'")
+    chk("REGRESSION: `cast sig` gives the selector the prompt quotes",
+        "a9059cbb" in out, out.strip()[:60])
+
+    from web3 import Web3 as _W3
+    import eth_abi as _ea, eth_account as _eacc  # noqa: F401
+    chk("web3 / eth_abi / eth_account import", True)
+    chk("...and Web3.keccak matches that same selector",
+        _W3.keccak(text="transfer(address,uint256)").hex().startswith("a9059cbb"))
+
+    import modules.web3.prompts as _W3P
+    w3sp = _W3P.SYSTEM_PROMPT
+    chk("the web3 prompt renders", len(w3sp) > 5000, len(w3sp))
+    chk("REGRESSION: it teaches the minimal foundry.toml, not `forge init` "
+        "alone — init CLONES forge-std from GitHub and a bare src/ + 4-line "
+        "config compiles offline",
+        "[profile.default]" in w3sp and "CLONES forge-std" in w3sp)
+    chk("it says `private` is readable via cast storage",
+        "cast storage" in w3sp and "no getter" in w3sp)
+    chk("REGRESSION: it separates a local rehearsal from a remote capture — "
+        "the win condition is a predicate, not a printed flag",
+        "isSolved()" in w3sp and "rehearsal" in w3sp)
+    chk("it warns that a receipt must be checked for status == 1",
+        "wait_for_transaction_receipt" in w3sp)
+    chk("the anvil key it hardcodes is the well-known dev key, and it says "
+        "not to use it remotely",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" in w3sp
+        and "funded only" in w3sp)
+
     # ------------------------------------------------------------ render
-    section("all six modules still render")
-    for m in ("crypto", "pwn", "rev", "web", "misc", "forensic"):
+    section("every module still renders")
+    for m in ("crypto", "pwn", "rev", "web", "misc", "forensic", "web3"):
         try:
             sp = getattr(importlib.import_module(f"modules.{m}.prompts"),
                          "SYSTEM_PROMPT", "") or ""

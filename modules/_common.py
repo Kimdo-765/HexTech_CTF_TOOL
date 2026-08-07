@@ -23,6 +23,7 @@ from modules._prompts import (  # noqa: E402,F401
     TOOLS_PWN,
     TOOLS_REV,
     TOOLS_CRYPTO,
+    TOOLS_WEB3,
     TOOLS_FORENSIC,
     TOOLS_MISC,
     RECON_AGENT_PROMPT,
@@ -2268,6 +2269,24 @@ _RECON_WEB_ADDENDUM = {
         "running / tracing (gdb / qemu / ltrace / strace), not by trusting a "
         "blog — a deliberately-modified binary won't match the reference."
     ),
+    "web3": (
+        "WEB RESEARCH FOR THIS web3 JOB (overrides the pwn-flavored web "
+        "examples above)\n"
+        "--------------------------------------------------------------\n"
+        "Local ground truth = the Solidity in front of you and what a local "
+        "anvil chain actually does when you run it. Use the web to: look up "
+        "EXACT semantics you must not guess at (opcode behaviour and gas "
+        "rules, `delegatecall` storage context, proxy/EIP-1967 slot layout, "
+        "ERC-20/721/777 hook order, precompile addresses), read the reference "
+        "docs for a library the challenge imports (OpenZeppelin version "
+        "differences are load-bearing — `_beforeTokenTransfer` moved, "
+        "`Initializable` changed), and recognise a known bug pattern by name. "
+        "Do NOT copy an exploit from a writeup of a similarly-named "
+        "challenge: CTF contracts are deliberately modified, and the one line "
+        "they changed is the whole puzzle. Verify every claim on anvil — it "
+        "is free and instant, so there is no excuse for shipping an untested "
+        "assumption about EVM behaviour."
+    ),
     "web": (
         "WEB RESEARCH FOR THIS web JOB (overrides the pwn-flavored web "
         "examples above)\n"
@@ -2615,6 +2634,42 @@ REPORT_SCHEMA_WEB = """\
   },
   "exploit_status": "drafted | tested-failed | tested-partial | flag-captured | aborted",
   "caveats": ["<auth-required | remote-untested | rate-limited | …>"]
+}"""
+
+
+REPORT_SCHEMA_WEB3 = """\
+{
+  "schema_version": 1,
+  "chal_name": "<from description or filename>",
+  "chain_env": "local-anvil | anvil-fork | remote-rpc",
+  "contracts": [
+    {
+      "name": "<contract name>",
+      "file": "<source file>",
+      "address": "<deployed address, or null if not deployed yet>",
+      "role": "<setup | target | token | helper — what it is FOR>"
+    }
+  ],
+  "vulns": [
+    {
+      "id": "V-01",
+      "bug_class": "reentrancy | access-control | unchecked-return | delegatecall | selfdestruct-force-send | tx-origin-auth | integer-overflow | price-oracle-manipulation | flashloan | signature-replay | uninitialized-proxy | storage-collision | weak-randomness | front-running | precision-loss | logic | …",
+      "contract": "<contract name>",
+      "function": "<function signature — e.g. 'withdraw()'>",
+      "file": "<source file>",
+      "line": <int or null>,
+      "why": "<one paragraph: the state or check that is wrong, and why the EVM lets you abuse it>",
+      "primitive_quality": "HIGH | MED | LOW"
+    }
+  ],
+  "chain": {
+    "technique_name": "reentrancy-drain | delegatecall-takeover | oracle-manipulation | proxy-init-race | …",
+    "steps": ["<ordered one-line steps, each an on-chain action>"],
+    "win_condition": "<the exact predicate the challenge checks — e.g. 'Setup.isSolved() returns true' or 'target balance == 0'>",
+    "expected_observable": "<how you will SEE it: the isSolved() call returning true, the flag the remote handout prints, …>"
+  },
+  "exploit_status": "drafted | tested-failed | tested-partial | flag-captured | aborted",
+  "caveats": ["<local-only | remote-untested | needs-funded-key | gas-bound | …>"]
 }"""
 
 

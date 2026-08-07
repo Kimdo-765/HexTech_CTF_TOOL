@@ -978,6 +978,46 @@ Rev-specific:
                      input domain and fitting the observed table.
 """
 
+TOOLS_WEB3 = _TOOLS_BASE + """\
+Web3-specific (every line below was executed in BOTH images before it was
+written here — see scripts/test_prompt_claims.py):
+  - chain          : `anvil` — a local EVM. Bare `anvil --silent --port 8545`
+                     gives you 10 funded accounts; `anvil --fork-url <RPC>`
+                     forks a live chain at a block so you can rehearse an
+                     exploit against real state for free.
+                     First account (well-known anvil key, safe to hardcode):
+                       0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+                       0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+  - contract calls : `cast` — the tool you will reach for most.
+                       cast call  <addr> "fn()(uint256)" --rpc-url $R
+                       cast send  <addr> "fn(address)" <arg> --rpc-url $R --private-key $K
+                       cast storage <addr> <slot> --rpc-url $R   # read private vars
+                       cast sig "transfer(address,uint256)"      # -> 0xa9059cbb
+                       cast 4byte <selector> / cast abi-decode / cast --to-dec
+                     `cast storage` is how you read a `private` variable: on
+                     the EVM `private` means "no getter", never "not readable".
+  - build / deploy : `forge build`, `forge create <path>:<Contract> --rpc-url
+                     $R --private-key $K --broadcast`, `forge test`.
+                     A bare directory is enough — `src/` plus a 4-line
+                     foundry.toml compiles with NO forge-std and NO network:
+                       [profile.default]
+                       src = "src"
+                       out = "out"
+                       libs = []
+                     `forge init` also works but CLONES forge-std from GitHub;
+                     prefer the minimal layout unless you need its cheatcodes.
+                     forge downloads the solc matching your `pragma` on first
+                     build (needs egress, which this container has).
+  - static analysis: `slither <file.sol>` — reentrancy, unchecked calls,
+                     access control, tx.origin. WORKER ONLY: it is a reasoning
+                     aid, not something a shipped exploit shells out to.
+  - Python (import): web3 (Web3.HTTPProvider, eth.get_storage_at, contract
+                     ABI binding), eth_abi (encode/decode), eth_account
+                     (LocalAccount, sign_transaction), plus the usual
+                     requests / pwntools.
+                     Web3.keccak(text="f(uint256)")[:4] is the selector.
+"""
+
 TOOLS_CRYPTO = _TOOLS_BASE + """\
 Crypto-specific:
   - shell          : openssl (genrsa, dgst, aes-*, ec, …)
