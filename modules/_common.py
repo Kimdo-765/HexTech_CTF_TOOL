@@ -2668,7 +2668,8 @@ REPORT_SCHEMA_WEB3 = """\
     "win_condition": "<the exact predicate the challenge checks — e.g. 'Setup.isSolved() returns true' or 'target balance == 0'>",
     "expected_observable": "<how you will SEE it: the isSolved() call returning true, the flag the remote handout prints, …>"
   },
-  "exploit_status": "drafted | tested-failed | tested-partial | flag-captured | aborted",
+  "exploit_status": "drafted | tested-failed | tested-partial | local-solved | flag-captured | aborted",
+  "_exploit_status_note": "local-solved = the predicate flipped on YOUR anvil and there was no flag to take. flag-captured = you hold the actual flag string from the remote instance. They are different claims; picking the second for a local run overstates what happened.",
   "caveats": ["<local-only | remote-untested | needs-funded-key | gas-bound | …>"]
 }"""
 
@@ -7252,6 +7253,14 @@ _FINDINGS_PRIM_CLASS = {
 _FINDINGS_EXPLOIT_STATUS = {
     "drafted", "tested-failed", "tested-partial",
     "flag-captured", "aborted",
+    # web3: the challenge's own predicate (Setup.isSolved()) flipped on a LOCAL
+    # chain and there was no flag to capture — the exploit is proven, the
+    # challenge is not necessarily finished. Without this value the closest
+    # option is "flag-captured", which overstates: job 5e0de4572503 verified
+    # `isSolved after = True` on anvil, had no flag to take, and filed
+    # flag-captured anyway. The whole point of the web3 prompt is that a local
+    # pass is a rehearsal, so the status enum has to be able to say so.
+    "local-solved",
 }
 
 

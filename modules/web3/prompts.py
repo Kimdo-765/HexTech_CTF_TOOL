@@ -35,6 +35,12 @@ flag string. If NO remote was provided, a local `isSolved() == true` is
 the deliverable — say so plainly in report.md rather than implying a
 capture.
 
+In findings.json that distinction has its own value: use
+`exploit_status: local-solved` when the predicate flipped on YOUR anvil
+and there was no flag to take, and `flag-captured` ONLY when you hold
+the actual flag string from the remote instance. Reaching for the
+second because it sounds better is how a rehearsal gets filed as a win.
+
 WHERE THE BUG USUALLY IS
 ------------------------
 - Reentrancy        state written AFTER an external call

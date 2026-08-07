@@ -368,6 +368,19 @@ def main() -> int:
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" in w3sp
         and "funded only" in w3sp)
 
+    # Found by running the module on a real challenge (job 5e0de4572503): the
+    # agent verified `isSolved after = True` on anvil, had no flag to take, and
+    # filed `flag-captured` — because the inherited enum had no value for what
+    # actually happened. A prompt that draws a distinction needs a schema that
+    # can express it.
+    from modules._common import _FINDINGS_EXPLOIT_STATUS as _ST
+    chk("REGRESSION: the status enum can say 'proved locally, no flag'",
+        "local-solved" in _ST, sorted(_ST))
+    from modules._common import REPORT_SCHEMA_WEB3 as _W3S
+    chk("...the web3 report schema offers it", "local-solved" in _W3S)
+    chk("...and the prompt says which of the two to pick",
+        "local-solved" in w3sp and "flag-captured` ONLY when" in w3sp)
+
     # ------------------------------------------------------------ render
     section("every module still renders")
     for m in ("crypto", "pwn", "rev", "web", "misc", "forensic", "web3"):
