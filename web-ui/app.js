@@ -3056,7 +3056,10 @@ async function renderJob(id, opts = {}) {
     ? (prevMonFeed.scrollTop + prevMonFeed.clientHeight >= prevMonFeed.scrollHeight - 12)
     : true;
   const prevMonScrollTop = prevMonFeed ? prevMonFeed.scrollTop : 0;
-  const prevTimeline = detail.querySelector(".gpt-timeline-feed");
+  // The scrolling element is the EVENT LIST, not the feed — the feed is a
+  // fixed box now so the agent cards stay put. Capturing the wrong element
+  // here would silently stop preserving position across the 2s poll.
+  const prevTimeline = detail.querySelector(".gpt-timeline-feed .gpt-event-list");
   const prevTimelineAtBottom = prevTimeline
     ? (prevTimeline.scrollTop + prevTimeline.clientHeight >= prevTimeline.scrollHeight - 12)
     : true;
@@ -3642,7 +3645,7 @@ async function renderJob(id, opts = {}) {
       newMonFeed.scrollTop = prevMonScrollTop;
     }
   }
-  const newTimeline = detail.querySelector(".gpt-timeline-feed");
+  const newTimeline = detail.querySelector(".gpt-timeline-feed .gpt-event-list");
   if (newTimeline) {
     if (!isSameJob || prevTimelineAtBottom) {
       newTimeline.scrollTop = newTimeline.scrollHeight;
