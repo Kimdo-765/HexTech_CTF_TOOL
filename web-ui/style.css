@@ -2015,3 +2015,16 @@ body.modal-open { overflow: hidden; }
   margin-bottom: 0.4rem;
 }
 .role-provider-grid label { margin: 0; }
+
+/* A role routed off the job's backend. It emits no GPT events, so its card
+   stays "configured" for the whole run — the badge is what stops that reading
+   as a stalled GPT agent. */
+.gpt-agent-routed {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  background: rgba(59, 130, 246, 0.16);
+  border: 1px solid rgba(59, 130, 246, 0.45);
+}

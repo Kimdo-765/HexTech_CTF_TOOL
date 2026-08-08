@@ -217,5 +217,27 @@ check("...and is not a settings key the server knows",
     .includes("topology_preset"),
   false);
 
+
+// ---------------------------------------------------------------------------
+// 6. The Timeline must not claim a routed-away role runs on the job's backend.
+//    Source-level, because the render path needs a live job to exercise: the
+//    contract is that the API resolves per role and the card carries it.
+// ---------------------------------------------------------------------------
+const jobsRoute = fs.readFileSync(path.join(ROOT, "api/routes/jobs.py"), "utf8");
+const runEvents = fs.readFileSync(path.join(ROOT, "modules/gpt_run_events.py"), "utf8");
+
+check("the timeline resolves the provider per role",
+  /provider_for_role\(job_id, role\)/.test(jobsRoute), true);
+check("...and takes that provider's model, not the GPT preset's",
+  /role_model_for\(role, where, None\)/.test(jobsRoute), true);
+check("...only substituting when the role is routed away",
+  /fallbacks\[role\] if where == "gpt"/.test(jobsRoute), true);
+check("the provider reaches the card",
+  /"provider": configured_providers\.get\(role, ""\)/.test(runEvents), true);
+check("...and summarize_agents accepts it",
+  /configured_providers: dict\[str, str\] \| None = None/.test(runEvents), true);
+check("the card renders a badge for a routed role",
+  /agent\.provider && agent\.provider !== "gpt"/.test(appjs), true);
+
 console.log(`\n${PASS + FAIL} checks, ${FAIL} failed`);
 process.exit(FAIL ? 1 : 0);

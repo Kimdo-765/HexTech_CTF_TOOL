@@ -330,10 +330,21 @@ def _collapse_emitted_events(events: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def summarize_agents(
-    events: list[dict[str, Any]], configured_models: dict[str, str] | None = None
+    events: list[dict[str, Any]],
+    configured_models: dict[str, str] | None = None,
+    configured_providers: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fold timeline records into one current-status card per observed role."""
+    """Fold timeline records into one current-status card per observed role.
+
+    `configured_providers` says which backend each role actually runs on. On a
+    hybrid job that is not all one value, and a card that omits it reads as
+    "everything is GPT" — which is what the Timeline showed before. A role
+    routed away also emits no GPT events, so its card stays `configured`
+    forever; naming the provider is what makes that legible rather than
+    looking like a stalled GPT agent.
+    """
     configured_models = configured_models or {}
+    configured_providers = configured_providers or {}
     agents: dict[str, dict[str, Any]] = {}
     for event in events:
         role = str(event.get("role") or "").strip()
@@ -341,6 +352,7 @@ def summarize_agents(
             continue
         card = agents.setdefault(role, {
             "role": role, "model": configured_models.get(role, ""),
+            "provider": configured_providers.get(role, ""),
             "status": "configured", "last_at": "", "current": "",
         })
         if event.get("model"):

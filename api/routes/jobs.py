@@ -596,6 +596,7 @@ def get_gpt_timeline(job_id: str, tail: int | None = None):
         return {"enabled": False, "events": [], "agents": [], "source": "disabled"}
 
     configured_models: dict[str, str] = {}
+    configured_providers: dict[str, str] = {}
     preset_name = ""
     try:
         from modules.agent_provider import default_model_for
@@ -619,12 +620,28 @@ def get_gpt_timeline(job_id: str, tail: int | None = None):
             "triage": str(preset.get("triage") or main),
             "report": str(preset.get("report") or main),
         }
-        configured_models = {
-            role: fallbacks[role] for role in CONFIGURABLE_ROLES
+        # A role routed to another backend does NOT run the GPT preset's model
+        # for it. Reporting the GPT entry there made the Timeline claim every
+        # agent was GPT on a hybrid job — the one thing an operator turns
+        # hybrid on to be able to see.
+        from modules.agent_provider import provider_for_role, role_model_for
+
+        configured_models = {}
+        configured_providers = {}
+        _timeline_roles = [
+            role for role in CONFIGURABLE_ROLES
             if role != "monitor" and fallbacks.get(role)
-        }
+        ]
+        for role in _timeline_roles:
+            where = provider_for_role(job_id, role)
+            configured_providers[role] = where
+            configured_models[role] = (
+                fallbacks[role] if where == "gpt"
+                else role_model_for(role, where, None)
+            )
     except Exception:
         configured_models = {}
+        configured_providers = {}
 
     from modules.gpt_run_events import read_gpt_timeline, summarize_agents
 
@@ -639,7 +656,8 @@ def get_gpt_timeline(job_id: str, tail: int | None = None):
         "source": source,
         "preset": preset_name,
         "events": events,
-        "agents": summarize_agents(all_events, configured_models),
+        "agents": summarize_agents(all_events, configured_models,
+                                   configured_providers),
     }
 
 

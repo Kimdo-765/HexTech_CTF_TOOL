@@ -726,6 +726,9 @@ function renderGptTimeline(payload) {
         <span>${escapeHtml(_GPT_STATUS_KO[status] || status)}</span>
       </div>
       <code>${escapeHtml(agent.model || "model 미확인")}</code>
+      ${agent.provider && agent.provider !== "gpt"
+        ? `<span class="gpt-agent-routed" title="이 역할은 다른 백엔드로 라우팅되어 GPT 이벤트를 남기지 않습니다">↗ ${escapeHtml(agent.provider)}</span>`
+        : ""}
       ${current ? `<div>${escapeHtml(current.slice(0, 130))}${current.length > 130 ? "…" : ""}</div>` : ""}
     </div>`;
   }).join("");
