@@ -260,6 +260,52 @@ check("a reported ACP figure is preserved", row_g2.get("cost_usd"), 0.2)
 check("...as reported", row_g2.get("cost_basis"), "reported")
 
 # ---------------------------------------------------------------------------
+# 2f. turn 0014 D1 — the row's model and its dollar figure must be the SAME
+#     resolution. The estimate omitted the provider, so it fell through to
+#     whatever Settings says NOW, while the row used the job's create-time
+#     snapshot: a job stamped `claude` with no model override, running while
+#     Settings said `gpt`, produced model=claude-opus-4-8 priced at
+#     gpt-5.6-luna rates ($0.13 against $0.625 for the model it names).
+#
+#     A job with `model: null` is the COMMON case — that key is the per-job
+#     override and is null whenever the operator did not pick one in the form.
+# ---------------------------------------------------------------------------
+SETTINGS.write_text(
+    json.dumps(
+        {
+            "agent_provider": "gpt",          # live Settings says gpt...
+            "gpt_model": "gpt-5.6-luna",
+            "claude_model": "claude-opus-4-8",
+        }
+    )
+)
+j2f = make_job("mu2f", agent_provider="claude", model=None)   # ...job says claude
+reset(j2f)
+TOKENS = {"input_tokens": 100000, "output_tokens": 5000}
+C.agent_heartbeat(j2f, AssistantMessage(TOKENS, "xm1"))
+C._heartbeat_state.pop(j2f, None)
+C.agent_heartbeat(j2f, ResultMessage(cost=None, session_id="xs1"))
+row_x = UL.read_usage(j2f)[-1]
+check("D1 the row follows the job snapshot, not live Settings", row_x.get("provider"), "claude")
+check("D1 and names the job provider's model", row_x.get("model"), "claude-opus-4-8")
+check(
+    "D1 the dollar figure is priced with the model the row NAMES",
+    round(row_x.get("cost_usd") or 0, 4),
+    round(C.estimate_cost_from_tokens(TOKENS, row_x.get("model")), 4),
+)
+check(
+    "D1 and is NOT the live-Settings model's price",
+    round(row_x.get("cost_usd") or 0, 4)
+    == round(C.estimate_cost_from_tokens(TOKENS, "gpt-5.6-luna"), 4),
+    False,
+)
+check(
+    "D1 meta's in-flight estimate agrees with the row",
+    round(float((C.read_meta(j2f) or {}).get("cost_usd_estimate") or 0), 4),
+    round(row_x.get("cost_usd") or 0, 4),
+)
+
+# ---------------------------------------------------------------------------
 # 3. A ledger failure must not break the heartbeat.
 # ---------------------------------------------------------------------------
 SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))

@@ -4932,6 +4932,25 @@ def agent_heartbeat(job_id: str, msg) -> None:
     # it — never under `cost_usd`, which is the authoritative SDK number and
     # whose meaning must not be diluted (an earlier estimate-into-cost_usd
     # bug poisoned the spend meter; see the _snapshot_cost fix).
+    # The job's provider and model, resolved ONCE. Both the estimate below and
+    # the usage-ledger row further down need them, and resolving them
+    # separately let them disagree: the estimate omitted the provider, so it
+    # fell through to whatever Settings says NOW, while the ledger row used the
+    # job's create-time snapshot. A job stamped `claude` with no model override,
+    # running while Settings said `gpt`, produced a row reading
+    # model=claude-opus-4-8 with a dollar figure computed at gpt-5.6-luna rates
+    # — $0.13 against $0.625 for the model the row names. Resolving once makes
+    # that divergence impossible rather than asking two call sites to agree.
+    _job_provider = None
+    _job_model = None
+    try:
+        from modules.agent_provider import provider_for_job as _pfj
+
+        _job_provider = _pfj(job_id)
+        _job_model = resolve_main_model(read_meta(job_id).get("model"), _job_provider)
+    except Exception:
+        pass
+
     if tokens and "cost_usd" not in updates:
         try:
             # RESOLVE the model — do not read meta.model raw. That key holds the
@@ -4941,9 +4960,7 @@ def agent_heartbeat(job_id: str, msg) -> None:
             # through to _rates_for_model's unknown-model default and priced an
             # opus-5 run at the legacy $15/$75 — the live job c552faf18d31 was
             # parked at $13.28 against a true-rate estimate of $7.14.
-            est = estimate_cost_from_tokens(
-                tokens, resolve_main_model(read_meta(job_id).get("model"))
-            )
+            est = estimate_cost_from_tokens(tokens, _job_model)
             if est > 0:
                 updates["cost_usd_estimate"] = round(est, 4)
         except Exception:
@@ -4970,21 +4987,23 @@ def agent_heartbeat(job_id: str, msg) -> None:
         # See modules/usage_ledger.py. Entirely best-effort — accounting must
         # never break the run it is accounting for.
         try:
-            from modules.agent_provider import get_gpt_runtime, provider_for_job
+            from modules.agent_provider import get_gpt_runtime
             from modules.usage_ledger import (
                 codex_window_snapshot,
                 cost_contract,
                 record_usage,
             )
 
-            _prov = provider_for_job(job_id)
+            # Same values the estimate above was priced with — see the comment
+            # there. Never re-resolve here.
+            _prov = _job_provider or "claude"
             # The cost contract is per BACKEND, not per provider name. Codex
             # OAuth prices nothing, so pricing its tokens would run GPT usage
             # through the Claude rate table and invent money; the Responses
             # runtime IS dollar-billed but its figure is the adapter's own
             # estimate, and the OAuth window does not apply to an API key.
             _runtime = get_gpt_runtime() if _prov == "gpt" else None
-            _model = resolve_main_model(read_meta(job_id).get("model"), _prov)
+            _model = _job_model
             _cost, _basis, _wants_window = cost_contract(
                 _prov,
                 reported_cost=session_cost,
