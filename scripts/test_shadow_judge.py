@@ -243,6 +243,36 @@ check("...and says it WOULD have blocked", s["would_have_blocked"], True)
 check("...and WOULD have killed", s["would_have_killed"], True)
 check("...but did neither", s["would_have_retried"], False)
 
+# Every "would have" must answer with the rule the REAL path uses. The runner
+# blocks only on severity=high; low/med are advisory and the run proceeds. A
+# rollup that counts any ok=False turns advisory findings into false blocks,
+# and a confusion matrix built on it is wrong in the direction that matters.
+for _sev, _blocks in (("high", True), ("med", False), ("low", False),
+                      ("HIGH", True), (None, False), ("", False)):
+    _j = f"shsev{_sev!r}"
+    (DATA / "jobs" / _j).mkdir(parents=True, exist_ok=True)
+    SH.record_verdict(_j, "prejudge", {"ok": False, "severity": _sev})
+    check(f"severity={_sev!r} blocks? (runner's own rule)",
+          SH.summary(_j)["would_have_blocked"], _blocks)
+
+check("an ok=True verdict never blocks, whatever its severity",
+      _judge_mod.prejudge_blocks_ship({"ok": True, "severity": "high"}), False)
+check("...and the runner asks the SAME predicate",
+      "_judge.prejudge_blocks_ship(prejudge)" in
+      (ROOT / "modules" / "_runner.py").read_text(), True)
+check("...so no inline severity test is left behind in the runner",
+      'prejudge.get("severity") == "high"' in
+      (ROOT / "modules" / "_runner.py").read_text(), False)
+
+# next_action is read by the retry loop as `(x or "continue").lower()`.
+for _na, _retries in (("retry", True), ("RETRY", True), ("stop", False),
+                      (None, False), ("continue", False)):
+    _j = f"shna{_na!r}"
+    (DATA / "jobs" / _j).mkdir(parents=True, exist_ok=True)
+    SH.record_verdict(_j, "postjudge", {"next_action": _na})
+    check(f"next_action={_na!r} counts as a retry?",
+          SH.summary(_j)["would_have_retried"], _retries)
+
 # ---------------------------------------------------------------------------
 # 6. THE ONE THAT MATTERS: shadow prose must never reach the flag scanner.
 # ---------------------------------------------------------------------------
@@ -373,11 +403,24 @@ check("no shadow block sits under the enforce gate", _enclosed_by_gate,
 # What a shadow block may call. Recording is a file append; anything else here
 # runs in the auto_run cycle, which is the wall-clock change §8.2 forbids.
 # `evaluate` is deliberately absent: the run path never evaluates.
-_ALLOWED_IN_BLOCK = {"judge_shadow.record_input"}
+# `_postjudge_extra` is allowed in the postjudge block only, and only because
+# it is pure — pinned immediately below, so widening the allowlist did not
+# quietly widen what a shadow block may DO.
 _block_callees = [{_callee(c.func) for s in b.body for c in ast.walk(s)
                    if isinstance(c, ast.Call)} for b in _shadow_blocks]
-check("every shadow block only records", _block_callees,
-      [_ALLOWED_IN_BLOCK] * len(_shadow_blocks))
+check("every shadow block only records (+ the pure context builder)",
+      _block_callees,
+      [{"judge_shadow.record_input"},
+       {"judge_shadow.record_input", "_postjudge_extra"}])
+
+_extra_fn = next((n for n in ast.walk(_runner_ast)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_postjudge_extra"),
+                 None)
+check("the shared context builder exists", _extra_fn is not None, True)
+check("...and is pure — dict reads and builtins, no I/O, no model, no state",
+      sorted({_callee(c.func) for c in ast.walk(_extra_fn)
+              if isinstance(c, ast.Call)}) if _extra_fn else None,
+      ["enumerate", "len", "res.get"])
 check("nothing in the run path evaluates",
       any("judge_shadow.evaluate" in c for c in _block_callees), False)
 check("...anywhere in _runner.py, guarded or not",
@@ -505,6 +548,77 @@ check("off: the run is otherwise identical",
 
 for _m, _at, _orig in _seam_saved:
     setattr(_m, _at, _orig)
+
+# ---------------------------------------------------------------------------
+# 8b. Shadow must judge the SAME PROMPT the gate would. The runner assembles
+#     `extra_context` — target reachability, timeout/kill, prior retry hints —
+#     and postjudge is judged with it. If shadow records only the four raw
+#     fields, the replay scores a prompt the gate never saw.
+# ---------------------------------------------------------------------------
+_HINTS = ["reuse the same failed idea", "and again"]
+
+
+def _drive_ctx(job_id: str, *, mode: str, timeout: bool):
+    """Drive the runner and capture the extra_context each mode produces."""
+    jd = DATA / "jobs" / job_id
+    (jd / "work").mkdir(parents=True, exist_ok=True)
+    (jd / "work" / "exploit.py").write_text("print('x')\n")
+    (jd / "meta.json").write_text(json.dumps({"id": job_id}))
+    set_settings(enable_judge=(mode == "enforce"), judge_mode=mode)
+    seen_ctx: list[str] = []
+
+    def _fake_sandbox(*a, **k):
+        return {"exit_code": 1, "stdout": "", "stderr": "boom",
+                "timeout": timeout, "killed_by_supervise": False}
+
+    def _fake_post(jd_, rel, code, out, err, log, *, extra_context="", **kw):
+        seen_ctx.append(extra_context)
+        return {"verdict": "fail", "next_action": "retry", "retry_hint": "",
+                "summary": "", "raw": ""}
+
+    _saved = (R.run_in_sandbox, R.Path, _judge_mod.postjudge_run)
+    R.run_in_sandbox, R.Path = _fake_sandbox, _tmp_path
+    _judge_mod.postjudge_run = _fake_post
+    try:
+        R.attempt_sandbox_run(job_id, "exploit.py", None, lambda *_: None,
+                              prior_hints=_HINTS)
+    finally:
+        R.run_in_sandbox, R.Path, _judge_mod.postjudge_run = _saved
+    return seen_ctx
+
+
+_enf_ctx = _drive_ctx("ctxenf", mode="enforce", timeout=True)
+check("enforce judges with an assembled context", len(_enf_ctx), 1)
+check("...that carries the timeout note",
+      "runner timeout fired" in (_enf_ctx[0] if _enf_ctx else ""), True)
+check("...and the prior-hint history",
+      "same failed idea" in (_enf_ctx[0] if _enf_ctx else ""), True)
+
+_drive_ctx("ctxsh", mode="shadow", timeout=True)
+_sh_rec = [r for r in SH.read_shadow("ctxsh")
+           if r.get("kind") == "input" and r.get("stage") == "postjudge"]
+check("shadow records the postjudge context too", len(_sh_rec), 1)
+check("...and it is BYTE-IDENTICAL to what enforce judged",
+      _sh_rec[0]["inputs"].get("extra_context") if _sh_rec else None,
+      _enf_ctx[0] if _enf_ctx else "<no enforce run>")
+
+# ...and the evaluator actually forwards it, rather than recording it unused.
+_fwd: list[str] = []
+
+
+def _capture_post(jd_, rel, code, out, err, log, *, extra_context="", **kw):
+    _fwd.append(extra_context)
+    return {"verdict": "fail"}
+
+
+_saved_post = _judge_mod.postjudge_run
+_judge_mod.postjudge_run = _capture_post
+try:
+    SH.evaluate("ctxsh", DATA / "jobs" / "ctxsh")
+finally:
+    _judge_mod.postjudge_run = _saved_post
+check("the evaluator forwards the recorded context to postjudge",
+      _fwd, [_enf_ctx[0] if _enf_ctx else "<no enforce run>"])
 
 # ---------------------------------------------------------------------------
 # 9. The default evaluator must not write judge prose into the run's log.

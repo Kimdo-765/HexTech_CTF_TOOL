@@ -164,6 +164,46 @@ def _judge_mode() -> str:
         return "enforce"
 
 
+def _postjudge_extra(
+    target_note: str,
+    res: dict,
+    prior_hints: list[str] | None,
+) -> str:
+    """The `extra_context` postjudge is judged WITH.
+
+    Shared rather than inlined in the enforce branch, because shadow has to
+    record the identical string. Built separately, the two drift and the
+    shadow verdict is scored on a prompt the gate never saw.
+    """
+    extra = ""
+    if target_note:
+        # Surface pre-run target reachability notes to postjudge FIRST so its
+        # verdict can distinguish "remote was down" (network_error, operator
+        # must refresh instance) from "script's own bug" (parse_error, retry
+        # will help).
+        extra = target_note + "\n"
+    if res.get("timeout"):
+        extra += "(runner timeout fired before container exit)\n"
+    elif res.get("killed_by_supervise"):
+        extra += (
+            "(supervise judge killed the container due to stalled output)\n"
+        )
+    if prior_hints:
+        # Attach the retry-hint history so judge can detect "I'm about to
+        # repeat myself" — the strongest signal for next_action=stop. Each
+        # entry is one of the judge's prior postjudge_retry_hints (already
+        # capped at ~600 chars upstream).
+        extra += (
+            "\nPRIOR RETRY HINTS (this job has already iterated "
+            f"{len(prior_hints)} time(s); your new hint MUST NOT "
+            "rhyme with these — if it does, next_action=stop):\n"
+        )
+        for i, h in enumerate(prior_hints, 1):
+            if h:
+                extra += f"  #{i}: {h[:300]}\n"
+    return extra
+
+
 def _judge_gates(mode: str) -> bool:
     """Does THIS mode let the judge's verdicts gate the run?
 
@@ -795,7 +835,7 @@ def attempt_sandbox_run(
                 severity=(prejudge or {}).get("severity"),
                 issues=len((prejudge or {}).get("issues") or []),
             )
-            if prejudge and not prejudge.get("ok") and prejudge.get("severity") == "high":
+            if _judge.prejudge_blocks_ship(prejudge):
                 log_fn(
                     f"[runner] prejudge BLOCKED ship: severity=high, "
                     f"{len(prejudge.get('issues') or [])} issues — "
@@ -895,37 +935,16 @@ def attempt_sandbox_run(
                     "exit_code": res["exit_code"],
                     "stdout": res["stdout"],
                     "stderr": res["stderr"],
+                    # The SAME extra_context enforce would judge on. Without
+                    # it shadow scores a different prompt — no timeout note,
+                    # no target-reachability note, no prior-hint history — and
+                    # a comparison against the real gate measures the wrong
+                    # thing.
+                    "extra_context": _postjudge_extra(target_note, res, prior_hints),
                 },
             )
         if enable_judge:
-            extra = ""
-            if target_note:
-                # Surface pre-run target reachability notes to postjudge
-                # FIRST so its verdict can distinguish "remote was down"
-                # (network_error, operator must refresh instance) from
-                # "script's own bug" (parse_error, retry will help).
-                extra = target_note + "\n"
-            if res.get("timeout"):
-                extra += "(runner timeout fired before container exit)\n"
-            elif res.get("killed_by_supervise"):
-                extra += (
-                    "(supervise judge killed the container due to stalled "
-                    "output)\n"
-                )
-            if prior_hints:
-                # Attach the retry-hint history so judge can detect
-                # "I'm about to repeat myself" — which is the strongest
-                # signal for next_action=stop. Each entry is one of the
-                # judge's prior postjudge_retry_hints (already capped at
-                # ~600 chars upstream).
-                extra += (
-                    "\nPRIOR RETRY HINTS (this job has already iterated "
-                    f"{len(prior_hints)} time(s); your new hint MUST NOT "
-                    "rhyme with these — if it does, next_action=stop):\n"
-                )
-                for i, h in enumerate(prior_hints, 1):
-                    if h:
-                        extra += f"  #{i}: {h[:300]}\n"
+            extra = _postjudge_extra(target_note, res, prior_hints)
             try:
                 post = _judge.postjudge_run(
                     work_dir,

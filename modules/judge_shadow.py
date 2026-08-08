@@ -243,6 +243,10 @@ def evaluate(
                 inputs.get("stdout") or "",
                 inputs.get("stderr") or "",
                 jlog, job_id=job_id,
+                # Recorded at run time by the runner, from the same helper the
+                # enforce path uses. Dropping it here would judge a prompt the
+                # gate never saw — no timeout note, no prior-hint history.
+                extra_context=str(inputs.get("extra_context") or ""),
             )
 
     count = 0
@@ -260,7 +264,16 @@ def evaluate(
 
 
 def summary(job_id: str) -> dict[str, Any]:
-    """Operator-facing rollup: what shadow saw, and whether it agreed."""
+    """Operator-facing rollup: what shadow saw, and whether it agreed.
+
+    Every "would have" here must answer with the SAME rule the real path uses.
+    `would_have_blocked` once counted any `ok=False`, but the runner only
+    blocks on severity=high — low/med are advisory and the run proceeds — so
+    every advisory finding was being reported as a block, and a confusion
+    matrix built on that counts them as false positives.
+    """
+    from modules._judge import prejudge_blocks_ship
+
     inputs = 0
     verdicts: dict[str, list[dict]] = {}
     for rec in read_shadow(job_id):
@@ -275,12 +288,15 @@ def summary(job_id: str) -> dict[str, Any]:
         "evaluated": sum(len(v) for v in verdicts.values()),
         "by_stage": {k: len(v) for k, v in verdicts.items()},
         "would_have_blocked": any(
-            v.get("ok") is False for v in verdicts.get("prejudge", [])
+            prejudge_blocks_ship(v) for v in verdicts.get("prejudge", [])
         ),
         "would_have_killed": any(
             v.get("action") == "kill" for v in verdicts.get("supervise", [])
         ),
+        # Normalised exactly as the auto-retry loop reads it: missing means
+        # "continue", and the comparison is case-insensitive.
         "would_have_retried": any(
-            v.get("next_action") == "retry" for v in verdicts.get("postjudge", [])
+            str(v.get("next_action") or "continue").lower() == "retry"
+            for v in verdicts.get("postjudge", [])
         ),
     }

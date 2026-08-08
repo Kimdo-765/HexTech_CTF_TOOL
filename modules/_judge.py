@@ -1467,6 +1467,24 @@ def deterministic_prejudge(jd: Path, script: Path, log_fn) -> dict:
     return {"ok": ok, "severity": sev, "issues": issues}
 
 
+def prejudge_blocks_ship(prejudge: dict | None) -> bool:
+    """Would THIS prejudge verdict stop the sandbox from starting?
+
+    The contract this file hands the judge says severity=high blocks and
+    low/med are advisory — the run proceeds. `ok=False` alone therefore does
+    NOT block, and anything that counts it as a block (an operator rollup, a
+    confusion matrix) turns advisory findings into false positives.
+
+    It lives here, next to the prompt that defines it, because two callers
+    need the same answer: the runner that acts on it and the shadow rollup
+    that reports what the runner WOULD have done. Asked separately, those two
+    drift — and a drifted shadow measures something the gate never did.
+    """
+    if not prejudge:
+        return False
+    return (not prejudge.get("ok")) and str(prejudge.get("severity") or "").lower() == "high"
+
+
 def prejudge_script(
     jd: Path,
     script_rel: str,
