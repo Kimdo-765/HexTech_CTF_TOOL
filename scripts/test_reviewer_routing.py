@@ -330,6 +330,10 @@ def scripted_stream(outcomes: dict):
                                "error_kind": (outcomes.get(provider) or {}).get("kind")})
         spec = outcomes.get(provider) or {}
         if spec.get("kind"):
+            # The real adapters put the block's own text through the SAME
+            # `token` events as a hint — that is exactly why streaming the
+            # first attempt live let a refusal reach the UI.
+            yield "token", {"delta": spec.get("text", "BLOCKED: policy text")}
             yield "error", {"message": "blocked", "kind": spec["kind"]}
             return
         yield "token", {"delta": spec.get("text", "hint")}
