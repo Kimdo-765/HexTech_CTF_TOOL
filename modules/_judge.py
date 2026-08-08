@@ -42,6 +42,7 @@ import asyncio
 import json
 import re
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -61,6 +62,44 @@ from modules._common import (
     resolve_judge_model,
 )
 from modules.pwn import chain_schema
+
+
+@dataclass
+class JudgeTurnResult:
+    """What one judge turn produced, including WHY it produced nothing.
+
+    The previous return type was ``(text, session_id)``, and every failure
+    path collapsed to ``("", sid)``. That is enough to fall back permissively
+    — which the judge always does — but it throws away the two things the
+    hybrid work needs:
+
+      * ``error_kind``. A Claude judge on a Codex job can be refused by the
+        Anthropic classifier for the same content the job is about (this
+        repo has a reviewer that once refused nearly every job on its own
+        prompt scaffolding). Failing over to the other provider is only
+        correct for ``policy_refusal``; doing it on a timeout or an auth
+        error just burns the second provider's quota too.
+      * usage. A cross-provider judge spends real money on a different
+        meter from main's, and "we cannot see judge spend" is exactly the
+        blind spot the ledger exists to close.
+
+    Empty ``text`` with ``error_kind is None`` means the turn ran and said
+    nothing, which is a different fact from a turn that never ran.
+    """
+
+    text: str = ""
+    session_id: str | None = None
+    provider: str = ""
+    model: str | None = None
+    runtime: str | None = None
+    error_kind: str | None = None
+    error_detail: str = ""
+    tokens: dict[str, int] = field(default_factory=dict)
+    reported_cost: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error_kind is None and bool(self.text)
 
 
 # ---------------------------------------------------------------------------
@@ -368,15 +407,123 @@ def _forget_sid(job_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
+    """(tokens, reported_cost) from any provider's ResultMessage.
+
+    All three adapters mirror the SDK shape, so one reader covers them. The
+    SDK's own ``model_usage`` is preferred over the streamed ``usage`` for the
+    same reason `agent_heartbeat` prefers it: pricing those totals reproduces
+    the reported cost to the cent.
+    """
+    tokens: dict[str, int] = {}
+    try:
+        from modules._common import _tokens_from_model_usage
+
+        mu = getattr(msg, "model_usage", None)
+        if isinstance(mu, dict):
+            tokens = _tokens_from_model_usage(mu) or {}
+        if not tokens:
+            usage = getattr(msg, "usage", None)
+            if isinstance(usage, dict):
+                from modules._common import _TOKEN_KEYS
+
+                tokens = {
+                    k: int(usage[k])
+                    for k in _TOKEN_KEYS
+                    if isinstance(usage.get(k), (int, float))
+                    and not isinstance(usage.get(k), bool)
+                    and usage[k]
+                }
+    except Exception:
+        tokens = {}
+    cost = getattr(msg, "total_cost_usd", None)
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        cost = None
+    return tokens, cost
+
+
+def _classify(detail: str, fallback: str) -> str:
+    """Map an error string to an error_kind, defaulting to `fallback`.
+
+    `policy_refusal` is the only kind stage 4 fails over on, so mislabelling
+    a transport blip as one would send a healthy job to the other provider,
+    and mislabelling a refusal as transport would leave the AUP class stuck
+    exactly where it is today.
+    """
+    try:
+        from modules._common import classify_agent_error
+
+        kind = classify_agent_error(detail or "")
+    except Exception:
+        return fallback
+    # `classify_agent_error` answers "unknown" rather than None when nothing
+    # matched, so `or fallback` is dead code — every unrecognised transport
+    # error came back tagged "unknown", which tells stage 4 nothing about
+    # WHERE it happened. Treat it as "not classified" and keep the caller's
+    # more specific tag.
+    return fallback if kind in (None, "", "unknown") else kind
+
+
+def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
+    """One ledger row per judge turn, keyed by stage.
+
+    Judge spend was invisible before this: `meta.cost_usd` is main's session
+    and `summary["cost_usd"]` is subagents, so a cross-provider judge burned a
+    second vendor's meter with nothing recording it. Best-effort — accounting
+    must never break the gate it is accounting for, and the judge in
+    particular is designed so that every failure falls back permissively.
+
+    `stage` is prejudge / supervise / postjudge: supervise fires repeatedly
+    within one run, so a role-only ledger would say "judge is expensive"
+    without saying which part.
+    """
+    try:
+        from modules._common import estimate_cost_from_tokens, model_rates_are_known
+        from modules.usage_ledger import (
+            codex_window_snapshot,
+            cost_contract,
+            record_usage,
+        )
+
+        est = None
+        if res.tokens and res.reported_cost is None:
+            est = estimate_cost_from_tokens(res.tokens, res.model) or None
+        cost, basis, wants_window = cost_contract(
+            res.provider,
+            reported_cost=res.reported_cost,
+            estimated_cost=est,
+            gpt_runtime=res.runtime,
+            estimate_priced=model_rates_are_known(res.model),
+        )
+        record_usage(
+            job_id,
+            role="judge",
+            stage=stage,
+            provider=res.provider,
+            model=res.model,
+            tokens=res.tokens,
+            cost_usd=cost,
+            cost_basis=basis,
+            runtime=res.runtime,
+            window=(
+                codex_window_snapshot(cached_only=True) if wants_window else None
+            ),
+            error_kind=res.error_kind,
+        )
+    except Exception:
+        pass
+
+
 async def _run_judge_turn(
     user_prompt: str,
     *,
     cwd: Path,
     resume_sid: str | None,
     model: str | None = None,
-) -> tuple[str, str | None]:
+) -> JudgeTurnResult:
     """Run a single judge turn (which may internally do multiple tool
-    calls). Returns (final_text, captured_session_id).
+    calls). Returns a `JudgeTurnResult` — text, session id, and WHY the turn
+    produced nothing when it did.
 
     Backend follows the job's ``agent_provider`` (Settings / meta):
       * claude — Claude Agent SDK ``query()`` (historical path; session
@@ -387,7 +534,8 @@ async def _run_judge_turn(
 
     `model` follows the job's main model family via ``resolve_judge_model``;
     when None it falls back to LATEST_JUDGE_MODEL (Claude) or the Grok
-    default. Empty string + None on failure — judge errors are NEVER fatal.
+    default. Judge errors are NEVER fatal — a failed turn returns an empty
+    `text` and the callers fall back permissively, exactly as before.
     """
     from modules.agent_provider import (
         coerce_model_for_provider,
@@ -398,6 +546,7 @@ async def _run_judge_turn(
     job_id = Path(cwd).name
     provider = provider_for_job(job_id)
     _jm = coerce_model_for_provider(model or LATEST_JUDGE_MODEL, provider)
+    res = JudgeTurnResult(provider=provider, model=_jm, session_id=resume_sid)
 
     # ---- OpenAI GPT path --------------------------------------------------
     if provider == "gpt":
@@ -409,10 +558,19 @@ async def _run_judge_turn(
                 ResultMessage as GptResultMessage,
             )
             from modules._prompts import JUDGE_AGENT_PROMPT
-        except Exception:
-            return "", None
+        except Exception as exc:
+            res.error_kind = "import_error"
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            return res
         if not _jm or str(_jm).lower().startswith(("claude", "grok")):
             _jm = default_model_for("gpt")
+        res.model = _jm
+        try:
+            from modules.agent_provider import get_gpt_runtime
+
+            res.runtime = get_gpt_runtime()
+        except Exception:
+            pass
         opts = GptSessionOptions(
             system_prompt=JUDGE_AGENT_PROMPT,
             model=_jm,
@@ -436,12 +594,22 @@ async def _run_judge_turn(
                                 parts.append(t)
                     elif isinstance(msg, GptResultMessage):
                         captured_sid = getattr(msg, "session_id", None) or captured_sid
+                        res.session_id = captured_sid
+                        res.tokens, res.reported_cost = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            return "", captured_sid
+                            detail = str(getattr(msg, "result", "") or "")
+                            res.error_kind = _classify(detail, "agent_error")
+                            res.error_detail = detail[:500]
+                            return res
                         break
-        except Exception:
-            return "", captured_sid
-        return "".join(parts).strip()[:8000], captured_sid
+        except Exception as exc:
+            res.session_id = captured_sid
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            res.error_kind = _classify(res.error_detail, "transport_error")
+            return res
+        res.session_id = captured_sid
+        res.text = "".join(parts).strip()[:8000]
+        return res
 
     # ---- Grok path: full ACP session (tools available like Claude judge) --
     if provider == "grok":
@@ -453,10 +621,13 @@ async def _run_judge_turn(
                 ResultMessage as GrokResultMessage,
             )
             from modules._prompts import JUDGE_AGENT_PROMPT
-        except Exception:
-            return "", None
+        except Exception as exc:
+            res.error_kind = "import_error"
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            return res
         if not _jm or str(_jm).lower().startswith("claude"):
             _jm = default_model_for("grok")
+        res.model = _jm
         opts = GrokSessionOptions(
             system_prompt=JUDGE_AGENT_PROMPT,
             model=_jm,
@@ -481,12 +652,22 @@ async def _run_judge_turn(
                         sid = getattr(msg, "session_id", None)
                         if sid and not captured_sid:
                             captured_sid = sid
+                        res.session_id = captured_sid
+                        res.tokens, res.reported_cost = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            return "", captured_sid
+                            detail = str(getattr(msg, "result", "") or "")
+                            res.error_kind = _classify(detail, "agent_error")
+                            res.error_detail = detail[:500]
+                            return res
                         break
-        except Exception:
-            return "", captured_sid
-        return "".join(parts).strip()[:8000], captured_sid
+        except Exception as exc:
+            res.session_id = captured_sid
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            res.error_kind = _classify(res.error_detail, "transport_error")
+            return res
+        res.session_id = captured_sid
+        res.text = "".join(parts).strip()[:8000]
+        return res
 
     # ---- Claude path (historical) ----------------------------------------
     options = ClaudeAgentOptions(
@@ -523,13 +704,23 @@ async def _run_judge_turn(
                 sid = getattr(msg, "session_id", None)
                 if sid and not captured_sid:
                     captured_sid = sid
+                res.session_id = captured_sid
+                res.tokens, res.reported_cost = _usage_from_result(msg)
                 if getattr(msg, "is_error", False):
-                    return "", captured_sid
+                    detail = str(getattr(msg, "result", "") or "")
+                    res.error_kind = _classify(detail, "agent_error")
+                    res.error_detail = detail[:500]
+                    return res
                 break
-    except Exception:
-        return "", captured_sid
+    except Exception as exc:
+        res.session_id = captured_sid
+        res.error_detail = f"{type(exc).__name__}: {exc}"
+        res.error_kind = _classify(res.error_detail, "transport_error")
+        return res
 
-    return "".join(parts).strip()[:8000], captured_sid
+    res.session_id = captured_sid
+    res.text = "".join(parts).strip()[:8000]
+    return res
 
 
 def _run_async(coro):
@@ -759,12 +950,14 @@ def prejudge_script(
         cwd=jd,
         script_path=script,
     )
-    raw, sid = _run_async(
+    turn = _run_async(
         _run_judge_turn(
             user_prompt, cwd=jd, resume_sid=None,
             model=resolve_judge_model(job_id),
         )
     )
+    _record_judge_usage(job_id, "prejudge", turn)
+    raw, sid = turn.text, turn.session_id
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
@@ -917,12 +1110,14 @@ def supervise_run_once(
         stdout_tail=_truncate_tail(stdout_tail, max_bytes=4096) or "(empty)",
         stderr_tail=_truncate_tail(stderr_tail, max_bytes=4096) or "(empty)",
     )
-    raw, sid = _run_async(
+    turn = _run_async(
         _run_judge_turn(
             user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
             model=resolve_judge_model(job_id),
         )
     )
+    _record_judge_usage(job_id, "supervise", turn)
+    raw, sid = turn.text, turn.session_id
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
@@ -1109,12 +1304,14 @@ def postjudge_run(
         stdout_tail=out_t or "(empty)",
         stderr_tail=err_t or "(empty)",
     )
-    raw, sid = _run_async(
+    turn = _run_async(
         _run_judge_turn(
             user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
             model=resolve_judge_model(job_id),
         )
     )
+    _record_judge_usage(job_id, "postjudge", turn)
+    raw, sid = turn.text, turn.session_id
     _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
