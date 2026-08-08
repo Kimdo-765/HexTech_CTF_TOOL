@@ -87,9 +87,15 @@ const es5 = (src) => src.replace(/\?\.\(/g, "(").replace(/\?\.\[/g, "[").replace
 const constBlock = es5(appjs.slice(
   appjs.indexOf("const ROLE_OVERRIDABLE ="),
   appjs.indexOf("function renderRoleProviderStatus")));
+// Anchored from the submit handler, not from the first `const routes = {}` in
+// the file — `currentTopology` also declares one, and slicing from there
+// silently captured a malformed chunk. An ambiguous anchor is the same trap the
+// mutation batteries kept hitting.
+const _saveAt = appjs.indexOf('document.getElementById("settings-form").addEventListener("submit"');
 const assembly = es5(appjs.slice(
-  appjs.indexOf("  const routes = {};"),
-  appjs.indexOf("payload.agent_role_providers = routes;") + "payload.agent_role_providers = routes;".length));
+  appjs.indexOf("  const routes = {};", _saveAt),
+  appjs.indexOf("payload.agent_role_providers = routes;", _saveAt)
+    + "payload.agent_role_providers = routes;".length));
 const loadSrc = es5(appjs.slice(appjs.indexOf("  const roleRoutes ="),
   appjs.indexOf("renderRoleProviderStatus(f);")));
 check("the assembly block was found in app.js", assembly.length > 40, true);
@@ -97,9 +103,18 @@ check("...and the load block too", loadSrc.length > 40, true);
 
 // One eval, so the constants and the two functions share a scope — `const`
 // declared in its own eval is not visible to a later one.
+// ONE eval: `const` declared in its own eval is invisible to a later one, and
+// constBlock already carries TOPOLOGIES / currentTopology / applyTopology
+// (it runs up to renderRoleProviderStatus), so slicing them again would just
+// shadow them in a scope that cannot see the constants.
 win.eval(constBlock + `
+  window.setProviderUI = function () {};
+  window.renderProviderAuthUI = function () {};
+  window.renderRoleProviderStatus = function () {};
   window._assemble = function (e) { const payload = {}; ${assembly} return payload; };
   window._load = function (f, s) { ${loadSrc} };
+  window._topo = function (f) { return currentTopology(f); };
+  window._apply = function (f, n) { return applyTopology(f, n); };
 `);
 
 // nothing selected -> empty map, NOT four nulls and NOT absent
@@ -154,6 +169,53 @@ win._load(form, {});
 check("no stored map leaves every role following the job provider",
   ROLES.map((r) => form.querySelector(`[name=role_provider_${r}]`).value),
   ["", "", "", ""]);
+
+
+// ---------------------------------------------------------------------------
+// 5. The topology preset FILLS the form and is never itself a setting.
+// ---------------------------------------------------------------------------
+check("the topology block travels with the constants",
+  constBlock.includes("const TOPOLOGIES = {") && constBlock.includes("function applyTopology"),
+  true);
+
+function formState(f) {
+  return [
+    (f.querySelector("[name=agent_provider]:checked") || {}).value || "",
+    ...ROLES.map((r) => f.querySelector(`[name=role_provider_${r}]`).value),
+  ];
+}
+
+win._apply(form, "hybrid");
+check("hybrid puts the job on Codex and routes judge + reviewer to Claude",
+  formState(form), ["gpt", "claude", "claude", "", ""]);
+check("...and the assembled payload matches",
+  win._assemble({ target: form }).agent_role_providers,
+  { judge: "claude", reviewer: "claude" });
+
+win._apply(form, "codex");
+check("all-Codex clears every route", formState(form), ["gpt", "", "", "", ""]);
+check("...so the payload map is empty, not stale",
+  win._assemble({ target: form }).agent_role_providers, {});
+
+win._apply(form, "claude");
+check("all-Claude switches the job provider too",
+  formState(form), ["claude", "", "", "", ""]);
+
+// Round-trip: the select must report back what the controls actually say, so
+// an operator who hand-edits one role sees it stop claiming a named topology.
+win._apply(form, "hybrid");
+check("a matching form reads back as hybrid", win._topo(form), "hybrid");
+form.querySelector("[name=role_provider_report]").value = "claude";
+check("...and as custom the moment it stops matching", win._topo(form), "custom");
+win._apply(form, "codex");
+check("an all-Codex form reads back as codex", win._topo(form), "codex");
+
+check("the preset never reaches the settings payload",
+  saveSrc.includes('k === "topology_preset"'), true);
+check("...and is not a settings key the server knows",
+  fs.readFileSync(path.join(ROOT, "modules/settings_io.py"), "utf8")
+    .includes("topology_preset"),
+  false);
 
 console.log(`\n${PASS + FAIL} checks, ${FAIL} failed`);
 process.exit(FAIL ? 1 : 0);

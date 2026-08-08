@@ -1082,6 +1082,52 @@ function _setModelField(f, name, customName, catalog, value) {
 const ROLE_OVERRIDABLE = ["judge", "reviewer", "report", "monitor"];
 const ROLE_TARGETS = ["claude", "gpt"];
 
+// Named topologies. Each is exactly "job provider + role routes"; the models
+// are NOT part of this — those come from each provider's own preset, and a
+// role routed to Claude already resolves through the Claude preset.
+//
+// These fill the form. They are deliberately not a stored setting: routing
+// would then have two sources of truth (the topology and the four selects),
+// and the whole class of defect this project keeps hitting is one rule living
+// in two places. Settings stays authoritative; this is a shortcut to filling it.
+const TOPOLOGIES = {
+  codex:  { provider: "gpt",    routes: {} },
+  claude: { provider: "claude", routes: {} },
+  hybrid: { provider: "gpt",    routes: { judge: "claude", reviewer: "claude" } },
+};
+
+function currentTopology(form) {
+  const base = form.querySelector("[name=agent_provider]:checked")?.value || "";
+  const routes = {};
+  for (const role of ROLE_OVERRIDABLE) {
+    const v = String(form.querySelector(`[name=role_provider_${role}]`)?.value || "");
+    if (v) routes[role] = v;
+  }
+  for (const [name, t] of Object.entries(TOPOLOGIES)) {
+    if (t.provider !== base) continue;
+    const want = Object.keys(t.routes).sort().join(",") +
+      "|" + Object.values(t.routes).join(",");
+    const have = Object.keys(routes).sort().join(",") +
+      "|" + Object.keys(routes).sort().map((k) => routes[k]).join(",");
+    if (want === have) return name;
+  }
+  return "custom";
+}
+
+function applyTopology(form, name) {
+  const t = TOPOLOGIES[name];
+  if (!t) return;
+  const radio = form.querySelector(`[name=agent_provider][value="${t.provider}"]`);
+  if (radio) radio.checked = true;
+  for (const role of ROLE_OVERRIDABLE) {
+    const sel = form.querySelector(`[name=role_provider_${role}]`);
+    if (sel) sel.value = t.routes[role] || "";
+  }
+  setProviderUI(t.provider);
+  renderProviderAuthUI(t.provider, { unsaved: true });
+  renderRoleProviderStatus(form);
+}
+
 function renderRoleProviderStatus(form) {
   const el = document.getElementById("role-provider-status");
   if (!el) return;
@@ -1089,6 +1135,8 @@ function renderRoleProviderStatus(form) {
   const routed = ROLE_OVERRIDABLE
     .map((r) => [r, String(form.querySelector(`[name=role_provider_${r}]`)?.value || "")])
     .filter(([, v]) => v && v !== base);
+  const topoSel = form.querySelector("[name=topology_preset]");
+  if (topoSel) topoSel.value = currentTopology(form);
   el.textContent = routed.length
     ? `${routed.map(([r, v]) => `${r} → ${v}`).join(" · ")}  (job runs on ${base})`
     : `every role follows the job provider (${base}) — no hybrid routing`;
@@ -1240,6 +1288,9 @@ document.getElementById("settings-form")?.addEventListener("change", (e) => {
   if (t && t.name && t.name.startsWith("role_provider_")) {
     renderRoleProviderStatus(e.currentTarget);
   }
+  if (t && t.name === "topology_preset" && t.value !== "custom") {
+    applyTopology(e.currentTarget, t.value);
+  }
   if (t && t.name === "gpt_runtime") {
     const selected = document.querySelector(
       '#settings-form input[name="agent_provider"]:checked'
@@ -1270,6 +1321,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
     }
     if (k === "enable_exploit_library_hint") continue;  // handled explicitly below
     if (k.startsWith("role_provider_")) continue;  // assembled into one map below
+    if (k === "topology_preset") continue;  // a form shortcut, never a setting
     if (v === "") {
       payload[k] = null;  // null = clear the override
       continue;
