@@ -13,6 +13,7 @@ import json
 import os
 import selectors
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -26,7 +27,10 @@ from modules.settings_io import has_codex_oauth
 CODEX_RATE_LIMIT_CACHE = (
     Path(os.environ.get("DATA_DIR", "/data")) / "codex_rate_limit.json"
 )
-CODEX_RATE_LIMIT_TTL_S = 60.0
+# The browser refreshes the top bar every seven seconds.  A one-minute cache made
+# an otherwise healthy Codex pool look frozen for over a minute, so keep the
+# process-spawn guard but bound normal UI lag to roughly two poll cycles.
+CODEX_RATE_LIMIT_TTL_S = 15.0
 CODEX_RATE_LIMIT_TIMEOUT_S = 10.0
 
 _cache_lock = threading.Lock()
@@ -219,12 +223,14 @@ def _read_response(
             return result
 
 
-def _query_codex_rate_limits() -> dict[str, Any]:
+def _query_codex_rate_limits(*, codex_home: Path | None = None) -> dict[str, Any]:
     env = os.environ.copy()
     # This widget specifically represents the mounted ChatGPT OAuth account,
     # even if an API fallback key is also configured in Settings.
     env.pop("OPENAI_API_KEY", None)
     env.pop("CODEX_API_KEY", None)
+    if codex_home is not None:
+        env["CODEX_HOME"] = str(codex_home)
     timeout = _number(os.environ.get("CODEX_RATE_LIMIT_TIMEOUT_S"))
     timeout = (
         timeout if timeout is not None and timeout > 0 else CODEX_RATE_LIMIT_TIMEOUT_S
@@ -277,6 +283,32 @@ def _query_codex_rate_limits() -> dict[str, Any]:
                 proc.wait(timeout=1)
 
 
+def _query_codex_rate_limits_isolated() -> dict[str, Any]:
+    """Query quota without sharing the agent runtime's SQLite/config state.
+
+    Workers and the API intentionally share HexTech's isolated ``CODEX_HOME``
+    for OAuth and resumable sessions.  Starting a short-lived app-server in
+    that busy home can fail before JSON-RPC initialization when another Codex
+    process owns or has migrated its runtime state.  Quota lookup only needs
+    OAuth, so retry in an ephemeral home whose ``auth.json`` is a symlink to
+    the authoritative isolated credential.  The symlink avoids copying a
+    secret and lets ordinary in-place token refreshes reach the source.
+    """
+
+    source_home = Path(
+        os.environ.get("CODEX_HOME") or (Path.home() / ".codex")
+    ).expanduser()
+    source_auth = source_home / "auth.json"
+    if not source_auth.is_file():
+        raise FileNotFoundError("Codex OAuth auth.json is unavailable")
+
+    with tempfile.TemporaryDirectory(prefix="hextech-codex-quota-") as tmp_name:
+        clean_home = Path(tmp_name)
+        clean_home.chmod(0o700)
+        (clean_home / "auth.json").symlink_to(source_auth.resolve())
+        return _query_codex_rate_limits(codex_home=clean_home)
+
+
 def _read_cache(*, fresh_only: bool) -> dict[str, Any] | None:
     try:
         age = time.time() - CODEX_RATE_LIMIT_CACHE.stat().st_mtime
@@ -308,7 +340,14 @@ def read_codex_rate_limit() -> dict[str, Any] | None:
         if cached is not None:
             return cached
         try:
-            normalized = _normalize_rate_limits(_query_codex_rate_limits())
+            try:
+                raw = _query_codex_rate_limits()
+            except Exception:
+                # Keep agent session state isolated from this read-only account
+                # query.  This fallback is Codex-only and does not touch the
+                # Claude/Grok usage paths.
+                raw = _query_codex_rate_limits_isolated()
+            normalized = _normalize_rate_limits(raw)
             if normalized is None:
                 raise RuntimeError("Codex returned no rate-limit windows")
             _write_cache(normalized)
@@ -319,4 +358,10 @@ def read_codex_rate_limit() -> dict[str, Any] | None:
             stale = _read_cache(fresh_only=False)
             if stale is not None:
                 stale["stale"] = True
+                try:
+                    stale["stale_age_seconds"] = max(
+                        0, int(time.time() - CODEX_RATE_LIMIT_CACHE.stat().st_mtime)
+                    )
+                except OSError:
+                    pass
             return stale

@@ -1118,17 +1118,17 @@ The top bar shows a budget pill plus provider usage chips, all best-effort:
 - **Budget pill** — `budget_usd` from Settings vs summed job spend
   (`GET /api/jobs/usage`). Purely informational: **nothing enforces it**
   (the cost cap is a separate mechanism, disabled by default).
-- **Rate-limit chip** — the SDK's `RateLimitEvent` (five-hour / seven-day
-  utilization + reset time), persisted account-globally to
-  `/data/rate_limit.json` by `record_rate_limit_event`. It appears only
-  after a job has produced an API response, and a true account
-  "remaining %" is not always present on Claude's headless OAuth path.
+- **Claude quota chip** — actively polls the mounted Claude Code OAuth
+  account's five-hour / seven-day usage, showing the most constrained ordinary
+  window and caching the sanitized result in `/data/rate_limit.json` for 15
+  seconds. API-key-only setups fall back to the SDK's passive `RateLimitEvent`.
 - **Grok quota chip** — polls the mounted SuperGrok OAuth account's weekly
-  billing pool and caches the sanitized result for 60 seconds.
+  billing pool and caches the sanitized result for 60 seconds. Failed refreshes
+  remain visible as `stale` rather than presenting old quota as current.
 - **Codex quota chip** — asks Codex CLI app-server for the mounted ChatGPT
   OAuth account's rate-limit windows, then displays the most constrained
   ordinary Codex window as `⏳ Codex 94% left · resets 6d21h`. The sanitized
-  response is cached in `/data/codex_rate_limit.json` for 60 seconds; OAuth
+  response is cached in `/data/codex_rate_limit.json` for 15 seconds; OAuth
   tokens and raw auth data never enter the API response.
 
 ## Authentication options

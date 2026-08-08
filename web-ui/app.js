@@ -1948,6 +1948,22 @@ function _rlResetSuffix(rl) {
   return ` · resets ${m}m`;
 }
 
+function _rlStaleSuffix(rl) {
+  if (!rl || !rl.stale) return "";
+  let secs = Number(rl.stale_age_seconds);
+  if (!Number.isFinite(secs) && rl.updated_at) {
+    const observed = Date.parse(rl.updated_at);
+    if (Number.isFinite(observed)) secs = (Date.now() - observed) / 1000;
+  }
+  if (!Number.isFinite(secs) || secs < 0) return " · stale";
+  if (secs < 60) return " · stale <1m";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return ` · stale ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return ` · stale ${hours}h`;
+  return ` · stale ${Math.floor(hours / 24)}d`;
+}
+
 async function refreshStats() {
   try {
     const [statsRes, queueRes, usageRes] = await Promise.all([
@@ -2030,19 +2046,32 @@ function renderUsage(u) {
   const chip = document.getElementById("ratelimit-chip");
   if (chip) {
     const rl = u && u.rate_limit;
-    if (rl && rl.status) {
+    if (rl && rl.status && rl.status !== "unknown") {
       chip.hidden = false;
       chip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
       if (rl.status === "rejected") chip.classList.add("rl-chip--rejected");
-      else if (rl.status === "allowed_warning") chip.classList.add("rl-chip--warn");
+      else if (rl.stale || rl.status === "allowed_warning") chip.classList.add("rl-chip--warn");
       else chip.classList.add("rl-chip--ok");
-      chip.textContent = `⏳ Claude ${_rlRemainingLabel(rl)}${_rlResetSuffix(rl)}`;
+      const claudeUsageIcon = rl.stale ? "⚠" : "⏳";
+      chip.textContent = `${claudeUsageIcon} Claude ${_rlRemainingLabel(rl)}`
+        + `${_rlResetSuffix(rl)}${_rlStaleSuffix(rl)}`;
+      const windows = (rl.windows || []).map((w) => {
+        const label = w.label || w.rate_limit_type || w.kind || "Claude";
+        const reset = w.resets_at
+          ? `, resets ${new Date(w.resets_at * 1000).toLocaleString()}` : "";
+        return `${label}: ${Math.round(w.remaining_pct)}% left${reset}`;
+      }).join("\n");
       chip.title = `Claude rate-limit: ${rl.status}`
         + (rl.rate_limit_type ? ` (${rl.rate_limit_type})` : "")
-        + (typeof rl.utilization === "number"
-            ? `\n${Math.round(rl.utilization * 100)}% of the window used` : "")
+        + (rl.subscription_type ? ` · ${rl.subscription_type}` : "")
+        + (typeof rl.used_pct === "number"
+            ? `\nused ${rl.used_pct}%` : "")
+        + (typeof rl.remaining_pct === "number"
+            ? ` · ${rl.remaining_pct}% remaining` : "")
+        + (windows ? `\n${windows}` : "")
         + (rl.resets_at ? `\nresets at ${new Date(rl.resets_at * 1000).toLocaleString()}` : "")
-        + (rl.updated_at ? `\nlast event ${new Date(rl.updated_at).toLocaleString()}` : "");
+        + (rl.updated_at ? `\nlast poll ${new Date(rl.updated_at).toLocaleString()}` : "")
+        + (rl.stale ? "\nshowing cached data (refresh unavailable)" : "");
     } else {
       chip.hidden = true;  // no rate-limit event seen yet
     }
@@ -2058,9 +2087,11 @@ function renderUsage(u) {
       gchip.hidden = false;
       gchip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
       if (gr.status === "rejected") gchip.classList.add("rl-chip--rejected");
-      else if (gr.status === "allowed_warning") gchip.classList.add("rl-chip--warn");
+      else if (gr.stale || gr.status === "allowed_warning") gchip.classList.add("rl-chip--warn");
       else gchip.classList.add("rl-chip--ok");
-      gchip.textContent = `⏳ Grok ${_rlRemainingLabel(gr)}${_rlResetSuffix(gr)}`;
+      const grokUsageIcon = gr.stale ? "⚠" : "⏳";
+      gchip.textContent = `${grokUsageIcon} Grok ${_rlRemainingLabel(gr)}`
+        + `${_rlResetSuffix(gr)}${_rlStaleSuffix(gr)}`;
       const prod = (gr.product_usage || [])
         .map((p) => `${p.product || "?"}: ${Math.round(p.usage_percent || 0)}%`)
         .join(", ");
@@ -2070,7 +2101,8 @@ function renderUsage(u) {
         + (typeof gr.remaining_pct === "number" ? ` · ${gr.remaining_pct}% remaining` : "")
         + (prod ? `\nby product: ${prod}` : "")
         + (gr.resets_at ? `\nresets at ${new Date(gr.resets_at * 1000).toLocaleString()}` : "")
-        + (gr.updated_at ? `\nlast poll ${new Date(gr.updated_at).toLocaleString()}` : "");
+        + (gr.updated_at ? `\nlast poll ${new Date(gr.updated_at).toLocaleString()}` : "")
+        + (gr.stale ? "\nshowing cached data (refresh unavailable)" : "");
     } else {
       gchip.hidden = true;
     }
@@ -2078,7 +2110,7 @@ function renderUsage(u) {
 
   // --- OpenAI Codex ChatGPT OAuth usage chip (remaining %) ---
   // Source: Codex CLI app-server account/rateLimits/read. The API caches the
-  // sanitized response for 60 seconds; no OAuth token reaches this payload.
+  // sanitized response for 15 seconds; no OAuth token reaches this payload.
   const cchip = document.getElementById("codex-ratelimit-chip");
   if (cchip) {
     const cr = u && u.codex_rate_limit;
@@ -2086,9 +2118,11 @@ function renderUsage(u) {
       cchip.hidden = false;
       cchip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
       if (cr.status === "rejected") cchip.classList.add("rl-chip--rejected");
-      else if (cr.status === "allowed_warning") cchip.classList.add("rl-chip--warn");
+      else if (cr.stale || cr.status === "allowed_warning") cchip.classList.add("rl-chip--warn");
       else cchip.classList.add("rl-chip--ok");
-      cchip.textContent = `⏳ Codex ${_rlRemainingLabel(cr)}${_rlResetSuffix(cr)}`;
+      const codexUsageIcon = cr.stale ? "⚠" : "⏳";
+      cchip.textContent = `${codexUsageIcon} Codex ${_rlRemainingLabel(cr)}`
+        + `${_rlResetSuffix(cr)}${_rlStaleSuffix(cr)}`;
       const windows = (cr.windows || []).map((w) => {
         const label = w.limit_name || w.limit_id || "Codex";
         const reset = w.resets_at

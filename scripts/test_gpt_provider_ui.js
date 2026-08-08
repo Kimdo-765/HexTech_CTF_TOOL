@@ -61,7 +61,10 @@ check("Codex OAuth status uses settings view", /codex_oauth_detected/.test(js));
 check("GPT card reports ChatGPT OAuth readiness", /✓ ChatGPT OAuth ready/.test(js));
 check("provider selection preserves live auth status", /renderProviderAuthUI\(t\.value, \{unsaved: true\}\)/.test(js));
 check("Codex quota payload is rendered", /u\.codex_rate_limit/.test(js));
-check("Codex quota is labeled as remaining", /⏳ Codex.*_rlRemainingLabel\(cr\)/.test(js));
+check("Codex quota is labeled as remaining", /Codex.*_rlRemainingLabel\(cr\)/.test(js));
+check("stale Codex quota is visible without hover", /codexUsageIcon = cr\.stale \? "⚠" : "⏳"/.test(js)
+  && /_rlStaleSuffix\(cr\)/.test(js)
+  && /cr\.stale \|\| cr\.status === "allowed_warning"/.test(js));
 check("auth badges have ready styling", /provider-auth-badge\.auth-ready/.test(css));
 check("saved GPT runtime is loaded", /gptRuntimeSel\.value = gptRuntime/.test(js));
 check("presets use provider-scoped GPT models", /provider === "gpt"\) return \{ models: GPT_MODELS/.test(js));
