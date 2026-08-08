@@ -325,22 +325,35 @@ async def _iter_reviewer_messages(framed_context: str, options, deadline_s: floa
                 await asyncio.wait_for(aclose(), timeout=10)
 
 
-def _reviewer_provider_and_model(model: str | None) -> tuple[str, str]:
+def _reviewer_provider_and_model(
+    model: str | None, job_id: str | None = None
+) -> tuple[str, str]:
     """Resolve (provider, model) for the retry reviewer.
 
-    Provider follows Settings / active job stamp; model is coerced so a
-    Grok selection never launches a Claude reviewer (and vice versa).
+    With a job id this follows the job's SNAPSHOTTED role route — the reviewer
+    is one of the two roles v1 routes, and reading live `active_provider()`
+    instead meant a job stamped "reviewer -> claude" still ran its reviewer on
+    whatever Settings said at retry time. Without one (no job in hand) the
+    live provider is all there is.
+
+    The model comes from the RESOLVED provider's own active preset, not from a
+    coerced global default — see agent_provider.role_model_for().
     """
     from modules.agent_provider import (
         active_provider,
-        coerce_model_for_provider,
-        default_model_for,
+        provider_for_role,
+        role_model_for,
     )
-    provider = active_provider()
-    m = coerce_model_for_provider(model or LATEST_REVIEWER_MODEL, provider)
-    if provider == "grok" and (not m or m.lower().startswith("claude")):
-        m = default_model_for("grok")
-    return provider, m
+
+    provider = (
+        provider_for_role(job_id, "reviewer") if job_id else active_provider()
+    )
+    # Pass the caller's model THROUGH, not `model or LATEST_REVIEWER_MODEL`:
+    # that constant is same-family with a Claude target, so it short-circuited
+    # the preset lookup and a preset pinning reviewer to claude-opus-4-8 was
+    # never consulted. A default is a last resort, not a request.
+    resolved = role_model_for("reviewer", provider, model)
+    return provider, resolved or LATEST_REVIEWER_MODEL
 
 
 def _resume_id_for_active_provider(meta: dict) -> str | None:
@@ -410,8 +423,15 @@ async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
     return hint
 
 
-async def _ask_reviewer_gpt(framed_context: str, *, model: str) -> str:
-    """One-shot Codex OAuth / GPT Responses reviewer (text only)."""
+async def _ask_reviewer_gpt(
+    framed_context: str, *, model: str, usage_out: dict | None = None
+) -> str:
+    """One-shot Codex OAuth / GPT Responses reviewer.
+
+    `usage_out` is filled with the adapter's own usage so the caller can bill
+    the turn. Returning text alone is why reviewer calls left zero rows in a
+    ledger whose whole point is provider x model x role accounting.
+    """
     from modules.gpt_agent import query_gpt_once
 
     prompt = framed_context
@@ -439,6 +459,12 @@ async def _ask_reviewer_gpt(framed_context: str, *, model: str) -> str:
     except Exception as e:
         raw = str(e)
         raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+    # Filled BEFORE the error check: a refused turn spent tokens too, and a
+    # ledger that only bills successes understates every failover.
+    if isinstance(usage_out, dict):
+        usage_out["model_usage"] = r.get("model_usage") or {}
+        usage_out["usage"] = r.get("usage") or {}
+        usage_out["reported_cost"] = r.get("total_cost_usd")
     if r.get("error"):
         detail = str(r["error"])
         raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
@@ -450,7 +476,128 @@ async def _ask_reviewer_gpt(framed_context: str, *, model: str) -> str:
     return hint
 
 
-async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
+def _record_reviewer_usage(
+    job_id: str | None,
+    provider: str,
+    model: str,
+    usage_out: dict | None,
+    *,
+    error_kind: str | None = None,
+    failover: dict | None = None,
+) -> None:
+    """Ledger rows for one reviewer turn. Best-effort.
+
+    The reviewer was the last role spending real money with nothing recording
+    it — `meta.cost_usd` is main's session and `summary["cost_usd"]` is
+    subagents, so a Claude reviewer running against a Codex job billed a
+    second vendor invisibly.
+    """
+    if not job_id:
+        return
+    try:
+        from modules._common import estimate_cost_from_tokens, model_rates_are_known
+        from modules.agent_provider import get_gpt_runtime
+        from modules.usage_ledger import (
+            codex_window_snapshot,
+            record_usage_by_model,
+        )
+
+        u = usage_out or {}
+        record_usage_by_model(
+            job_id,
+            role="reviewer",
+            stage="reviewer",
+            provider=provider,
+            primary_model=model,
+            model_usage=u.get("model_usage") or {},
+            tokens=u.get("usage") or {},
+            reported_cost=u.get("reported_cost"),
+            estimate_for=estimate_cost_from_tokens,
+            rates_known=model_rates_are_known,
+            gpt_runtime=get_gpt_runtime() if provider == "gpt" else None,
+            window_for=lambda: codex_window_snapshot(cached_only=True),
+            error_kind=error_kind,
+            extra=failover or {},
+        )
+    except Exception:
+        pass
+
+
+async def _ask_reviewer_with_failover(
+    context: str, *, model: str | None = None, job_id: str | None = None
+) -> str:
+    """`_ask_reviewer`, plus one cross-provider retry on a policy block.
+
+    Same rule as the judge's, and deliberately the same shape: only a
+    policy_refusal retries, only once, and the recovery doubles as a
+    measurement — if the other vendor accepts the identical request the block
+    was provider-specific rather than content-specific. That question is not
+    academic here: this repo has had a reviewer refuse nearly every job over
+    its OWN prompt scaffolding.
+
+    The caller contract is unchanged — a hint on success, ReviewerError on
+    failure, and no retry is ever enqueued when it raises.
+    """
+    from modules.agent_provider import failover_target, provider_for_role
+
+    # Resolved BEFORE the attempt. Reading it afterwards means reporting
+    # whatever the resolver says by then, which is not necessarily where the
+    # call actually went.
+    origin, _ = _reviewer_provider_and_model(model, job_id)
+    try:
+        return await _ask_reviewer(
+            context, model=model, job_id=job_id, provider_override=origin
+        )
+    except ReviewerError as first:
+        if getattr(first, "kind", None) != "policy_refusal":
+            raise
+        target = failover_target(origin)
+        if not target:
+            raise
+
+        try:
+            hint = await _ask_reviewer(
+                context,
+                # The retry has to be TOLD the target. Calling back in without
+                # it just re-resolves to the provider that already refused, so
+                # the "failover" never leaves the first vendor.
+                model=None,
+                job_id=job_id,
+                provider_override=target,
+            )
+        except ReviewerError as second:
+            _record_reviewer_usage(
+                job_id, origin, "", None,
+                error_kind="policy_refusal",
+                failover={
+                    "failover_from": origin,
+                    "failover_to": target,
+                    "failover_diagnosis": (
+                        "content_or_prompt"
+                        if getattr(second, "kind", None) == "policy_refusal"
+                        else "inconclusive"
+                    ),
+                },
+            )
+            raise first
+        _record_reviewer_usage(
+            job_id, target, "", None,
+            failover={
+                "failover_from": origin,
+                "failover_to": target,
+                "failover_diagnosis": "provider_specific",
+            },
+        )
+        return hint
+
+
+async def _ask_reviewer(
+    context: str,
+    *,
+    model: str | None = None,
+    job_id: str | None = None,
+    provider_override: str | None = None,
+) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
     when this raises.
@@ -458,11 +605,23 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     Backend follows Settings ``agent_provider``: GPT and Grok use their
     provider adapters; Claude keeps the historical SDK path.
     """
-    provider, model = _reviewer_provider_and_model(model)
+    if provider_override:
+        from modules.agent_provider import normalize_provider, role_model_for
+
+        provider = normalize_provider(provider_override)
+        model = role_model_for("reviewer", provider, None) or model or ""
+    else:
+        provider, model = _reviewer_provider_and_model(model, job_id)
     framed_context = _frame_reviewer_context(context)
+    usage_out: dict = {}
 
     if provider == "gpt":
-        return await _ask_reviewer_gpt(framed_context, model=model)
+        try:
+            return await _ask_reviewer_gpt(
+                framed_context, model=model, usage_out=usage_out
+            )
+        finally:
+            _record_reviewer_usage(job_id, provider, model, usage_out)
     if provider == "grok":
         return await _ask_reviewer_grok(framed_context, model=model)
 
@@ -482,6 +641,7 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     )
     hint_parts: list[str] = []
     try:
+      try:
         async for msg in _iter_reviewer_messages(
             framed_context, options, _REVIEWER_WALL_CLOCK_S
         ):
@@ -490,6 +650,9 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
                     if isinstance(blk, TextBlock):
                         hint_parts.append(blk.text)
             elif isinstance(msg, ResultMessage):
+                usage_out["model_usage"] = getattr(msg, "model_usage", None) or {}
+                usage_out["usage"] = getattr(msg, "usage", None) or {}
+                usage_out["reported_cost"] = getattr(msg, "total_cost_usd", None)
                 if getattr(msg, "is_error", False):
                     detail = (
                         (getattr(msg, "result", None) or "").strip()
@@ -500,18 +663,20 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
                         detail, classify_agent_error(detail) or "api_error"
                     )
                 break
-    except ReviewerError:
+      except ReviewerError:
         raise
-    except asyncio.TimeoutError:
+      except asyncio.TimeoutError:
         raise ReviewerError(
             f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with no "
             "completion (possible transport stall or expired auth); not "
             "enqueuing a retry",
             "timeout",
         )
-    except Exception as e:
+      except Exception as e:
         raw = str(e)
         raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+    finally:
+        _record_reviewer_usage(job_id, provider, model, usage_out)
 
     hint = "\n".join(hint_parts).strip()
     diag = _diagnose_reviewer_text(hint)
@@ -1440,7 +1605,8 @@ async def retry_with_hint(job_id: str, request: Request):
         if not context.strip():
             raise HTTPException(status_code=400, detail="no context to review")
         try:
-            hint = await _ask_reviewer(context, model=resolve_reviewer_model(job_id))
+            hint = await _ask_reviewer_with_failover(
+                context, model=resolve_reviewer_model(job_id), job_id=job_id)
         except ReviewerError as e:
             # 502 = upstream (Claude API) failure. The retry never reached
             # the queue, so the client knows nothing new was scheduled.

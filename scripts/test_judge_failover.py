@@ -197,6 +197,10 @@ check("both were tried", len(CALLS), 2)
 check("the ORIGINAL result is returned", out.provider, "claude")
 check("...still a policy_refusal", out.error_kind, "policy_refusal")
 check("diagnosed as content, not vendor", out.failover_diagnosis, "content_or_prompt")
+# turn 0031 D1: when BOTH blocked we return the original result, so reading
+# its `provider` reported a failover to the place it came from. The target
+# that was actually tried has to be recorded explicitly.
+check("the TARGET that was tried is recorded", out.failover_to, "gpt")
 check("the detail names both attempts", "blocked A" in out.error_detail and "blocked B" in out.error_detail, True)
 # Pinning records who ANSWERED. When nobody did, there is nothing to pin: the
 # next stage re-resolves normally and gets its own failover attempt, because a
@@ -316,6 +320,21 @@ check(
     {r.get("failover_from") for r in lrows},
     {"claude"},
 )
+
+# D1 through the PUBLIC path: both providers blocked.
+CALLS.clear()
+jid = "fo-both-public"
+jdb = make_job(jid, agent_provider="claude")
+(jdb / "exploit.py").write_text("print(1)\n")
+scripted({
+    "claude": {"error_kind": "policy_refusal", "error_detail": "blocked A"},
+    "gpt": {"error_kind": "policy_refusal", "error_detail": "blocked B"},
+})
+vb = J.prejudge_script(jdb, "exploit.py", None, lambda *_: None, job_id=jid)
+check("both blocked: the verdict still reports the real target",
+      vb.get("failover_to"), "gpt")
+check("both blocked: and the real origin", vb.get("failover_from"), "claude")
+check("both blocked: diagnosed as content", vb.get("failover_diagnosis"), "content_or_prompt")
 
 # A turn with no failover must not grow the keys.
 CALLS.clear()

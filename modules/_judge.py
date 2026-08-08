@@ -100,6 +100,7 @@ class JudgeTurnResult:
     # turns the recovery into a measurement: if the other vendor accepted the
     # identical request the block was provider-specific, not content-specific.
     failover_from: str | None = None
+    failover_to: str | None = None
     failover_diagnosis: str | None = None
     # Per-model breakdown, kept because a judge session is not necessarily
     # single-model: the Claude judge registers a recon subagent, and the
@@ -721,7 +722,38 @@ def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
     if turn.failover_diagnosis:
         out["fallback_used"] = True
         out["failover_from"] = turn.failover_from
-        out["failover_to"] = turn.provider
+        # The TARGET that was tried, not the provider of whichever result we
+        # ended up returning. When both blocked we return the original, and
+        # reading its provider reported a failover to the place it came from.
+        out["failover_to"] = turn.failover_to or turn.provider
+        out["failover_diagnosis"] = turn.failover_diagnosis
+    return out
+
+
+def _judge_model_for(provider: str, requested: str | None) -> str:
+    """Judge model for `provider`, honouring THAT provider's active preset."""
+    from modules.agent_provider import role_model_for
+
+    return role_model_for("judge", provider, requested) or (
+        LATEST_JUDGE_MODEL if str(provider).lower() == "claude" else ""
+    )
+
+
+def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
+    """Attach the failover facts to a stage's public verdict.
+
+    The diagnosis is only worth producing if it outlives the call that made
+    it. It goes on the ledger row for accounting and here for the caller —
+    postjudge's dict is what the retry logic reads, so a failover that is
+    invisible there is a failover nobody can act on.
+    """
+    if turn.failover_diagnosis:
+        out["fallback_used"] = True
+        out["failover_from"] = turn.failover_from
+        # The TARGET that was tried, not the provider of whichever result we
+        # ended up returning. When both blocked we return the original, and
+        # reading its provider reported a failover to the place it came from.
+        out["failover_to"] = turn.failover_to or turn.provider
         out["failover_diagnosis"] = turn.failover_diagnosis
     return out
 
@@ -768,33 +800,10 @@ def _judge_model_for(provider: str, requested: str | None) -> str:
 
 
 def _failover_target(provider: str) -> str | None:
-    """The other backend to try after a policy refusal, or None.
+    """Shared provider policy — see agent_provider.failover_target()."""
+    from modules.agent_provider import failover_target
 
-    Only `claude` <-> `gpt`. Grok stays a whole-job provider in v1 (the same
-    exclusion `agent_provider.ROLE_TARGET_PROVIDERS` makes), and a target with
-    no auth configured is not a target — trying it would turn one refusal into
-    two failures and a wasted turn.
-    """
-    from modules.agent_provider import ROLE_TARGET_PROVIDERS, has_provider_auth
-
-    current = str(provider or "").strip().lower()
-    # The exclusion has to hold on the SOURCE side too. Iterating the target
-    # set and skipping `current` looks symmetric but is not: a Grok job is not
-    # in that set, so nothing was skipped and Grok fell over to Claude —
-    # leaving the role boundary Grok is supposed to stay behind. v1 keeps Grok
-    # a whole-job provider, which means it neither receives a routed role nor
-    # hands one off.
-    if current not in ROLE_TARGET_PROVIDERS:
-        return None
-    for candidate in sorted(ROLE_TARGET_PROVIDERS):
-        if candidate == current:
-            continue
-        try:
-            if has_provider_auth(candidate):
-                return candidate
-        except Exception:
-            continue
-    return None
+    return failover_target(provider)
 
 
 def judge_turn(
@@ -886,6 +895,7 @@ def judge_turn(
     )
     origin = res.provider or primary
     res.failover_from = alt.failover_from = origin
+    res.failover_to = alt.failover_to = target
     res.failover_diagnosis = alt.failover_diagnosis = diagnosis
     _record_judge_usage(job_id, stage, res)
     _record_judge_usage(job_id, stage, alt)

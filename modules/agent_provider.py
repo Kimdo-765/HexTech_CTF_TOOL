@@ -512,6 +512,62 @@ def role_provider_routes(job_provider: str | None = None) -> dict[str, str]:
     return out
 
 
+def failover_target(provider: str | None) -> str | None:
+    """The other backend to try after a policy block, or None.
+
+    Provider POLICY, so it lives here rather than in the judge — the reviewer
+    needs exactly the same rule, and the role-collapse defect earlier in this
+    work was caused twice by logic that lived in neither caller.
+
+    Only `claude` <-> `gpt`. Grok stays a whole-job provider in v1, and the
+    exclusion has to hold on the SOURCE side too: iterating the target set and
+    skipping `current` looks symmetric, but a Grok job is not IN that set, so
+    nothing gets skipped and Grok escapes the boundary it is meant to stay
+    behind. A target with no auth is not a target — trying it turns one
+    refusal into two failures and a wasted turn.
+    """
+    current = str(provider or "").strip().lower()
+    if current not in ROLE_TARGET_PROVIDERS:
+        return None
+    for candidate in sorted(ROLE_TARGET_PROVIDERS):
+        if candidate == current:
+            continue
+        try:
+            if has_provider_auth(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def role_model_for(role: str, provider: str | None, requested: str | None) -> str:
+    """Model for `role` on `provider`, honouring THAT provider's active preset.
+
+    The role model is resolved before the provider is known (against the job's
+    own backend), so a role routed — or failed over — to another provider
+    arrives holding a model from the wrong family. Coercing that to the
+    target's GLOBAL default is what the code did, and it silently ignored the
+    target's active preset.
+    """
+    p = normalize_provider(provider)
+    m = str(requested or "").strip()
+    same_family = bool(m) and (
+        (p == "gpt" and is_gpt_model_id(m))
+        or (p == "grok" and is_grok_model_id(m))
+        or (p == "claude" and is_claude_model_id(m))
+    )
+    if same_family:
+        return m
+    fallback = default_model_for(p)
+    try:
+        from modules.model_presets import resolve_role_model
+
+        resolved = resolve_role_model(role, fallback, p)
+    except Exception:
+        resolved = fallback
+    return coerce_model_for_provider(resolved or fallback, p)
+
+
 def provider_for_role(job_id: str | None, role: str) -> str:
     """Provider that should drive ``role`` for this job.
 
