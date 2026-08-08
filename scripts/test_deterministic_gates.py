@@ -185,6 +185,66 @@ v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
 check("the model's own issue survives", any("llm noticed" in i for i in v["issues"]), True)
 check("...beside the static one", any("self-defeat" in i for i in v["issues"]), True)
 
+# ---------------------------------------------------------------------------
+# 3b. turn 0040 D1 — the gates run BEFORE the judge call. "Whether or not the
+#     judge answered" was only true for a judge that RETURNED: a wrapper that
+#     raised escaped past them, and the runner turns that into ok/low, so a
+#     run whose own artifact admits an incomplete chain went to the sandbox
+#     because a network call failed.
+# ---------------------------------------------------------------------------
+def judge_raises(exc):
+    def _fake(user_prompt, *, cwd, job_id, stage, resume, model=None):
+        raise exc
+
+    J.judge_turn = _fake
+
+
+for exc in (RuntimeError("transport wrapper failure"), ValueError("bug")):
+    jd = make_job(f"g-raise-{type(exc).__name__}", self_defeat=True)
+    judge_raises(exc)
+    try:
+        v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+        check(f"{type(exc).__name__}: prejudge does not propagate", True, True)
+        check(f"{type(exc).__name__}: the static gate still blocks", v["ok"], False)
+        check(f"{type(exc).__name__}: at high severity", v["severity"], "high")
+    except Exception as e:  # pragma: no cover
+        check(f"{type(exc).__name__}: prejudge does not propagate ({e})", False, True)
+
+# A clean job whose judge raised still ships.
+jd = make_job("g-raise-clean")
+judge_raises(RuntimeError("boom"))
+v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+check("a clean job whose judge raised still ships", v["ok"], True)
+
+# ---------------------------------------------------------------------------
+# 3c. turn 0040 D2 — no gate's CAUSE is lost to another gate's volume. A
+#     single trailing cap let twelve self-defeat matches erase chain.critical
+#     from the verdict, so the operator would read "self-defeat" and never
+#     learn the chain was also invalid.
+# ---------------------------------------------------------------------------
+many_sd = [f"self-defeat in report: \"admission {i}\"" for i in range(12)]
+crit = [f"chain.critical: step {i} depends on a blocked primitive" for i in range(2)]
+llm6 = [f"llm issue {i}" for i in range(6)]
+merged = J._merge_prejudge_issues(llm6, many_sd + crit)
+check("the cap still holds", len(merged), 12)
+check("chain.critical survives a flood of self-defeat",
+      sum(1 for i in merged if i.startswith("chain.critical")), 2)
+check("self-defeat is represented", any(i.startswith("self-defeat") for i in merged), True)
+check("the model's own issues are represented",
+      any(i.startswith("llm issue") for i in merged), True)
+check(
+    "every cause present in the input is present in the output",
+    {i.split(":")[0].split(" in ")[0] for i in merged}
+    >= {"self-defeat", "chain.critical"},
+    True,
+)
+
+# Advisory families never crowd out a blocking one.
+notes = [f"chain.note: n{i}" for i in range(20)]
+merged2 = J._merge_prejudge_issues([], crit + notes)
+check("chain.critical survives a flood of notes",
+      sum(1 for i in merged2 if i.startswith("chain.critical")), 2)
+
 J.judge_turn = _orig_turn
 
 # ---------------------------------------------------------------------------

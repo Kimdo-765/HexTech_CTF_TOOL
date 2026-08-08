@@ -1290,6 +1290,51 @@ def _scan_self_defeat_sources(
 # ---------------------------------------------------------------------------
 
 
+_PREJUDGE_ISSUE_CAP = 12
+
+
+def _merge_prejudge_issues(llm: list[str], static: list[str]) -> list[str]:
+    """Merge issue lists so no GATE's cause is lost to another's volume.
+
+    A single trailing cap looked simpler than the staged 6 -> 10 -> 12 caps it
+    replaced, and silently changed behaviour: twelve self-defeat matches ate
+    the whole budget and `chain.critical` — a different, independently
+    blocking cause — vanished from the verdict entirely. The operator then
+    reads "blocked: self-defeat" and never learns the chain was also invalid.
+
+    So the budget is allocated by CAUSE, round-robin, before it is spent:
+    every family that has something to say gets a line before any family gets
+    a second one. Ordering within the result keeps the blocking causes first.
+    """
+    def family(issue: str) -> str:
+        for prefix in ("self-defeat", "chain.critical", "chain.high", "chain.note"):
+            if issue.startswith(prefix):
+                return prefix
+        return "llm"
+
+    groups: dict[str, list[str]] = {}
+    # Blocking causes are listed before advisory ones; `llm` sits between so a
+    # model's own finding is not buried under chain notes.
+    order = ["self-defeat", "chain.critical", "llm", "chain.high", "chain.note"]
+    for issue in list(static) + list(llm):
+        groups.setdefault(family(issue), []).append(str(issue)[:200])
+
+    out: list[str] = []
+    while len(out) < _PREJUDGE_ISSUE_CAP:
+        took = False
+        for name in order:
+            bucket = groups.get(name)
+            if not bucket:
+                continue
+            out.append(bucket.pop(0))
+            took = True
+            if len(out) >= _PREJUDGE_ISSUE_CAP:
+                break
+        if not took:
+            break
+    return out
+
+
 def deterministic_prejudge(jd: Path, script: Path, log_fn) -> dict:
     """The prejudge gates that need NO model, run on their own.
 
@@ -1386,14 +1431,28 @@ def prejudge_script(
         cwd=jd,
         script_path=script,
     )
-    turn = judge_turn(
-        user_prompt, cwd=jd, job_id=job_id, stage="prejudge",
-        resume=False, model=resolve_judge_model(job_id),
-    )
-    raw, sid = turn.text, turn.session_id
-    # Runs whether or not the judge answered. A judge failure loses the
-    # judge's OPINION; it must not lose the checks that never needed one.
+    # BEFORE the judge call, not after it. "Runs whether or not the judge
+    # answered" was only true for a judge that RETURNED — a wrapper that
+    # raised (transport, auth, a bug in the failover path) escaped past the
+    # gates entirely, and the runner turns that exception into ok=True /
+    # severity=low. A run whose own artifact admits the chain is incomplete
+    # then went to the sandbox because a network call failed.
     static = deterministic_prejudge(jd, script, log_fn)
+
+    try:
+        turn = judge_turn(
+            user_prompt, cwd=jd, job_id=job_id, stage="prejudge",
+            resume=False, model=resolve_judge_model(job_id),
+        )
+    except Exception as exc:
+        log_fn(
+            f"[judge] prejudge: judge call raised ({type(exc).__name__}: {exc}) "
+            f"— static gates stand (ok={static['ok']} "
+            f"severity={static['severity']})"
+        )
+        return {**static, "issues": _merge_prejudge_issues([], static["issues"]),
+                "raw": ""}
+    raw, sid = turn.text, turn.session_id
 
     parsed = _parse_json(raw)
 
@@ -1405,7 +1464,9 @@ def prejudge_script(
             f"issues={len(static['issues'])})"
         )
         return _with_failover(
-            {**static, "issues": static["issues"][:12], "raw": raw}, turn)
+            {**static,
+             "issues": _merge_prejudge_issues([], static["issues"]),
+             "raw": raw}, turn)
 
     ok = bool(parsed.get("ok", True))
     sev = str(parsed.get("severity") or ("low" if ok else "med")).lower()
@@ -1439,8 +1500,7 @@ def prejudge_script(
     # be overruled by a regex that found the agent admitting no working chain,
     # never the other way round.
     if static["issues"]:
-        issues.extend(static["issues"])
-        issues = issues[:12]
+        issues = _merge_prejudge_issues(issues, static["issues"])
     if not static["ok"]:
         ok = False
     if static["severity"] == "high":
