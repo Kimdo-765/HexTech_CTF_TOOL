@@ -1445,13 +1445,39 @@ def prejudge_script(
             resume=False, model=resolve_judge_model(job_id),
         )
     except Exception as exc:
-        log_fn(
-            f"[judge] prejudge: judge call raised ({type(exc).__name__}: {exc}) "
-            f"— static gates stand (ok={static['ok']} "
-            f"severity={static['severity']})"
+        # The static verdict survives (that was the point of moving the gates
+        # above this call) — but the CAUSE has to survive with it. Swallowing
+        # the exception here re-opened the hole stage 3 closed: `error_kind`
+        # exists to tell "ran and said nothing" from "never ran", and a
+        # wrapper that raised is emphatically the second. It also has to reach
+        # the ledger, or a judge that burned tokens before dying bills nothing.
+        detail = f"{type(exc).__name__}: {exc}"
+        kind = _classify(detail, "transport_error")
+        try:
+            from modules.agent_provider import provider_for_role
+
+            _p = _pinned_provider(job_id) or provider_for_role(job_id, "judge")
+        except Exception:
+            _p = ""
+        _record_judge_usage(
+            job_id, "prejudge",
+            JudgeTurnResult(provider=_p, error_kind=kind, error_detail=detail[:500]),
         )
-        return {**static, "issues": _merge_prejudge_issues([], static["issues"]),
-                "raw": ""}
+        log_fn(
+            f"[judge] prejudge: judge call raised ({detail}) — static gates "
+            f"stand (ok={static['ok']} severity={static['severity']}), "
+            f"error_kind={kind}"
+        )
+        return {
+            **static,
+            "issues": _merge_prejudge_issues([], static["issues"]),
+            "raw": "",
+            # The runner's own error-preservation branch is no longer reached
+            # now that this catch exists, so the fields it looked for are
+            # carried here instead of vanishing.
+            "error": detail[:500],
+            "error_kind": kind,
+        }
     raw, sid = turn.text, turn.session_id
 
     parsed = _parse_json(raw)

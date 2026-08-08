@@ -69,6 +69,7 @@ if _missing("claude_agent_sdk"):
     sys.modules["claude_agent_sdk"] = _sdk
 
 import modules._judge as J  # noqa: E402
+from modules import usage_ledger as UL  # noqa: E402
 
 PASSED = 0
 FAILED = 0
@@ -221,6 +222,31 @@ for exc in (RuntimeError("transport wrapper failure"), ValueError("bug")):
     check(f"{type(exc).__name__}: prejudge does not propagate", v["ok"] != "RAISED", True)
     check(f"{type(exc).__name__}: the static gate still blocks", v["ok"], False)
     check(f"{type(exc).__name__}: at high severity", v["severity"], "high")
+
+# turn 0042 D3: the static verdict survives, and so must the CAUSE. Swallowing
+# the exception re-opened the hole stage 3 closed — `error_kind` exists to tell
+# "ran and said nothing" from "never ran", and a wrapper that raised is
+# emphatically the second. It also has to reach the ledger, or a judge that
+# burned tokens before dying bills nothing.
+jd = make_job("g-raise-observable", self_defeat=True)
+judge_raises(RuntimeError("connection reset by peer"))
+v = prejudge(jd)
+check("D3 the failure reason is returned, not just logged",
+      "connection reset" in str(v.get("error") or ""), True)
+check("D3 ...classified", v.get("error_kind"), "transport_error")
+check("D3 the static verdict still stands", (v["ok"], v["severity"]), (False, "high"))
+rrows = UL.read_usage(jd.name)
+check("D3 the dead turn is billed", len(rrows), 1)
+check("D3 ...with its kind on the row",
+      rrows[0].get("error_kind") if rrows else None, "transport_error")
+check("D3 ...under the prejudge stage",
+      rrows[0].get("stage") if rrows else None, "prejudge")
+
+# A timeout is classified as a timeout, not lumped into transport.
+jd = make_job("g-raise-timeout", self_defeat=True)
+judge_raises(RuntimeError("request timed out after 600s"))
+v = prejudge(jd)
+check("D3 a timeout keeps its own kind", v.get("error_kind"), "timeout")
 
 # A clean job whose judge raised still ships.
 jd = make_job("g-raise-clean")
