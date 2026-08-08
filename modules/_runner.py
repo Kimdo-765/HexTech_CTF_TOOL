@@ -813,7 +813,12 @@ def attempt_sandbox_run(
 
             judge_shadow.record_input(
                 job_id, "prejudge",
-                {"script_rel": script_filename, "target": target},
+                {
+                    "script_rel": script_filename, "target": target,
+                    # The retry loop rewrites this file between attempts, so
+                    # the path alone does not identify what the gate reviewed.
+                    **judge_shadow.script_snapshot(work_dir / script_filename),
+                },
             )
         if enable_judge:
             try:
@@ -933,8 +938,13 @@ def attempt_sandbox_run(
                 {
                     "script_rel": script_filename,
                     "exit_code": res["exit_code"],
-                    "stdout": res["stdout"],
-                    "stderr": res["stderr"],
+                    # What postjudge actually CONSUMES — the byte tails that
+                    # reach the prompt and the flag shapes the placeholder
+                    # override scans for across the whole output. Recording
+                    # "stdout, shortened" reproduced neither: the generic clip
+                    # keeps the HEAD, the prompt uses the TAIL, and the
+                    # override reads the FULL string.
+                    **_judge.postjudge_inputs(res["stdout"], res["stderr"]),
                     # The SAME extra_context enforce would judge on. Without
                     # it shadow scores a different prompt — no timeout note,
                     # no target-reachability note, no prior-hint history — and

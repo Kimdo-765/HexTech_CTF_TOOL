@@ -18,6 +18,13 @@ both are handled here rather than left to discipline:
     attempts run in a retry loop under a wall clock. `evaluate()`'s caller is
     the replay / sweep harness, never the runner.
 
+  * **The flag scanner.** Judge prose has been scraped as a job's flag before
+    (job a15ff70a6ed5: the judge wrote an abbreviated `DH{...}` into a
+    prejudge issue and it landed in meta.flags[0]). `_NARRATIVE_FLAG_SOURCES`
+    is an explicit allowlist and `run.log` was removed from it in 2026-07,
+    so a NEW file is safe by construction — but only as long as nobody adds
+    it. `scripts/test_shadow_judge.py` pins that.
+
 WHAT SHADOW DOES NOT SEE: supervise. That stage fires from inside
 `_wait_with_supervise` under the same `enable_judge` gate, which shadow leaves
 False, so a shadow job records prejudge and postjudge only. Reaching it would
@@ -25,13 +32,6 @@ mean splitting the branch that also holds `container.kill()`, and a shadow
 mode that can kill is the one failure this design must not have. Read a replay
 with zero supervise rows as "shadow never looked", NOT as "supervise never
 fired".
-
-  * **The flag scanner.** Judge prose has been scraped as a job's flag before
-    (job a15ff70a6ed5: the judge wrote an abbreviated `DH{...}` into a
-    prejudge issue and it landed in meta.flags[0]). `_NARRATIVE_FLAG_SOURCES`
-    is an explicit allowlist and `run.log` was removed from it in 2026-07,
-    so a NEW file is safe by construction — but only as long as nobody adds
-    it. `scripts/test_shadow_judge.py` pins that.
 
 Shadow gates NOTHING. Not the sandbox ship-block, not the supervise kill, not
 the postjudge retry. A run in shadow mode must produce byte-identical
@@ -41,6 +41,7 @@ comparison against the recorded outcome meaningful.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -65,10 +66,25 @@ def shadow_path(job_id: str) -> Path:
     return _jobs_dir() / Path(job_id).name / SHADOW_FILENAME
 
 
+# Fields whose value IS the measurement, so the generic cap must not touch
+# them. `script_text` is the artifact the gate reviewed — clipping it means
+# evaluating different code and never noticing. The postjudge tails are
+# already bounded by the judge's own rule (8000/4000 bytes) and re-clipping
+# them by a CHARACTER count would cut a byte-exact tail into a different
+# string.
+_UNCLIPPED_FIELDS = frozenset({
+    "script_text", "stdout_tail", "stderr_tail", "extra_context",
+})
+
+
 def _clip(value: Any) -> Any:
     if isinstance(value, str) and len(value) > _MAX_FIELD_CHARS:
         return value[:_MAX_FIELD_CHARS] + f"…[clipped {len(value)} chars]"
     return value
+
+
+def _clip_field(key: str, value: Any) -> Any:
+    return value if key in _UNCLIPPED_FIELDS else _clip(value)
 
 
 def record_input(job_id: str, stage: str, inputs: dict) -> dict | None:
@@ -82,7 +98,8 @@ def record_input(job_id: str, stage: str, inputs: dict) -> dict | None:
             "ts": datetime.now(timezone.utc).isoformat(),
             "kind": "input",
             "stage": str(stage),
-            "inputs": {str(k): _clip(v) for k, v in (inputs or {}).items()},
+            "inputs": {str(k): _clip_field(str(k), v)
+                       for k, v in (inputs or {}).items()},
         }
         path = shadow_path(job_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +131,36 @@ def record_verdict(job_id: str, stage: str, verdict: dict, **extra) -> dict | No
         return rec
     except Exception:
         return None
+
+
+# A script is small; the reason it is snapshotted at all is that the retry
+# loop REWRITES it between attempts, so by evaluation time the path recorded
+# for attempt 1 holds attempt 3's code. Its own cap, because clipping a script
+# to the generic field limit would silently change what gets judged.
+_MAX_SCRIPT_CHARS = 400_000
+
+SNAPSHOT_DIRNAME = ".judge_shadow"
+
+
+def script_snapshot(path: Path) -> dict:
+    """Identity + contents of the script as it was AT RECORD TIME.
+
+    `sha256` is the part that matters: it lets the evaluator ask "is the file
+    still the one the gate saw?" instead of assuming it. Without this, an
+    evaluation that runs after the script changed judges different code — and
+    `prejudge_script` returns a silent `ok=True, severity=low` when the file
+    is simply gone, so the failure looks like a clean verdict.
+    """
+    try:
+        raw = path.read_bytes()
+    except Exception:
+        return {"script_sha256": None, "script_bytes": None, "script_text": None}
+    text = raw.decode("utf-8", errors="replace")
+    return {
+        "script_sha256": hashlib.sha256(raw).hexdigest(),
+        "script_bytes": len(raw),
+        "script_text": text if len(text) <= _MAX_SCRIPT_CHARS else None,
+    }
 
 
 def _shadow_logger(job_id: str, stage: str) -> Callable[[str], None]:
@@ -192,6 +239,45 @@ def pending_inputs(job_id: str) -> list[dict[str, Any]]:
     return [rec for stage, n, rec in inputs if (stage, n) not in done]
 
 
+class ArtifactChanged(RuntimeError):
+    """The thing the gate judged is not the thing on disk any more."""
+
+
+def _resolve_script(job_dir: Path, script_rel: str, inputs: dict) -> str:
+    """Which path should the evaluator hand prejudge — and is it the right code?
+
+    The evaluation runs long after the run, and the retry loop rewrites
+    `exploit.py` between attempts. Judging whatever sits at the recorded path
+    would score attempt 3's code against attempt 1's verdict, and if the file
+    is gone `prejudge_script` returns a silent `ok=True, severity=low` that is
+    indistinguishable from a clean review.
+
+    So: if the file still hashes to what was recorded, judge it in place. If
+    not, restore the recorded text next to it — inside the job dir, so the
+    judge keeps the same cwd and the same surrounding artifacts — and judge
+    that. With no snapshot to restore, refuse; a missing measurement is
+    honest, a wrong one is not.
+    """
+    want = inputs.get("script_sha256")
+    live = job_dir / script_rel
+    if want:
+        try:
+            if hashlib.sha256(live.read_bytes()).hexdigest() == want:
+                return script_rel
+        except Exception:
+            pass
+    text = inputs.get("script_text")
+    if not isinstance(text, str):
+        raise ArtifactChanged(
+            f"{script_rel} is not the file recorded at run time "
+            f"(sha256 {str(want)[:12] or '?'}…) and no snapshot was taken"
+        )
+    dest = job_dir / SNAPSHOT_DIRNAME / (want or "unknown")[:16] / Path(script_rel).name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+    return str(dest.relative_to(job_dir))
+
+
 def evaluate(
     job_id: str,
     job_dir: Path,
@@ -225,6 +311,7 @@ def evaluate(
             script_rel = str(inputs.get("script_rel") or "exploit.py")
             jlog = _shadow_logger(job_id, stage)
             if stage == "prejudge":
+                script_rel = _resolve_script(job_dir, script_rel, inputs)
                 return _judge.prejudge_script(
                     job_dir, script_rel, inputs.get("target"), jlog,
                     job_id=job_id,
@@ -237,12 +324,18 @@ def evaluate(
                     inputs.get("stderr_tail") or "",
                     jlog, job_id=job_id,
                 )
+            # The recorded TAILS, not "stdout" — postjudge truncates to the
+            # last 8000/4000 bytes anyway, so passing the tail reproduces the
+            # prompt byte for byte. `flag_shapes` is passed separately because
+            # the placeholder override scans the FULL output, which no longer
+            # exists here.
             return _judge.postjudge_run(
                 job_dir, script_rel,
                 int(inputs.get("exit_code") or 0),
-                inputs.get("stdout") or "",
-                inputs.get("stderr") or "",
+                inputs.get("stdout_tail") or "",
+                inputs.get("stderr_tail") or "",
                 jlog, job_id=job_id,
+                flag_shapes=inputs.get("flag_shapes"),
                 # Recorded at run time by the runner, from the same helper the
                 # enforce path uses. Dropping it here would judge a prompt the
                 # gate never saw — no timeout note, no prior-hint history.

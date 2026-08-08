@@ -1232,6 +1232,37 @@ def _truncate_tail(text: str, *, max_bytes: int) -> str:
     return b.decode("utf-8", errors="replace")
 
 
+POSTJUDGE_STDOUT_BYTES = 8000
+POSTJUDGE_STDERR_BYTES = 4000
+
+
+def postjudge_inputs(stdout: str, stderr: str) -> dict:
+    """Exactly what postjudge consumes from a run's output. Nothing more.
+
+    Two different reductions happen inside `postjudge_run`, and a recorder
+    that keeps "the output, shortened" reproduces neither:
+
+      * the PROMPT gets the TAIL — the last 8000/4000 **bytes**. Keeping the
+        head instead hands the judge the start of a long run and drops the
+        end, which is where a capture appears.
+      * the placeholder override scans the WHOLE output for flag shapes and
+        can downgrade a `success` verdict on what it finds. Feed it a tail and
+        it sees a different set.
+
+    Returning both from one place is what keeps a recorder honest: it stores
+    this dict, and `postjudge_run` accepts every field of it back.
+    """
+    from modules._common import FLAG_RE
+
+    return {
+        "stdout_tail": _truncate_tail(stdout, max_bytes=POSTJUDGE_STDOUT_BYTES),
+        "stderr_tail": _truncate_tail(stderr, max_bytes=POSTJUDGE_STDERR_BYTES),
+        "flag_shapes": sorted(set(FLAG_RE.findall(f"{stdout}\n{stderr}"))),
+        "stdout_bytes": len((stdout or "").encode("utf-8", errors="replace")),
+        "stderr_bytes": len((stderr or "").encode("utf-8", errors="replace")),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Self-defeat detection (Phase 9 ship gate)
 # ---------------------------------------------------------------------------
@@ -1844,6 +1875,7 @@ def postjudge_run(
     *,
     extra_context: str = "",
     job_id: str | None = None,
+    flag_shapes: list[str] | None = None,
 ) -> dict:
     """Categorize a finished run and produce a retry hint.
 
@@ -1852,8 +1884,8 @@ def postjudge_run(
     in-memory map after (post is the last stage).
     """
     job_id = job_id or jd.name
-    out_t = _truncate_tail(stdout, max_bytes=8000)
-    err_t = _truncate_tail(stderr, max_bytes=4000)
+    out_t = _truncate_tail(stdout, max_bytes=POSTJUDGE_STDOUT_BYTES)
+    err_t = _truncate_tail(stderr, max_bytes=POSTJUDGE_STDERR_BYTES)
 
     user_prompt = _POSTJUDGE_USER_TMPL.format(
         exit_code=exit_code,
@@ -1895,7 +1927,13 @@ def postjudge_run(
     # the operator to fix the target and /retry — exactly dc981's real fix.
     if norm["verdict"] == "success":
         from modules._common import FLAG_RE as _FRE, _is_placeholder_flag as _isph
-        _run_shapes = set(_FRE.findall(f"{stdout}\n{stderr}"))
+        # `flag_shapes`, when given, is the set scanned from the FULL output
+        # at the time it existed. A caller replaying a recorded run has only
+        # the tails left, and re-deriving from those would consult a smaller
+        # string than the live gate did — the verdict would differ for a
+        # reason that has nothing to do with the judge.
+        _run_shapes = (set(flag_shapes) if flag_shapes is not None
+                       else set(_FRE.findall(f"{stdout}\n{stderr}")))
         if _run_shapes and not any(
             not _isph(s, trusted=True) for s in _run_shapes
         ):

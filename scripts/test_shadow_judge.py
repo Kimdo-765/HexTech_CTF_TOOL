@@ -408,10 +408,11 @@ check("no shadow block sits under the enforce gate", _enclosed_by_gate,
 # quietly widen what a shadow block may DO.
 _block_callees = [{_callee(c.func) for s in b.body for c in ast.walk(s)
                    if isinstance(c, ast.Call)} for b in _shadow_blocks]
-check("every shadow block only records (+ the pure context builder)",
+check("every shadow block only records (+ the pinned derivations)",
       _block_callees,
-      [{"judge_shadow.record_input"},
-       {"judge_shadow.record_input", "_postjudge_extra"}])
+      [{"judge_shadow.record_input", "judge_shadow.script_snapshot"},
+       {"judge_shadow.record_input", "_postjudge_extra",
+        "_judge.postjudge_inputs"}])
 
 _extra_fn = next((n for n in ast.walk(_runner_ast)
                   if isinstance(n, ast.FunctionDef) and n.name == "_postjudge_extra"),
@@ -421,6 +422,31 @@ check("...and is pure — dict reads and builtins, no I/O, no model, no state",
       sorted({_callee(c.func) for c in ast.walk(_extra_fn)
               if isinstance(c, ast.Call)}) if _extra_fn else None,
       ["enumerate", "len", "res.get"])
+
+# The other two derivations are allowed in a shadow block only because of what
+# they do, so pin that rather than trusting the name. `postjudge_inputs` is
+# pure; `script_snapshot` reads ONE local file the runner has just written —
+# bounded, no model, no network — which is the price of recording the artifact
+# rather than a path to it.
+_judge_src_ast = ast.parse((ROOT / "modules" / "_judge.py").read_text())
+_pin = next((n for n in ast.walk(_judge_src_ast)
+             if isinstance(n, ast.FunctionDef) and n.name == "postjudge_inputs"), None)
+check("postjudge_inputs exists", _pin is not None, True)
+check("...and only reduces strings — no model, no I/O",
+      sorted({_callee(c.func) for c in ast.walk(_pin) if isinstance(c, ast.Call)})
+      if _pin else None,
+      ["<expr>.encode", "FLAG_RE.findall", "_truncate_tail", "len",
+       "set", "sorted"])
+
+_shadow_src_ast = ast.parse((ROOT / "modules" / "judge_shadow.py").read_text())
+_snap = next((n for n in ast.walk(_shadow_src_ast)
+              if isinstance(n, ast.FunctionDef) and n.name == "script_snapshot"), None)
+check("script_snapshot exists", _snap is not None, True)
+check("...and does exactly one local read",
+      sorted({_callee(c.func) for c in ast.walk(_snap) if isinstance(c, ast.Call)})
+      if _snap else None,
+      ["<expr>.hexdigest", "hashlib.sha256", "len", "path.read_bytes",
+       "raw.decode"])
 check("nothing in the run path evaluates",
       any("judge_shadow.evaluate" in c for c in _block_callees), False)
 check("...anywhere in _runner.py, guarded or not",
@@ -627,7 +653,11 @@ check("the evaluator forwards the recorded context to postjudge",
 # ---------------------------------------------------------------------------
 _leak_job = "shleak"
 (DATA / "jobs" / _leak_job).mkdir(parents=True, exist_ok=True)
-SH.record_input(_leak_job, "prejudge", {"script_rel": "exploit.py"})
+(DATA / "jobs" / _leak_job / "exploit.py").write_text("print('leak probe')\n")
+SH.record_input(_leak_job, "prejudge", {
+    "script_rel": "exploit.py",
+    **SH.script_snapshot(DATA / "jobs" / _leak_job / "exploit.py"),
+})
 _run_log: list[str] = []
 _saved_pre = _judge_mod.prejudge_script
 
@@ -661,6 +691,196 @@ check("evaluate() takes log_fn keyword-only, so it cannot be passed by habit",
       _sig.parameters["log_fn"].kind, inspect.Parameter.KEYWORD_ONLY)
 check("...and defaults to writing nowhere",
       _sig.parameters["log_fn"].default, None)
+
+# ---------------------------------------------------------------------------
+# 10. Long output: shadow must keep the END, because that is what postjudge
+#     reads — and the placeholder override reads the WHOLE thing. Keeping a
+#     head-clipped prefix hands the judge the start of a long run and drops the
+#     capture, then re-derives the override's input from the wrong string.
+# ---------------------------------------------------------------------------
+_FAKE = "DH{fake_flag}"                       # near the START, survives a head clip
+_REAL = "DH{" + "r" * 24 + "}"                # near the END, only a tail keeps it
+_LONG = _FAKE + ("x" * 40_000) + _REAL + "\n"
+
+_pi = _judge_mod.postjudge_inputs(_LONG, "")
+check("the recorded stdout is the TAIL the prompt uses",
+      _pi["stdout_tail"],
+      _judge_mod._truncate_tail(_LONG, max_bytes=_judge_mod.POSTJUDGE_STDOUT_BYTES))
+check("...so the real flag survives", _REAL in _pi["stdout_tail"], True)
+check("...and the head-clipped prefix would have lost it",
+      _REAL in _LONG[:8000], False)
+check("the override's input is scanned from the FULL output",
+      (_FAKE in _pi["flag_shapes"], _REAL in _pi["flag_shapes"]), (True, True))
+check("...which the tail alone would not give",
+      _FAKE in set(_judge_mod.postjudge_inputs(_pi["stdout_tail"], "")["flag_shapes"]),
+      False)
+check("the record says how much was elided",
+      _pi["stdout_bytes"], len(_LONG.encode()))
+
+# Recording it must not re-clip: the generic cap counts CHARACTERS and would
+# cut a byte-exact tail into a different string.
+_long_job = "shlong"
+(DATA / "jobs" / _long_job).mkdir(parents=True, exist_ok=True)
+_rec_long = SH.record_input(_long_job, "postjudge", {"exit_code": 0, **_pi})
+check("the recorded tail is byte-identical to the derived one",
+      _rec_long["inputs"]["stdout_tail"] if _rec_long else None, _pi["stdout_tail"])
+
+# End to end: the same run judged directly and through shadow must reach the
+# SAME verdict. The override downgrades success->partial only when every shape
+# is a placeholder, so the real flag in the tail is what keeps it `success`.
+_seen_prompts: list[tuple[str, str, tuple]] = []
+
+
+def _echo_success(prompt, **kw):
+    # The REAL result type. A hand-rolled stand-in was missing fields the
+    # failover wrapper reads, and a double that cannot survive the code under
+    # test is not evidence about the code under test.
+    return _judge_mod.JudgeTurnResult(
+        provider="claude", model="m",
+        text=json.dumps({"verdict": "success", "next_action": "stop",
+                         "summary": "", "retry_hint": "", "failure_code": ""}))
+
+
+_saved_turn = _judge_mod.judge_turn
+_judge_mod.judge_turn = _echo_success
+try:
+    _direct = _judge_mod.postjudge_run(
+        DATA / "jobs" / _long_job, "exploit.py", 0, _LONG, "", lambda *_: None)
+    # through the real default evaluator — no injected runner
+    SH.evaluate(_long_job, DATA / "jobs" / _long_job)
+    _shadow_v = [r["verdict"] for r in SH.read_shadow(_long_job)
+                 if r.get("kind") == "verdict"]
+finally:
+    _judge_mod.judge_turn = _saved_turn
+
+check("judged directly, the run is a success", _direct.get("verdict"), "success")
+check("judged through shadow, it is the SAME verdict",
+      [v.get("verdict") for v in _shadow_v], ["success"])
+
+# The DISCRIMINATING case for the override. Put the real capture at the START
+# and a placeholder at the END: the tail alone shows only a placeholder, and
+# the override downgrades success->partial when EVERY shape is one. Enforce
+# scans the full output and keeps `success`; a shadow that re-derives shapes
+# from the tail flips the verdict. The previous fixture could not tell the two
+# apart, because the real flag was in the tail either way.
+_LONG2 = _REAL + ("y" * 40_000) + _FAKE + "\n"
+_pi2 = _judge_mod.postjudge_inputs(_LONG2, "")
+check("the tail alone shows only the placeholder",
+      (_REAL in _pi2["stdout_tail"], _FAKE in _pi2["stdout_tail"]), (False, True))
+check("...but the recorded shapes still carry the real one",
+      _REAL in _pi2["flag_shapes"], True)
+
+_long2 = "shlong2"
+(DATA / "jobs" / _long2).mkdir(parents=True, exist_ok=True)
+SH.record_input(_long2, "postjudge", {"exit_code": 0, **_pi2})
+_judge_mod.judge_turn = _echo_success
+try:
+    _direct2 = _judge_mod.postjudge_run(
+        DATA / "jobs" / _long2, "exploit.py", 0, _LONG2, "", lambda *_: None)
+    SH.evaluate(_long2, DATA / "jobs" / _long2)
+    _shadow2 = [r["verdict"] for r in SH.read_shadow(_long2)
+                if r.get("kind") == "verdict"]
+finally:
+    _judge_mod.judge_turn = _saved_turn
+check("a capture at the START is still a success directly",
+      _direct2.get("verdict"), "success")
+check("...and shadow does not downgrade it to partial",
+      [v.get("verdict") for v in _shadow2], ["success"])
+
+# The unclipped-field rule needs a value that actually EXCEEDS the generic cap
+# in CHARACTERS. A byte-bounded tail never can; a script and a long prior-hint
+# history can.
+_big_ctx = "hint\n" * 4_000
+_big_src = "# " + ("s" * 30_000) + "\nprint(1)\n"
+_uncl = "shuncl"
+(DATA / "jobs" / _uncl).mkdir(parents=True, exist_ok=True)
+(DATA / "jobs" / _uncl / "big.py").write_text(_big_src)
+_rec_u = SH.record_input(_uncl, "postjudge", {"extra_context": _big_ctx})
+_rec_s = SH.record_input(_uncl, "prejudge", {
+    "script_rel": "big.py", **SH.script_snapshot(DATA / "jobs" / _uncl / "big.py")})
+check("a long extra_context is recorded whole, not clipped",
+      _rec_u["inputs"]["extra_context"] if _rec_u else None, _big_ctx)
+check("a long script snapshot is recorded whole",
+      _rec_s["inputs"]["script_text"] if _rec_s else None, _big_src)
+check("...while an unlisted field is still capped",
+      len(SH.record_input(_uncl, "postjudge", {"stdout": "z" * 50_000})
+          ["inputs"]["stdout"]) < 20_000, True)
+
+# ---------------------------------------------------------------------------
+# 11. The artifact, not the path. The retry loop rewrites exploit.py between
+#     attempts, and prejudge returns a silent ok=True when the file is gone —
+#     so an evaluation that trusts the recorded PATH scores different code and
+#     cannot tell.
+# ---------------------------------------------------------------------------
+_snap_job = "shsnap"
+_snap_dir = DATA / "jobs" / _snap_job
+_snap_dir.mkdir(parents=True, exist_ok=True)
+(_snap_dir / "exploit.py").write_text("print('attempt one')\n")
+_snap = SH.script_snapshot(_snap_dir / "exploit.py")
+check("the snapshot carries a hash", bool(_snap["script_sha256"]), True)
+check("...and the text", _snap["script_text"], "print('attempt one')\n")
+
+SH.record_input(_snap_job, "prejudge", {"script_rel": "exploit.py", **_snap})
+(_snap_dir / "exploit.py").write_text("print('attempt three — different code')\n")
+
+_judged: list[str] = []
+
+
+def _capture_pre(jd, script_rel, target, log_fn, **kw):
+    _judged.append((jd / script_rel).read_text())
+    return {"ok": True, "severity": "low", "issues": [], "raw": ""}
+
+
+_saved_pre2 = _judge_mod.prejudge_script
+_judge_mod.prejudge_script = _capture_pre
+try:
+    SH.evaluate(_snap_job, _snap_dir)
+finally:
+    _judge_mod.prejudge_script = _saved_pre2
+
+check("the evaluator judges the RECORDED code, not what is on disk now",
+      _judged, ["print('attempt one')\n"])
+check("...and the live file is left alone",
+      (_snap_dir / "exploit.py").read_text(),
+      "print('attempt three — different code')\n")
+check("...restored under the shadow dir, which the flag scanner never walks",
+      SH.SNAPSHOT_DIRNAME.startswith("."), True)
+(_snap_dir / "work").mkdir(parents=True, exist_ok=True)
+(_snap_dir / "meta.json").write_text(json.dumps({"id": _snap_job}))
+check("...so a restored script adds no flags",
+      scan_job_for_flags(_snap_job), [])
+
+# Unchanged file: judge it in place, no restore.
+_same_job = "shsame"
+_same_dir = DATA / "jobs" / _same_job
+_same_dir.mkdir(parents=True, exist_ok=True)
+(_same_dir / "exploit.py").write_text("print('stable')\n")
+SH.record_input(_same_job, "prejudge", {
+    "script_rel": "exploit.py", **SH.script_snapshot(_same_dir / "exploit.py")})
+_rels: list[str] = []
+_judge_mod.prejudge_script = lambda jd, rel, t, lg, **kw: (
+    _rels.append(rel), {"ok": True, "severity": "low"})[1]
+try:
+    SH.evaluate(_same_job, _same_dir)
+finally:
+    _judge_mod.prejudge_script = _saved_pre2
+check("an unchanged artifact is judged in place", _rels, ["exploit.py"])
+check("...with no snapshot directory created",
+      (_same_dir / SH.SNAPSHOT_DIRNAME).exists(), False)
+
+# No snapshot and a changed file: refuse, loudly, rather than judge the wrong
+# thing. A missing measurement is honest; a wrong one is not.
+_gone_job = "shgone"
+_gone_dir = DATA / "jobs" / _gone_job
+_gone_dir.mkdir(parents=True, exist_ok=True)
+SH.record_input(_gone_job, "prejudge", {
+    "script_rel": "exploit.py", "script_sha256": "0" * 64, "script_text": None})
+SH.evaluate(_gone_job, _gone_dir)
+_gv = [r["verdict"] for r in SH.read_shadow(_gone_job) if r.get("kind") == "verdict"]
+check("a changed artifact with no snapshot is refused", len(_gv), 1)
+check("...and says why", "ArtifactChanged" in json.dumps(_gv[0]), True)
+check("...rather than reporting a clean review",
+      _gv[0].get("ok"), None)
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="
