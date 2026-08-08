@@ -940,6 +940,9 @@ def attempt_sandbox_run(
                 {
                     "script_rel": script_filename,
                     "exit_code": res["exit_code"],
+                    # The files a delayed postjudge could still Read from cwd
+                    # (the prompt invites it), overwritten by the next attempt.
+                    **judge_shadow.postjudge_fingerprint(work_dir, script_filename),
                     # What postjudge actually CONSUMES — the byte tails that
                     # reach the prompt and the flag shapes the placeholder
                     # override scans for across the whole output. Recording

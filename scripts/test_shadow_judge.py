@@ -224,8 +224,10 @@ def boom(stage, inputs):
     raise RuntimeError("evaluator exploded")
 
 
-check("an exploding evaluator still consumes the entry",
-      SH.evaluate(jid3, DATA / "jobs" / jid3, runner=boom), 1)
+check("an exploding evaluator counts as no measurement",
+      SH.evaluate(jid3, DATA / "jobs" / jid3, runner=boom), 0)
+check("...but the entry is consumed, not lost",
+      any(r.get("kind") == "verdict" for r in SH.read_shadow(jid3)), True)
 check("...and records why",
       any("exploded" in json.dumps(r.get("verdict") or {})
           for r in SH.read_shadow(jid3) if r.get("kind") == "verdict"), True)
@@ -415,7 +417,7 @@ check("every shadow block only records (+ the pinned derivations)",
       _block_callees,
       [{"judge_shadow.record_input", "judge_shadow.prejudge_fingerprint"},
        {"judge_shadow.record_input", "_postjudge_extra",
-        "_judge.postjudge_inputs"}])
+        "_judge.postjudge_inputs", "judge_shadow.postjudge_fingerprint"}])
 
 _extra_fn = next((n for n in ast.walk(_runner_ast)
                   if isinstance(n, ast.FunctionDef) and n.name == "_postjudge_extra"),
@@ -873,9 +875,11 @@ SH.record_input(_chg, "prejudge", {
 _seen, _v = _evaluate_with_stub(_chg, _chg_dir)
 check("a changed script is NOT judged", _seen, [])
 check("...it is recorded as unevaluable, naming the artifact",
-      ("ArtifactChanged" in json.dumps(_v), "exploit.py" in json.dumps(_v)),
+      (bool(_v[0].get("unevaluable")), "exploit.py" in json.dumps(_v)),
       (True, True))
 check("...rather than reporting a clean review", _v[0].get("ok"), None)
+check("...and the rollup does not count it as a measurement",
+      (SH.summary(_chg)["evaluated"], SH.summary(_chg)["unevaluable"]), (0, 1))
 
 # A COMPANION moved. Same script, same hash — and prejudge's deterministic
 # gates read report.md for self-defeat admissions, so this alone flips a
@@ -950,6 +954,106 @@ _lp.write_text("\n".join(json.dumps(r) for r in [
 ]) + "\n")
 check("an id-less file falls back to positional matching",
       [r["inputs"]["stall_seconds"] for r in SH.pending_inputs(_leg)], [60])
+
+# ---------------------------------------------------------------------------
+# 13. The delayed postjudge can READ. Its prompt says so: "You may Read the
+#     script + std{out,err} files under `{cwd}`". Those live at fixed names
+#     the next attempt overwrites, so an evaluation that happens later can
+#     answer about attempt 3's crash while holding attempt 1's tail.
+# ---------------------------------------------------------------------------
+_pj = "shpjart"
+_pj_dir = DATA / "jobs" / _pj
+(_pj_dir / "work").mkdir(parents=True, exist_ok=True)
+(_pj_dir / "exploit.py").write_text("print('one')\n")
+(_pj_dir / "exploit.py.stdout").write_text("FIRST_ATTEMPT_GOOD\n")
+(_pj_dir / "exploit.py.stderr").write_text("")
+_pjfp = SH.postjudge_fingerprint(_pj_dir, "exploit.py")
+check("the postjudge fingerprint covers the readable artifacts",
+      sorted(_pjfp), ["script_sha256", "stderr_file_sha256", "stdout_file_sha256"])
+SH.record_input(_pj, "postjudge", {
+    "script_rel": "exploit.py", "exit_code": 0,
+    **_pjfp, **_judge_mod.postjudge_inputs("FIRST_ATTEMPT_GOOD\n", "")})
+
+# The next attempt overwrites the fixed-name file.
+(_pj_dir / "exploit.py.stdout").write_text("SECOND_ATTEMPT_CRASH\n")
+_pj_called: list[str] = []
+_saved_post2 = _judge_mod.postjudge_run
+_judge_mod.postjudge_run = lambda *a, **k: (
+    _pj_called.append("x"), {"verdict": "crash"})[1]
+try:
+    SH.evaluate(_pj, _pj_dir)
+finally:
+    _judge_mod.postjudge_run = _saved_post2
+_pjv = [r["verdict"] for r in SH.read_shadow(_pj) if r.get("kind") == "verdict"]
+check("an overwritten stdout file stops the delayed postjudge", _pj_called, [])
+check("...naming the file that moved",
+      "exploit.py.stdout" in json.dumps(_pjv), True)
+
+# ---------------------------------------------------------------------------
+# 14. pre -> post share ONE judge session. A postjudge evaluated without its
+#     prejudge has none of the context the gate's postjudge had, so it is not
+#     a measurement of the gate — and must not be counted as one.
+# ---------------------------------------------------------------------------
+_dep = "shdep"
+_dep_dir = DATA / "jobs" / _dep
+(_dep_dir / "work").mkdir(parents=True, exist_ok=True)
+(_dep_dir / "exploit.py").write_text("print('one')\n")
+(_dep_dir / "exploit.py.stdout").write_text("out\n")
+(_dep_dir / "exploit.py.stderr").write_text("")
+SH.record_input(_dep, "prejudge", {
+    "script_rel": "exploit.py", **SH.prejudge_fingerprint(_dep_dir, "exploit.py")})
+SH.record_input(_dep, "postjudge", {
+    "script_rel": "exploit.py", "exit_code": 0,
+    **SH.postjudge_fingerprint(_dep_dir, "exploit.py"),
+    **_judge_mod.postjudge_inputs("out\n", "")})
+# Only the SCRIPT moves — postjudge's own artifacts are untouched, so nothing
+# but the prejudge dependency can stop it.
+(_dep_dir / "exploit.py").write_text("print('three')\n")
+(_dep_dir / "exploit.py.stdout").write_text("out\n")
+
+_pre_calls, _post_calls = [], []
+_judge_mod.prejudge_script = lambda *a, **k: (
+    _pre_calls.append("x"), {"ok": True, "severity": "low"})[1]
+_judge_mod.postjudge_run = lambda *a, **k: (
+    _post_calls.append("x"), {"verdict": "success"})[1]
+try:
+    _n_dep = SH.evaluate(_dep, _dep_dir)
+finally:
+    _judge_mod.prejudge_script = _saved_pre2
+    _judge_mod.postjudge_run = _saved_post2
+
+check("an unevaluable prejudge is not judged", _pre_calls, [])
+check("...and its postjudge is not judged either", _post_calls, [])
+_depv = [r["verdict"] for r in SH.read_shadow(_dep) if r.get("kind") == "verdict"]
+check("both stages are recorded, both unevaluable",
+      [bool(v.get("unevaluable")) for v in _depv], [True, True])
+check("...and the postjudge says WHY it was blocked",
+      "prejudge was unevaluable" in str(_depv[1].get("unevaluable")), True)
+check("evaluate() reports no measurements", _n_dep, 0)
+
+# The rollup must not report this job as fully evaluated.
+_ds = SH.summary(_dep)
+check("the rollup counts the inputs", _ds["inputs"], 2)
+check("...but zero measurements", _ds["evaluated"], 0)
+check("...and two refusals", _ds["unevaluable"], 2)
+check("...split by stage",
+      _ds["unevaluable_by_stage"], {"prejudge": 1, "postjudge": 1})
+check("...with by_stage empty, since nothing was measured", _ds["by_stage"], {})
+
+# The block survives a RESUMED evaluation: a later call must reach the same
+# conclusion, which is why it is derived from the file and not a local.
+SH.record_input(_dep, "postjudge", {
+    "script_rel": "exploit.py", "exit_code": 0,
+    **SH.postjudge_fingerprint(_dep_dir, "exploit.py"),
+    **_judge_mod.postjudge_inputs("out\n", "")})
+_post2: list[str] = []
+_judge_mod.postjudge_run = lambda *a, **k: (
+    _post2.append("x"), {"verdict": "success"})[1]
+try:
+    SH.evaluate(_dep, _dep_dir)
+finally:
+    _judge_mod.postjudge_run = _saved_post2
+check("a resumed evaluation is still blocked", _post2, [])
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="

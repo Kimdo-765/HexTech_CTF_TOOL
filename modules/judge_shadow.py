@@ -152,6 +152,24 @@ def _digest(path: Path) -> str | None:
         return None
 
 
+def postjudge_fingerprint(job_dir: Path, script_rel: str) -> dict:
+    """The files a DELAYED postjudge could still read, hashed at record time.
+
+    The postjudge prompt says so in as many words: "You may Read the script +
+    std{out,err} files under `{cwd}`". The runner writes those to fixed names
+    and overwrites them on the next attempt, so an evaluation that happens
+    afterwards can read attempt 3's crash output while being handed attempt
+    1's recorded tail — and answer about neither.
+
+    Same rule as prejudge: hash them, and refuse to evaluate if they moved.
+    """
+    return {
+        "script_sha256": _digest(job_dir / script_rel),
+        "stdout_file_sha256": _digest(job_dir / f"{script_rel}.stdout"),
+        "stderr_file_sha256": _digest(job_dir / f"{script_rel}.stderr"),
+    }
+
+
 def prejudge_fingerprint(job_dir: Path, script_rel: str) -> dict:
     """Every artifact prejudge reads, hashed as it was AT RECORD TIME.
 
@@ -288,6 +306,20 @@ def pending_inputs(job_id: str) -> list[dict[str, Any]]:
     return out
 
 
+def _blocked_reason(job_id: str) -> str | None:
+    """Why later stages cannot be evaluated, if a prejudge already failed.
+
+    Read from the file rather than kept in a local, so a second `evaluate()`
+    call — the resume path — reaches the same conclusion as the first.
+    """
+    for rec in read_shadow(job_id):
+        if rec.get("kind") == "verdict" and str(rec.get("stage")) == "prejudge":
+            why = (rec.get("verdict") or {}).get("unevaluable")
+            if why:
+                return str(why)
+    return None
+
+
 class ArtifactChanged(RuntimeError):
     """The inputs the gate judged are not the inputs on disk any more."""
 
@@ -313,6 +345,8 @@ def _require_unchanged(job_dir: Path, script_rel: str, inputs: dict) -> None:
         (script_rel, job_dir / script_rel, "script_sha256"),
         ("work/report.md", work / "report.md", "report_sha256"),
         ("work/chain.json", work / "chain.json", "chain_sha256"),
+        (f"{script_rel}.stdout", job_dir / f"{script_rel}.stdout", "stdout_file_sha256"),
+        (f"{script_rel}.stderr", job_dir / f"{script_rel}.stderr", "stderr_file_sha256"),
     ):
         if key not in inputs:
             continue          # recorded before this field existed; nothing to check
@@ -372,6 +406,10 @@ def evaluate(
                     inputs.get("stderr_tail") or "",
                     jlog, job_id=job_id,
                 )
+            # Same rule as prejudge: the delayed postjudge may Read the
+            # script and the std{out,err} files from cwd, and the next attempt
+            # overwrites all three under fixed names.
+            _require_unchanged(job_dir, script_rel, inputs)
             # The recorded TAILS, not "stdout" — postjudge truncates to the
             # last 8000/4000 bytes anyway, so passing the tail reproduces the
             # prompt byte for byte. `flag_shapes` is passed separately because
@@ -390,18 +428,36 @@ def evaluate(
                 extra_context=str(inputs.get("extra_context") or ""),
             )
 
-    count = 0
+    # A stage that could not be evaluated blocks the ones that depend on it.
+    # The real cycle is pre -> (supervise) -> post sharing ONE judge session:
+    # supervise and postjudge resume the id prejudge opened, so a postjudge
+    # evaluated without a prejudge has none of the context the gate's
+    # postjudge had. Judging it anyway produces a number that looks like a
+    # measurement of the gate and is not one.
+    blocked = _blocked_reason(job_id)
+    count = unevaluable = 0
     for rec in pend:
         stage = str(rec.get("stage") or "")
-        try:
-            verdict = runner(stage, rec.get("inputs") or {})
-        except Exception as exc:
-            verdict = {"error": f"{type(exc).__name__}: {exc}"}
+        if blocked and stage != "prejudge":
+            verdict = {"unevaluable": f"prejudge was unevaluable: {blocked}"}
+        else:
+            try:
+                verdict = runner(stage, rec.get("inputs") or {})
+            except ArtifactChanged as exc:
+                verdict = {"unevaluable": str(exc)}
+            except Exception as exc:
+                verdict = {"unevaluable": f"{type(exc).__name__}: {exc}"}
+        if verdict.get("unevaluable"):
+            unevaluable += 1
+            if stage == "prejudge":
+                blocked = str(verdict["unevaluable"])
+        else:
+            count += 1
         record_verdict(job_id, stage, verdict,
                        answers=rec.get("id"), evaluated_from=rec.get("ts"))
-        count += 1
     _shadow_logger(job_id, "evaluate")(
-        f"[judge] shadow: evaluated {count} recorded stage(s) out of band")
+        f"[judge] shadow: evaluated {count} recorded stage(s) out of band"
+        + (f"; {unevaluable} unevaluable" if unevaluable else ""))
     return count
 
 
@@ -418,17 +474,22 @@ def summary(job_id: str) -> dict[str, Any]:
 
     inputs = 0
     verdicts: dict[str, list[dict]] = {}
+    refused: dict[str, list[dict]] = {}
     for rec in read_shadow(job_id):
         if rec.get("kind") == "input":
             inputs += 1
         elif rec.get("kind") == "verdict":
-            verdicts.setdefault(str(rec.get("stage") or ""), []).append(
-                rec.get("verdict") or {}
-            )
+            v = rec.get("verdict") or {}
+            # A refusal is not a measurement. Counting it as one reported a
+            # job where the judge was never called as fully evaluated.
+            bucket = refused if v.get("unevaluable") else verdicts
+            bucket.setdefault(str(rec.get("stage") or ""), []).append(v)
     return {
         "inputs": inputs,
         "evaluated": sum(len(v) for v in verdicts.values()),
+        "unevaluable": sum(len(v) for v in refused.values()),
         "by_stage": {k: len(v) for k, v in verdicts.items()},
+        "unevaluable_by_stage": {k: len(v) for k, v in refused.items()},
         "would_have_blocked": any(
             prejudge_blocks_ship(v) for v in verdicts.get("prejudge", [])
         ),
