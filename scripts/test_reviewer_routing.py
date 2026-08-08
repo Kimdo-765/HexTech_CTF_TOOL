@@ -202,12 +202,16 @@ CALLS: list[str] = []
 
 
 def scripted_by_provider(outcomes: dict):
-    async def _fake(context, *, model=None, job_id=None, provider_override=None):
+    async def _fake(context, *, model=None, job_id=None, provider_override=None, usage_sink=None):
         provider = provider_override or (
             AP.provider_for_role(job_id, "reviewer") if job_id
             else AP.active_provider()
         )
         CALLS.append(provider)
+        if usage_sink is not None:
+            usage_sink.append({"provider": provider, "model": f"{provider}-model",
+                               "usage_out": {"usage": {"input_tokens": 7}},
+                               "error_kind": (outcomes.get(provider) or {}).get("error_kind")})
         spec = outcomes.get(provider) or {}
         if spec.get("error_kind"):
             raise R.ReviewerError(spec.get("detail", "blocked"), spec["error_kind"])
@@ -242,11 +246,15 @@ scripted_by_provider({
 # The double now keys on the provider it is TOLD, which is the whole point:
 # a retry that re-resolves instead of being told the target never leaves the
 # first vendor. The earlier counter-based double hid exactly that.
-async def _fake2(context, *, model=None, job_id=None, provider_override=None):
+async def _fake2(context, *, model=None, job_id=None, provider_override=None, usage_sink=None):
     provider = provider_override or (
         AP.provider_for_role(job_id, "reviewer") if job_id else AP.active_provider()
     )
     CALLS.append(provider)
+    if usage_sink is not None:
+        usage_sink.append({"provider": provider, "model": f"{provider}-model",
+                           "usage_out": {"usage": {"input_tokens": 7}},
+                           "error_kind": "policy_refusal" if provider == "claude" else None})
     if provider == "claude":
         raise R.ReviewerError("blocked", "policy_refusal")
     return "recovered hint"
@@ -257,7 +265,12 @@ got = asyncio.run(R._ask_reviewer_with_failover("ctx", job_id=jid))
 check("a policy block is retried on the other provider", CALLS, ["claude", "gpt"])
 check("and the retry's hint is returned", got, "recovered hint")
 frows = UL.read_usage(jid)
-check("the failover is recorded", len(frows) >= 1, True)
+check("exactly TWO rows — one per real attempt, no synthetic third", len(frows), 2)
+check("attempts are 1 and 2, not inflated", sorted(r["attempt"] for r in frows), [1, 2])
+check("the refusal row keeps its error_kind",
+      [r.get("error_kind") for r in frows], ["policy_refusal", None])
+check("each row names its own provider",
+      [r.get("provider") for r in frows], ["claude", "gpt"])
 check(
     "...with the diagnosis",
     {r.get("failover_diagnosis") for r in frows},
@@ -278,8 +291,99 @@ try:
 except R.ReviewerError as e:
     check("no target: the original refusal is preserved", e.kind, "policy_refusal")
 check("no target: exactly one attempt", CALLS, ["claude"])
+# Restore: leaving the auth double narrowed silently disabled every failover
+# in the sections below, which is how eight streaming assertions "failed".
+AP.has_provider_auth = lambda p=None: True
 
+# ---------------------------------------------------------------------------
+# 4. turn 0033 D1 — the STREAMING path gets the same three things.
+#    It had none of them: no job id reached it, so it resolved against live
+#    Settings, wrote no rows, and ended a policy block as a terminal error —
+#    the one failure a second vendor can actually cure.
+# ---------------------------------------------------------------------------
 R._ask_reviewer = _orig_ask
+SCALLS: list[str] = []
+
+
+def scripted_stream(outcomes: dict):
+    async def _fake(context, *, model=None, job_id=None, provider_override=None,
+                    usage_sink=None):
+        provider = provider_override or AP.provider_for_role(job_id, "reviewer")
+        SCALLS.append(provider)
+        if usage_sink is not None:
+            usage_sink.append({"provider": provider, "model": f"{provider}-m",
+                               "usage_out": {"usage": {"input_tokens": 11}},
+                               "error_kind": (outcomes.get(provider) or {}).get("kind")})
+        spec = outcomes.get(provider) or {}
+        if spec.get("kind"):
+            yield "error", {"message": "blocked", "kind": spec["kind"]}
+            return
+        yield "token", {"delta": spec.get("text", "hint")}
+        yield "done", {"hint": spec.get("text", "hint")}
+
+    R._stream_reviewer_once = _fake
+
+
+async def _drain(job_id):
+    out = []
+    async for k, p_ in R._ask_reviewer_streaming("ctx", job_id=job_id):
+        out.append((k, p_))
+    return out
+
+
+_orig_stream = R._stream_reviewer_once
+
+# A clean stream: routed provider, one billed row, no note.
+sj = make_job("sv-ok", agent_provider="gpt",
+              agent_role_providers={"reviewer": "claude"})
+SCALLS.clear()
+scripted_stream({"claude": {"text": "streamed hint"}})
+ev = asyncio.run(_drain(sj))
+check("streaming follows the job snapshot", SCALLS, ["claude"])
+check("streaming yields its hint", [k for k, _ in ev], ["token", "done"])
+check("streaming bills the turn", len(UL.read_usage(sj)), 1)
+check("...on the routed provider",
+      UL.read_usage(sj)[0].get("provider") if UL.read_usage(sj) else None, "claude")
+
+# A policy block fails over, and the client is NOT shown a failure that is
+# about to be retried.
+sj2 = make_job("sv-fo", agent_provider="claude")
+SCALLS.clear()
+scripted_stream({"claude": {"kind": "policy_refusal"}, "gpt": {"text": "recovered"}})
+ev = asyncio.run(_drain(sj2))
+check("streaming retries on the other provider", SCALLS, ["claude", "gpt"])
+check("no error is streamed before the retry",
+      [k for k, _ in ev], ["note", "token", "done"])
+srows = UL.read_usage(sj2)
+check("both streamed attempts are billed", len(srows), 2)
+check("attempts are 1 and 2", sorted(r["attempt"] for r in srows), [1, 2])
+check("the refusal row keeps its kind",
+      [r.get("error_kind") for r in srows], ["policy_refusal", None])
+check("the diagnosis is on both rows",
+      {r.get("failover_diagnosis") for r in srows}, {"provider_specific"})
+
+# Both blocked: the ORIGINAL refusal surfaces, so the caller still refuses to
+# enqueue.
+sj3 = make_job("sv-both", agent_provider="claude")
+SCALLS.clear()
+scripted_stream({"claude": {"kind": "policy_refusal"}, "gpt": {"kind": "policy_refusal"}})
+ev = asyncio.run(_drain(sj3))
+check("both blocked: an error is streamed", [k for k, _ in ev][-1], "error")
+check("both blocked: it is the ORIGINAL refusal",
+      ev[-1][1].get("kind"), "policy_refusal")
+check("both blocked: still two billed rows", len(UL.read_usage(sj3)), 2)
+check("both blocked: diagnosed as content",
+      {r.get("failover_diagnosis") for r in UL.read_usage(sj3)}, {"content_or_prompt"})
+
+# A non-policy error never retries.
+sj4 = make_job("sv-timeout", agent_provider="claude")
+SCALLS.clear()
+scripted_stream({"claude": {"kind": "timeout"}})
+ev = asyncio.run(_drain(sj4))
+check("a timeout is not retried", SCALLS, ["claude"])
+check("...and surfaces immediately", ev[-1][0], "error")
+
+R._stream_reviewer_once = _orig_stream
 GA.query_gpt_once = _orig_once
 
 print(

@@ -370,7 +370,9 @@ def _resume_id_for_active_provider(meta: dict) -> str | None:
     return meta.get("agent_session_id")
 
 
-async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
+async def _ask_reviewer_grok(
+    framed_context: str, *, model: str, usage_out: dict | None = None
+) -> str:
     """One-shot Grok reviewer (text only). Raises ReviewerError on failure.
 
     Effort is capped at medium — ``high`` on a large artifact dump routinely
@@ -412,6 +414,10 @@ async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
         raw = str(e)
         raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
 
+    if isinstance(usage_out, dict):
+        usage_out["usage"] = r.get("usage") or {}
+        usage_out["model_usage"] = r.get("model_usage") or {}
+        usage_out["reported_cost"] = r.get("total_cost_usd")
     if r.get("error"):
         detail = str(r["error"])
         raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
@@ -484,6 +490,7 @@ def _record_reviewer_usage(
     *,
     error_kind: str | None = None,
     failover: dict | None = None,
+    sink: list | None = None,
 ) -> None:
     """Ledger rows for one reviewer turn. Best-effort.
 
@@ -492,6 +499,17 @@ def _record_reviewer_usage(
     subagents, so a Claude reviewer running against a Codex job billed a
     second vendor invisibly.
     """
+    if sink is not None:
+        # Deferred: the failover diagnosis is a property of the WHOLE event and
+        # is not known until the second attempt has run. Writing now and adding
+        # a diagnostic row later inflated two real calls into three attempts
+        # and left the refusal row with no error_kind — the diagnosis has to
+        # ride on the rows the adapters already produce, not beside them.
+        sink.append({
+            "provider": provider, "model": model,
+            "usage_out": dict(usage_out or {}), "error_kind": error_kind,
+        })
+        return
     if not job_id:
         return
     try:
@@ -544,51 +562,61 @@ async def _ask_reviewer_with_failover(
     # whatever the resolver says by then, which is not necessarily where the
     # call actually went.
     origin, _ = _reviewer_provider_and_model(model, job_id)
-    try:
-        return await _ask_reviewer(
-            context, model=model, job_id=job_id, provider_override=origin
-        )
-    except ReviewerError as first:
-        if getattr(first, "kind", None) != "policy_refusal":
-            raise
-        target = failover_target(origin)
-        if not target:
-            raise
+    sink: list = []
+    failover: dict = {}
 
-        try:
-            hint = await _ask_reviewer(
-                context,
-                # The retry has to be TOLD the target. Calling back in without
-                # it just re-resolves to the provider that already refused, so
-                # the "failover" never leaves the first vendor.
-                model=None,
-                job_id=job_id,
-                provider_override=target,
-            )
-        except ReviewerError as second:
+    def _flush() -> None:
+        for entry in sink:
             _record_reviewer_usage(
-                job_id, origin, "", None,
-                error_kind="policy_refusal",
-                failover={
-                    "failover_from": origin,
-                    "failover_to": target,
-                    "failover_diagnosis": (
-                        "content_or_prompt"
-                        if getattr(second, "kind", None) == "policy_refusal"
-                        else "inconclusive"
-                    ),
-                },
+                job_id,
+                entry["provider"],
+                entry["model"],
+                entry["usage_out"],
+                error_kind=entry["error_kind"],
+                failover=failover or None,
             )
-            raise first
-        _record_reviewer_usage(
-            job_id, target, "", None,
-            failover={
+        sink.clear()
+
+    try:
+        try:
+            return await _ask_reviewer(
+                context, model=model, job_id=job_id,
+                provider_override=origin, usage_sink=sink,
+            )
+        except ReviewerError as first:
+            if getattr(first, "kind", None) != "policy_refusal":
+                raise
+            target = failover_target(origin)
+            if not target:
+                raise
+            failover.update({
                 "failover_from": origin,
                 "failover_to": target,
-                "failover_diagnosis": "provider_specific",
-            },
-        )
-        return hint
+            })
+            try:
+                hint = await _ask_reviewer(
+                    context,
+                    # The retry has to be TOLD the target. Calling back in
+                    # without it just re-resolves to the provider that already
+                    # refused, so the "failover" never leaves the first vendor.
+                    model=None,
+                    job_id=job_id,
+                    provider_override=target,
+                    usage_sink=sink,
+                )
+            except ReviewerError as second:
+                failover["failover_diagnosis"] = (
+                    "content_or_prompt"
+                    if getattr(second, "kind", None) == "policy_refusal"
+                    else "inconclusive"
+                )
+                raise first
+            failover["failover_diagnosis"] = "provider_specific"
+            return hint
+    finally:
+        # Every real attempt is billed, once, carrying whatever diagnosis the
+        # event ended with. No synthetic row.
+        _flush()
 
 
 async def _ask_reviewer(
@@ -597,6 +625,7 @@ async def _ask_reviewer(
     model: str | None = None,
     job_id: str | None = None,
     provider_override: str | None = None,
+    usage_sink: list | None = None,
 ) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
@@ -615,15 +644,33 @@ async def _ask_reviewer(
     framed_context = _frame_reviewer_context(context)
     usage_out: dict = {}
 
+    _err: dict = {}
     if provider == "gpt":
         try:
             return await _ask_reviewer_gpt(
                 framed_context, model=model, usage_out=usage_out
             )
+        except ReviewerError as e:
+            _err["kind"] = e.kind
+            raise
         finally:
-            _record_reviewer_usage(job_id, provider, model, usage_out)
+            _record_reviewer_usage(
+                job_id, provider, model, usage_out,
+                error_kind=_err.get("kind"), sink=usage_sink,
+            )
     if provider == "grok":
-        return await _ask_reviewer_grok(framed_context, model=model)
+        try:
+            return await _ask_reviewer_grok(
+                framed_context, model=model, usage_out=usage_out
+            )
+        except ReviewerError as e:
+            _err["kind"] = e.kind
+            raise
+        finally:
+            _record_reviewer_usage(
+                job_id, provider, model, usage_out,
+                error_kind=_err.get("kind"), sink=usage_sink,
+            )
 
     work_dir = Path("/tmp")
     options = ClaudeAgentOptions(
@@ -663,7 +710,8 @@ async def _ask_reviewer(
                         detail, classify_agent_error(detail) or "api_error"
                     )
                 break
-      except ReviewerError:
+      except ReviewerError as e:
+        _err["kind"] = e.kind
         raise
       except asyncio.TimeoutError:
         raise ReviewerError(
@@ -676,7 +724,10 @@ async def _ask_reviewer(
         raw = str(e)
         raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
     finally:
-        _record_reviewer_usage(job_id, provider, model, usage_out)
+        _record_reviewer_usage(
+            job_id, provider, model, usage_out,
+            error_kind=_err.get("kind"), sink=usage_sink,
+        )
 
     hint = "\n".join(hint_parts).strip()
     diag = _diagnose_reviewer_text(hint)
@@ -686,8 +737,13 @@ async def _ask_reviewer(
     return hint
 
 
-async def _ask_reviewer_streaming(
-    context: str, *, model: str | None = None
+async def _stream_reviewer_once(
+    context: str,
+    *,
+    model: str | None = None,
+    job_id: str | None = None,
+    provider_override: str | None = None,
+    usage_sink: list | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Yield ('event_kind', payload) tuples while the reviewer runs.
 
@@ -700,22 +756,39 @@ async def _ask_reviewer_streaming(
     Backend follows Settings ``agent_provider`` (GPT → selected Codex/API runtime,
     Grok → Grok ACP, Claude → Agent SDK).
     """
-    provider, model = _reviewer_provider_and_model(model)
+    if provider_override:
+        from modules.agent_provider import normalize_provider, role_model_for
+
+        provider = normalize_provider(provider_override)
+        model = role_model_for("reviewer", provider, None) or model or ""
+    else:
+        provider, model = _reviewer_provider_and_model(model, job_id)
     framed_context = _frame_reviewer_context(context)
+    usage_out: dict = {}
+    _err: dict = {}
+
+    def _bill() -> None:
+        _record_reviewer_usage(
+            job_id, provider, model, usage_out,
+            error_kind=_err.get("kind"), sink=usage_sink,
+        )
 
     if provider == "gpt":
         try:
-            hint = await _ask_reviewer_gpt(framed_context, model=model)
+            hint = await _ask_reviewer_gpt(
+                framed_context, model=model, usage_out=usage_out)
         except ReviewerError as e:
-            yield "error", {"message": str(e), "kind": e.kind or "api_error"}
+            _err["kind"] = e.kind or "api_error"
+            _bill()
+            yield "error", {"message": str(e), "kind": _err["kind"]}
             return
         except Exception as e:
             raw = str(e)
-            yield "error", {
-                "message": raw,
-                "kind": classify_agent_error(raw) or "api_error",
-            }
+            _err["kind"] = classify_agent_error(raw) or "api_error"
+            _bill()
+            yield "error", {"message": raw, "kind": _err["kind"]}
             return
+        _bill()
         if hint:
             yield "token", {"delta": hint}
         yield "done", {"hint": hint}
@@ -726,17 +799,20 @@ async def _ask_reviewer_streaming(
         # burst then done (UI still shows progressive text via the final
         # delta). Errors surface as 'error' events same as Claude path.
         try:
-            hint = await _ask_reviewer_grok(framed_context, model=model)
+            hint = await _ask_reviewer_grok(
+                framed_context, model=model, usage_out=usage_out)
         except ReviewerError as e:
-            yield "error", {"message": str(e), "kind": e.kind or "api_error"}
+            _err["kind"] = e.kind or "api_error"
+            _bill()
+            yield "error", {"message": str(e), "kind": _err["kind"]}
             return
         except Exception as e:
             raw = str(e)
-            yield "error", {
-                "message": raw,
-                "kind": classify_agent_error(raw) or "api_error",
-            }
+            _err["kind"] = classify_agent_error(raw) or "api_error"
+            _bill()
+            yield "error", {"message": raw, "kind": _err["kind"]}
             return
+        _bill()
         if hint:
             yield "token", {"delta": hint}
         yield "done", {"hint": hint}
@@ -772,19 +848,23 @@ async def _ask_reviewer_streaming(
                             last_emitted = len(full)
                             yield "token", {"delta": delta}
             elif isinstance(msg, ResultMessage):
+                usage_out["model_usage"] = getattr(msg, "model_usage", None) or {}
+                usage_out["usage"] = getattr(msg, "usage", None) or {}
+                usage_out["reported_cost"] = getattr(msg, "total_cost_usd", None)
                 if getattr(msg, "is_error", False):
                     detail = (
                         (getattr(msg, "result", None) or "").strip()
                         or "".join(accumulated).strip()
                         or "reviewer call failed"
                     )
-                    yield "error", {
-                        "message": detail,
-                        "kind": classify_agent_error(detail) or "api_error",
-                    }
+                    _err["kind"] = classify_agent_error(detail) or "api_error"
+                    _bill()
+                    yield "error", {"message": detail, "kind": _err["kind"]}
                     return
                 break
     except asyncio.TimeoutError:
+        _err["kind"] = "timeout"
+        _bill()
         yield "error", {
             "message": (
                 f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with "
@@ -795,19 +875,96 @@ async def _ask_reviewer_streaming(
         return
     except Exception as e:
         raw = str(e)
-        yield "error", {
-            "message": raw,
-            "kind": classify_agent_error(raw) or "api_error",
-        }
+        _err["kind"] = classify_agent_error(raw) or "api_error"
+        _bill()
+        yield "error", {"message": raw, "kind": _err["kind"]}
         return
 
     hint = "".join(accumulated).strip()
     diag = _diagnose_reviewer_text(hint)
     if diag is not None:
         kind, message = diag
+        _err["kind"] = kind
+        _bill()
         yield "error", {"message": message, "kind": kind}
         return
+    _bill()
     yield "done", {"hint": hint}
+
+
+async def _ask_reviewer_streaming(
+    context: str, *, model: str | None = None, job_id: str | None = None
+) -> AsyncIterator[tuple[str, dict]]:
+    """Streaming reviewer, with the same routing / billing / failover as the
+    synchronous path.
+
+    It had none of them: no job id reached it, so it resolved against live
+    Settings instead of the job's snapshot, wrote no ledger rows, and ended a
+    policy block as a terminal `error` — the one failure a second vendor can
+    actually cure.
+
+    A refusal is not streamed to the client as an error until BOTH providers
+    have refused, so the UI does not show a failure that is about to be
+    retried; a `note` event says a failover is happening.
+    """
+    from modules.agent_provider import failover_target
+
+    origin, _ = _reviewer_provider_and_model(model, job_id)
+    sink: list = []
+    failover: dict = {}
+
+    def _flush() -> None:
+        for entry in sink:
+            _record_reviewer_usage(
+                job_id, entry["provider"], entry["model"], entry["usage_out"],
+                error_kind=entry["error_kind"], failover=failover or None,
+            )
+        sink.clear()
+
+    try:
+        buffered: list[tuple[str, dict]] = []
+        refusal: dict | None = None
+        async for kind, payload in _stream_reviewer_once(
+            context, model=model, job_id=job_id,
+            provider_override=origin, usage_sink=sink,
+        ):
+            if kind == "error" and payload.get("kind") == "policy_refusal":
+                refusal = payload
+                break
+            buffered.append((kind, payload))
+            yield kind, payload
+        if refusal is None:
+            return
+
+        target = failover_target(origin)
+        if not target:
+            yield "error", refusal
+            return
+
+        failover.update({"failover_from": origin, "failover_to": target})
+        yield "note", {
+            "message": f"{origin} reviewer was blocked by policy; retrying on {target}",
+        }
+        blocked_again = False
+        async for kind, payload in _stream_reviewer_once(
+            context, model=None, job_id=job_id,
+            provider_override=target, usage_sink=sink,
+        ):
+            if kind == "error":
+                blocked_again = True
+                failover["failover_diagnosis"] = (
+                    "content_or_prompt"
+                    if payload.get("kind") == "policy_refusal" else "inconclusive"
+                )
+                # The caller must not enqueue on a failed reviewer, so the
+                # ORIGINAL refusal is what surfaces.
+                yield "error", refusal
+                return
+            yield kind, payload
+        if not blocked_again:
+            failover["failover_diagnosis"] = "provider_specific"
+    finally:
+        _flush()
 
 
 _CLAUDE_HOME = Path("/root/.claude")
@@ -1526,7 +1683,8 @@ async def retry_with_hint_stream(job_id: str, request: Request):
             _rv_model = resolve_reviewer_model(job_id)
             yield sse("stage", {"name": "asking", "model": _rv_model})
             try:
-                async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
+                async for kind, payload in _ask_reviewer_streaming(
+                    context, model=_rv_model, job_id=job_id):
                     if kind == "token":
                         yield sse("token", payload)
                     elif kind == "done":
@@ -2089,7 +2247,8 @@ async def stop_and_resume_stream(job_id: str, request: Request):
             _rv_model = resolve_reviewer_model(job_id)
             yield sse("stage", {"name": "asking", "model": _rv_model})
             try:
-                async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
+                async for kind, payload in _ask_reviewer_streaming(
+                    context, model=_rv_model, job_id=job_id):
                     if kind == "token":
                         yield sse("token", payload)
                     elif kind == "done":
