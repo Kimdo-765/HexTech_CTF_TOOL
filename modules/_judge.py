@@ -447,16 +447,27 @@ def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
 # being cut away and misfiled as a generic agent_error.
 _DETAIL_MAX_CHARS = 2000
 
-# `stop_reason` values that name the failure CATEGORY themselves. The ones
-# absent here (`turn_failed`, `refusal`) are the ambiguous kinds where the
-# adapter puts the actual reason in the message body, so those — and only
-# those — fall through to reading prose.
+# `stop_reason` values that name the failure CATEGORY themselves.
+#
+# ENUMERATED from all three adapters rather than added one at a time — adding
+# them piecemeal is what produced the last defect here: `codex_cli`'s values
+# were mapped, `grok_acp`'s `eof` and `max_tokens` were not, and both fell
+# through to prose and were poisoned by an earlier analysis that happened to
+# mention a usage policy. Sources:
+#   codex_cli     completed process_error timeout unexpected_eof turn_failed error
+#   grok_acp      eof error process_error timeout  (+ cancelled max_tokens in its
+#                 own is_error set)
+#   gpt_responses api_error completed max_tool_rounds refusal timeout
 _STOP_REASON_KIND = {
     "timeout": "timeout",
     "process_error": "transport_error",
     "unexpected_eof": "transport_error",
+    "eof": "transport_error",
     "cancelled": "killed",
     "canceled": "killed",
+    # A budget ceiling is a limit, not a refusal and not a transport fault.
+    "max_tokens": "agent_error",
+    "max_tool_rounds": "agent_error",
 }
 
 # Failure fields across the three adapters. `errors` is a LIST on the Claude
@@ -568,12 +579,21 @@ def classify_failure(msg: Any, parts: list[str], fallback: str) -> tuple[str, st
     if stop_reason in _STOP_REASON_KIND:
         return _STOP_REASON_KIND[stop_reason], detail
 
-    # 3. Ambiguous or absent stop_reason: the reason is in the body. Newest
-    #    part first — the adapter's failure detail is emitted last.
-    for part in reversed([p for p in parts if p and p.strip()]):
-        kind = _classify(part, "")
-        if kind:
-            return kind, detail
+    # 3. Ambiguous or unmapped stop_reason: the reason is in the body. Read
+    #    ONLY THE LAST message, never earlier ones.
+    #
+    #    Every adapter emits its failure detail as the final assistant message
+    #    before the error result (codex_cli, grok_acp). Anything before that is
+    #    the judge's own output, and scanning it is how an analysis that merely
+    #    DISCUSSED a usage policy turned a broken pipe into a refusal. Reading
+    #    one message instead of all of them removes that whole class, and it
+    #    keeps working for adapter values nobody has mapped yet — which
+    #    matters, because an unmapped value is exactly the case the map above
+    #    was missing twice.
+    tail = next((p for p in reversed(parts) if p and p.strip()), "")
+    kind = _classify(tail, "")
+    if kind:
+        return kind, detail
 
     return fallback, detail
 

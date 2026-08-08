@@ -437,6 +437,61 @@ check(
     "agent_error",
 )
 
+# turn 0021 D3: the category map is ENUMERATED from all three adapters, not
+# grown one value at a time — growing it piecemeal is what left grok's `eof`
+# and `max_tokens` out, and both were then poisoned by earlier policy prose.
+POLICY_PROSE = "the challenge discusses a usage policy"
+
+for reason, want in (
+    ("eof", "transport_error"),            # grok_acp
+    ("process_error", "transport_error"),  # codex_cli + grok_acp
+    ("unexpected_eof", "transport_error"), # codex_cli
+    ("timeout", "timeout"),                # all three
+    ("max_tokens", "agent_error"),         # grok_acp — a limit, not a refusal
+    ("max_tool_rounds", "agent_error"),    # gpt_responses
+    ("cancelled", "killed"),
+):
+    check(
+        f"stop_reason={reason} names its own category",
+        J.classify_failure(
+            GK.ResultMessage(is_error=True, stop_reason=reason, session_id="s"),
+            [], "agent_error")[0],
+        want,
+    )
+    check(
+        f"...and earlier policy prose cannot override it ({reason})",
+        J.classify_failure(
+            GK.ResultMessage(is_error=True, stop_reason=reason, session_id="s"),
+            [POLICY_PROSE], "agent_error")[0],
+        want,
+    )
+
+# Prose is read from the LAST message only. Every adapter emits its failure
+# detail there; anything earlier is the judge's own output. This closes the
+# poisoning class even for stop_reason values nobody has mapped yet — which
+# matters, because an unmapped value is exactly what the map was missing.
+check(
+    "an UNMAPPED stop_reason still finds a real refusal in the last message",
+    J.classify_failure(
+        RealGptResult(is_error=True, stop_reason="brand_new_value", session_id="s"),
+        [POLICY_PROSE, AUP], "agent_error")[0],
+    "policy_refusal",
+)
+check(
+    "...but earlier policy prose alone cannot make one",
+    J.classify_failure(
+        RealGptResult(is_error=True, stop_reason="brand_new_value", session_id="s"),
+        [POLICY_PROSE, "[Codex CLI exited 1] broken pipe"], "agent_error")[0],
+    "agent_error",
+)
+check(
+    "a real refusal survives 300 preceding normal messages",
+    J.classify_failure(
+        RealGptResult(is_error=True, stop_reason="turn_failed", session_id="s"),
+        ["normal " * 300, "[Codex CLI turn_failed] " + AUP], "agent_error")[0],
+    "policy_refusal",
+)
+
 # A SUCCESSFUL turn is never classified at all, so ordinary judge output that
 # discusses policy can never trigger a failover.
 _orig_gpt_client2 = GA.GptAgentClient
