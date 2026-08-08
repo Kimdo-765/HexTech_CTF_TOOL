@@ -52,8 +52,29 @@ try:
 except ImportError:  # pragma: no cover
     _sio_get_gpt_runtime = None  # type: ignore
 
+try:
+    from modules.settings_io import (
+        get_agent_role_providers as _sio_get_agent_role_providers,
+    )
+except ImportError:  # pragma: no cover — worker holding a pre-hybrid module
+    _sio_get_agent_role_providers = None  # type: ignore
+
 # Runtime readiness. True once modules/grok_acp.py can drive main sessions.
 GROK_RUNTIME_READY = True
+
+# Roles a per-role provider override may target. Deliberately narrower than
+# model_presets.CONFIGURABLE_ROLES: `main` is excluded because switching the
+# main backend mid-map would fork the whole run (a whole-job provider switch
+# is what `agent_provider` and the AUP `other_provider` rung already do), and
+# `recon`/`debugger`/`triage` are excluded in v1 because they are spawned as
+# children of main's session and cross-provider child spawn does not exist yet
+# (make_spawn_subagent_mcp constructs a ClaudeSDKClient directly).
+ROLE_OVERRIDABLE: frozenset[str] = frozenset({"judge", "reviewer", "report", "monitor"})
+
+# Providers a role may be routed TO. Grok is excluded from the role map in v1:
+# it stays a whole-job provider. A route naming an excluded provider is dropped,
+# so the role falls back to the job's provider rather than half-switching.
+ROLE_TARGET_PROVIDERS: frozenset[str] = frozenset({"claude", "gpt"})
 
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
 DEFAULT_GROK_MODEL = "grok-build"
@@ -298,6 +319,13 @@ def provider_meta_fields(provider: str | None = None) -> dict[str, Any]:
         "agent_provider": p,
         "agent_provider_label": provider_display_name(p),
     }
+    # Per-role overrides are snapshotted at CREATE time so editing Settings
+    # mid-run cannot half-switch a job (same reason `agent_provider` itself is
+    # stamped). Omitted entirely when empty, so pre-hybrid meta stays
+    # byte-identical and every existing consumer is unaffected.
+    routes = role_provider_routes(p)
+    if routes:
+        fields["agent_role_providers"] = routes
     if p == "gpt":
         fields["gpt_runtime"] = get_gpt_runtime()
         # Snapshot the GPT preset used when the job starts. Timeline role cards
@@ -395,3 +423,85 @@ def provider_for_job(job_id: str | None = None) -> str:
         except Exception:
             pass
     return active_provider()
+
+
+def role_provider_routes(job_provider: str | None = None) -> dict[str, str]:
+    """Sanitized per-role overrides from Settings.
+
+    Drops every entry that would not actually change behaviour or that v1
+    refuses to honour:
+      * role not in ``ROLE_OVERRIDABLE``
+      * target provider not in ``ROLE_TARGET_PROVIDERS`` (Grok stays whole-job)
+      * target equal to the job's own provider (a no-op route would otherwise
+        make meta look like a hybrid job when it is not)
+
+    Returns ``{}`` when nothing survives, which is what keeps a non-hybrid
+    deployment byte-identical to the pre-hybrid one.
+    """
+    if _sio_get_agent_role_providers is not None:
+        try:
+            raw = dict(_sio_get_agent_role_providers())
+        except Exception:
+            raw = {}
+    else:  # pragma: no cover — stale worker process
+        value = get_setting("agent_role_providers")
+        raw = dict(value) if isinstance(value, dict) else {}
+
+    base = normalize_provider(job_provider or active_provider())
+    out: dict[str, str] = {}
+    for role, provider in raw.items():
+        r = str(role or "").strip().lower()
+        p = str(provider or "").strip().lower()
+        if r not in ROLE_OVERRIDABLE or p not in ROLE_TARGET_PROVIDERS:
+            continue
+        if p == base:
+            continue
+        out[r] = p
+    return out
+
+
+def provider_for_role(job_id: str | None, role: str) -> str:
+    """Provider that should drive ``role`` for this job.
+
+    Resolution order, and the reason for it:
+      1. ``meta.agent_role_providers[role]`` — snapshotted at job create, so a
+         Settings edit cannot half-switch a running job or its /retry chain.
+      2. live Settings routes — only reachable when there is no job_id (e.g.
+         a pre-create decision) or meta predates the hybrid work.
+      3. ``provider_for_job(job_id)`` — the job's own backend.
+
+    With no override anywhere this returns exactly ``provider_for_job(job_id)``
+    for every role, which is the pre-hybrid behaviour the characterization
+    gate pins.
+
+    NB: this deliberately does NOT change ``coerce_model_for_provider``, which
+    stays a pure model-family check. Call sites resolve the provider FIRST and
+    then coerce against it, so a generic child agent is never dragged onto a
+    different backend just because its label matches a routed role name.
+    """
+    base = provider_for_job(job_id)
+    r = str(role or "").strip().lower()
+    if r not in ROLE_OVERRIDABLE:
+        return base
+
+    if job_id:
+        try:
+            from modules._common import read_meta
+
+            meta = read_meta(job_id) or {}
+            stamped = meta.get("agent_role_providers")
+            if isinstance(stamped, dict):
+                # A stamped map is authoritative even when it has no entry for
+                # this role: the operator's routing at create time said this
+                # role follows the job provider. Falling through to live
+                # Settings here would let a mid-run edit leak in, which is the
+                # exact failure the snapshot exists to prevent.
+                target = str(stamped.get(r) or "").strip().lower()
+                if target in ROLE_TARGET_PROVIDERS:
+                    return target
+                return base
+        except Exception:
+            pass
+
+    target = role_provider_routes(base).get(r, "")
+    return target or base

@@ -27,6 +27,12 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # Which coding-agent backend runs CTF jobs. "claude" = Claude Agent SDK
     # (current default). "grok" = Grok Build via ACP / headless (in progress).
     ("agent_provider", "AGENT_PROVIDER", str, "claude"),
+    # OPTIONAL per-role backend override, e.g. {"judge": "claude"} while
+    # agent_provider stays "gpt". Absent / empty means every role follows
+    # agent_provider, which is byte-for-byte the pre-hybrid behaviour — the
+    # scalar above is deliberately NOT replaced, because _monitor.py and the
+    # retry chain read it as a plain string.
+    ("agent_role_providers", None, dict, {}),
     ("anthropic_api_key", "ANTHROPIC_API_KEY", str, ""),
     ("claude_model", "CLAUDE_MODEL", str, "claude-opus-4-7"),
     # Global effort for Claude sessions (low/medium/high/xhigh/max). UI has
@@ -378,6 +384,27 @@ def get_agent_provider() -> str:
     """
     v = str(get_setting("agent_provider") or "claude").strip().lower()
     return v if v in AGENT_PROVIDERS else "claude"
+
+
+def get_agent_role_providers() -> dict[str, str]:
+    """Per-role backend overrides from Settings, sanitized.
+
+    Returns ``{role: provider}`` keeping only entries whose provider is a
+    known id. A malformed value yields ``{}`` — an unreadable override must
+    degrade to "every role follows agent_provider", never to a half-applied
+    map. Role names are NOT validated here; the resolver owns that, so a
+    future role does not need a settings_io release to be routable.
+    """
+    raw = get_setting("agent_role_providers")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for role, provider in raw.items():
+        r = str(role or "").strip().lower()
+        p = str(provider or "").strip().lower()
+        if r and p in AGENT_PROVIDERS:
+            out[r] = p
+    return out
 
 
 def has_active_agent_auth() -> bool:
