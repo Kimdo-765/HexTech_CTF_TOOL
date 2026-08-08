@@ -251,6 +251,16 @@ check("the card renders a badge for a routed role",
 // "min-height:0", and the assertion that the declaration exists was matching
 // that prose — passing whether or not the declaration was there. A check that
 // a comment can satisfy is not a check.
+// style.css had NO cache-buster at all, so a browser could keep an old copy
+// through a deploy and the change would look like it never shipped — which is
+// how the fixed-header layout first appeared not to work.
+const indexHtml = fs.readFileSync(path.join(ROOT, "web-ui/index.html"), "utf8");
+check("style.css is cache-busted like app.js",
+  /href="\/static\/style\.css\?v=/.test(indexHtml), true);
+check("...and both busters move together",
+  (indexHtml.match(/\?v=([0-9a-z-]+)/g) || []).length >= 2
+  && new Set(indexHtml.match(/\?v=([0-9a-z-]+)/g)).size === 1, true);
+
 const css = fs.readFileSync(path.join(ROOT, "web-ui/style.css"), "utf8")
   .replace(/\/\*[\s\S]*?\*\//g, "");
 // Just the `.gpt-timeline-feed {…}` block. Slicing to the next selector swept
@@ -268,6 +278,11 @@ check("the feed is a fixed box, not a scroller",
   /overflow:\s*hidden/.test(feedRule) && !/overflow-y:\s*auto/.test(feedRule), true);
 check("...laid out as a column so the list can take the remaining height",
   /flex-direction:\s*column/.test(feedRule), true);
+// The view-toggle rule is (0,3,0) and beats the plain `.gpt-timeline-feed`
+// rule, so a `display: block` there defeats the whole layout regardless of
+// what the block below says. This is what actually shipped broken.
+check("the rule that reveals the timeline does not force display:block",
+  /data-view="timeline"\] \.gpt-timeline-feed \{ display: flex; \}/.test(css), true);
 check("the agent grid does not shrink",
   /\.gpt-timeline-feed > \.gpt-agent-grid \{[^}]*flex:\s*0 0 auto/.test(css), true);
 check("the event list is the scroller",
