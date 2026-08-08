@@ -532,24 +532,11 @@ _STOP_REASON_KIND = {
 # SDK ResultMessage and is where its parser puts the wire's error payload;
 # reading only scalars dropped it entirely. `stop_reason` is what GPT and Grok
 # carry — neither has `result` at all.
-_FAILURE_ATTRS = ("errors", "result", "error", "error_detail", "api_error_status")
-
-
 def _structured_failure_bits(msg: Any) -> list[str]:
-    """Authoritative failure strings the adapter/SDK set, in priority order."""
-    bits: list[str] = []
-    for attr in _FAILURE_ATTRS:
-        value = getattr(msg, attr, None)
-        if not value:
-            continue
-        if isinstance(value, (list, tuple, set)):
-            bits.extend(str(v) for v in value if v)
-        else:
-            bits.append(str(value))
-    stop_reason = getattr(msg, "stop_reason", None)
-    if stop_reason:
-        bits.append(str(stop_reason))
-    return bits
+    """Shared extraction — see modules._common.structured_failure_bits()."""
+    from modules._common import structured_failure_bits
+
+    return structured_failure_bits(msg)
 
 
 def _error_detail(msg: Any, parts: list[str]) -> str:

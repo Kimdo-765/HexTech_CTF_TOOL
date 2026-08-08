@@ -576,6 +576,74 @@ check("a clean stream still yields its token",
 check("...and no note", [k for k, _ in ev], ["token", "done"])
 R._stream_reviewer_once = _orig_stream
 
+# ---------------------------------------------------------------------------
+# 7. turn 0037 — the Claude SDK puts the wire's AUP payload in `errors`, a
+#    LIST. The judge already read it; the reviewer read only `result` and
+#    classified a structured policy block as a generic api_error — which the
+#    policy-refusal-only failover then declined to retry. Same question, same
+#    SDK object, two different answers, because the extraction lived in one
+#    caller instead of between them.
+# ---------------------------------------------------------------------------
+AUP_TEXT = "request violates our usage policy"
+
+
+class _ErrRes(_Res):
+    """An error Result carrying the payload ONLY in `errors`.
+
+    Subclasses the type the module compares against — an isinstance check is
+    part of the production path, and a look-alike that fails it silently sends
+    the test down a different branch than the one under test.
+    """
+
+    def __init__(self):
+        self.is_error = True
+        self.result = None
+        self.errors = [AUP_TEXT]
+        self.stop_reason = None
+        self.model_usage = {}
+        self.usage = {}
+        self.total_cost_usd = None
+
+
+async def _iter_errors_only(framed, options, timeout):
+    yield _ErrRes()
+
+
+from modules._common import classify_failure_kind, structured_failure_bits  # noqa: E402
+
+check("the shared extraction sees the errors LIST",
+      structured_failure_bits(_ErrRes()), [AUP_TEXT])
+check("...and classifies it as a policy refusal",
+      classify_failure_kind(AUP_TEXT, "api_error"), "policy_refusal")
+
+_orig_iter3 = R._iter_reviewer_messages
+R._iter_reviewer_messages = _iter_errors_only
+ej = make_job("errors-only", agent_provider="claude")
+try:
+    asyncio.run(R._ask_reviewer("ctx", job_id=ej))
+    check("an errors-only refusal raises", False, True)
+except R.ReviewerError as e:
+    check("the sync reviewer classifies an errors-only AUP", e.kind, "policy_refusal")
+erows = UL.read_usage(ej)
+check("...and the row records it as such",
+      erows[0].get("error_kind") if erows else None, "policy_refusal")
+
+# The whole point: this is what makes the failover fire.
+GA.query_gpt_once = _orig_once
+gpt_returns(text="recovered by gpt")
+AP.has_provider_auth = lambda p=None: True
+fj = make_job("errors-only-fo", agent_provider="claude")
+try:
+    got = asyncio.run(R._ask_reviewer_with_failover("ctx", job_id=fj))
+    check("an errors-only AUP now reaches the other provider", got, "recovered by gpt")
+except R.ReviewerError as e:
+    check(f"an errors-only AUP now reaches the other provider ({e.kind})", False, True)
+frows2 = UL.read_usage(fj)
+check("both attempts billed", len(frows2), 2)
+check("the refusal row keeps its kind",
+      [r.get("error_kind") for r in frows2], ["policy_refusal", None])
+R._iter_reviewer_messages = _orig_iter3
+
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="
     + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]")

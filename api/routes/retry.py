@@ -100,8 +100,9 @@ def _reviewer_error_kind(detail: str, fallback: str = "api_error") -> str:
     reader — and the ledger — nothing about where it happened. Same trap the
     judge hit.
     """
-    kind = classify_agent_error(detail or "")
-    return fallback if kind in (None, "", "unknown") else kind
+    from modules._common import classify_failure_kind
+
+    return classify_failure_kind(detail, fallback)
 
 
 def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
@@ -714,14 +715,20 @@ async def _ask_reviewer(
                 usage_out["usage"] = getattr(msg, "usage", None) or {}
                 usage_out["reported_cost"] = getattr(msg, "total_cost_usd", None)
                 if getattr(msg, "is_error", False):
-                    detail = (
-                        (getattr(msg, "result", None) or "").strip()
-                        or "\n".join(hint_parts).strip()
-                        or "reviewer call failed"
-                    )
-                    raise ReviewerError(
-                        detail, _reviewer_error_kind(detail)
-                    )
+                    # Every field the SDK might have used, not just `result`:
+                    # the Claude parser puts the wire's AUP payload in the
+                    # `errors` LIST, and reading only `result` classified a
+                    # structured policy block as a generic api_error — which
+                    # the policy-refusal-only failover then declined to retry.
+                    from modules._common import structured_failure_bits
+
+                    bits = structured_failure_bits(msg)
+                    text = "\n".join(hint_parts).strip()
+                    detail = " | ".join(
+                        [b for b in bits if b] + ([text] if text else [])
+                    ) or "reviewer call failed"
+                    _err["kind"] = _reviewer_error_kind(detail)
+                    raise ReviewerError(detail, _err["kind"])
                 break
       except ReviewerError as e:
         _err["kind"] = e.kind
@@ -871,11 +878,13 @@ async def _stream_reviewer_once(
                 usage_out["usage"] = getattr(msg, "usage", None) or {}
                 usage_out["reported_cost"] = getattr(msg, "total_cost_usd", None)
                 if getattr(msg, "is_error", False):
-                    detail = (
-                        (getattr(msg, "result", None) or "").strip()
-                        or "".join(accumulated).strip()
-                        or "reviewer call failed"
-                    )
+                    from modules._common import structured_failure_bits
+
+                    bits = structured_failure_bits(msg)
+                    text = "".join(accumulated).strip()
+                    detail = " | ".join(
+                        [b for b in bits if b] + ([text] if text else [])
+                    ) or "reviewer call failed"
                     _err["kind"] = _reviewer_error_kind(detail)
                     _bill()
                     yield "error", {"message": detail, "kind": _err["kind"]}

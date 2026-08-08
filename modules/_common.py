@@ -5830,6 +5830,50 @@ def _rates_for_model(model: str | None) -> tuple[float, float, float, float]:
     return _MODEL_RATES_USD_PER_MTOK["opus-5"]
 
 
+# Failure fields across every adapter. `errors` is a LIST on the Claude SDK
+# ResultMessage and is where its parser puts the wire's error payload; GPT and
+# Grok carry `stop_reason` and have no `result` at all. Reading only one of
+# these is how a structured AUP block came back classified as a generic error.
+AGENT_FAILURE_ATTRS = ("errors", "result", "error", "error_detail", "api_error_status")
+
+
+def structured_failure_bits(msg: Any) -> list[str]:
+    """Authoritative failure strings an adapter/SDK set on a result message.
+
+    Shared deliberately. This extraction lived in the judge only, so the
+    reviewer — asked the SAME question about the SAME SDK object — answered
+    `api_error` where the judge answered `policy_refusal`, and the
+    policy-refusal-only failover never fired. Third time in this work that
+    logic living in one caller instead of between them produced the same
+    defect twice.
+    """
+    bits: list[str] = []
+    for attr in AGENT_FAILURE_ATTRS:
+        value = getattr(msg, attr, None)
+        if not value:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            bits.extend(str(v) for v in value if v)
+        else:
+            bits.append(str(value))
+    stop_reason = getattr(msg, "stop_reason", None)
+    if stop_reason:
+        bits.append(str(stop_reason))
+    return bits
+
+
+def classify_failure_kind(detail: str, fallback: str) -> str:
+    """`classify_agent_error`, with "unknown" treated as UNclassified.
+
+    It answers "unknown" rather than None when nothing matched, so the
+    `... or "fallback"` idiom is dead code — every unrecognised failure came
+    back tagged "unknown", which tells a reader nothing about where it
+    happened.
+    """
+    kind = classify_agent_error(detail or "")
+    return fallback if kind in (None, "", "unknown") else kind
+
+
 def model_rates_are_known(model: str | None) -> bool:
     """True when the rate table has a row that actually matches `model`.
 
