@@ -257,6 +257,20 @@ check("the card renders a badge for a routed role",
 const indexHtml = fs.readFileSync(path.join(ROOT, "web-ui/index.html"), "utf8");
 check("style.css is cache-busted like app.js",
   /href="\/static\/style\.css\?v=/.test(indexHtml), true);
+// The buster is DERIVED from the assets it busts, and this recomputes it.
+// A hand-typed version string goes stale silently: it was not bumped with the
+// scaffold-badge change, so browsers kept an app.js without the badge while
+// the API already returned the field — the third time in this branch that a
+// shipped UI change looked like it never shipped. Now editing app.js or
+// style.css without regenerating the tag fails here, and the failure prints
+// the value to use.
+const crypto = require("crypto");
+const _assetHash = "a" + crypto.createHash("sha256")
+  .update(fs.readFileSync(path.join(ROOT, "web-ui/app.js")))
+  .update(fs.readFileSync(path.join(ROOT, "web-ui/style.css")))
+  .digest("hex").slice(0, 8);
+check(`the buster is derived from the assets (expected ?v=${_assetHash})`,
+  new RegExp("\\?v=" + _assetHash).test(indexHtml), true);
 check("...and both busters move together",
   (indexHtml.match(/\?v=([0-9a-z-]+)/g) || []).length >= 2
   && new Set(indexHtml.match(/\?v=([0-9a-z-]+)/g)).size === 1, true);
