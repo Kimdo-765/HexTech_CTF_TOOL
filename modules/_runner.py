@@ -154,13 +154,25 @@ def _host_path(job_id: str) -> str:
     return f"{host_root.rstrip('/')}/jobs/{job_id}"
 
 
-def _judge_enabled() -> bool:
-    """Default ON; off only if the user explicitly disabled it."""
+def _judge_mode() -> str:
+    """`off` | `shadow` | `enforce`. See settings_io.get_judge_mode()."""
     try:
-        v = get_setting("enable_judge")
+        from modules.settings_io import get_judge_mode
+
+        return get_judge_mode()
     except Exception:
-        return True
-    return bool(v) if v is not None else True
+        return "enforce"
+
+
+def _judge_enabled() -> bool:
+    """True when the judge's verdicts actually GATE the run.
+
+    Shadow is deliberately False here: it records what the judge would have
+    said and gates nothing, so every branch that reads this keeps behaving
+    exactly as it does with the judge off. That identity is the whole basis
+    for comparing a shadow job against the recorded outcome.
+    """
+    return _judge_mode() == "enforce"
 
 
 def _wait_with_supervise(
@@ -631,6 +643,7 @@ def attempt_sandbox_run(
     (work_tree / "tmp").mkdir(parents=True, exist_ok=True)
 
     enable_judge = _judge_enabled()
+    judge_mode = _judge_mode()
 
     # ---------- Stage 0: target reachability probe ----------
     # If the chal is remote-targeted, do a single TCP connect ping
@@ -738,6 +751,16 @@ def attempt_sandbox_run(
         # point, and postjudge still backstops anything that slips
         # through with severity≤med.
         prejudge: dict | None = None
+        if judge_mode == "shadow":
+            # INPUTS ONLY. Calling the judge here would lengthen every run and
+            # leave a shadow job incomparable with the control it exists to be
+            # compared against; the verdicts are produced after the run.
+            from modules import judge_shadow
+
+            judge_shadow.record_input(
+                job_id, "prejudge",
+                {"script_rel": script_filename, "target": target},
+            )
         if enable_judge:
             try:
                 prejudge = _judge.prejudge_script(
@@ -872,6 +895,25 @@ def attempt_sandbox_run(
                 for i, h in enumerate(prior_hints, 1):
                     if h:
                         extra += f"  #{i}: {h[:300]}\n"
+            if judge_mode == "shadow":
+                from modules import judge_shadow
+
+                judge_shadow.record_input(
+                    job_id, "postjudge",
+                    {
+                        "script_rel": script_filename,
+                        "exit_code": res["exit_code"],
+                        "stdout": res["stdout"],
+                        "stderr": res["stderr"],
+                    },
+                )
+                # Out of band, and AFTER the run: the sandbox has finished, so
+                # nothing the judge does now can lengthen it or move the
+                # supervise watchdog it would otherwise be racing.
+                try:
+                    judge_shadow.evaluate(job_id, work_dir, log_fn)
+                except Exception as _sh:
+                    log_fn(f"[judge] shadow evaluation skipped: {_sh}")
             try:
                 post = _judge.postjudge_run(
                     work_dir,

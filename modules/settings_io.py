@@ -97,6 +97,12 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # script with the plain runner (saves ~3 Claude turns per auto_run
     # job at the cost of losing hang/parse-error detection).
     ("enable_judge", "ENABLE_JUDGE", bool, True),
+    # Tri-state successor to `enable_judge`. Empty means "derive from the
+    # boolean", so existing settings keep meaning exactly what they meant:
+    # False -> off, True -> enforce. `shadow` is reachable only by setting
+    # this explicitly — a mode that changes what the operator sees should
+    # never be entered by inference.
+    ("judge_mode", "JUDGE_MODE", str, ""),
     # When True, every job's user_prompt is prepended with a short
     # paragraph listing same-module entries from the exploit library
     # (`/data/exploits/`, populated via POST /api/exploits/save) so
@@ -384,6 +390,25 @@ def get_agent_provider() -> str:
     """
     v = str(get_setting("agent_provider") or "claude").strip().lower()
     return v if v in AGENT_PROVIDERS else "claude"
+
+
+JUDGE_MODES = ("off", "shadow", "enforce")
+
+
+def get_judge_mode() -> str:
+    """`off` | `shadow` | `enforce`.
+
+    `judge_mode` wins when explicitly set; otherwise it is derived from the
+    legacy boolean so no existing deployment changes behaviour by upgrading.
+    `shadow` is deliberately NOT derivable — it runs the judge without letting
+    it gate anything, and entering that by inference would leave an operator
+    believing a gate is live when it is not.
+    """
+    raw = str(get_setting("judge_mode") or "").strip().lower()
+    if raw in JUDGE_MODES:
+        return raw
+    legacy = get_setting("enable_judge")
+    return "enforce" if (legacy is None or bool(legacy)) else "off"
 
 
 def get_agent_role_providers() -> dict[str, str]:
