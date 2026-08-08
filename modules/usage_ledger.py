@@ -281,6 +281,98 @@ def record_usage(
         return None
 
 
+def record_usage_by_model(
+    job_id: str,
+    *,
+    role: str,
+    stage: str,
+    provider: str,
+    primary_model: str | None,
+    model_usage: dict[str, dict] | None,
+    tokens: dict | None,
+    reported_cost: float | None,
+    estimate_for,
+    rates_known,
+    gpt_runtime: str | None = None,
+    window_for=None,
+    error_kind: str | None = None,
+    dedupe_key: str | None = None,
+) -> list[dict[str, Any]]:
+    """One row PER MODEL for a turn that may have spanned several.
+
+    A single turn is not necessarily single-model: a judge registers a recon
+    subagent, main's Responses adapter merges every child's usage into the
+    parent map, and either can be pinned to a different model by the active
+    preset. Folding that into one row loses the ledger's own `model` axis and
+    prices the cheaper model's tokens at the expensive one's rate — measured
+    $0.0225 booked where the per-model sum was $0.0165.
+
+    Shared by the judge and main wirings deliberately. This defect was found
+    twice — once in each — because the same splitting logic lived in neither
+    place and had to be written from scratch the second time.
+
+    A REPORTED cost is a SESSION figure and cannot be split across models
+    without inventing the split, so it stays whole on the primary model's row
+    and the others carry tokens with no dollars. The bucket then sums to the
+    reported total rather than a fabricated one, and `usd_complete` says out
+    loud that not every row could be priced.
+
+    `dedupe_key`, when given, is suffixed per model — otherwise the first row
+    would claim the key and every other model would be silently refused.
+    """
+    breakdown = {
+        str(m): t for m, t in (model_usage or {}).items() if isinstance(t, dict) and t
+    }
+    if len(breakdown) > 1:
+        rows = sorted(breakdown.items(), key=lambda kv: kv[0] != (primary_model or ""))
+    else:
+        rows = [(primary_model, tokens or {})]
+
+    written: list[dict[str, Any]] = []
+    window = None
+    for index, (model, model_tokens) in enumerate(rows):
+        is_primary = index == 0
+        reported = reported_cost if is_primary else None
+        est = None
+        if model_tokens and reported_cost is None:
+            try:
+                est = estimate_for(model_tokens, model) or None
+            except Exception:
+                est = None
+        cost, basis, wants_window = cost_contract(
+            provider,
+            reported_cost=reported,
+            estimated_cost=est,
+            gpt_runtime=gpt_runtime,
+            estimate_priced=bool(rates_known(model)),
+        )
+        if wants_window and window is None and window_for is not None:
+            try:
+                window = window_for()
+            except Exception:
+                window = None
+        rec = record_usage(
+            job_id,
+            role=role,
+            stage=stage,
+            provider=provider,
+            model=model,
+            tokens=model_tokens,
+            cost_usd=cost,
+            cost_basis=basis,
+            runtime=gpt_runtime,
+            window=window if wants_window else None,
+            error_kind=error_kind,
+            dedupe_key=(
+                f"{dedupe_key}:{model or ''}" if dedupe_key and len(rows) > 1
+                else dedupe_key
+            ),
+        )
+        if rec:
+            written.append(rec)
+    return written
+
+
 def read_usage(job_id: str) -> list[dict[str, Any]]:
     """All ledger records for a job, oldest first. Malformed lines are skipped.
 

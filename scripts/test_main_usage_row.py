@@ -306,6 +306,55 @@ check(
 )
 
 # ---------------------------------------------------------------------------
+# 2g. turn 0026 D5 — main spans several models too. The Responses adapter
+#     merges every subagent's usage into the parent map and the preset can
+#     pin a subagent to a different model, so folding them into one row loses
+#     the ledger's `model` axis and prices the cheaper model's tokens at the
+#     expensive one's rate. Same defect as the judge's, found separately
+#     because the splitting logic lived in neither place; it now lives in
+#     usage_ledger.record_usage_by_model, shared by both.
+# ---------------------------------------------------------------------------
+SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))
+MULTI = {
+    "claude-opus-4-8": {"input_tokens": 1000, "output_tokens": 100},
+    "claude-sonnet-4-6": {"input_tokens": 2000, "output_tokens": 200},
+}
+jmm = make_job("mu-multi", agent_provider="claude", model="claude-opus-4-8")
+reset(jmm)
+C.agent_heartbeat(jmm, ResultMessage(cost=None, session_id="ms1", model_usage=MULTI))
+mrows = UL.read_usage(jmm)
+check("D5 one row PER MODEL", len(mrows), 2)
+check("D5 both models named", sorted(r["model"] for r in mrows),
+      ["claude-opus-4-8", "claude-sonnet-4-6"])
+check("D5 each row holds only its own tokens",
+      {r["model"]: r["tokens"] for r in mrows}, MULTI)
+_want = round(sum(C.estimate_cost_from_tokens(v, m) for m, v in MULTI.items()), 6)
+_flat = round(C.estimate_cost_from_tokens(
+    {"input_tokens": 3000, "output_tokens": 300}, "claude-opus-4-8"), 6)
+check("D5 dollars are the PER-MODEL sum", round(sum(r["cost_usd"] or 0 for r in mrows), 6), _want)
+check("D5 ...not the flattened single-rate figure", _want == _flat, False)
+
+# A reported session cost cannot be split: whole on the primary row, absent
+# on the others, so the bucket sums to the reported total.
+jmr = make_job("mu-multi-reported", agent_provider="claude", model="claude-opus-4-8")
+reset(jmr)
+C.agent_heartbeat(jmr, ResultMessage(cost=0.42, session_id="ms2", model_usage=MULTI))
+rrows = UL.read_usage(jmr)
+check("D5 reported: still one row per model", len(rrows), 2)
+check("D5 reported: whole on the primary row",
+      rrows[0]["cost_usd"] if rrows else None, 0.42)
+check("D5 reported: not duplicated onto the other",
+      rrows[1]["cost_usd"] if len(rrows) > 1 else "MISSING ROW", None)
+check("D5 reported: bucket sums to the reported total",
+      UL.aggregate_usage(jmr)["providers"]["claude"]["usd"], 0.42)
+
+# The per-model dedupe key must not let one model claim the whole session.
+reset(jmr)
+C.agent_heartbeat(jmr, ResultMessage(cost=0.42, session_id="ms2", model_usage=MULTI))
+check("D5 a re-emitted Result adds no rows for any model",
+      len(UL.read_usage(jmr)), 2)
+
+# ---------------------------------------------------------------------------
 # 3. A ledger failure must not break the heartbeat.
 # ---------------------------------------------------------------------------
 SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))

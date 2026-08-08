@@ -4990,44 +4990,33 @@ def agent_heartbeat(job_id: str, msg) -> None:
             from modules.agent_provider import get_gpt_runtime
             from modules.usage_ledger import (
                 codex_window_snapshot,
-                cost_contract,
-                record_usage,
+                record_usage_by_model,
             )
 
             # Same values the estimate above was priced with — see the comment
             # there. Never re-resolve here.
             _prov = _job_provider or "claude"
-            # The cost contract is per BACKEND, not per provider name. Codex
-            # OAuth prices nothing, so pricing its tokens would run GPT usage
-            # through the Claude rate table and invent money; the Responses
-            # runtime IS dollar-billed but its figure is the adapter's own
-            # estimate, and the OAuth window does not apply to an API key.
+            # The cost contract is per BACKEND, not per provider name, and a
+            # turn is not necessarily single-model: the Responses adapter
+            # merges every subagent's usage into the parent map, and the
+            # preset can pin a subagent to a different model. Both concerns
+            # live in usage_ledger.record_usage_by_model, shared with the
+            # judge wiring — the model-collapse defect was found once in each
+            # because the logic lived in neither.
             _runtime = get_gpt_runtime() if _prov == "gpt" else None
-            _model = _job_model
-            _cost, _basis, _wants_window = cost_contract(
-                _prov,
-                reported_cost=session_cost,
-                estimated_cost=updates.get("cost_usd_estimate"),
-                gpt_runtime=_runtime,
-                # `grok-build` has no row in the rate table, so its estimate
-                # was Opus-5 pricing applied to Grok tokens. An estimate is
-                # only money if the model is actually priced.
-                estimate_priced=model_rates_are_known(_model),
-            )
-            record_usage(
+            record_usage_by_model(
                 job_id,
                 role="main",
                 stage="main",
                 provider=_prov,
-                model=_model,
+                primary_model=_job_model,
+                model_usage=updates.get("model_usage"),
                 tokens=tokens,
-                cost_usd=_cost,
-                cost_basis=_basis,
-                runtime=_runtime,
-                window=(
-                    codex_window_snapshot(cached_only=True)
-                    if _wants_window else None
-                ),
+                reported_cost=session_cost,
+                estimate_for=estimate_cost_from_tokens,
+                rates_known=model_rates_are_known,
+                gpt_runtime=_runtime,
+                window_for=lambda: codex_window_snapshot(cached_only=True),
                 # Cumulative-per-session cost plus a stream that can re-emit a
                 # Result means the same session must not add a second row.
                 dedupe_key=getattr(msg, "session_id", None) or None,

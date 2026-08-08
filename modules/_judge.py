@@ -642,51 +642,23 @@ def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
     """
     try:
         from modules._common import estimate_cost_from_tokens, model_rates_are_known
-        from modules.usage_ledger import (
-            codex_window_snapshot,
-            cost_contract,
-            record_usage,
+        from modules.usage_ledger import codex_window_snapshot, record_usage_by_model
+
+        record_usage_by_model(
+            job_id,
+            role="judge",
+            stage=stage,
+            provider=res.provider,
+            primary_model=res.model,
+            model_usage=res.model_usage,
+            tokens=res.tokens,
+            reported_cost=res.reported_cost,
+            estimate_for=estimate_cost_from_tokens,
+            rates_known=model_rates_are_known,
+            gpt_runtime=res.runtime,
+            window_for=lambda: codex_window_snapshot(cached_only=True),
+            error_kind=res.error_kind,
         )
-
-        window = None
-        breakdown = res.model_usage or {}
-        if len(breakdown) > 1:
-            rows = list(breakdown.items())
-            # The turn's own model is the primary one; anything else came from
-            # a subagent the judge spawned.
-            rows.sort(key=lambda kv: kv[0] != (res.model or ""))
-        else:
-            rows = [(res.model, res.tokens)]
-
-        for index, (model, tokens) in enumerate(rows):
-            is_primary = index == 0
-            # Only the primary row may carry the session's reported figure.
-            reported = res.reported_cost if is_primary else None
-            est = None
-            if tokens and res.reported_cost is None:
-                est = estimate_cost_from_tokens(tokens, model) or None
-            cost, basis, wants_window = cost_contract(
-                res.provider,
-                reported_cost=reported,
-                estimated_cost=est,
-                gpt_runtime=res.runtime,
-                estimate_priced=model_rates_are_known(model),
-            )
-            if wants_window and window is None:
-                window = codex_window_snapshot(cached_only=True)
-            record_usage(
-                job_id,
-                role="judge",
-                stage=stage,
-                provider=res.provider,
-                model=model,
-                tokens=tokens,
-                cost_usd=cost,
-                cost_basis=basis,
-                runtime=res.runtime,
-                window=window if wants_window else None,
-                error_kind=res.error_kind,
-            )
     except Exception:
         pass
 
