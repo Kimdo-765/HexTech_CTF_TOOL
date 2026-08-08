@@ -193,6 +193,22 @@ check("nothing is left pending", SH.pending_inputs(jid2), [])
 check("a second pass re-evaluates nothing",
       SH.evaluate(jid2, DATA / "jobs" / jid2, lambda *_: None, runner=fake_runner), 0)
 
+# PARTIAL evaluation is the case stage-only matching gets wrong: with one
+# supervise verdict already on file, the other two firings are still pending.
+jid2b = "sh2b"
+(DATA / "jobs" / jid2b).mkdir(parents=True, exist_ok=True)
+for stall in (30, 60, 90):
+    SH.record_input(jid2b, "supervise", {"stall_seconds": stall})
+SH.record_verdict(jid2b, "supervise", {"action": "continue"})
+check("one verdict does not clear three firings",
+      len(SH.pending_inputs(jid2b)), 2)
+check("...and the ones left are the LATER firings",
+      [r["inputs"]["stall_seconds"] for r in SH.pending_inputs(jid2b)], [60, 90])
+seen2: list[int] = []
+SH.evaluate(jid2b, DATA / "jobs" / jid2b, lambda *_: None,
+            runner=lambda st, inp: seen2.append(inp.get("stall_seconds")) or {"action": "continue"})
+check("evaluation resumes where it left off", seen2, [60, 90])
+
 # A runner that raises records the failure rather than losing the entry.
 jid3 = "sh3"
 (DATA / "jobs" / jid3).mkdir(parents=True, exist_ok=True)
@@ -268,6 +284,48 @@ after = scan_job_for_flags(jid5)
 check("a shadow verdict full of flag-shaped prose adds no flags", after, before)
 check("...and specifically not that one",
       any("shadow_prose_flag" in f for f in after), False)
+
+# ---------------------------------------------------------------------------
+# 7. The runner WIRING. Driving auto_run needs a live Docker daemon, so this
+#    is a structural assertion — weaker than execution, and labelled as such.
+#    Without it the whole shadow branch could be deleted and every test above
+#    would still pass, because they exercise judge_shadow directly.
+# ---------------------------------------------------------------------------
+import ast  # noqa: E402
+
+_runner_src = (ROOT / "modules" / "_runner.py").read_text()
+_runner_ast = ast.parse(_runner_src)
+
+
+def _calls_in(tree, dotted: str) -> list[int]:
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            if n.func.attr == dotted.split(".")[-1] and isinstance(n.func.value, ast.Name):
+                if n.func.value.id == dotted.split(".")[0]:
+                    out.append(n.lineno)
+    return out
+
+
+_records = _calls_in(_runner_ast, "judge_shadow.record_input")
+_evals = _calls_in(_runner_ast, "judge_shadow.evaluate")
+check("the runner records shadow inputs", len(_records) >= 2, True)
+check("the runner evaluates out of band", len(_evals), 1)
+check(
+    "evaluation comes AFTER the last input is recorded",
+    _evals[0] > max(_records) if _evals and _records else False,
+    True,
+)
+check(
+    "the shadow branch is guarded on the mode, not on enable_judge",
+    'judge_mode == "shadow"' in _runner_src,
+    True,
+)
+check(
+    "shadow recording never sits under the gating flag",
+    'if enable_judge:\n            from modules import judge_shadow' in _runner_src,
+    False,
+)
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="
