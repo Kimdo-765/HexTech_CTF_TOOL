@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""A judge failure must lose the judge's OPINION, not the checks below it.
+
+prejudge has two ship-gates that need no model: a static scan for the agent
+admitting its own chain has no working path, and structural validation of
+chain.json. Both were written INSIDE the branch that handles a parseable LLM
+verdict — so a judge that was blocked, timed out, or answered in prose skipped
+them and the run shipped on a permissive default.
+
+That is the wrong way round, and it matters most exactly when the hybrid work
+makes a judge failure MORE likely: a cross-provider judge can be refused by a
+classifier that has nothing to say about whether the exploit works.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+_TMP = tempfile.TemporaryDirectory(prefix="deterministic-gates-")
+DATA = Path(_TMP.name)
+(DATA / "jobs").mkdir()
+SETTINGS = DATA / "settings.json"
+PRESETS = DATA / "model_presets.json"
+SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))
+PRESETS.write_text(json.dumps({"version": 2, "providers": {}}))
+os.environ.update(
+    DATA_DIR=str(DATA),
+    SETTINGS_PATH=str(SETTINGS),
+    MODEL_PRESETS_PATH=str(PRESETS),
+    JOBS_DIR=str(DATA / "jobs"),
+)
+for _k in ("AGENT_PROVIDER", "CLAUDE_MODEL", "GROK_MODEL", "GPT_MODEL"):
+    os.environ.pop(_k, None)
+
+
+def _missing(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is None
+    except (ImportError, ValueError):
+        return True
+
+
+STUBBED = [n for n in ("claude_agent_sdk",) if _missing(n)]
+if _missing("claude_agent_sdk"):
+    _sdk = types.ModuleType("claude_agent_sdk")
+    for _n in ("AssistantMessage", "ClaudeAgentOptions", "ResultMessage",
+               "SystemMessage", "TextBlock", "ClaudeSDKClient", "UserMessage"):
+        setattr(_sdk, _n, type(_n, (), {}))
+
+    async def _query(*a, **k):  # pragma: no cover
+        if False:
+            yield None
+
+    _sdk.query = _query
+    _sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda s, **k: None})
+    _sdk.AgentDefinition = type("AgentDefinition", (), {"__init__": lambda s, **k: None})
+    _sdk.create_sdk_mcp_server = lambda *a, **k: None
+    _sdk.tool = lambda *a, **k: (lambda fn: fn)
+    _sdk.project_key_for_directory = lambda *a, **k: ""
+    sys.modules["claude_agent_sdk"] = _sdk
+
+import modules._judge as J  # noqa: E402
+
+PASSED = 0
+FAILED = 0
+LOGS: list[str] = []
+
+
+def check(label: str, got, want) -> None:
+    global PASSED, FAILED
+    if got == want:
+        PASSED += 1
+    else:
+        FAILED += 1
+        print(f"FAIL  {label}\n        got  = {got!r}\n        want = {want!r}")
+
+
+def log(msg):
+    LOGS.append(str(msg))
+
+
+# Wording taken from _SELF_DEFEAT_PATTERNS, which exists because real jobs
+# shipped with these admissions in their own artifacts.
+SELF_DEFEAT = "The chain is incomplete; unable to leak the libc base.\n"
+
+
+def make_job(job_id: str, *, self_defeat: bool = False, chain: dict | None = None) -> Path:
+    jd = DATA / "jobs" / job_id
+    (jd / "work").mkdir(parents=True, exist_ok=True)
+    (jd / "meta.json").write_text(json.dumps({"id": job_id, "agent_provider": "claude"}))
+    (jd / "exploit.py").write_text(
+        "# solver\n" + (f'"""{SELF_DEFEAT}"""\n' if self_defeat else "print(1)\n")
+    )
+    if chain is not None:
+        (jd / "work" / "chain.json").write_text(json.dumps(chain))
+    J._forget_sid(job_id)
+    return jd
+
+
+# ---------------------------------------------------------------------------
+# 1. The gates stand alone.
+# ---------------------------------------------------------------------------
+clean = make_job("g-clean")
+out = J.deterministic_prejudge(clean, clean / "exploit.py", log)
+check("a clean job passes the static gates", out["ok"], True)
+check("...at low severity", out["severity"], "low")
+
+sd = make_job("g-selfdefeat", self_defeat=True)
+out = J.deterministic_prejudge(sd, sd / "exploit.py", log)
+check("a self-defeat admission blocks", out["ok"], False)
+check("...at high severity", out["severity"], "high")
+check("...and says why", any("self-defeat" in i for i in out["issues"]), True)
+
+# ---------------------------------------------------------------------------
+# 2. THE POINT: they run when the judge does not answer.
+# ---------------------------------------------------------------------------
+_orig_turn = J.judge_turn
+
+
+def judge_returns(text: str, **kw):
+    def _fake(user_prompt, *, cwd, job_id, stage, resume, model=None):
+        return J.JudgeTurnResult(text=text, provider="claude", **kw)
+
+    J.judge_turn = _fake
+
+
+# An unparseable answer is exactly what a refused / timed-out judge produces.
+for label, answer in (
+    ("empty", ""),
+    ("prose", "I was unable to complete this review."),
+    ("truncated json", '{"ok": tr'),
+):
+    jd = make_job(f"g-noparse-{label.replace(' ', '-')}", self_defeat=True)
+    judge_returns(answer)
+    v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+    check(f"{label}: the static gate still blocks", v["ok"], False)
+    check(f"{label}: at high severity", v["severity"], "high")
+    check(f"{label}: with the reason", any("self-defeat" in i for i in v["issues"]), True)
+
+# And a CLEAN job with an unparseable answer still ships — the fallback is
+# permissive about opinion, not about evidence.
+jd = make_job("g-noparse-clean")
+judge_returns("")
+v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+check("a clean job with no verdict still ships", v["ok"], True)
+check("...at low severity", v["severity"], "low")
+
+# A refused judge is the case the hybrid work makes more likely, and it must
+# behave identically — the refusal says nothing about the exploit.
+jd = make_job("g-refused", self_defeat=True)
+judge_returns("", error_kind="policy_refusal", error_detail="violates our usage policy")
+v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+check("a REFUSED judge still runs the static gates", v["ok"], False)
+check("...and blocks", v["severity"], "high")
+
+# ---------------------------------------------------------------------------
+# 3. Escalation only. A static gate may overrule "ok"; never the reverse.
+# ---------------------------------------------------------------------------
+jd = make_job("g-llm-ok-static-bad", self_defeat=True)
+judge_returns('{"ok": true, "severity": "low", "flag_likelihood": 0.9}')
+v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+check("an 'ok' verdict is overruled by the static gate", v["ok"], False)
+check("...and severity is raised", v["severity"], "high")
+
+jd = make_job("g-llm-bad-static-ok")
+judge_returns('{"ok": false, "severity": "high", "flag_likelihood": 0.9}')
+v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+check("a clean static gate does NOT rescue a blocking verdict", v["ok"], False)
+check("...severity stays high", v["severity"], "high")
+
+# The LLM's own issues survive alongside the static ones.
+jd = make_job("g-both-issues", self_defeat=True)
+judge_returns('{"ok": true, "severity": "low", "flag_likelihood": 0.9, '
+              '"issues": ["llm noticed something"]}')
+v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+check("the model's own issue survives", any("llm noticed" in i for i in v["issues"]), True)
+check("...beside the static one", any("self-defeat" in i for i in v["issues"]), True)
+
+J.judge_turn = _orig_turn
+
+# ---------------------------------------------------------------------------
+# 4. The other stages' deterministic fallbacks, per the agreed table.
+# ---------------------------------------------------------------------------
+_orig_turn2 = J.judge_turn
+judge_returns("")   # nothing parseable from any stage
+
+sup = make_job("g-supervise")
+sv = J.supervise_run_once(sup, "exploit.py", 60, "", "", log, job_id=sup.name)
+check("supervise with no verdict CONTINUES", sv["action"], "continue")
+check("...it never kills on a judge failure", sv["action"] == "kill", False)
+
+post = make_job("g-postjudge")
+pv = J.postjudge_run(post, "exploit.py", 1, "", "", log, job_id=post.name)
+check("postjudge with no verdict is 'unknown'", pv["verdict"], "unknown")
+check("...continues rather than stopping", pv["next_action"], "continue")
+check("...and offers no retry hint it does not have", pv["retry_hint"], "")
+
+J.judge_turn = _orig_turn2
+
+print(
+    f"== summary: {PASSED} passed, {FAILED} failed =="
+    + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]")
+)
+_TMP.cleanup()
+raise SystemExit(1 if FAILED else 0)

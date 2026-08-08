@@ -1290,6 +1290,76 @@ def _scan_self_defeat_sources(
 # ---------------------------------------------------------------------------
 
 
+def deterministic_prejudge(jd: Path, script: Path, log_fn) -> dict:
+    """The prejudge gates that need NO model, run on their own.
+
+    These are the ship-blockers that do not depend on a judge answering: a
+    static scan for the agent admitting its own chain has no working path,
+    and structural validation of chain.json. They were written INSIDE the
+    branch that handles a parseable LLM verdict, so a judge that failed to
+    answer — blocked, timed out, returned prose — skipped them entirely and
+    the run shipped on a permissive default.
+
+    That is backwards. A judge failure should lose the judge's OPINION, not
+    the checks that never needed one.
+
+    Returns the public verdict shape so the caller can merge, and escalates
+    ONLY: a static gate can turn ok into not-ok, never the reverse.
+    """
+    issues: list[str] = []
+    ok = True
+    sev = "low"
+
+    # Phase 9 — self-defeat ship gate. Static regex pass on exploit +
+    # report.md catches cases where the agent admits the chain has no
+    # working RCE path. LLM judge sometimes ranks such runs "ok low"
+    # because the script merely runs — but it cannot produce a flag,
+    # so ship is blocked here regardless of the LLM verdict.
+    sd_hits = _scan_self_defeat_sources(jd, script)
+    if sd_hits:
+        for src_name, snippet in sd_hits:
+            issues.append(
+                f"self-defeat in {src_name}: \"{snippet}\" — "
+                f"agent admits no working chain"
+            )
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge SELF-DEFEAT: escalated severity=high "
+            f"({len(sd_hits)} pattern match(es) — exploit/report "
+            f"admit chain incomplete)"
+        )
+
+    # Phase 8 — chain.json structural validation. The ship-gate that
+    # catches "chain step depends on an empirically-blocked primitive"
+    # without paying a sandbox cycle to confirm. chain.json is optional
+    # (advisory `med` if missing); when present, `critical` issues
+    # force severity=high + ok=False, `high` issues are recorded but
+    # don't auto-escalate (LLM's own severity stands).
+    _chain_data, chain_issues = chain_schema.load_chain(_resolve_work_dir(jd))
+    crit = [m for s, m in chain_issues if s == "critical"]
+    hi = [m for s, m in chain_issues if s == "high"]
+    med = [m for s, m in chain_issues if s == "med"]
+    if crit:
+        for m in crit:
+            issues.append(f"chain.critical: {m}")
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge CHAIN-INVALID: escalated severity=high "
+            f"({len(crit)} critical chain issue(s) — step depends on "
+            f"empirically-blocked primitive or broken DAG)"
+        )
+    if hi:
+        for m in hi:
+            issues.append(f"chain.high: {m}")
+    if med:
+        for m in med[:2]:
+            issues.append(f"chain.note: {m}")
+
+    return {"ok": ok, "severity": sev, "issues": issues}
+
+
 def prejudge_script(
     jd: Path,
     script_rel: str,
@@ -1321,15 +1391,21 @@ def prejudge_script(
         resume=False, model=resolve_judge_model(job_id),
     )
     raw, sid = turn.text, turn.session_id
+    # Runs whether or not the judge answered. A judge failure loses the
+    # judge's OPINION; it must not lose the checks that never needed one.
+    static = deterministic_prejudge(jd, script, log_fn)
+
     parsed = _parse_json(raw)
 
     if not parsed:
         log_fn(
             "[judge] prejudge: no parseable JSON returned — "
-            "running anyway (permissive default)"
+            f"falling back to the static gates alone "
+            f"(ok={static['ok']} severity={static['severity']} "
+            f"issues={len(static['issues'])})"
         )
         return _with_failover(
-            {"ok": True, "severity": "low", "issues": [], "raw": raw}, turn)
+            {**static, "issues": static["issues"][:12], "raw": raw}, turn)
 
     ok = bool(parsed.get("ok", True))
     sev = str(parsed.get("severity") or ("low" if ok else "med")).lower()
@@ -1359,59 +1435,16 @@ def prejudge_script(
         raw_issues = [str(raw_issues)]
     issues = [str(x)[:200] for x in raw_issues][:6]
 
-    # Phase 9 — self-defeat ship gate. Static regex pass on exploit +
-    # report.md catches cases where the agent admits the chain has no
-    # working RCE path. LLM judge sometimes ranks such runs "ok low"
-    # because the script merely runs — but it cannot produce a flag,
-    # so ship is blocked here regardless of the LLM verdict.
-    sd_hits = _scan_self_defeat_sources(jd, script)
-    if sd_hits:
-        for src_name, snippet in sd_hits:
-            issues.append(
-                f"self-defeat in {src_name}: \"{snippet}\" — "
-                f"agent admits no working chain"
-            )
-        # Raise cap from 6 → 10 so original LLM issues survive when
-        # self-defeat appends; still bounded so log lines stay readable.
-        issues = issues[:10]
-        sev = "high"
+    # Merge the static gates. They ESCALATE only — a model that says "ok" can
+    # be overruled by a regex that found the agent admitting no working chain,
+    # never the other way round.
+    if static["issues"]:
+        issues.extend(static["issues"])
+        issues = issues[:12]
+    if not static["ok"]:
         ok = False
-        log_fn(
-            f"[judge] prejudge SELF-DEFEAT: escalated severity=high "
-            f"({len(sd_hits)} pattern match(es) — exploit/report "
-            f"admit chain incomplete)"
-        )
-
-    # Phase 8 — chain.json structural validation. The ship-gate that
-    # catches "chain step depends on an empirically-blocked primitive"
-    # without paying a sandbox cycle to confirm. chain.json is optional
-    # (advisory `med` if missing); when present, `critical` issues
-    # force severity=high + ok=False, `high` issues are recorded but
-    # don't auto-escalate (LLM's own severity stands).
-    _chain_data, chain_issues = chain_schema.load_chain(_resolve_work_dir(jd))
-    crit = [m for s, m in chain_issues if s == "critical"]
-    hi = [m for s, m in chain_issues if s == "high"]
-    med = [m for s, m in chain_issues if s == "med"]
-    if crit:
-        for m in crit:
-            issues.append(f"chain.critical: {m}")
-        # cap 10 → 12 so chain issues land without dropping LLM/self-defeat
-        issues = issues[:12]
+    if static["severity"] == "high":
         sev = "high"
-        ok = False
-        log_fn(
-            f"[judge] prejudge CHAIN-INVALID: escalated severity=high "
-            f"({len(crit)} critical chain issue(s) — step depends on "
-            f"empirically-blocked primitive or broken DAG)"
-        )
-    if hi:
-        for m in hi:
-            issues.append(f"chain.high: {m}")
-        issues = issues[:12]
-    if med:
-        for m in med[:2]:
-            issues.append(f"chain.note: {m}")
-        issues = issues[:12]
 
     # Tier 1.7 #1 — flag_likelihood threshold gate. Runs LAST so the
     # regex / chain.json checks above can also raise severity; this
