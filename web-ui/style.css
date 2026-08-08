@@ -1278,7 +1278,10 @@ mark.log-hit {
 .run-log-window[data-view="monitor"] .gpt-timeline-feed { display: none; }
 .run-log-window[data-view="timeline"] .run-log,
 .run-log-window[data-view="timeline"] .monitor-feed { display: none; }
-.run-log-window[data-view="timeline"] .gpt-timeline-feed { display: block; }
+/* flex, not block: this selector is (0,3,0) and beats the `.gpt-timeline-feed`
+   rule below, so leaving `block` here silently defeated the fixed-header
+   layout no matter what that rule said. */
+.run-log-window[data-view="timeline"] .gpt-timeline-feed { display: flex; }
 .run-log-window[data-view="monitor"] .run-log-search,
 .run-log-window[data-view="monitor"] .run-log-search-count,
 .run-log-window[data-view="timeline"] .run-log-search,
