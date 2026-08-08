@@ -56,8 +56,16 @@ def _missing(name: str) -> bool:
 STUBBED = [n for n in ("claude_agent_sdk", "fastapi", "redis", "rq") if _missing(n)]
 if _missing("claude_agent_sdk"):
     _sdk = types.ModuleType("claude_agent_sdk")
-    for _n in ("AssistantMessage", "ClaudeAgentOptions", "ResultMessage", "TextBlock"):
+    for _n in ("AssistantMessage", "ClaudeAgentOptions", "ResultMessage", "TextBlock",
+               "SystemMessage", "ClaudeSDKClient", "UserMessage"):
         setattr(_sdk, _n, type(_n, (), {}))
+    _sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda s, **k: None})
+    _sdk.ClaudeAgentOptions = type(
+        "ClaudeAgentOptions", (), {"__init__": lambda s, **k: s.__dict__.update(k)}
+    )
+    _sdk.AgentDefinition = type("AgentDefinition", (), {"__init__": lambda s, **k: None})
+    _sdk.create_sdk_mcp_server = lambda *a, **k: None
+    _sdk.tool = lambda *a, **k: (lambda fn: fn)
 
     async def _query(*a, **k):  # pragma: no cover
         if False:
@@ -177,8 +185,11 @@ check("role is reviewer", rows[0].get("role") if rows else None, "reviewer")
 check("stage is reviewer", rows[0].get("stage") if rows else None, "reviewer")
 check("the model is the resolved one", rows[0].get("model") if rows else None,
       "gpt-5.6-terra")
-check("tokens survive", rows[0].get("tokens") if rows else None,
-      {"input_tokens": 50})
+# The per-model map wins over the streamed `usage` even for one model — the
+# ledger and agent_heartbeat now agree on which number is authoritative.
+check("tokens come from the authoritative per-model map",
+      rows[0].get("tokens") if rows else None,
+      {"input_tokens": 50, "output_tokens": 5})
 
 # A FAILED turn is billed too — it spent tokens either way.
 failed = make_job("rv-failed", agent_provider="gpt")
@@ -384,6 +395,88 @@ check("a timeout is not retried", SCALLS, ["claude"])
 check("...and surfaces immediately", ev[-1][0], "error")
 
 R._stream_reviewer_once = _orig_stream
+
+# ---------------------------------------------------------------------------
+# 5. The REAL `_stream_reviewer_once` and the REAL Grok branch.
+#    The section above replaces `_stream_reviewer_once` wholesale, so the
+#    routing and billing INSIDE it were never executed — two mutations
+#    (job_id ignored; grok usage discarded) passed 47/47 underneath. These
+#    drive the production functions with only the ADAPTER faked.
+# ---------------------------------------------------------------------------
+real_sj = make_job("sv-real", agent_provider="gpt",
+                   agent_role_providers={"reviewer": "claude"})
+_orig_claude_iter = R._iter_reviewer_messages
+
+
+class _Blk:
+    def __init__(self, t):
+        self.text = t
+
+
+class _Asst:
+    def __init__(self, t):
+        self.content = [_Blk(t)]
+
+
+class _Res:
+    def __init__(self):
+        self.is_error = False
+        self.model_usage = {"claude-opus-4-8": {"input_tokens": 21, "output_tokens": 3}}
+        self.usage = {"input_tokens": 21}
+        self.total_cost_usd = 0.11
+
+
+async def _fake_iter(framed, options, timeout):
+    yield _Asst("real hint")
+    yield _Res()
+
+
+# The production function type-checks messages, so bind the doubles to the
+# names it actually compares against.
+R.AssistantMessage = _Asst
+R.TextBlock = _Blk
+R.ResultMessage = _Res
+R._iter_reviewer_messages = _fake_iter
+try:
+    ev = asyncio.run(_drain(real_sj))
+    rrows = UL.read_usage(real_sj)
+    check("the REAL streamer honours the job's route", 
+          rrows[0].get("provider") if rrows else None, "claude")
+    check("...and its preset model",
+          rrows[0].get("model") if rrows else None, "claude-opus-4-8")
+    check("the REAL streamer bills exactly one row", len(rrows), 1)
+    check("...with the adapter's tokens",
+          rrows[0].get("tokens") if rrows else None,
+          {"input_tokens": 21, "output_tokens": 3})
+    check("...and its reported cost", rrows[0].get("cost_usd") if rrows else None, 0.11)
+finally:
+    R._iter_reviewer_messages = _orig_claude_iter
+
+# The REAL Grok branch of the synchronous path.
+import modules.grok_acp as GK  # noqa: E402
+
+_orig_grok_once = GK.query_grok_once
+
+
+async def _fake_grok(**kw):
+    return {"text": "grok hint", "session_id": "gs", "error": None,
+            "usage": {"input_tokens": 13, "output_tokens": 5}}
+
+
+GK.query_grok_once = _fake_grok
+grok_job = make_job("rv-grok", agent_provider="grok")
+try:
+    hint = asyncio.run(R._ask_reviewer("ctx", job_id=grok_job))
+    grows = UL.read_usage(grok_job)
+    check("the REAL grok reviewer returns its hint", hint, "grok hint")
+    check("...and bills a row", len(grows), 1)
+    check("...on the grok provider", grows[0].get("provider") if grows else None, "grok")
+    check("...carrying the adapter's usage",
+          grows[0].get("tokens") if grows else None,
+          {"input_tokens": 13, "output_tokens": 5})
+finally:
+    GK.query_grok_once = _orig_grok_once
+
 GA.query_gpt_once = _orig_once
 
 print(

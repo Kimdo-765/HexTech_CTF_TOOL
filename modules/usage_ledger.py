@@ -335,7 +335,13 @@ def record_usage_by_model(
     breakdown = {
         str(m): t for m, t in (model_usage or {}).items() if isinstance(t, dict) and t
     }
-    if len(breakdown) > 1:
+    if breakdown:
+        # Whenever the SDK gave a per-model map, use it — even for one model.
+        # `_common.agent_heartbeat` already treats model_usage as the
+        # authoritative field ("pricing these totals reproduces the reported
+        # cost to the cent"), and taking the streamed `usage` for one model
+        # while taking the map for two made the two paths disagree about which
+        # number is real.
         rows = sorted(breakdown.items(), key=lambda kv: kv[0] != (primary_model or ""))
     else:
         rows = [(primary_model, tokens or {})]
