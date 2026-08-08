@@ -1334,10 +1334,24 @@ mark.log-hit {
 /* GPT-only structured timeline. Claude/Grok never render this element. */
 .gpt-timeline-feed {
   background: var(--bg-deep);
-  max-height: min(64vh, 820px); min-height: 180px;
-  overflow-y: auto;
-  padding: 0.65rem 0.7rem 1.2rem;
+  /* Fixed box, inner scroll. The agent cards are the answer to "what is
+     running where" and scrolling them away is exactly when you want them —
+     so the feed no longer scrolls as a whole; only the event list does. */
+  display: flex; flex-direction: column;
+  height: min(64vh, 820px); min-height: 180px;
+  overflow: hidden;
+  padding: 0.65rem 0.7rem 0;
   color: var(--fg);
+}
+.gpt-timeline-feed > .gpt-timeline-meta,
+.gpt-timeline-feed > .gpt-agent-grid { flex: 0 0 auto; }
+.gpt-timeline-feed > .gpt-event-list {
+  flex: 1 1 auto;
+  /* Without min-height:0 a flex child refuses to shrink below its content and
+     the scrollbar never appears — the container just grows instead. */
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 1.2rem;
 }
 .gpt-timeline-meta {
   display: flex; gap: 0.45rem; align-items: center;

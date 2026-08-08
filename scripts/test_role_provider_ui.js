@@ -239,5 +239,46 @@ check("...and summarize_agents accepts it",
 check("the card renders a badge for a routed role",
   /agent\.provider && agent\.provider !== "gpt"/.test(appjs), true);
 
+
+// ---------------------------------------------------------------------------
+// 7. The agent cards stay put; only the event list scrolls.
+//    jsdom does no layout, so this pins the two things that CAN be wrong
+//    without looking wrong: which element is the scroll container, and whether
+//    the poll's scroll-preservation still points at it. Getting the second
+//    wrong silently yanks the view to the bottom every 2 seconds.
+// ---------------------------------------------------------------------------
+// Comments stripped FIRST. The rule below explains itself with the words
+// "min-height:0", and the assertion that the declaration exists was matching
+// that prose — passing whether or not the declaration was there. A check that
+// a comment can satisfy is not a check.
+const css = fs.readFileSync(path.join(ROOT, "web-ui/style.css"), "utf8")
+  .replace(/\/\*[\s\S]*?\*\//g, "");
+// Just the `.gpt-timeline-feed {…}` block. Slicing to the next selector swept
+// in the child rules that follow it — including the event list's own
+// `overflow-y: auto`, which made the "feed is not a scroller" check read the
+// opposite of what it asks.
+// Anchored at a LINE START: `.run-log-window .gpt-timeline-feed { display:none }`
+// appears earlier and matched first, so the slice examined a one-line
+// visibility rule and every assertion below read the wrong block. Third time
+// an ambiguous anchor has bitten in this branch.
+const _feedAt = css.indexOf("\n.gpt-timeline-feed {") + 1;
+const feedRule = css.slice(_feedAt, css.indexOf("}", _feedAt) + 1);
+
+check("the feed is a fixed box, not a scroller",
+  /overflow:\s*hidden/.test(feedRule) && !/overflow-y:\s*auto/.test(feedRule), true);
+check("...laid out as a column so the list can take the remaining height",
+  /flex-direction:\s*column/.test(feedRule), true);
+check("the agent grid does not shrink",
+  /\.gpt-timeline-feed > \.gpt-agent-grid \{[^}]*flex:\s*0 0 auto/.test(css), true);
+check("the event list is the scroller",
+  /\.gpt-timeline-feed > \.gpt-event-list \{[^}]*overflow-y:\s*auto/.test(css), true);
+check("...and can actually shrink (the min-height:0 flex trap)",
+  /\.gpt-timeline-feed > \.gpt-event-list \{[^}]*min-height:\s*0/.test(css), true);
+
+const preserve = (appjs.match(/detail\.querySelector\("\.gpt-timeline-feed[^"]*"\)/g) || []);
+check("scroll preservation captures and restores the same element", preserve.length, 2);
+check("...and that element is the event list, not the feed",
+  preserve.every((m) => m.includes(".gpt-event-list")), true);
+
 console.log(`\n${PASS + FAIL} checks, ${FAIL} failed`);
 process.exit(FAIL ? 1 : 0);
