@@ -47,7 +47,26 @@ SETTINGS.write_text(
 # turn. That path is not under test here and the SDK is only installed in the
 # worker image, so stub exactly the names it binds — running this suite must
 # not depend on which container it happens to be started in.
-if "claude_agent_sdk" not in sys.modules:
+def _missing(name: str) -> bool:
+    """True when `name` cannot be imported for real.
+
+    Checked with find_spec rather than `name not in sys.modules`: the latter
+    is true at startup even in the api container, so it would install a stub
+    over a perfectly good library and this suite would never once exercise the
+    real one. Stubs are a fallback for hosts without the image, not the
+    default.
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is None
+    except (ImportError, ValueError):
+        return True
+
+
+STUBBED = [n for n in ("claude_agent_sdk", "fastapi", "redis", "rq") if _missing(n)]
+
+if _missing("claude_agent_sdk"):
     _sdk = types.ModuleType("claude_agent_sdk")
     for _name in (
         "AssistantMessage",
@@ -70,7 +89,7 @@ if "claude_agent_sdk" not in sys.modules:
 # stub keeps this suite runnable on the host, in the worker and in the api
 # container alike — a test that runs in exactly one container is how dev/run
 # coverage quietly disappears in this repo.
-if "fastapi" not in sys.modules:
+if _missing("fastapi"):
     _fa = types.ModuleType("fastapi")
 
     class _Router:
@@ -91,13 +110,13 @@ if "fastapi" not in sys.modules:
 
 # api.queue opens a Redis handle at import time. `_resubmit`'s queue is
 # replaced with a fake below, so nothing here ever talks to a broker.
-if "redis" not in sys.modules:
+if _missing("redis"):
     _redis_mod = types.ModuleType("redis")
     _redis_mod.Redis = type(
         "Redis", (), {"from_url": staticmethod(lambda *a, **k: object())}
     )
     sys.modules["redis"] = _redis_mod
-if "rq" not in sys.modules:
+if _missing("rq"):
     _rq = types.ModuleType("rq")
     _rq.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
     sys.modules["rq"] = _rq
@@ -180,6 +199,7 @@ check(
     ("claude", "gpt"),
 )
 
-print(f"== summary: {PASSED} passed, {FAILED} failed ==")
+print(f"== summary: {PASSED} passed, {FAILED} failed =="
+      f"{'  [stubbed: ' + ', '.join(STUBBED) + ']' if STUBBED else '  [all real deps]'}")
 _TMP.cleanup()
 raise SystemExit(1 if FAILED else 0)
