@@ -1529,6 +1529,38 @@ def prejudge_blocks_ship(prejudge: dict | None) -> bool:
     return (not prejudge.get("ok")) and str(prejudge.get("severity") or "").lower() == "high"
 
 
+def postjudge_would_retry(verdict: dict | None) -> bool:
+    """Would THIS postjudge verdict have cost the job another attempt?
+
+    `next_action` never takes the value "retry". `_normalize_verdict` clamps it
+    to exactly {"continue", "stop"} — a model that answers "retry" is coerced
+    to "continue" — so any rollup comparing against "retry" is a constant
+    False, which is what `would_have_retried` was.
+
+    The loop's real rule, read from `_common.py`:
+
+      * "stop" halts, EXCEPT the one-shot method-change conversion: a STOP with
+        `retry_worthwhile` and either a hint or `alternative_paths`, on a
+        verdict that is not `network_error`, is turned into a continue and
+        spends exactly one retry.
+      * anything else re-queries the agent with the hint — but a verdict with
+        no `retry_hint` is the loop's natural exit, so it costs nothing.
+
+    Answered for a FRESH budget: the loop also caps method-change retries at
+    one per job and has an overall attempt ceiling, and neither is a property
+    of the verdict.
+    """
+    v = verdict or {}
+    hint = str(v.get("retry_hint") or "").strip()
+    if str(v.get("next_action") or "continue").lower() == "stop":
+        return bool(
+            v.get("retry_worthwhile")
+            and (hint or (v.get("alternative_paths") or []))
+            and v.get("verdict") != "network_error"
+        )
+    return bool(hint)
+
+
 def prejudge_script(
     jd: Path,
     script_rel: str,

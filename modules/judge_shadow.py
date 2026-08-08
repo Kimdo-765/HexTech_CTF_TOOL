@@ -319,11 +319,14 @@ def _cycle_state(job_id: str) -> tuple[set[str], dict[str, str]]:
     cycle ids existed all carry `""`, which collapses to the old job-wide
     behaviour — the honest reading, since they cannot be told apart.
 
-    Returns (cycles that recorded a prejudge INPUT, {cycle: why it was refused}).
+    Returns (cycles that recorded a prejudge INPUT, {cycle: why it was refused},
+    cycles whose prejudge OPENED a judge session).
     """
     stage_of: dict[str, tuple[str, str]] = {}       # input id -> (cycle, stage)
     have_prejudge: set[str] = set()
     refused: dict[str, str] = {}
+    opened_session: set[str] = set()
+    answered: set[str] = set()
     for rec in read_shadow(job_id):
         if rec.get("kind") == "input":
             cyc = str((rec.get("inputs") or {}).get("cycle_id") or "")
@@ -332,11 +335,33 @@ def _cycle_state(job_id: str) -> tuple[set[str], dict[str, str]]:
             if stage == "prejudge":
                 have_prejudge.add(cyc)
         elif rec.get("kind") == "verdict":
-            cyc, stage = stage_of.get(str(rec.get("answers") or ""), ("", ""))
+            ans = str(rec.get("answers") or "")
+            # FIRST answer wins, like everywhere else that reads this file. Two
+            # evaluators can both answer one input; if the redundant one is a
+            # refusal, taking it blocked a cycle whose prejudge the rollup
+            # simultaneously reported as measured.
+            if ans:
+                if ans in answered:
+                    continue
+                answered.add(ans)
+            cyc, stage = stage_of.get(ans, ("", ""))
             why = (rec.get("verdict") or {}).get("unevaluable")
-            if stage == "prejudge" and why:
-                refused[cyc] = str(why)
-    return have_prejudge, refused
+            if stage == "prejudge":
+                if why:
+                    refused[cyc] = str(why)
+                elif rec.get("opened_session"):
+                    opened_session.add(cyc)
+    return have_prejudge, refused, opened_session
+
+
+def _session_live(job_id: str) -> bool:
+    """Does THIS process still hold the judge session for `job_id`?"""
+    try:
+        from modules._judge import _recall_sid
+
+        return bool(_recall_sid(job_id))
+    except Exception:
+        return False
 
 
 def _mark_model_failure(verdict: dict) -> dict:
@@ -473,7 +498,7 @@ def evaluate(
     # evaluated without a prejudge has none of the context the gate's
     # postjudge had. Judging it anyway produces a number that looks like a
     # measurement of the gate and is not one.
-    have_prejudge, refused = _cycle_state(job_id)
+    have_prejudge, refused, opened_session = _cycle_state(job_id)
     count = unevaluable = 0
     for rec in pend:
         stage = str(rec.get("stage") or "")
@@ -489,6 +514,18 @@ def evaluate(
                 why = "no prejudge was recorded for this cycle"
             elif cyc in refused:
                 why = f"prejudge for this cycle was unevaluable: {refused[cyc]}"
+            elif cyc in opened_session and not _session_live(job_id):
+                # The prerequisite was checked against the FILE, but the thing
+                # it exists to guarantee — that this stage resumes the session
+                # prejudge opened — lives in `_judge._session_ids`, a dict in
+                # THIS process. A sweep that evaluated the prejudge earlier, in
+                # another process or a run that died partway, satisfies every
+                # file condition and then judges in a brand-new session with
+                # none of prejudge's warnings. The enforce path cannot reach
+                # this state: it runs both stages in one process, in one
+                # try/finally.
+                why = ("the judge session prejudge opened is not available in "
+                       "this process — evaluate the whole cycle in one sweep")
         if why:
             verdict = {"unevaluable": why}
         else:
@@ -507,7 +544,14 @@ def evaluate(
         else:
             count += 1
         record_verdict(job_id, stage, verdict,
-                       answers=rec.get("id"), evaluated_from=rec.get("ts"))
+                       answers=rec.get("id"), evaluated_from=rec.get("ts"),
+                       # Whether the prejudge left a session for the rest of
+                       # the cycle to resume. Recorded, not inferred: a
+                       # prejudge that legitimately yielded none is faithful
+                       # (enforce would have had none either), and only the
+                       # "opened one, cannot reach it now" case is a defect.
+                       opened_session=(_session_live(job_id)
+                                       if stage == "prejudge" else None))
     _shadow_logger(job_id, "evaluate")(
         f"[judge] shadow: evaluated {count} recorded stage(s) out of band"
         + (f"; {unevaluable} unevaluable" if unevaluable else ""))
@@ -523,7 +567,7 @@ def summary(job_id: str) -> dict[str, Any]:
     every advisory finding was being reported as a block, and a confusion
     matrix built on that counts them as false positives.
     """
-    from modules._judge import prejudge_blocks_ship
+    from modules._judge import prejudge_blocks_ship, postjudge_would_retry
 
     inputs = 0
     verdicts: dict[str, list[dict]] = {}
@@ -554,16 +598,26 @@ def summary(job_id: str) -> dict[str, Any]:
         "unevaluable": sum(len(v) for v in refused.values()),
         "by_stage": {k: len(v) for k, v in verdicts.items()},
         "unevaluable_by_stage": {k: len(v) for k, v in refused.items()},
+        # Refused rows are consulted here on purpose. `deterministic_prejudge`
+        # runs BEFORE the judge call and escalates on its own, so a prejudge
+        # can carry a certain severity=high ship-block AND a failed model turn.
+        # The block is model-independent and the fingerprint already proved the
+        # artifacts unmoved, so it is a real answer even though the opinion is
+        # missing — counting it as "no block" lost a true positive that no
+        # later sweep can recover.
         "would_have_blocked": any(
-            prejudge_blocks_ship(v) for v in verdicts.get("prejudge", [])
+            prejudge_blocks_ship(v)
+            for v in verdicts.get("prejudge", []) + refused.get("prejudge", [])
         ),
         "would_have_killed": any(
             v.get("action") == "kill" for v in verdicts.get("supervise", [])
         ),
-        # Normalised exactly as the auto-retry loop reads it: missing means
-        # "continue", and the comparison is case-insensitive.
+        # Asked of the predicate that owns the rule. Comparing next_action to
+        # "retry" here was a constant False: `_normalize_verdict` clamps the
+        # field to {"continue", "stop"}, so no verdict the default evaluator
+        # can produce ever matched, and every job the gate WOULD have retried
+        # scored as no-retry. Same class as would_have_blocked (D6).
         "would_have_retried": any(
-            str(v.get("next_action") or "continue").lower() == "retry"
-            for v in verdicts.get("postjudge", [])
+            postjudge_would_retry(v) for v in verdicts.get("postjudge", [])
         ),
     }

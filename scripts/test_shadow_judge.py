@@ -286,14 +286,49 @@ check("...so no inline severity test is left behind in the runner",
       'prejudge.get("severity") == "high"' in
       (ROOT / "modules" / "_runner.py").read_text(), False)
 
-# next_action is read by the retry loop as `(x or "continue").lower()`.
-for _na, _retries in (("retry", True), ("RETRY", True), ("stop", False),
-                      (None, False), ("continue", False)):
-    _j = f"shna{_na!r}"
+# The retry axis. `next_action` NEVER takes the value "retry" —
+# `_normalize_verdict` clamps it to {"continue","stop"} — so the old table
+# below pinned a vocabulary production cannot emit, and two of these checks
+# were holding a constant-False metric in place. The cases now come from the
+# loop's real conditions in _common.py: "stop" halts unless the one-shot
+# method-change conversion applies, and anything else costs an attempt only
+# when there is a hint to inject.
+for _label, _v, _retries in (
+    ("continue + a hint — the ordinary retry",
+     {"next_action": "continue", "retry_hint": "widen the recvuntil"}, True),
+    ("continue with NO hint — the loop's natural exit",
+     {"next_action": "continue", "retry_hint": ""}, False),
+    ("next_action missing — defaults to continue",
+     {"retry_hint": "h"}, True),
+    ("a plain stop halts",
+     {"next_action": "stop", "retry_hint": "h"}, False),
+    ("stop + retry_worthwhile + hint — the method-change retry",
+     {"next_action": "stop", "retry_worthwhile": True, "retry_hint": "swap to FSOP"},
+     True),
+    ("...or alternative_paths instead of a hint",
+     {"next_action": "stop", "retry_worthwhile": True,
+      "alternative_paths": ["FSOP"]}, True),
+    ("...but never on network_error",
+     {"next_action": "stop", "retry_worthwhile": True, "retry_hint": "h",
+      "verdict": "network_error"}, False),
+    ("retry_worthwhile alone, with nothing to inject",
+     {"next_action": "stop", "retry_worthwhile": True}, False),
+    ("the literal 'retry' production cannot emit, and no hint",
+     {"next_action": "retry"}, False),
+):
+    _j = "shna" + str(abs(hash(_label)))[:8]
     (DATA / "jobs" / _j).mkdir(parents=True, exist_ok=True)
-    SH.record_verdict(_j, "postjudge", {"next_action": _na})
-    check(f"next_action={_na!r} counts as a retry?",
+    SH.record_verdict(_j, "postjudge", _v)
+    check(f"would_have_retried: {_label}",
           SH.summary(_j)["would_have_retried"], _retries)
+    check(f"...and the predicate agrees directly: {_label}",
+          _judge_mod.postjudge_would_retry(_v), _retries)
+
+check("no verdict the normaliser can produce says 'retry'",
+      sorted({_judge_mod._normalize_verdict(
+          {"verdict": "crash", "next_action": _na, "retry_hint": "h"})["next_action"]
+          for _na in ("retry", "RETRY", "continue", "stop", None, "", "banana")}),
+      ["continue", "stop"])
 
 # ---------------------------------------------------------------------------
 # 6. THE ONE THAT MATTERS: shadow prose must never reach the flag scanner.
@@ -1233,6 +1268,206 @@ check("...and counts as no measurement", _norp, 0)
 check("...saying the prerequisite is missing, not that it failed",
       any("no prejudge was recorded" in str((r["verdict"] or {}).get("unevaluable") or "")
           for r in SH.read_shadow(_orp) if r.get("kind") == "verdict"), True)
+
+# ---------------------------------------------------------------------------
+# 19. The prerequisite is checked against the FILE, but the session it exists
+#     to guarantee lives in THIS process. A sweep that answered the prejudge
+#     earlier — another process, or a run that died partway — satisfies every
+#     file condition and then judges in a brand-new session.
+# ---------------------------------------------------------------------------
+_sess = "shsess"
+_sess_dir = DATA / "jobs" / _sess
+(_sess_dir / "work").mkdir(parents=True, exist_ok=True)
+_si = SH.record_input(_sess, "prejudge", {"cycle_id": "cs", "script_rel": "exploit.py"})
+SH.record_verdict(_sess, "prejudge", {"ok": True, "severity": "low"},
+                  answers=_si["id"], opened_session=True)
+SH.record_input(_sess, "postjudge", {"cycle_id": "cs", "exit_code": 0})
+
+_judge_mod._forget_sid(_sess)          # a fresh process holds no session
+_scalls = []
+_ns = SH.evaluate(_sess, _sess_dir,
+                  runner=lambda st, i: (_scalls.append(st), {"verdict": "x"})[1])
+check("a postjudge whose session this process cannot resume is not judged",
+      _scalls, [])
+check("...and counts as no measurement", _ns, 0)
+check("...saying the session is unreachable, not that the prejudge failed",
+      any("not available in this process"
+          in str((r["verdict"] or {}).get("unevaluable") or "")
+          for r in SH.read_shadow(_sess) if r.get("kind") == "verdict"), True)
+
+# The session IS live: the same records evaluate normally. Without this the
+# check above could pass because dependents are refused for some other reason.
+# A fresh input: the first evaluate() already consumed the one above (it
+# recorded a refusal), so without this the control would pass on an empty
+# pending list rather than on the session being reachable.
+SH.record_input(_sess, "postjudge", {"cycle_id": "cs", "exit_code": 0})
+_judge_mod._remember_sid(_sess, "sid-live", "claude")
+try:
+    _scalls2 = []
+    SH.evaluate(_sess, _sess_dir,
+                runner=lambda st, i: (_scalls2.append(st), {"verdict": "x"})[1])
+finally:
+    _judge_mod._forget_sid(_sess)
+check("...and with the session live it IS judged", _scalls2, ["postjudge"])
+
+# ...and evaluate() must RECORD that fact itself. The fixture above writes
+# `opened_session` by hand, so it cannot tell whether the production path
+# stamps it — the same blind spot that hid D1 and the cycle id.
+_sess2 = "shsess2"
+_sess2_dir = DATA / "jobs" / _sess2
+_sess2_dir.mkdir(parents=True, exist_ok=True)
+SH.record_input(_sess2, "prejudge", {"cycle_id": "cs2", "script_rel": "exploit.py"})
+SH.evaluate(_sess2, _sess2_dir, runner=lambda st, i: (
+    _judge_mod._remember_sid(_sess2, "sid-from-prejudge", "claude"),
+    {"ok": True, "severity": "low"})[1])
+check("evaluate() stamps that the prejudge opened a session",
+      [r.get("opened_session") for r in SH.read_shadow(_sess2)
+       if r.get("kind") == "verdict"], [True])
+_judge_mod._forget_sid(_sess2)                 # the sweep ends; a new one starts
+SH.record_input(_sess2, "postjudge", {"cycle_id": "cs2", "exit_code": 0})
+_s2calls = []
+SH.evaluate(_sess2, _sess2_dir,
+            runner=lambda st, i: (_s2calls.append(st), {"verdict": "x"})[1])
+check("...so the next sweep refuses the postjudge it can no longer resume for",
+      _s2calls, [])
+
+# A prejudge that legitimately opened NO session is faithful — enforce would
+# have had none either — so it must NOT be refused.
+_nos = "shnosess"
+_nos_dir = DATA / "jobs" / _nos
+_nos_dir.mkdir(parents=True, exist_ok=True)
+_ni = SH.record_input(_nos, "prejudge", {"cycle_id": "cn", "script_rel": "exploit.py"})
+SH.record_verdict(_nos, "prejudge", {"ok": True}, answers=_ni["id"],
+                  opened_session=False)
+SH.record_input(_nos, "postjudge", {"cycle_id": "cn", "exit_code": 0})
+_ncalls = []
+SH.evaluate(_nos, _nos_dir,
+            runner=lambda st, i: (_ncalls.append(st), {"verdict": "x"})[1])
+check("a prejudge that opened no session does not block its postjudge",
+      _ncalls, ["postjudge"])
+
+# ---------------------------------------------------------------------------
+# 20. One duplicate refusal must not poison a cycle whose prejudge was
+#     measured. `pending_inputs` and `summary` both fold duplicates by the
+#     input they answer; `_cycle_state` decides whether dependents run at all,
+#     so it has to agree with them or the rollup contradicts itself.
+# ---------------------------------------------------------------------------
+_dupc = "shdupcyc"
+_dupc_dir = DATA / "jobs" / _dupc
+_dupc_dir.mkdir(parents=True, exist_ok=True)
+_dci = SH.record_input(_dupc, "prejudge", {"cycle_id": "cd", "script_rel": "exploit.py"})
+SH.record_verdict(_dupc, "prejudge", {"ok": True, "severity": "low"},
+                  answers=_dci["id"], opened_session=False)
+SH.record_verdict(_dupc, "prejudge",
+                  {"unevaluable": "the judge never answered: transport_error"},
+                  answers=_dci["id"])          # the redundant second answer
+_have, _ref, _open = SH._cycle_state(_dupc)
+check("a redundant refusal does not block the cycle", _ref, {})
+check("...and the rollup agrees the prejudge was measured",
+      (SH.summary(_dupc)["by_stage"], SH.summary(_dupc)["unevaluable"]),
+      ({"prejudge": 1}, 0))
+SH.record_input(_dupc, "postjudge", {"cycle_id": "cd", "exit_code": 0})
+_dcalls = []
+SH.evaluate(_dupc, _dupc_dir,
+            runner=lambda st, i: (_dcalls.append(st), {"verdict": "x"})[1])
+check("...so its postjudge is still measured", _dcalls, ["postjudge"])
+
+# ---------------------------------------------------------------------------
+# 21. A ship-block the DETERMINISTIC gates forced is a real answer even when
+#     the model turn failed: it runs before the judge call and escalates on
+#     its own, and the fingerprint already proved the artifacts unmoved.
+# ---------------------------------------------------------------------------
+_det = "shdet"
+(DATA / "jobs" / _det).mkdir(parents=True, exist_ok=True)
+_dti = SH.record_input(_det, "prejudge", {"cycle_id": "ct"})
+SH.record_verdict(_det, "prejudge",
+                  {"ok": False, "severity": "high",
+                   "unevaluable": "the judge never answered: transport_error",
+                   "error_kind": "transport_error"},
+                  answers=_dti["id"])
+_ds2 = SH.summary(_det)
+check("a certain ship-block survives a failed model turn",
+      _ds2["would_have_blocked"], True)
+check("...while still counting as no measurement",
+      (_ds2["evaluated"], _ds2["unevaluable"]), (0, 1))
+check("...and the runner would indeed not have spawned",
+      _judge_mod.prejudge_blocks_ship(
+          {"ok": False, "severity": "high", "error_kind": "transport_error"}), True)
+check("an advisory verdict with a failed turn still blocks nothing",
+      _judge_mod.prejudge_blocks_ship(
+          {"ok": False, "severity": "med", "error_kind": "transport_error"}), False)
+
+# ---------------------------------------------------------------------------
+# 22. Every recorded field must reach the replay. D5 was fixed by pinning ONE
+#     field byte-for-byte; its siblings were left unpinned, so dropping
+#     `target` from the record passed all 162 checks while the replayed
+#     prejudge prompt read "(none)".
+# ---------------------------------------------------------------------------
+_fwd_job = "shfwd"
+_fwd_dir = DATA / "jobs" / _fwd_job
+(_fwd_dir / "work").mkdir(parents=True, exist_ok=True)
+(_fwd_dir / "work" / "exploit.py").write_text("print('x')\n")
+(_fwd_dir / "exploit.py").write_text("print('x')\n")
+(_fwd_dir / "exploit.py.stdout").write_text("out\n")
+(_fwd_dir / "exploit.py.stderr").write_text("")
+(_fwd_dir / "meta.json").write_text(json.dumps({"id": _fwd_job}))
+set_settings(enable_judge=False, judge_mode="shadow")
+_saved_fwd = (R.run_in_sandbox, R.Path)
+R.run_in_sandbox = lambda *a, **k: {"exit_code": 7, "stdout": "out\n", "stderr": "",
+                                    "timeout": False, "killed_by_supervise": False}
+R.Path = _tmp_path
+try:
+    R.attempt_sandbox_run(_fwd_job, "exploit.py", "10.9.8.7:31337", lambda *_: None,
+                          prior_hints=["an earlier idea"])
+finally:
+    R.run_in_sandbox, R.Path = _saved_fwd
+
+_fwd_in = {r["stage"]: r["inputs"] for r in SH.read_shadow(_fwd_job)
+           if r.get("kind") == "input"}
+check("the runner records the target", _fwd_in["prejudge"].get("target"),
+      "10.9.8.7:31337")
+check("...and the exit code", _fwd_in["postjudge"].get("exit_code"), 7)
+
+# Now watch what the replay actually HANDS the judge.
+_handed = {}
+
+
+def _cap_pre(jd, script_rel, target, log_fn, **kw):
+    _handed["prejudge"] = {"script_rel": script_rel, "target": target}
+    return {"ok": True, "severity": "low"}
+
+
+def _cap_post(jd, script_rel, code, out, err, log_fn, **kw):
+    _handed["postjudge"] = {"script_rel": script_rel, "exit_code": code,
+                            "stdout": out, "extra_context": kw.get("extra_context"),
+                            "flag_shapes": kw.get("flag_shapes")}
+    return {"verdict": "crash"}
+
+
+_judge_mod.prejudge_script, _judge_mod.postjudge_run = _cap_pre, _cap_post
+try:
+    SH.evaluate(_fwd_job, _fwd_dir)
+finally:
+    _judge_mod.prejudge_script, _judge_mod.postjudge_run = _saved_pre2, _saved_post2
+
+check("the replayed prejudge gets the SAME target the gate would have",
+      _handed.get("prejudge", {}).get("target"),
+      _fwd_in["prejudge"].get("target"))
+check("...and the same script_rel",
+      _handed.get("prejudge", {}).get("script_rel"),
+      _fwd_in["prejudge"].get("script_rel"))
+check("the replayed postjudge gets the same exit_code",
+      _handed.get("postjudge", {}).get("exit_code"),
+      _fwd_in["postjudge"].get("exit_code"))
+check("...the same stdout tail",
+      _handed.get("postjudge", {}).get("stdout"),
+      _fwd_in["postjudge"].get("stdout_tail"))
+check("...the same extra_context",
+      _handed.get("postjudge", {}).get("extra_context"),
+      _fwd_in["postjudge"].get("extra_context"))
+check("...and the same flag shapes",
+      _handed.get("postjudge", {}).get("flag_shapes"),
+      _fwd_in["postjudge"].get("flag_shapes"))
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="
