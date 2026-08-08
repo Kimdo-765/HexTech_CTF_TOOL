@@ -257,9 +257,14 @@ scripted({
 J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
 rows = UL.read_usage(jid)
 check("both turns are in the ledger", len(rows), 2)
-check("the refused turn is recorded too", rows[0].get("error_kind"), "policy_refusal")
-check("...on the provider that refused", rows[0].get("provider"), "claude")
-check("the retry is recorded on the target", rows[1].get("provider"), "gpt")
+# Indexed defensively: a mutation that drops a row should NAME the contract it
+# broke, not die with an IndexError and hide which one.
+check("the refused turn is recorded too",
+      rows[0].get("error_kind") if rows else "NO ROWS", "policy_refusal")
+check("...on the provider that refused",
+      rows[0].get("provider") if rows else "NO ROWS", "claude")
+check("the retry is recorded on the target",
+      rows[1].get("provider") if len(rows) > 1 else "MISSING ROW", "gpt")
 check("both are the same stage", {r["stage"] for r in rows}, {"prejudge"})
 check(
     "the two providers are billed separately",
