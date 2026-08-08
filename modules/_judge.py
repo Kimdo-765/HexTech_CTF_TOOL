@@ -442,6 +442,47 @@ def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
     return tokens, cost
 
 
+# Stored detail cap. Classification NEVER runs on the truncated string — a
+# real refusal arriving after 1000 characters of normal output was measured
+# being cut away and misfiled as a generic agent_error.
+_DETAIL_MAX_CHARS = 2000
+
+# `stop_reason` values that name the failure CATEGORY themselves. The ones
+# absent here (`turn_failed`, `refusal`) are the ambiguous kinds where the
+# adapter puts the actual reason in the message body, so those — and only
+# those — fall through to reading prose.
+_STOP_REASON_KIND = {
+    "timeout": "timeout",
+    "process_error": "transport_error",
+    "unexpected_eof": "transport_error",
+    "cancelled": "killed",
+    "canceled": "killed",
+}
+
+# Failure fields across the three adapters. `errors` is a LIST on the Claude
+# SDK ResultMessage and is where its parser puts the wire's error payload;
+# reading only scalars dropped it entirely. `stop_reason` is what GPT and Grok
+# carry — neither has `result` at all.
+_FAILURE_ATTRS = ("errors", "result", "error", "error_detail", "api_error_status")
+
+
+def _structured_failure_bits(msg: Any) -> list[str]:
+    """Authoritative failure strings the adapter/SDK set, in priority order."""
+    bits: list[str] = []
+    for attr in _FAILURE_ATTRS:
+        value = getattr(msg, attr, None)
+        if not value:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            bits.extend(str(v) for v in value if v)
+        else:
+            bits.append(str(value))
+    stop_reason = getattr(msg, "stop_reason", None)
+    if stop_reason:
+        bits.append(str(stop_reason))
+    return bits
+
+
 def _error_detail(msg: Any, parts: list[str]) -> str:
     """Failure detail from wherever THIS adapter actually puts it.
 
@@ -457,15 +498,11 @@ def _error_detail(msg: Any, parts: list[str]) -> str:
     error Result, and Grok does the same for ACP errors — so the text already
     accumulated in `parts` is a first-class source, not a fallback.
     """
-    bits: list[str] = []
-    for attr in ("result", "stop_reason", "error", "error_detail"):
-        value = getattr(msg, attr, None)
-        if value:
-            bits.append(str(value))
+    bits = _structured_failure_bits(msg)
     text = "".join(parts).strip()
     if text:
         bits.append(text)
-    return " | ".join(bits)[:1000]
+    return " | ".join(bits)[:_DETAIL_MAX_CHARS]
 
 
 def _classify(detail: str, fallback: str) -> str:
@@ -488,6 +525,57 @@ def _classify(detail: str, fallback: str) -> str:
     # WHERE it happened. Treat it as "not classified" and keep the caller's
     # more specific tag.
     return fallback if kind in (None, "", "unknown") else kind
+
+
+def classify_failure(msg: Any, parts: list[str], fallback: str) -> tuple[str, str]:
+    """(error_kind, detail) for a failed turn, structured signal FIRST.
+
+    Joining every source into one blob and classifying that was wrong in both
+    directions at once, and the two failures share a cause: prose and
+    structured fields were treated as interchangeable.
+
+      * A real refusal was HIDDEN. The blob was truncated to a fixed length
+        before classification, so a turn that produced 1000+ characters of
+        normal output before the server's block pushed the block's own words
+        past the cut — measured `agent_error` on text whose tail said
+        "violates our usage policy". Failover would not fire for the exact
+        case it exists for.
+      * A generic failure was POISONED. A judge analysing a challenge that
+        mentions a usage policy, followed by an unrelated `process_error`,
+        classified as `policy_refusal` — a spurious failover on a broken pipe.
+
+    So: structured sources are authoritative and are classified alone, before
+    any prose is consulted. `stop_reason` then names the CATEGORY for adapter
+    failures that carry no message of their own. Only the ambiguous kinds
+    (`turn_failed`, `refusal` — where the body carries the reason) fall
+    through to prose, and prose is read newest-first because the adapters emit
+    the failure detail as the LAST assistant message before the error result.
+
+    Classification always runs on the FULL text; truncation is for storage.
+    """
+    structured = _structured_failure_bits(msg)
+    detail = " | ".join(structured + ([("".join(parts)).strip()] if parts else []))
+    detail = detail.strip(" |")[:_DETAIL_MAX_CHARS]
+
+    # 1. The server's own message, when the adapter preserved one.
+    for src in structured:
+        kind = _classify(src, "")
+        if kind:
+            return kind, detail
+
+    # 2. stop_reason names the category for adapter-level failures.
+    stop_reason = str(getattr(msg, "stop_reason", "") or "").strip().lower()
+    if stop_reason in _STOP_REASON_KIND:
+        return _STOP_REASON_KIND[stop_reason], detail
+
+    # 3. Ambiguous or absent stop_reason: the reason is in the body. Newest
+    #    part first — the adapter's failure detail is emitted last.
+    for part in reversed([p for p in parts if p and p.strip()]):
+        kind = _classify(part, "")
+        if kind:
+            return kind, detail
+
+    return fallback, detail
 
 
 def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
@@ -623,9 +711,8 @@ async def _run_judge_turn(
                         res.session_id = captured_sid
                         res.tokens, res.reported_cost = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            detail = _error_detail(msg, parts)
-                            res.error_kind = _classify(detail, "agent_error")
-                            res.error_detail = detail[:500]
+                            res.error_kind, res.error_detail = classify_failure(
+                                msg, parts, "agent_error")
                             return res
                         break
         except Exception as exc:
@@ -681,9 +768,8 @@ async def _run_judge_turn(
                         res.session_id = captured_sid
                         res.tokens, res.reported_cost = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            detail = _error_detail(msg, parts)
-                            res.error_kind = _classify(detail, "agent_error")
-                            res.error_detail = detail[:500]
+                            res.error_kind, res.error_detail = classify_failure(
+                                msg, parts, "agent_error")
                             return res
                         break
         except Exception as exc:
@@ -733,9 +819,8 @@ async def _run_judge_turn(
                 res.session_id = captured_sid
                 res.tokens, res.reported_cost = _usage_from_result(msg)
                 if getattr(msg, "is_error", False):
-                    detail = _error_detail(msg, parts)
-                    res.error_kind = _classify(detail, "agent_error")
-                    res.error_detail = detail[:500]
+                    res.error_kind, res.error_detail = classify_failure(
+                        msg, parts, "agent_error")
                     return res
                 break
     except Exception as exc:

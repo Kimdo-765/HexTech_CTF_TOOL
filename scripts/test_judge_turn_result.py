@@ -368,37 +368,83 @@ try:
 finally:
     GK.GrokACPClient = _orig_grok_client
 
-# ---- known tradeoff, pinned deliberately ------------------------------------
-# The accumulated Assistant text is a classification input because that is
-# where the adapters put the failure BODY (codex_cli formats it as
-# "[Codex CLI {stop_reason}] {detail}" — stop_reason names the category, the
-# text carries the server's message). The cost is that a judge which produced
-# analysis prose before erroring could have that prose classified.
-#
-# This is bounded: the path is reachable only when is_error is True, and the
-# stage-4 ladder tries each recovery at most once per job. Pinned here so it
-# is a decision rather than an accident — if it ever misfires, this is the
-# test to change.
+# ---- turn 0019: structured signal FIRST, and never classify a truncated blob
+# Joining every source into one blob and classifying that was wrong in BOTH
+# directions at once, from the same cause — prose and structured fields were
+# treated as interchangeable.
+AUP = "request violates our usage policy"
+
+# D1: the Claude SDK puts the wire's error payload in `errors`, a LIST.
+# Reading only scalar attributes dropped it, so a Claude refusal — the exact
+# thing stage 4 exists to fail over on — came back as a generic agent_error.
+# The attribute behaviour is checked with a duck-typed object so it runs
+# everywhere; the real SDK's CONTRACT is asserted separately, and only where
+# the real package is installed — a stub cannot testify about a real field.
+if not STUBBED:
+    import inspect as _inspect
+
+    from claude_agent_sdk import ResultMessage as SdkResult  # noqa: E402
+
+    _params = _inspect.signature(SdkResult).parameters
+    check("the real SDK ResultMessage HAS an `errors` field", "errors" in _params, True)
+    check("...and a `result` field (unlike GPT/Grok)", "result" in _params, True)
+
+_k, _d = J.classify_failure(_R(errors=[AUP]), [], "agent_error")
+check("D1 the SDK's `errors` list is classified", _k, "policy_refusal")
+check("D1 and lands in the stored detail", "usage policy" in _d, True)
+
+# D2a: a real refusal must not be TRUNCATED AWAY. The adapter emits normal
+# output first and the failure detail last, so a long turn pushed the block's
+# own words past a fixed cut and it was filed as agent_error.
+_long = J.classify_failure(
+    RealGptResult(is_error=True, stop_reason="turn_failed", session_id="s"),
+    ["ordinary judge analysis " * 60, "[Codex CLI turn_failed] " + AUP],
+    "agent_error",
+)
+check("D2a a refusal after 1000+ chars of output is still found", _long[0], "policy_refusal")
+
+# D2b: a generic failure must not be POISONED. `process_error` names its own
+# category, so prose that merely discusses policy cannot override it — that
+# would be a spurious failover on a broken pipe.
+_poison = J.classify_failure(
+    RealGptResult(is_error=True, stop_reason="process_error", session_id="s"),
+    ["The challenge description discusses a usage policy.",
+     "[Codex CLI exited 1] broken pipe"],
+    "agent_error",
+)
+check("D2b a process_error is NOT poisoned into a refusal", _poison[0], "transport_error")
+
+# The cases that already worked must keep working.
+check(
+    "a short refusal is still classified",
+    J.classify_failure(
+        RealGptResult(is_error=True, stop_reason="turn_failed", session_id="s"),
+        ["[Codex CLI turn_failed] " + AUP], "agent_error")[0],
+    "policy_refusal",
+)
+check(
+    "stop_reason=timeout names its own category",
+    J.classify_failure(
+        RealGptResult(is_error=True, stop_reason="timeout", session_id="s"),
+        ["[Codex CLI turn timed out]"], "agent_error")[0],
+    "timeout",
+)
+check(
+    "an unrecognised failure keeps the caller's fallback",
+    J.classify_failure(
+        RealGptResult(is_error=True, stop_reason="turn_failed", session_id="s"),
+        ["something odd happened"], "agent_error")[0],
+    "agent_error",
+)
+
+# A SUCCESSFUL turn is never classified at all, so ordinary judge output that
+# discusses policy can never trigger a failover.
 _orig_gpt_client2 = GA.GptAgentClient
 SETTINGS.write_text(json.dumps({"agent_provider": "gpt", "gpt_model": "gpt-5.6"}))
 try:
     GA.GptAgentClient = _fake_client([
         RealGptAssistant(content=[RealGptText(
-            'the script would breach the target site usage policy'
-        )]),
-        RealGptResult(is_error=True, stop_reason="turn_failed", session_id="gs1"),
-    ])
-    amb = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
-    check(
-        "analysis prose in a FAILED turn is classified from the text (known tradeoff)",
-        amb.error_kind,
-        "policy_refusal",
-    )
-    # ...but a turn that did NOT error is never classified at all, so ordinary
-    # judge output mentioning policy can never trigger a failover.
-    GA.GptAgentClient = _fake_client([
-        RealGptAssistant(content=[RealGptText(
-            'the script would breach the target site usage policy'
+            "the script would breach the target site usage policy"
         )]),
         RealGptResult(session_id="gs1"),
     ])
