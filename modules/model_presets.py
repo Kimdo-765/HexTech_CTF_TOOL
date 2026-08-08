@@ -1,44 +1,34 @@
-"""Named per-role model presets (operator-configurable).
+"""Provider-scoped, named per-role model presets.
 
-The operator can save several NAMED presets — each mapping a small set of
-non-main agent roles to a model id — and activate one at a time. A job in
-flight resolves each configurable role's model against the ACTIVE preset;
-an empty/absent entry means "inherit the role's existing default" (judge
-follows main; report/monitor keep their cheap constant).
+Claude, Grok and GPT each keep an independent set of named presets and an
+independent active selection.  A running role resolves only against the
+active preset for its provider, so switching provider never leaks a model id
+from another model family into the new job.
 
-Stored in ``/data/model_presets.json`` (mounted on both api + worker),
-deliberately kept OUT of the flat settings.json SCHEMA because it's a
-nested structure the ``(key, env, type, default)`` schema can't hold
-cleanly.
+Stored in ``/data/model_presets.json`` (mounted on both api + worker), outside
+the flat settings schema because this is nested operator-managed data.
 
-Shape::
+Canonical shape (version 2)::
 
     {
-      "active": "max-quality",              # "" = no preset active
-      "presets": {
-        "max-quality": {"judge": "claude-opus-4-8", "report": "", "monitor": ""},
-        "budget":      {"judge": "claude-sonnet-4-6",
-                        "report": "claude-haiku-4-5",
-                        "monitor": "claude-haiku-4-5"}
+      "version": 2,
+      "providers": {
+        "claude": {
+          "active": "quality",
+          "presets": {
+            "quality": {"main": "claude-opus-5", "judge": "...", ...}
+          }
+        },
+        "grok": {"active": "", "presets": {}},
+        "gpt": {"active": "budget", "presets": {"budget": {...}}}
       }
     }
 
-Configurable roles:
-  - ``judge``    — orchestrator quality gate (prejudge / postjudge / supervise /
-                   retry-reviewer via ``resolve_judge_model``) AND the judge
-                   subagent; default = follow main / LATEST_JUDGE_MODEL.
-  - ``recon``    — read-only static-investigation subagent; default = follow spawner.
-  - ``debugger`` — dynamic-analysis (gdb/strace/qemu) subagent; default = follow spawner.
-  - ``triage``   — candidate-vuln verifier subagent; default = follow spawner.
-  - ``report``   — terminal findings.json transform; default = follow main.
-  - ``monitor``  — live progress narrator; default = MONITOR_MODEL (cheap).
-
-``main`` is deliberately excluded — that's the per-job model picker / global
-``claude_model`` setting. NB: ``recon`` / ``debugger`` / ``triage`` normally
-share their spawner's model for CACHE-PREFIX ALIGNMENT; pinning them to a
-different model is a valid operator choice but sacrifices that cache locality
-(higher cost / latency), so the UI flags it. A blank role entry keeps the
-current follow-spawner behavior.
+Version-1 files used the flat ``{"active": ..., "presets": ...}`` shape.
+Recognizable model ids determine their provider; inherited/custom-only stores
+fall back to the provider currently selected in Settings.  A legacy PUT
+updates the currently selected provider only, preserving the other version-2
+provider stores.
 """
 from __future__ import annotations
 
@@ -52,33 +42,52 @@ MODEL_PRESETS_PATH = Path(
     os.environ.get("MODEL_PRESETS_PATH", "/data/model_presets.json")
 )
 
+MODEL_PROVIDERS: tuple[str, ...] = ("claude", "grok", "gpt")
+
 # Roles the operator may pin to a model. Order = UI display order.
-# "main" = the main CTF agent's model; a blank slot inherits the per-job picker /
-# global `claude_model` setting. The remaining roles fold over their own base.
 CONFIGURABLE_ROLES: tuple[str, ...] = (
     "main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor",
 )
 
-# Reasoning-effort levels a preset may pin for the MAIN session (mirrors the
-# global `claude_effort` Setting; "" = inherit). Not a model — handled separately.
-VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+# Union accepted by all providers. Provider-specific catalogs in the UI show
+# the useful subset; the backend accepts the union so saved future model
+# capabilities are not destroyed by an older server.
+VALID_EFFORTS: tuple[str, ...] = (
+    "none", "minimal", "low", "medium", "high", "xhigh", "max",
+)
 
 _lock = threading.Lock()
 
 
-def _empty_store() -> dict[str, Any]:
+def _empty_provider_store() -> dict[str, Any]:
     return {"active": "", "presets": {}}
 
 
-def _normalize(data: Any) -> dict[str, Any]:
-    """Coerce arbitrary input into the canonical store shape.
+def _empty_store() -> dict[str, Any]:
+    return {
+        "version": 2,
+        "providers": {provider: _empty_provider_store() for provider in MODEL_PROVIDERS},
+    }
 
-    Drops malformed preset names / role maps, keeps only CONFIGURABLE_ROLES
-    (each a stripped string; "" = inherit), and clears an ``active`` that
-    doesn't name a surviving preset.
-    """
+
+def _provider_name(provider: str | None = None) -> str:
+    """Normalize an explicit provider or fall back to live Settings."""
+    value = str(provider or "").strip().lower()
+    if value in MODEL_PROVIDERS:
+        return value
+    try:
+        from modules.agent_provider import active_provider
+
+        value = str(active_provider() or "").strip().lower()
+    except Exception:
+        value = "claude"
+    return value if value in MODEL_PROVIDERS else "claude"
+
+
+def _normalize_provider_store(data: Any) -> dict[str, Any]:
+    """Validate one provider's ``{active, presets}`` bucket."""
     if not isinstance(data, dict):
-        return _empty_store()
+        return _empty_provider_store()
     presets_in = data.get("presets") or {}
     presets: dict[str, dict[str, str]] = {}
     if isinstance(presets_in, dict):
@@ -89,17 +98,81 @@ def _normalize(data: Any) -> dict[str, Any]:
                 continue
             clean: dict[str, str] = {}
             for role in CONFIGURABLE_ROLES:
-                v = roles.get(role, "")
-                clean[role] = str(v).strip() if v not in (None, "") else ""
-            # effort is NOT a model — validate against the allowed levels.
-            ev = roles.get("effort", "")
-            evs = str(ev).strip().lower() if ev not in (None, "") else ""
-            clean["effort"] = evs if evs in VALID_EFFORTS else ""
+                value = roles.get(role, "")
+                clean[role] = (
+                    str(value).strip() if value not in (None, "") else ""
+                )
+            effort = roles.get("effort", "")
+            effort = (
+                str(effort).strip().lower() if effort not in (None, "") else ""
+            )
+            clean["effort"] = effort if effort in VALID_EFFORTS else ""
             presets[name.strip()] = clean
     active = str(data.get("active") or "").strip()
     if active and active not in presets:
         active = ""
     return {"active": active, "presets": presets}
+
+
+def _is_provider_store(data: Any) -> bool:
+    return isinstance(data, dict) and (
+        "providers" in data or data.get("version") == 2
+    )
+
+
+def _infer_legacy_provider(data: dict[str, Any]) -> str | None:
+    """Infer a v1 store's provider from known model-id families.
+
+    Most pre-v2 files contain Claude ids and should stay with Claude even if
+    Settings happens to be on GPT during the upgrade. Unknown/custom-only or
+    completely inherited presets remain ambiguous and fall back to Settings.
+    """
+    counts = {provider: 0 for provider in MODEL_PROVIDERS}
+    presets = data.get("presets") or {}
+    if not isinstance(presets, dict):
+        return None
+    for roles in presets.values():
+        if not isinstance(roles, dict):
+            continue
+        for role in CONFIGURABLE_ROLES:
+            model = str(roles.get(role) or "").strip().lower()
+            if model.startswith(("claude", "anthropic")):
+                counts["claude"] += 1
+            elif model.startswith("grok"):
+                counts["grok"] += 1
+            elif model.startswith(("gpt", "chatgpt", "o1", "o3", "o4")):
+                counts["gpt"] += 1
+    highest = max(counts.values(), default=0)
+    if highest <= 0:
+        return None
+    winners = [provider for provider, count in counts.items() if count == highest]
+    return winners[0] if len(winners) == 1 else None
+
+
+def _normalize(data: Any, legacy_provider: str | None = None) -> dict[str, Any]:
+    """Coerce version-2 or legacy input into the canonical store shape."""
+    out = _empty_store()
+    if not isinstance(data, dict):
+        return out
+    if _is_provider_store(data):
+        providers = data.get("providers")
+        if not isinstance(providers, dict):
+            return out
+        for provider in MODEL_PROVIDERS:
+            out["providers"][provider] = _normalize_provider_store(
+                providers.get(provider)
+            )
+        return out
+
+    # Legacy v1: the UI catalog followed the selected Settings provider, so
+    # that provider is the only lossless place to migrate the flat bucket.
+    provider = (
+        _provider_name(legacy_provider)
+        if legacy_provider is not None
+        else (_infer_legacy_provider(data) or _provider_name())
+    )
+    out["providers"][provider] = _normalize_provider_store(data)
+    return out
 
 
 def load_store() -> dict[str, Any]:
@@ -112,71 +185,87 @@ def load_store() -> dict[str, Any]:
 
 
 def save_store(store: Any) -> dict[str, Any]:
-    """Validate + atomically persist the whole store; return the stored view."""
-    norm = _normalize(store)
+    """Validate and atomically persist the store; return the stored view.
+
+    Version-2 requests replace the complete store. A legacy flat request
+    updates only the live provider bucket, so an old browser tab cannot erase
+    presets already saved for the other providers.
+    """
+    if _is_provider_store(store):
+        normalized = _normalize(store)
+    else:
+        provider = _provider_name()
+        normalized = load_store()
+        migrated = _normalize(store, legacy_provider=provider)
+        normalized["providers"][provider] = migrated["providers"][provider]
+
     MODEL_PRESETS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
         tmp = MODEL_PRESETS_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(norm, indent=2))
+        tmp.write_text(json.dumps(normalized, indent=2))
         tmp.replace(MODEL_PRESETS_PATH)
-    return norm
+    return normalized
 
 
-def get_role_model(role: str) -> str:
-    """Model id configured for ``role`` in the ACTIVE preset.
+def get_provider_store(provider: str | None = None) -> dict[str, Any]:
+    """Return the normalized preset bucket for one provider."""
+    selected = _provider_name(provider)
+    return load_store()["providers"].get(selected) or _empty_provider_store()
 
-    Returns "" when there's no active preset, the role is unset, or the role
-    isn't configurable — the caller then keeps its existing default.
-    """
+
+def get_role_model(role: str, provider: str | None = None) -> str:
+    """Model configured for ``role`` in the provider's active preset."""
     if role not in CONFIGURABLE_ROLES:
         return ""
-    store = load_store()
-    active = store.get("active") or ""
+    bucket = get_provider_store(provider)
+    active = bucket.get("active") or ""
     if not active:
         return ""
-    preset = (store.get("presets") or {}).get(active) or {}
-    v = preset.get(role, "")
-    return str(v).strip() if v else ""
+    preset = (bucket.get("presets") or {}).get(active) or {}
+    value = preset.get(role, "")
+    return str(value).strip() if value else ""
 
 
-def get_preset_effort() -> str:
-    """Reasoning-effort level pinned by the ACTIVE preset, or "" when there's no
-    active preset / the effort slot is unset. The caller keeps its own default."""
-    store = load_store()
-    active = store.get("active") or ""
+def get_preset_effort(provider: str | None = None) -> str:
+    """Effort pinned by the provider's active preset, or ``""``."""
+    bucket = get_provider_store(provider)
+    active = bucket.get("active") or ""
     if not active:
         return ""
-    preset = (store.get("presets") or {}).get(active) or {}
-    e = str(preset.get("effort", "") or "").strip().lower()
-    return e if e in VALID_EFFORTS else ""
+    preset = (bucket.get("presets") or {}).get(active) or {}
+    effort = str(preset.get("effort", "") or "").strip().lower()
+    return effort if effort in VALID_EFFORTS else ""
 
 
-def resolve_role_model(role: str, fallback: str) -> str:
-    """Active preset's model for ``role``, else ``fallback`` (the role's
-    existing default behavior). Never raises.
+def resolve_role_model(
+    role: str,
+    fallback: str,
+    provider: str | None = None,
+) -> str:
+    """Active provider preset's role model, else ``fallback``.
 
-    When Settings ``agent_provider=grok`` (or claude), a preset entry from
-    the *other* family is coerced to the active provider's default so
-    judge/reviewer/report/monitor never call Claude while Grok is selected
-    (and vice versa).
+    The result is coerced to the same provider family as a final safety net.
+    Supplying ``provider`` is useful for work attached to an existing job;
+    otherwise the current Settings provider is used.
     """
+    selected = _provider_name(provider)
     try:
-        m = get_role_model(role)
-        if m:
-            resolved = m
-        else:
-            resolved = fallback
+        configured = get_role_model(role, selected)
+        resolved = configured or fallback
     except Exception:
         resolved = fallback
     try:
         from modules.agent_provider import coerce_model_for_provider
-        return coerce_model_for_provider(resolved)
+
+        return coerce_model_for_provider(resolved, selected)
     except Exception:
         return resolved
 
 
 def view() -> dict[str, Any]:
-    """Public view for the UI: the store plus the configurable-role list."""
+    """Public UI view, including supported providers/roles/efforts."""
     store = load_store()
+    store["model_providers"] = list(MODEL_PROVIDERS)
     store["configurable_roles"] = list(CONFIGURABLE_ROLES)
+    store["valid_efforts"] = list(VALID_EFFORTS)
     return store

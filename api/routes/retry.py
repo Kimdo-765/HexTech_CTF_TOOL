@@ -1,7 +1,7 @@
 """Retry-with-hint endpoint.
 
 Given an existing job whose exploit/solver failed (or finished without a
-flag), spin up a quick Claude turn that:
+flag), spin up a quick reviewer turn on the selected agent provider that:
 
 1. Reads the original description, run.log, exploit.py / solver.py,
    their stdout/stderr, plus 1-2 key source files.
@@ -104,9 +104,9 @@ def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
 
 router = APIRouter()
 
-# Reviewer shares the same "latest model" pin as the in-runner judge —
-# both are short, no-tools Claude calls and we want to upgrade them in
-# lockstep. Single source of truth lives in modules._common.
+# Reviewer shares the same "latest model" pin as the in-runner judge. Provider
+# coercion below replaces that Claude-family fallback when GPT/Grok is active.
+# The single source of truth lives in modules._common.
 LATEST_REVIEWER_MODEL = LATEST_JUDGE_MODEL
 
 # Always burn max extended-thinking budget on the reviewer. The hint is
@@ -343,6 +343,20 @@ def _reviewer_provider_and_model(model: str | None) -> tuple[str, str]:
     return provider, m
 
 
+def _resume_id_for_active_provider(meta: dict) -> str | None:
+    """Return the prior session id only when it belongs to today's backend."""
+    from modules.agent_provider import active_provider, normalize_provider
+
+    provider = active_provider()
+    previous = normalize_provider(meta.get("agent_provider"))
+    if provider != previous:
+        return None
+    if provider == "claude":
+        return meta.get("claude_session_id")
+    # GPT response ids and Grok ACP ids are provider-neutral in meta.
+    return meta.get("agent_session_id")
+
+
 async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
     """One-shot Grok reviewer (text only). Raises ReviewerError on failure.
 
@@ -396,17 +410,59 @@ async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
     return hint
 
 
+async def _ask_reviewer_gpt(framed_context: str, *, model: str) -> str:
+    """One-shot Codex OAuth / GPT Responses reviewer (text only)."""
+    from modules.gpt_agent import query_gpt_once
+
+    prompt = framed_context
+    if len(prompt) > 60_000:
+        prompt = prompt[:40_000] + "\n\n…[context truncated]…\n\n" + prompt[-18_000:]
+    try:
+        r = await asyncio.wait_for(
+            query_gpt_once(
+                prompt=prompt,
+                cwd="/tmp",
+                system_prompt=_REVIEWER_PROMPT,
+                model=model,
+                effort="medium",
+                timeout_s=float(_REVIEWER_WALL_CLOCK_S),
+                enable_tools=False,
+            ),
+            timeout=_REVIEWER_WALL_CLOCK_S + 30,
+        )
+    except asyncio.TimeoutError:
+        raise ReviewerError(
+            f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s; "
+            "not enqueuing a retry",
+            "timeout",
+        )
+    except Exception as e:
+        raw = str(e)
+        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+    if r.get("error"):
+        detail = str(r["error"])
+        raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
+    hint = (r.get("text") or "").strip()
+    diag = _diagnose_reviewer_text(hint)
+    if diag is not None:
+        kind, message = diag
+        raise ReviewerError(message, kind)
+    return hint
+
+
 async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
     when this raises.
 
-    Backend follows Settings ``agent_provider``: Grok jobs get a Grok
-    reviewer (never Claude weekly-quota on a Grok-selected stack).
+    Backend follows Settings ``agent_provider``: GPT and Grok use their
+    provider adapters; Claude keeps the historical SDK path.
     """
     provider, model = _reviewer_provider_and_model(model)
     framed_context = _frame_reviewer_context(context)
 
+    if provider == "gpt":
+        return await _ask_reviewer_gpt(framed_context, model=model)
     if provider == "grok":
         return await _ask_reviewer_grok(framed_context, model=model)
 
@@ -476,10 +532,29 @@ async def _ask_reviewer_streaming(
       - 'error'  : reviewer failed     -> {"message": "...", "kind": "..."}
 
     On 'error' the caller MUST stop and NOT enqueue a new job.
-    Backend follows Settings ``agent_provider`` (Grok → Grok ACP).
+    Backend follows Settings ``agent_provider`` (GPT → selected Codex/API runtime,
+    Grok → Grok ACP, Claude → Agent SDK).
     """
     provider, model = _reviewer_provider_and_model(model)
     framed_context = _frame_reviewer_context(context)
+
+    if provider == "gpt":
+        try:
+            hint = await _ask_reviewer_gpt(framed_context, model=model)
+        except ReviewerError as e:
+            yield "error", {"message": str(e), "kind": e.kind or "api_error"}
+            return
+        except Exception as e:
+            raw = str(e)
+            yield "error", {
+                "message": raw,
+                "kind": classify_agent_error(raw) or "api_error",
+            }
+            return
+        if hint:
+            yield "token", {"delta": hint}
+        yield "done", {"hint": hint}
+        return
 
     if provider == "grok":
         # Grok one-shot doesn't stream token deltas cleanly; emit one token
@@ -816,7 +891,10 @@ def _resubmit(
         # derives the project key from cwd; without copying the jsonl
         # into the *new* cwd's key directory, the fork attempt silently
         # fails (~2s exit 1, no init message).
-        prev_sid = prev_meta.get("claude_session_id")
+        prev_sid = (
+            prev_meta.get("claude_session_id")
+            if prev_meta.get("agent_provider") == "claude" else None
+        )
         if prev_sid:
             _carry_session_jsonl(prev_sid, prev_work, new_jd / "work")
         # The sentinel was carried into the new work tree by copytree —
@@ -886,9 +964,7 @@ def _resubmit(
     if prior_stopped or fresh_session or prior_aup_blocked:
         resume_sid = None
     else:
-        resume_sid = (
-            prev_meta.get("claude_session_id") if carry_work else None
-        )
+        resume_sid = _resume_id_for_active_provider(prev_meta) if carry_work else None
 
     meta = {
         "id": new_id,
@@ -1041,7 +1117,7 @@ def _continue_in_place(prev_meta: dict, comment: str,
 
     # Same cwd → the prior session jsonl is already under this cwd's project
     # key, so fork_session=True finds it without any carry step.
-    resume_sid = prev_meta.get("claude_session_id")
+    resume_sid = _resume_id_for_active_provider(prev_meta)
     cont_n = int(prev_meta.get("continue_count") or 0) + 1
     target, target_urls = _resolve_targets(target_override, prev_meta)
     auto_run = bool(prev_meta.get("auto_run"))
@@ -1135,6 +1211,7 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
     if require_claude_auth:
         apply_to_env()
         from modules.agent_provider import (
+            get_gpt_runtime,
             has_provider_auth,
             normalize_provider,
             provider_display_name,
@@ -1144,7 +1221,18 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
             prev_meta.get("agent_provider") or provider_for_job(safe)
         )
         if not has_provider_auth(provider):
-            if provider == "grok":
+            if provider == "gpt":
+                if get_gpt_runtime() == "codex":
+                    detail = (
+                        "no Codex ChatGPT OAuth configured (run `codex login` "
+                        "and mount the isolated HOST_CODEX_HOME)"
+                    )
+                else:
+                    detail = (
+                        "no OpenAI API key configured "
+                        "(Settings → OpenAI API key)"
+                    )
+            elif provider == "grok":
                 detail = (
                     "no Grok/xAI auth configured (Settings → xAI API key, "
                     "or `grok login` with ~/.grok mounted)"
@@ -1405,7 +1493,7 @@ async def continue_with_comment(job_id: str, request: Request):
         "job_id": new_id,
         "status": "queued",
         "continued": True,
-        "resumed_session": bool(prev_meta.get("claude_session_id")),
+        "resumed_session": bool(_resume_id_for_active_provider(prev_meta)),
     }
 
 

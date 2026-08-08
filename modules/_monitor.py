@@ -364,6 +364,18 @@ def _prefer_grok_narration(model: str) -> bool:
     return False
 
 
+def _prefer_gpt_narration(model: str) -> bool:
+    """True when the selected stack/model is OpenAI GPT."""
+    m = (model or "").strip().lower()
+    if m.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return True
+    try:
+        from modules.agent_provider import active_provider, has_openai_auth
+        return active_provider() == "gpt" and has_openai_auth()
+    except Exception:
+        return False
+
+
 async def _narrate_claude(signal_lines: list[str], model: str) -> dict:
     try:
         from claude_agent_sdk import ClaudeAgentOptions, query
@@ -433,6 +445,32 @@ async def _narrate_grok(signal_lines: list[str], model: str | None = None) -> di
     return _parse_narration_json(r.get("text") or "")
 
 
+async def _narrate_gpt(signal_lines: list[str], model: str | None = None) -> dict:
+    """Narrate via the selected Codex OAuth / GPT API runtime (text-only)."""
+    try:
+        from modules.gpt_agent import query_gpt_once
+        from modules.agent_provider import default_model_for
+    except Exception:
+        return {}
+    gpt_model = (model or "").strip()
+    if not gpt_model or gpt_model.lower().startswith(("claude", "grok")):
+        gpt_model = default_model_for("gpt")
+    prompt = "SIGNAL LINES:\n" + "\n".join(signal_lines[-12:])
+    try:
+        r = await query_gpt_once(
+            prompt=prompt,
+            cwd="/tmp",
+            system_prompt=_narrate_sys_prompt(),
+            model=gpt_model,
+            effort="low",
+            timeout_s=float(_NARRATE_TIMEOUT_S),
+            enable_tools=False,
+        )
+    except Exception:
+        return {}
+    return {} if r.get("error") else _parse_narration_json(r.get("text") or "")
+
+
 async def _narrate(signal_lines: list[str], model: str) -> dict:
     """Return {lang: one-line summary} for the batch, or {} on any failure.
 
@@ -444,15 +482,21 @@ async def _narrate(signal_lines: list[str], model: str) -> dict:
     if not signal_lines:
         return {}
 
+    prefer_gpt = _prefer_gpt_narration(model)
     prefer_grok = _prefer_grok_narration(model)
-    # Strict: Grok provider → Grok only. Claude provider → Claude then Grok.
-    if prefer_grok:
+    # Selected non-Claude providers are strict; Claude keeps its Grok escape
+    # hatch for historical weekly-limit failures.
+    if prefer_gpt:
+        order = ("gpt",)
+    elif prefer_grok:
         order = ("grok",)
     else:
         order = ("claude", "grok")
     for backend in order:
         try:
-            if backend == "grok":
+            if backend == "gpt":
+                out = await _narrate_gpt(signal_lines, model)
+            elif backend == "grok":
                 out = await _narrate_grok(signal_lines, model)
             else:
                 out = await _narrate_claude(signal_lines, model)
@@ -539,21 +583,47 @@ def _statefile(job_id: str) -> Path:
 
 
 async def run_monitor(job_id: str, model: str | None = None) -> None:
+    # GPT exposes the deterministic Timeline instead of the LLM narrator.
+    # Keep this gate inside the task as a final guard against direct callers;
+    # Claude/Grok continue through the historical monitor path unchanged.
+    if not _monitor_enabled_for_job(job_id):
+        return
+
+    # Settings-managed provider keys live in settings.json, not necessarily in
+    # the API process environment. Mirror them before selecting/narrating with
+    # a provider so GPT works immediately after saving the key in the UI.
+    try:
+        from modules.settings_io import apply_to_env
+        apply_to_env()
+    except Exception:
+        pass
+
     # Active model-preset can override the cheap sonnet default for the
     # monitor role; empty preset entry → MONITOR_MODEL. An explicit
     # caller-supplied `model` still wins over both.
+    try:
+        from modules.agent_provider import provider_for_job
+        provider = provider_for_job(job_id)
+    except Exception:
+        provider = None
     if model is None:
         try:
             from modules.model_presets import resolve_role_model
-            model = resolve_role_model("monitor", MONITOR_MODEL)
+            model = resolve_role_model("monitor", MONITOR_MODEL, provider)
         except Exception:
             model = MONITOR_MODEL
     model = model or MONITOR_MODEL
-    # When the CTF job runs on Grok (or Claude is weekly-limited), pin a Grok
-    # model id so _narrate prefers the Grok backend and produces real ko lines.
+    # Pin the selected provider's model family so narration never falls back
+    # into another provider merely because MONITOR_MODEL defaults to Claude.
     try:
-        from modules.agent_provider import active_provider, has_grok_auth
-        if active_provider() == "grok" and has_grok_auth():
+        from modules.agent_provider import (
+            active_provider, default_model_for, has_grok_auth, has_openai_auth,
+        )
+        provider = provider or active_provider()
+        if provider == "gpt" and has_openai_auth():
+            if not str(model).lower().startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+                model = os.environ.get("MONITOR_GPT_MODEL", default_model_for("gpt"))
+        elif provider == "grok" and has_grok_auth():
             if not str(model).lower().startswith("grok"):
                 model = os.environ.get("MONITOR_GROK_MODEL", "grok-4.5")
     except Exception:
@@ -703,6 +773,24 @@ async def run_monitor(job_id: str, model: str | None = None) -> None:
 _TASKS: dict[str, "asyncio.Task"] = {}
 
 
+def _monitor_enabled_for_job(job_id: str) -> bool:
+    """Return False only for GPT jobs, whose Timeline replaces Monitor.
+
+    Older retry metadata can briefly omit ``agent_provider`` before the worker
+    starts. Follow ``retry_of`` only in that narrow case. Missing/legacy
+    metadata otherwise preserves the existing Claude/Grok monitor behavior.
+    """
+    safe = Path(job_id).name
+    meta = _read_json(JOBS_DIR / safe / "meta.json")
+    provider = str(meta.get("agent_provider") or "").strip().lower()
+    if not provider:
+        parent = str(meta.get("retry_of") or "").strip()
+        if parent:
+            prior = _read_json(JOBS_DIR / Path(parent).name / "meta.json")
+            provider = str(prior.get("agent_provider") or "").strip().lower()
+    return provider != "gpt"
+
+
 def _is_terminal(job_id: str) -> bool:
     """True if the job's meta.status is a terminal state (the run is over)."""
     meta = _read_json(JOBS_DIR / Path(job_id).name / "meta.json")
@@ -712,7 +800,7 @@ def _is_terminal(job_id: str) -> bool:
 def ensure_monitor(job_id: str) -> None:
     """Start a monitor task for job_id if none is alive. Idempotent.
     Must be called from within the API's asyncio loop."""
-    if not MONITOR_ENABLED or not job_id:
+    if not MONITOR_ENABLED or not job_id or not _monitor_enabled_for_job(job_id):
         return
     t = _TASKS.get(job_id)
     if t is not None and not t.done():
@@ -756,7 +844,9 @@ def _scan_running() -> list[str]:
             status = meta.get("status")
             # a job is worth monitoring while it has a non-terminal status AND
             # a run.log has begun (skip queued jobs that haven't started).
-            if status and status not in _TERMINAL and (d / "run.log").exists():
+            if (status and status not in _TERMINAL
+                    and (d / "run.log").exists()
+                    and _monitor_enabled_for_job(d.name)):
                 out.append(d.name)
     except Exception:
         return out

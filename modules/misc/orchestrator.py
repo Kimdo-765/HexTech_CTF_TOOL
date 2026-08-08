@@ -149,6 +149,51 @@ async def _claude_summary(
     provider = active_provider()
     summary: dict = {"messages": 0, "tool_calls": 0, "agent_provider": provider}
 
+    # ---- OpenAI GPT path --------------------------------------------------
+    if provider == "gpt":
+        from modules.gpt_agent import (
+            GptAgentClient,
+            GptSessionOptions,
+            AssistantMessage as GptAM,
+            ResultMessage as GptRM,
+        )
+        _log(job_id, f"Launching {provider_display_name('gpt')} summary agent (model={model})")
+        opts = GptSessionOptions(
+            system_prompt=SYSTEM_PROMPT,
+            model=model,
+            cwd=str(work_dir),
+            effort=resolve_effort(read_meta(job_id).get("effort")),
+            env={
+                "JOB_ID": job_id,
+                "TMPDIR": _tmp_str,
+                "TMP": _tmp_str,
+                "TEMP": _tmp_str,
+            },
+            enable_tools=True,
+            enable_subagents=True,
+        )
+        async with GptAgentClient(opts) as client:
+            await client.query(prompt)
+            async for msg in client.receive_response():
+                capture_session_id(msg, job_id)
+                agent_heartbeat(job_id, msg)
+                if isinstance(msg, GptAM):
+                    summary["messages"] += 1
+                    for block in (getattr(msg, "content", None) or []):
+                        if type(block).__name__ == "TextBlock":
+                            _log(job_id, f"AGENT: {(getattr(block, 'text', '') or '')[:500]}")
+                        elif type(block).__name__ == "ToolUseBlock":
+                            summary["tool_calls"] += 1
+                            _log(job_id, f"TOOL {getattr(block, 'name', '?')}")
+                elif isinstance(msg, GptRM):
+                    summary["result"] = {
+                        "duration_ms": getattr(msg, "duration_ms", None),
+                        "num_turns": getattr(msg, "num_turns", None),
+                        "total_cost_usd": getattr(msg, "total_cost_usd", None),
+                        "is_error": bool(getattr(msg, "is_error", False)),
+                    }
+        return summary
+
     # ---- Grok path --------------------------------------------------------
     if provider == "grok":
         from modules.grok_acp import (

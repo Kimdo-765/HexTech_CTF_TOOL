@@ -6,6 +6,7 @@ Precedence: settings file > env var > default.
 Sensitive values (api keys, auth tokens) are returned masked from
 get_settings_view() — full values stay on disk.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,7 @@ SETTINGS_PATH = Path(os.environ.get("SETTINGS_PATH", "/data/settings.json"))
 
 # Allowed values for agent_provider. Keep in sync with the Settings UI and
 # modules/agent_provider.py.
-AGENT_PROVIDERS = ("claude", "grok")
+AGENT_PROVIDERS = ("claude", "grok", "gpt")
 
 # (key, env_fallback, type, default)
 SCHEMA: list[tuple[str, str | None, type, Any]] = [
@@ -35,6 +36,12 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     ("xai_api_key", "XAI_API_KEY", str, ""),
     ("grok_model", "GROK_MODEL", str, "grok-build"),
     ("grok_effort", "GROK_EFFORT", str, ""),
+    # GPT provider. Codex CLI + ChatGPT OAuth is the default; the direct
+    # Responses API remains an explicit usage-billed fallback.
+    ("gpt_runtime", "GPT_RUNTIME", str, "codex"),
+    ("openai_api_key", "OPENAI_API_KEY", str, ""),
+    ("gpt_model", "GPT_MODEL", str, "gpt-5.6-sol"),
+    ("gpt_effort", "GPT_EFFORT", str, "medium"),
     ("auth_token", "AUTH_TOKEN", str, ""),
     ("job_ttl_days", "JOB_TTL_DAYS", int, 7),
     ("job_timeout_seconds", "JOB_TIMEOUT", int, 900),
@@ -94,7 +101,7 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # library has several curated entries the operator trusts.
     ("enable_exploit_library_hint", "ENABLE_EXPLOIT_LIBRARY_HINT", bool, False),
 ]
-_MEM_SUFFIX = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+_MEM_SUFFIX = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 
 
 def parse_mem_limit(value: Any) -> int:
@@ -146,7 +153,12 @@ def _host_mem_total_bytes() -> int:
     return 0
 
 
-_SECRET_KEYS = {"anthropic_api_key", "xai_api_key", "auth_token"}
+_SECRET_KEYS = {
+    "anthropic_api_key",
+    "xai_api_key",
+    "openai_api_key",
+    "auth_token",
+}
 
 _lock = threading.Lock()
 
@@ -218,7 +230,7 @@ def apply_to_env() -> None:
     can change the key via the UI and the next job picks it up without a
     container restart.
 
-    For ANTHROPIC_API_KEY / XAI_API_KEY: a placeholder value (e.g.
+    For ANTHROPIC_API_KEY / XAI_API_KEY / OPENAI_API_KEY: a placeholder value (e.g.
     "sk-ant-..." or a value ending in "...") is treated as unset so the
     agent falls back to OAuth / browser credentials on disk.
     """
@@ -228,7 +240,7 @@ def apply_to_env() -> None:
         v = get_setting(key)
         if v in (None, ""):
             continue
-        if key in ("anthropic_api_key", "xai_api_key"):
+        if key in ("anthropic_api_key", "xai_api_key", "openai_api_key"):
             sv = str(v)
             if sv.startswith("sk-ant-...") or sv.endswith("..."):
                 os.environ.pop(env_key, None)
@@ -305,8 +317,61 @@ def has_grok_auth() -> bool:
     return has_xai_api_key() or has_grok_auth_file()
 
 
+def has_openai_api_key() -> bool:
+    """True if a real (non-placeholder) OpenAI API key is configured."""
+    v = str(get_setting("openai_api_key") or "")
+    return bool(v and not v.endswith("...") and v not in {"sk-...", "sk-proj-..."})
+
+
+def codex_auth_method() -> str:
+    """Return the non-secret auth mode from Codex's cache, if available.
+
+    The token payload is never returned or logged. Containers use file-backed
+    auth because a host OS keyring cannot be mounted into Docker.
+    """
+    candidates = [
+        Path(os.environ.get("CODEX_HOME", "") or "/nonexistent") / "auth.json",
+        Path("/root/.codex/auth.json"),
+        Path.home() / ".codex" / "auth.json",
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not candidate.is_file() or candidate.stat().st_size <= 0:
+                continue
+            data = json.loads(candidate.read_text())
+            mode = (
+                str(data.get("auth_mode") or data.get("authMode") or "unknown")
+                .strip()
+                .lower()
+            )
+            return mode or "unknown"
+        except Exception:
+            continue
+    return ""
+
+
+def has_codex_auth_file() -> bool:
+    return bool(codex_auth_method())
+
+
+def has_codex_oauth() -> bool:
+    """Whether a file-backed ChatGPT login is mounted for Codex CLI."""
+    mode = codex_auth_method()
+    return mode in {"chatgpt", "oauth", "chatgpt_oauth"}
+
+
+def get_gpt_runtime() -> str:
+    value = str(get_setting("gpt_runtime") or "codex").strip().lower()
+    return value if value in {"codex", "responses"} else "codex"
+
+
 def get_agent_provider() -> str:
-    """Return the active agent backend: ``claude`` or ``grok``.
+    """Return the active agent backend: ``claude``, ``grok`` or ``gpt``.
 
     Unknown / empty values fall back to ``claude`` so a typo in settings
     never silently disables the only fully-wired path.
@@ -317,8 +382,13 @@ def get_agent_provider() -> str:
 
 def has_active_agent_auth() -> bool:
     """Auth available for whichever provider Settings currently selects."""
-    if get_agent_provider() == "grok":
+    provider = get_agent_provider()
+    if provider == "grok":
         return has_grok_auth()
+    if provider == "gpt":
+        return (
+            has_codex_oauth() if get_gpt_runtime() == "codex" else has_openai_api_key()
+        )
     return has_claude_auth()
 
 
@@ -336,6 +406,9 @@ def get_settings_view() -> dict[str, Any]:
     out: dict[str, Any] = {
         "claude_oauth_detected": has_claude_oauth(),
         "grok_auth_detected": has_grok_auth_file(),
+        "codex_auth_detected": has_codex_auth_file(),
+        "codex_oauth_detected": has_codex_oauth(),
+        "codex_auth_method": codex_auth_method(),
         "agent_providers": list(AGENT_PROVIDERS),
     }
     for key, env_key, typ, default in SCHEMA:
@@ -343,7 +416,11 @@ def get_settings_view() -> dict[str, Any]:
         env_v = os.environ.get(env_key, "") if env_key else ""
         effective_raw = raw if raw not in (None, "") else env_v if env_v else default
         try:
-            effective = _coerce(effective_raw, typ) if effective_raw not in (None, "") else default
+            effective = (
+                _coerce(effective_raw, typ)
+                if effective_raw not in (None, "")
+                else default
+            )
         except (TypeError, ValueError):
             effective = effective_raw
         if key == "agent_provider":
@@ -352,6 +429,10 @@ def get_settings_view() -> dict[str, Any]:
             effective = str(effective or "claude").strip().lower()
             if effective not in AGENT_PROVIDERS:
                 effective = "claude"
+        if key == "gpt_runtime":
+            effective = str(effective or "codex").strip().lower()
+            if effective not in {"codex", "responses"}:
+                effective = "codex"
         if key in _SECRET_KEYS:
             out[f"{key}_set"] = bool(raw)
             out[f"{key}_env_set"] = bool(env_v)
@@ -359,8 +440,7 @@ def get_settings_view() -> dict[str, Any]:
         else:
             out[key] = effective
             out[f"{key}_source"] = (
-                "settings" if raw not in (None, "") else
-                "env" if env_v else "default"
+                "settings" if raw not in (None, "") else "env" if env_v else "default"
             )
     return out
 
@@ -384,6 +464,14 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
             if v not in AGENT_PROVIDERS:
                 raise ValueError(
                     f"agent_provider must be one of {AGENT_PROVIDERS}, got {val!r}"
+                )
+            cur[key] = v
+            continue
+        if key == "gpt_runtime":
+            v = str(val).strip().lower()
+            if v not in {"codex", "responses"}:
+                raise ValueError(
+                    f"gpt_runtime must be one of ('codex', 'responses'), got {val!r}"
                 )
             cur[key] = v
             continue

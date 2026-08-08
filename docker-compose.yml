@@ -70,6 +70,10 @@ x-worker-environment: &worker-environment
   # Grok Build binary lives under the mounted ~/.grok tree.
   PATH: /root/.grok/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   GROK_HOME: /root/.grok
+  # Codex CLI reads and refreshes HexTech's isolated ChatGPT OAuth cache.
+  # Never mount the operator's live ~/.codex here: this container runs as root
+  # and root-owned 0600 rewrites can break a concurrently running host TUI.
+  CODEX_HOME: /root/.codex
   # Default cap the docker shim injects into an agent-started container
   # that omits --memory (worker/docker_memguard.sh). Empty or 0 disables.
   CHAL_CONTAINER_MEM: ${CHAL_CONTAINER_MEM:-2g}
@@ -143,6 +147,11 @@ x-worker-service: &worker-service
     # host; set HOST_GROK_HOME if ~/.grok lives elsewhere. Not required when
     # using XAI_API_KEY / Settings xai_api_key instead.
     - ${HOST_GROK_HOME:-${HOME}/.grok}:/root/.grok
+    # Codex ChatGPT OAuth + persisted exec sessions. The default is a dedicated
+    # HexTech runtime home, bootstrapped from ~/.codex/auth.json by start.sh.
+    # It is deliberately NOT the operator's live ~/.codex: Codex runs as root
+    # here and would otherwise replace TUI config/session files as root-owned.
+    - ${HOST_CODEX_HOME:-./data/codex-home}:/root/.codex
   # Targeted seccomp profile so gdb/dynamic-analysis in the rev `debugger`
   # subagent can disable ASLR. gdb turns off per-inferior randomization via
   # personality(ADDR_NO_RANDOMIZE = 0x40000), which the DEFAULT Docker seccomp
@@ -184,6 +193,7 @@ services:
       # Grok binary for live monitor narration (and Settings auth status).
       PATH: /root/.grok/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       GROK_HOME: /root/.grok
+      CODEX_HOME: /root/.codex
       # Lift the SDK's per-turn output cap. The model still has its
       # own hard ceiling (Sonnet/Opus ~64k), so the agent picks
       # whatever its model supports rather than getting truncated
@@ -213,6 +223,10 @@ services:
       - ${HOST_CLAUDE_HOME:-${HOME}/.claude}:/root/.claude
       # Grok auth for Settings status + future Grok-driven jobs.
       - ${HOST_GROK_HOME:-${HOME}/.grok}:/root/.grok
+      # Isolated Codex OAuth/session cache for GPT reviewer/report/monitor.
+      # Sharing the operator's live ~/.codex rw is intentionally forbidden by
+      # the default because this root container can break a concurrent TUI.
+      - ${HOST_CODEX_HOME:-./data/codex-home}:/root/.codex
       # api needs the docker socket to kill sibling containers spawned by
       # workers when the user deletes a running job.
       - /var/run/docker.sock:/var/run/docker.sock

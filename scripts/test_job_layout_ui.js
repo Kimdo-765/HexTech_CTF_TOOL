@@ -65,6 +65,8 @@ const env = {
   logFindingsBlock: stub("findings"), resultBlock: stub("result"),
   monitorView: false, monitorLang: "ko", runlogTz: "utc", log: "l1\nl2",
   monitorFeedHTML: "", tokensPill: '<span class="tokens-pill"></span>',
+  isGptJob: false, activityView: "log", gptTimelineTools: false,
+  gptTimelineHTML: '<div class="STUB-gpt-timeline"></div>',
   _logSearch: {}, _localTzName: () => "KST", colorizeRunLog: (l) => l,
 };
 let html = "";
@@ -76,6 +78,25 @@ try {
 }
 t("the template evaluates", html.length > 0);
 const at = (needle) => html.indexOf(needle);
+
+const gptHtml = new Function(...Object.keys(env), `return ${tpl}`)(
+  ...Object.values({
+    ...env,
+    job: {...job, agent_provider: "gpt", agent_provider_label: "OpenAI Codex"},
+    isGptJob: true,
+    activityView: "timeline",
+  }),
+);
+t("Claude keeps the legacy log tabs", html.includes('data-action="view-log"')
+  && !html.includes('data-action="view-gpt-timeline"'));
+t("GPT gets its isolated Timeline tab", gptHtml.includes('data-action="view-gpt-timeline"')
+  && gptHtml.includes('class="gpt-timeline-feed"'));
+t("GPT has no narrator Monitor UI", !gptHtml.includes('data-action="view-gpt-monitor"')
+  && !gptHtml.includes('class="monitor-feed"')
+  && !gptHtml.includes('data-action="monitor-lang"'));
+t("Claude keeps its existing Monitor UI", html.includes('data-action="view-monitor"')
+  && html.includes('class="monitor-feed"')
+  && html.includes('data-action="monitor-lang"'));
 
 // -------------------------------------------------------------- structure
 console.log("\n--- the two columns, and what is in them -----------------");

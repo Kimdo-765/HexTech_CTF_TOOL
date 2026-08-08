@@ -6,14 +6,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Node + claude CLI — needed because the retry-with-hint endpoint runs
-# a quick Claude turn directly inside the api container. PINNED to >=2.1.156
+# Node + Claude/Codex CLIs — retry, judge, report and monitor turns may run
+# directly inside the api container. Claude is PINNED to >=2.1.156
 # (fixes the opus-4-8 thinking-block API 400); the SDK is made to use this
 # system CLI via the bundle-removal step after pip install below.
+ARG CODEX_CLI_VERSION=0.147.0
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g @anthropic-ai/claude-code@2.1.158
+ && npm install -g @anthropic-ai/claude-code@2.1.158 \
+                   "@openai/codex@${CODEX_CLI_VERSION}" \
+ && echo "Codex CLI = $(codex --version 2>&1)"
 
 COPY api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt

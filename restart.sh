@@ -60,6 +60,11 @@ ok()   { printf '%s[restart] OK:%s %s\n'   "$c_grn" "$c_off" "$*"; }
 cd "$PROJECT_DIR" 2>/dev/null || { err "project dir not found: $PROJECT_DIR"; exit 1; }
 [ -f docker-compose.yml ] || { err "no docker-compose.yml in $PROJECT_DIR"; exit 1; }
 [ -d data/jobs ] || warn "no data/jobs/ under $PROJECT_DIR — collector verify will be skipped"
+# Prefer this WSL distro's working snap Docker over a broken Docker Desktop
+# Windows shim that may appear earlier on PATH.
+if [ -x /snap/bin/docker ] && /snap/bin/docker info >/dev/null 2>&1; then
+  export PATH="/snap/bin:$PATH"
+fi
 log "project=$PROJECT  dir=$PROJECT_DIR  mode=$MODE  build=$BUILD"
 
 # --- run `docker compose` as the REAL user with the correct ~/.claude OAuth
@@ -72,12 +77,27 @@ REAL_USER="${SUDO_USER:-$(stat -c %U "$PROJECT_DIR" 2>/dev/null || id -un)}"
 REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)"; REAL_HOME="${REAL_HOME:-$HOME}"
 export HOST_CLAUDE_HOME="${HOST_CLAUDE_HOME:-$REAL_HOME/.claude}"
 export HOST_GROK_HOME="${HOST_GROK_HOME:-$REAL_HOME/.grok}"
+CODEX_LOGIN_HOME="$REAL_HOME/.codex"
+export HOST_CODEX_HOME="${HOST_CODEX_HOME:-$REAL_HOME/.codex-hextech}"
 log "compose user=$REAL_USER  HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME (claude.ai OAuth mount)"
 log "HOST_GROK_HOME=$HOST_GROK_HOME (Grok Build auth + binary mount)"
+log "HOST_CODEX_HOME=$HOST_CODEX_HOME (isolated HexTech Codex OAuth + sessions)"
 [ -f "$HOST_CLAUDE_HOME/.credentials.json" ] \
   || warn "no $HOST_CLAUDE_HOME/.credentials.json — worker will have NO OAuth token (run \`claude login\` as $REAL_USER)"
 [ -f "$HOST_GROK_HOME/auth.json" ] \
   || warn "no $HOST_GROK_HOME/auth.json — worker will have no Grok login (run \`grok login\` as $REAL_USER or set XAI_API_KEY)"
+if [ "$HOST_CODEX_HOME" = "$CODEX_LOGIN_HOME" ]; then
+  err "HOST_CODEX_HOME points at the live TUI home ($CODEX_LOGIN_HOME)."
+  err "Root containers can rewrite config.toml as root; use $REAL_HOME/.codex-hextech."
+  exit 2
+elif [ "$(id -un)" = "$REAL_USER" ]; then
+  bash scripts/init-codex-runtime-home.sh "$CODEX_LOGIN_HOME" "$HOST_CODEX_HOME"
+else
+  sudo -u "$REAL_USER" bash scripts/init-codex-runtime-home.sh \
+    "$CODEX_LOGIN_HOME" "$HOST_CODEX_HOME"
+fi
+[ -s "$HOST_CODEX_HOME/auth.json" ] \
+  || warn "no $HOST_CODEX_HOME/auth.json — run \`codex login\` as $REAL_USER, then restart again"
 dc() {
   if [ "$(id -un)" = "$REAL_USER" ]; then
     docker compose -p "$PROJECT" "$@"
@@ -85,6 +105,7 @@ dc() {
     sudo -u "$REAL_USER" env \
       "HOST_CLAUDE_HOME=$HOST_CLAUDE_HOME" \
       "HOST_GROK_HOME=$HOST_GROK_HOME" \
+      "HOST_CODEX_HOME=$HOST_CODEX_HOME" \
       docker compose -p "$PROJECT" "$@"
   fi
 }

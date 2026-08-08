@@ -7,7 +7,7 @@ router = APIRouter()
 
 @router.get("")
 def get_model_presets():
-    """Return the whole store: {active, presets, configurable_roles}."""
+    """Return all provider-scoped preset stores and UI metadata."""
     return view()
 
 
@@ -15,11 +15,13 @@ def get_model_presets():
 async def put_model_presets(request: Request):
     """Replace the whole store.
 
-    Body: ``{"active": "<name|>", "presets": {"<name>": {"judge": ...,
-    "report": ..., "monitor": ...}}}``. The UI manages add / rename / delete
-    / activate client-side, then PUTs the result. Unknown roles are dropped;
-    an ``active`` that names no preset is cleared; malformed input yields an
-    empty store rather than an error.
+    Version-2 body: ``{"version": 2, "providers": {"claude": {"active":
+    ..., "presets": ...}, "grok": ..., "gpt": ...}}``. The UI manages add /
+    rename / delete / activate client-side, then PUTs the result. Unknown
+    providers and roles are dropped; malformed buckets normalize to empty.
+
+    The legacy flat ``{"active": ..., "presets": ...}`` body remains
+    accepted and updates only the provider currently selected in Settings.
     """
     try:
         body = await request.json()

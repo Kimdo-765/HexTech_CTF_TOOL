@@ -20,6 +20,7 @@
         <span id="queue-info" title="busy/total workers · queued jobs">0/0 · 0 queued</span>
         <span id="ratelimit-chip" class="rl-chip" title="Claude account rate-limit status (subscription usage window)" hidden></span>
         <span id="grok-ratelimit-chip" class="rl-chip" title="Grok SuperGrok weekly usage pool (remaining %)" hidden></span>
+        <span id="codex-ratelimit-chip" class="rl-chip" title="OpenAI Codex ChatGPT OAuth usage pool (remaining %)" hidden></span>
         <span id="usage-pill" class="usage-pill" title="operator spend vs configured budget (Settings → Spend budget)" hidden></span>
         <span id="cost-total">$0.00</span>
         <button id="logout-btn" type="button" class="logout">logout</button>
@@ -78,7 +79,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -133,7 +134,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -188,7 +189,7 @@
         </label>
         <label class="checkbox">
           <input type="checkbox" name="skip_claude" />
-          Skip Claude summary (collection only)
+          Skip AI summary (collection only)
         </label>
         <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain disk/memory-image triage pass. Web & Pwn already do this by default.">
           <input type="checkbox" name="docker_challenge" />
@@ -200,7 +201,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -225,7 +226,7 @@
         <label>
           File (image / audio / pdf / archive / unknown blob) — <em>optional</em>
           <input type="file" name="file" />
-          <small style="color:var(--fg-muted)">Skip the file to run a description-only / Claude analysis (the misc tool sweep is skipped when no file is given).</small>
+          <small style="color:var(--fg-muted)">Skip the file to run a description-only agent analysis (the misc tool sweep is skipped when no file is given).</small>
         </label>
         <label>
           Steghide passphrase (optional)
@@ -237,7 +238,7 @@
         </label>
         <label class="checkbox">
           <input type="checkbox" name="skip_claude" />
-          Skip Claude summary (raw findings only)
+          Skip AI summary (raw findings only)
         </label>
         <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain file-triage pass. Web & Pwn already do this by default.">
           <input type="checkbox" name="docker_challenge" />
@@ -249,7 +250,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -309,7 +310,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -368,7 +369,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -428,7 +429,7 @@
           <small style="color:var(--fg-muted)">When set, ONLY flags of this prefix shape land in FLAG FOUND (local-test flags in another format are ignored).</small>
         </label>
         <label>
-          Claude model (blank = global Settings value)
+          Agent model (blank = global Settings value)
           <select name="model" data-role="model-select"></select>
         </label>
         <label>
@@ -553,8 +554,9 @@
           <legend>Agent provider</legend>
           <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.5rem">
             Which coding agent drives CTF jobs. Applies to the <strong>next</strong> job
-            (no restart). Claude uses the Claude Agent SDK; Grok uses Grok Build via ACP
-            (<code>grok agent stdio</code>).
+            (no restart). Claude uses the Claude Agent SDK; Grok uses Grok Build via ACP;
+            GPT uses Codex CLI with ChatGPT OAuth by default; direct Responses
+            API billing remains an explicit fallback.
           </p>
           <div class="provider-radios" id="agent-provider-radios">
             <label class="provider-card">
@@ -562,6 +564,7 @@
               <span class="provider-card-body">
                 <strong>Claude</strong>
                 <small>Claude Agent SDK · current default</small>
+                <small id="claude-provider-auth" class="provider-auth-badge">checking auth…</small>
               </span>
             </label>
             <label class="provider-card">
@@ -569,6 +572,15 @@
               <span class="provider-card-body">
                 <strong>Grok</strong>
                 <small>Grok Build · ACP / headless</small>
+                <small id="grok-provider-auth" class="provider-auth-badge">checking auth…</small>
+              </span>
+            </label>
+            <label class="provider-card">
+              <input type="radio" name="agent_provider" value="gpt" />
+              <span class="provider-card-body">
+                <strong>Codex / GPT</strong>
+                <small>OpenAI · ChatGPT OAuth agent</small>
+                <small id="gpt-provider-auth" class="provider-auth-badge">checking auth…</small>
               </span>
             </label>
           </div>
@@ -618,6 +630,37 @@
           <label>
             ...or type a custom Grok model id
             <input type="text" name="grok_model_custom" placeholder="grok-build / grok-4.5 / …" />
+          </label>
+        </div>
+
+        <div id="settings-gpt-block" class="provider-settings-block">
+          <h3 class="provider-block-title">OpenAI Codex / GPT credentials &amp; model</h3>
+          <label>
+            GPT runtime / billing mode
+            <select name="gpt_runtime">
+              <option value="codex">Codex CLI · ChatGPT OAuth (subscription)</option>
+              <option value="responses">Responses API · API key (usage billed)</option>
+            </select>
+            <small id="codex-oauth-status" style="color:var(--fg-muted)"></small>
+          </label>
+          <label>
+            OpenAI API Key (only for the Responses API fallback)
+            <input type="password" name="openai_api_key" placeholder="sk-proj-... (not needed for Codex OAuth)" autocomplete="new-password" />
+            <small id="openai-key-status" style="color:var(--fg-muted)"></small>
+          </label>
+          <label>
+            GPT model (global default)
+            <select name="gpt_model" data-role="gpt-model-select-settings"></select>
+            <small style="color:var(--fg-muted)">add a custom model with the field below if it's missing</small>
+          </label>
+          <label>
+            Reasoning effort (global default; Codex CLI or Responses API)
+            <select name="gpt_effort" data-role="gpt-effort-select-settings"></select>
+            <small style="color:var(--fg-muted)">Codex accepts minimal through xhigh; none/max are for the Responses fallback.</small>
+          </label>
+          <label>
+            ...or type a custom OpenAI model id
+            <input type="text" name="gpt_model_custom" placeholder="gpt-5.6 / gpt-5.6-terra / …" />
           </label>
         </div>
 
@@ -683,18 +726,21 @@
       </form>
 
       <div id="model-presets" class="preset-block">
-        <h3 style="margin-bottom:0.25rem">Model presets</h3>
+        <h3 style="margin-bottom:0.25rem">Provider model presets</h3>
         <p style="color:var(--fg-muted);font-size:0.85rem;margin-top:0">
-          Save named presets that pin per-agent models + reasoning effort, then
-          switch between them. Configurable: <code>main</code> (the CTF agent) and
+          Claude, Grok, and GPT each keep their own named presets and active
+          selection. Switching the job provider therefore switches to that
+          provider's active preset automatically. Presets pin per-agent models +
+          reasoning effort. Configurable: <code>main</code> (the CTF agent) and
           its <code>effort</code>, plus <code>judge</code> (prejudge / postjudge /
           stall-supervise + judge subagent), <code>reviewer</code> (the /retry hint
           reviewer, separately overridable), <code>recon</code>, <code>debugger</code>,
-          <code>triage</code>, <code>report</code>, <code>monitor</code>. A blank slot =
+          <code>triage</code>, <code>report</code>, and <code>monitor</code>
+          (Claude/Grok only; GPT uses its token-free Timeline). A blank slot =
           <em>inherit</em>: <code>main</code> + <code>effort</code> fall back to the
           per-job picker / global Settings values above; judge / report follow main;
           <code>reviewer</code> follows the judge slot (then main); recon / debugger /
-          triage follow main (cache-aligned); monitor keeps its cheap default. An
+          triage follow main (cache-aligned); Claude/Grok monitor keeps its cheap default. An
           explicit per-job model or effort still wins over the preset.
           <strong style="color:var(--yellow)">⚠ recon / debugger / triage</strong> normally
           share the main model for <em>cache-prefix alignment</em> — pinning them to a
@@ -702,9 +748,14 @@
           latency). Stored in <code>/data/model_presets.json</code>; applies to the
           next job.
         </p>
+        <div class="preset-provider-tabs" id="preset-provider-tabs" aria-label="Preset provider">
+          <button type="button" data-preset-provider="claude">Claude</button>
+          <button type="button" data-preset-provider="grok">Grok</button>
+          <button type="button" data-preset-provider="gpt">GPT</button>
+        </div>
         <div class="preset-row">
           <label style="flex:1;margin:0">
-            Active preset
+            Active preset for <strong id="preset-provider-label">Claude</strong>
             <select id="preset-active"></select>
           </label>
           <div class="preset-btns">
@@ -784,6 +835,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260808-gpt-timeline"></script>
 </body>
 </html>

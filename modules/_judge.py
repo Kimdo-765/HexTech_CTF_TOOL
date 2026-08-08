@@ -383,6 +383,7 @@ async def _run_judge_turn(
         continuity via ``resume`` / project-key under ``~/.claude``)
       * grok   — ``GrokACPClient`` with ``JUDGE_AGENT_PROMPT`` so
         prejudge/supervise/postjudge never burn Claude quota on a Grok job
+      * gpt    — Codex CLI OAuth (or explicit Responses API fallback)
 
     `model` follows the job's main model family via ``resolve_judge_model``;
     when None it falls back to LATEST_JUDGE_MODEL (Claude) or the Grok
@@ -397,6 +398,50 @@ async def _run_judge_turn(
     job_id = Path(cwd).name
     provider = provider_for_job(job_id)
     _jm = coerce_model_for_provider(model or LATEST_JUDGE_MODEL, provider)
+
+    # ---- OpenAI GPT path --------------------------------------------------
+    if provider == "gpt":
+        try:
+            from modules.gpt_agent import (
+                GptAgentClient,
+                GptSessionOptions,
+                AssistantMessage as GptAssistantMessage,
+                ResultMessage as GptResultMessage,
+            )
+            from modules._prompts import JUDGE_AGENT_PROMPT
+        except Exception:
+            return "", None
+        if not _jm or str(_jm).lower().startswith(("claude", "grok")):
+            _jm = default_model_for("gpt")
+        opts = GptSessionOptions(
+            system_prompt=JUDGE_AGENT_PROMPT,
+            model=_jm,
+            cwd=str(cwd),
+            resume=resume_sid,
+            effort="medium",
+            env={"JOB_ID": job_id, "AGENT_ROLE": "judge"},
+            enable_tools=True,
+            enable_subagents=False,
+        )
+        parts: list[str] = []
+        captured_sid: str | None = resume_sid
+        try:
+            async with GptAgentClient(opts) as client:
+                await client.query(user_prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, GptAssistantMessage):
+                        for blk in (getattr(msg, "content", None) or []):
+                            t = getattr(blk, "text", None)
+                            if t:
+                                parts.append(t)
+                    elif isinstance(msg, GptResultMessage):
+                        captured_sid = getattr(msg, "session_id", None) or captured_sid
+                        if getattr(msg, "is_error", False):
+                            return "", captured_sid
+                        break
+        except Exception:
+            return "", captured_sid
+        return "".join(parts).strip()[:8000], captured_sid
 
     # ---- Grok path: full ACP session (tools available like Claude judge) --
     if provider == "grok":

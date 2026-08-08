@@ -6,4 +6,6 @@ rq==2.0.0
 pydantic>=2.11
 docker==7.1.0
 claude-agent-sdk==0.2.87
+# Optional direct Responses fallback for GPT phases; Codex OAuth uses the CLI.
+openai>=2.0.0,<3
 anyio==4.6.2

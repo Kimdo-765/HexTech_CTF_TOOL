@@ -225,7 +225,7 @@ def get_stats():
 @router.get("/usage")
 def get_usage():
     """Top-bar usage pill data: cumulative SPENT cost vs an operator-set
-    budget, plus account-global rate-limit STATUS for Claude and Grok.
+    budget, plus account-global rate-limit status for Claude, Grok and Codex.
 
     Honest scope:
       * `remaining_usd` is `budget_usd - spent` against the OPERATOR'S
@@ -237,9 +237,12 @@ def get_usage():
       * `grok_rate_limit` is Grok SuperGrok weekly pool usage polled from
         cli-chat-proxy `/v1/billing?format=credits` (needs `grok login`
         OAuth mounted). Includes `remaining_pct` when available.
+      * `codex_rate_limit` is the mounted ChatGPT OAuth account's usage,
+        queried through Codex CLI app-server and cached for 60 seconds.
     """
     from modules.settings_io import get_setting
     from modules._common import read_rate_limit, read_grok_rate_limit
+    from modules.codex_rate_limit import read_codex_rate_limit
 
     stats = get_stats()
     spent = float(stats.get("total_cost_usd") or 0.0)
@@ -262,6 +265,7 @@ def get_usage():
         "count": stats.get("count", 0),
         "rate_limit": read_rate_limit(),
         "grok_rate_limit": read_grok_rate_limit(),
+        "codex_rate_limit": read_codex_rate_limit(),
     }
 
 
@@ -538,8 +542,18 @@ async def get_job_monitor(job_id: str, tail: int | None = None):
     by language ({"ko": "...", "en": "..."}); the client picks which to show,
     so switching language is instant with no refetch. With ?tail=N, returns
     only the last N entries. Opening this (or the SSE /stream) also ensures
-    the job's live monitor task is running."""
+    the job's live monitor task is running. GPT jobs use the deterministic
+    Timeline instead, so this endpoint neither starts nor returns Monitor."""
     safe = _validate_job_id(job_id)
+    meta = read_job_meta(safe) or {}
+    provider = str(meta.get("agent_provider") or "").strip().lower()
+    if not provider:
+        retry_of = str(meta.get("retry_of") or "").strip()
+        if retry_of:
+            prior_meta = read_job_meta(Path(retry_of).name) or {}
+            provider = str(prior_meta.get("agent_provider") or "").strip().lower()
+    if provider == "gpt":
+        return {"enabled": False, "entries": []}
     try:
         from modules._monitor import ensure_monitor
         ensure_monitor(safe)
@@ -562,6 +576,71 @@ async def get_job_monitor(job_id: str, tail: int | None = None):
     if tail and tail > 0:
         entries = entries[-tail:]
     return {"entries": entries}
+
+
+@router.get("/{job_id}/gpt-timeline")
+def get_gpt_timeline(job_id: str, tail: int | None = None):
+    """Structured activity for GPT jobs only.
+
+    Claude and Grok deliberately do not enter this path: their existing
+    ``run.log`` and Monitor behavior remains byte-for-byte unchanged.  A GPT
+    job created before ``gpt-events.jsonl`` existed receives a read-only
+    projection of its existing run.log so an in-flight job becomes useful
+    immediately without rewriting evidence.
+    """
+    safe = _validate_job_id(job_id)
+    meta = read_job_meta(safe)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if str(meta.get("agent_provider") or "").lower() != "gpt":
+        return {"enabled": False, "events": [], "agents": [], "source": "disabled"}
+
+    configured_models: dict[str, str] = {}
+    preset_name = ""
+    try:
+        from modules.agent_provider import default_model_for
+        from modules.model_presets import CONFIGURABLE_ROLES, get_provider_store
+
+        snapshot = meta.get("gpt_role_models")
+        bucket = get_provider_store("gpt")
+        preset_name = str(meta.get("gpt_preset") or bucket.get("active") or "")
+        preset = (
+            snapshot if isinstance(snapshot, dict)
+            else (bucket.get("presets") or {}).get(preset_name) or {}
+        )
+        main = str(meta.get("model") or preset.get("main") or default_model_for("gpt"))
+        judge = str(preset.get("judge") or main)
+        fallbacks = {
+            "main": main,
+            "judge": judge,
+            "reviewer": str(preset.get("reviewer") or judge),
+            "recon": str(preset.get("recon") or main),
+            "debugger": str(preset.get("debugger") or main),
+            "triage": str(preset.get("triage") or main),
+            "report": str(preset.get("report") or main),
+        }
+        configured_models = {
+            role: fallbacks[role] for role in CONFIGURABLE_ROLES
+            if role != "monitor" and fallbacks.get(role)
+        }
+    except Exception:
+        configured_models = {}
+
+    from modules.gpt_run_events import read_gpt_timeline, summarize_agents
+
+    bounded_tail = max(1, min(int(tail or 600), 2000))
+    all_events, source = read_gpt_timeline(
+        safe,
+        started_at=meta.get("started_at"),
+    )
+    events = all_events[-bounded_tail:]
+    return {
+        "enabled": True,
+        "source": source,
+        "preset": preset_name,
+        "events": events,
+        "agents": summarize_agents(all_events, configured_models),
+    }
 
 
 _TERMINAL_META_STATUSES = {"finished", "failed", "no_flag", "stopped"}
@@ -592,18 +671,28 @@ async def stream_job(job_id: str, request: Request):
 
     log_path = jd / "run.log"
     meta_path = jd / "meta.json"
+    initial_meta = read_job_meta(safe) or {}
+    stream_provider = str(initial_meta.get("agent_provider") or "").strip().lower()
+    if not stream_provider:
+        retry_of = str(initial_meta.get("retry_of") or "").strip()
+        if retry_of:
+            prior_meta = read_job_meta(Path(retry_of).name) or {}
+            stream_provider = str(prior_meta.get("agent_provider") or "").strip().lower()
+    is_gpt_job = stream_provider == "gpt"
 
     def sse(name: str, data) -> bytes:
         return f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
 
     async def event_gen():
-        # Opening the live stream also guarantees the job's monitor task is
-        # running (belt-and-suspenders with the always-on supervisor).
-        try:
-            from modules._monitor import ensure_monitor
-            ensure_monitor(safe)
-        except Exception:
-            pass
+        # Claude/Grok live streams also guarantee their monitor task is
+        # running (belt-and-suspenders with the always-on supervisor). GPT's
+        # deterministic Timeline deliberately has no narrator task.
+        if not is_gpt_job:
+            try:
+                from modules._monitor import ensure_monitor
+                ensure_monitor(safe)
+            except Exception:
+                pass
         from redis import asyncio as aioredis
         r = aioredis.from_url(REDIS_URL)
         pubsub = r.pubsub()
@@ -611,12 +700,14 @@ async def stream_job(job_id: str, request: Request):
             # Subscribe BEFORE backfill so any event published between
             # backfill-read and subscribe is buffered (Redis pubsub is
             # ephemeral but the gap here is microseconds).
-            await pubsub.subscribe(
+            channels = [
                 f"job:{safe}:log",
                 f"job:{safe}:meta",
                 f"job:{safe}:sdk",
-                f"job:{safe}:monitor",
-            )
+            ]
+            if not is_gpt_job:
+                channels.append(f"job:{safe}:monitor")
+            await pubsub.subscribe(*channels)
 
             # --- Backfill --------------------------------------------
             # Send current meta.json so the UI has tokens/status from
@@ -665,22 +756,23 @@ async def stream_job(job_id: str, request: Request):
 
             # Backfill the curated monitor feed (last 400 entries) so the
             # Monitor view renders instantly on connect, same as the run log.
-            try:
-                mon = jd / "monitor.jsonl"
-                if mon.exists():
-                    lines = mon.read_text(errors="replace").splitlines()[-400:]
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = json.loads(line)
-                        except Exception:
-                            continue
-                        entry["backfill"] = True
-                        yield sse("monitor", entry)
-            except Exception:
-                pass
+            if not is_gpt_job:
+                try:
+                    mon = jd / "monitor.jsonl"
+                    if mon.exists():
+                        lines = mon.read_text(errors="replace").splitlines()[-400:]
+                        for line in lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except Exception:
+                                continue
+                            entry["backfill"] = True
+                            yield sse("monitor", entry)
+                except Exception:
+                    pass
 
             yield sse("backfill_done", {})
 
