@@ -81,6 +81,31 @@ def tree_digest(root: Path) -> str:
     return h.hexdigest()
 
 
+def _pin_judge(job_copy: Path, provider: str) -> None:
+    """Route the judge onto one backend for this replay, in the COPY's meta.
+
+    Without this the replay inherits each job's own `agent_provider` — and the
+    corpus is mixed: 25 claude, 10 grok, 6 gpt. A stratified table built over
+    that measures three different judges at once, which is not the question
+    stage 7 asks. (It also hides that the gpt route is dead on this account:
+    `gpt-5.6` is rejected outright with "not supported when using Codex with a
+    ChatGPT account", so all six of those jobs came back transport_error.)
+
+    Uses `agent_role_providers` — the per-role override stage 1 added — rather
+    than rewriting `agent_provider`, so the replay routes the judge exactly the
+    way production would and leaves the job's own backend alone.
+    """
+    mp = job_copy / "meta.json"
+    try:
+        meta = json.loads(mp.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    roles = dict(meta.get("agent_role_providers") or {})
+    roles["judge"] = provider
+    meta["agent_role_providers"] = roles
+    mp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
 def replayable(jobs_root: Path) -> list[Path]:
     out = []
     for d in sorted(jobs_root.iterdir()):
@@ -96,6 +121,8 @@ def main() -> int:
     ap.add_argument("--out", default=str(Path(_SCRATCH_ROOT) / "results.jsonl"))
     ap.add_argument("--only", default="", help="comma-separated job ids")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--judge-provider", default="",
+                    help="force the judge onto one backend (claude|gpt|grok)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -138,6 +165,9 @@ def main() -> int:
                     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
                     fh.flush()
                     continue
+                if args.judge_provider:
+                    _pin_judge(dst, args.judge_provider)
+                    rec["judge_provider_forced"] = args.judge_provider
                 res = judge_replay.replay_job(dst)
                 rec.update(res or {"unreplayable": True})
                 rec["judged_cwd"] = str(dst)
@@ -155,6 +185,7 @@ def main() -> int:
 
     summary = {
         "scratch_root": _SCRATCH_ROOT,
+        "judge_provider_forced": args.judge_provider or None,
         "replayed": written,
         "skipped_unreplayable": skipped,
         "originals_changed": changed,
