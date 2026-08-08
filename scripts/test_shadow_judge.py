@@ -202,7 +202,9 @@ jid2b = "sh2b"
 (DATA / "jobs" / jid2b).mkdir(parents=True, exist_ok=True)
 for stall in (30, 60, 90):
     SH.record_input(jid2b, "supervise", {"stall_seconds": stall})
-SH.record_verdict(jid2b, "supervise", {"action": "continue"})
+_first = SH.pending_inputs(jid2b)[0]
+SH.record_verdict(jid2b, "supervise", {"action": "continue"},
+                  answers=_first.get("id"))
 check("one verdict does not clear three firings",
       len(SH.pending_inputs(jid2b)), 2)
 check("...and the ones left are the LATER firings",
@@ -225,7 +227,8 @@ def boom(stage, inputs):
 check("an exploding evaluator still consumes the entry",
       SH.evaluate(jid3, DATA / "jobs" / jid3, runner=boom), 1)
 check("...and records why",
-      "exploded" in json.dumps(SH.read_shadow(jid3)[-1].get("verdict") or {}), True)
+      any("exploded" in json.dumps(r.get("verdict") or {})
+          for r in SH.read_shadow(jid3) if r.get("kind") == "verdict"), True)
 check("...leaving nothing pending", SH.pending_inputs(jid3), [])
 
 # ---------------------------------------------------------------------------
@@ -410,7 +413,7 @@ _block_callees = [{_callee(c.func) for s in b.body for c in ast.walk(s)
                    if isinstance(c, ast.Call)} for b in _shadow_blocks]
 check("every shadow block only records (+ the pinned derivations)",
       _block_callees,
-      [{"judge_shadow.record_input", "judge_shadow.script_snapshot"},
+      [{"judge_shadow.record_input", "judge_shadow.prejudge_fingerprint"},
        {"judge_shadow.record_input", "_postjudge_extra",
         "_judge.postjudge_inputs"}])
 
@@ -440,13 +443,13 @@ check("...and only reduces strings — no model, no I/O",
 
 _shadow_src_ast = ast.parse((ROOT / "modules" / "judge_shadow.py").read_text())
 _snap = next((n for n in ast.walk(_shadow_src_ast)
-              if isinstance(n, ast.FunctionDef) and n.name == "script_snapshot"), None)
-check("script_snapshot exists", _snap is not None, True)
-check("...and does exactly one local read",
+              if isinstance(n, ast.FunctionDef) and n.name == "prejudge_fingerprint"),
+             None)
+check("prejudge_fingerprint exists", _snap is not None, True)
+check("...and only hashes local files",
       sorted({_callee(c.func) for c in ast.walk(_snap) if isinstance(c, ast.Call)})
       if _snap else None,
-      ["<expr>.hexdigest", "hashlib.sha256", "len", "path.read_bytes",
-       "raw.decode"])
+      ["<expr>.is_dir", "_digest", "len", "raw.decode", "script.read_bytes"])
 check("nothing in the run path evaluates",
       any("judge_shadow.evaluate" in c for c in _block_callees), False)
 check("...anywhere in _runner.py, guarded or not",
@@ -656,7 +659,7 @@ _leak_job = "shleak"
 (DATA / "jobs" / _leak_job / "exploit.py").write_text("print('leak probe')\n")
 SH.record_input(_leak_job, "prejudge", {
     "script_rel": "exploit.py",
-    **SH.script_snapshot(DATA / "jobs" / _leak_job / "exploit.py"),
+    **SH.prejudge_fingerprint(DATA / "jobs" / _leak_job, "exploit.py"),
 })
 _run_log: list[str] = []
 _saved_pre = _judge_mod.prejudge_script
@@ -670,7 +673,7 @@ def _prose_judge(job_dir, script_rel, target, log_fn, **kw):
 
 _judge_mod.prejudge_script = _prose_judge
 try:
-    SH.evaluate(_leak_job, DATA / "jobs" / _leak_job, log_fn=_run_log.append)
+    SH.evaluate(_leak_job, DATA / "jobs" / _leak_job)
 finally:
     _judge_mod.prejudge_script = _saved_pre
 
@@ -679,18 +682,23 @@ check("the judge's prose never reaches the caller's logger",
 check("...it lands in the shadow file instead",
       any(r.get("kind") == "log" and "shadow_prose_leak" in str(r.get("line"))
           for r in SH.read_shadow(_leak_job)), True)
-check("...and the caller still learns the evaluation happened",
-      any("evaluated 1 recorded stage" in line for line in _run_log), True)
+check("...and the caller is told nothing at all — there is no route to run.log",
+      _run_log, [])
+check("...the summary goes to the shadow file",
+      any(r.get("kind") == "log" and "evaluated 1 recorded stage" in str(r.get("line"))
+          for r in SH.read_shadow(_leak_job)), True)
 check("...while the verdict itself is recorded",
       any(r.get("kind") == "verdict" for r in SH.read_shadow(_leak_job)), True)
 # And the API gives a caller no way to hand the judge a production logger.
 import inspect  # noqa: E402
 
 _sig = inspect.signature(SH.evaluate)
-check("evaluate() takes log_fn keyword-only, so it cannot be passed by habit",
-      _sig.parameters["log_fn"].kind, inspect.Parameter.KEYWORD_ONLY)
-check("...and defaults to writing nowhere",
-      _sig.parameters["log_fn"].default, None)
+check("evaluate() has no log_fn at all — production hands around log_line(), "
+      "which appends to run.log",
+      "log_fn" in _sig.parameters, False)
+check("...and every remaining parameter is keyword-only except the job",
+      [k for k, v in _sig.parameters.items()
+       if v.kind is inspect.Parameter.KEYWORD_ONLY], ["runner"])
 
 # ---------------------------------------------------------------------------
 # 10. Long output: shadow must keep the END, because that is what postjudge
@@ -797,7 +805,7 @@ _uncl = "shuncl"
 (DATA / "jobs" / _uncl / "big.py").write_text(_big_src)
 _rec_u = SH.record_input(_uncl, "postjudge", {"extra_context": _big_ctx})
 _rec_s = SH.record_input(_uncl, "prejudge", {
-    "script_rel": "big.py", **SH.script_snapshot(DATA / "jobs" / _uncl / "big.py")})
+    "script_rel": "big.py", **SH.prejudge_fingerprint(DATA / "jobs" / _uncl, "big.py")})
 check("a long extra_context is recorded whole, not clipped",
       _rec_u["inputs"]["extra_context"] if _rec_u else None, _big_ctx)
 check("a long script snapshot is recorded whole",
@@ -807,80 +815,141 @@ check("...while an unlisted field is still capped",
           ["inputs"]["stdout"]) < 20_000, True)
 
 # ---------------------------------------------------------------------------
-# 11. The artifact, not the path. The retry loop rewrites exploit.py between
-#     attempts, and prejudge returns a silent ok=True when the file is gone —
-#     so an evaluation that trusts the recorded PATH scores different code and
-#     cannot tell.
+# 11. Evaluate the same inputs or none. The retry loop rewrites exploit.py
+#     between attempts, and report.md / chain.json move too — prejudge reads
+#     all three, and returns a silent ok=True when the script is simply gone.
+#     Restoring a recorded copy was tried and dropped: the prompt embeds the
+#     script's PATH, so a copy under any other name is a different prompt, and
+#     the companions cannot be put back at all without rewriting the job.
 # ---------------------------------------------------------------------------
-_snap_job = "shsnap"
-_snap_dir = DATA / "jobs" / _snap_job
-_snap_dir.mkdir(parents=True, exist_ok=True)
-(_snap_dir / "exploit.py").write_text("print('attempt one')\n")
-_snap = SH.script_snapshot(_snap_dir / "exploit.py")
-check("the snapshot carries a hash", bool(_snap["script_sha256"]), True)
-check("...and the text", _snap["script_text"], "print('attempt one')\n")
-
-SH.record_input(_snap_job, "prejudge", {"script_rel": "exploit.py", **_snap})
-(_snap_dir / "exploit.py").write_text("print('attempt three — different code')\n")
-
-_judged: list[str] = []
-
-
-def _capture_pre(jd, script_rel, target, log_fn, **kw):
-    _judged.append((jd / script_rel).read_text())
-    return {"ok": True, "severity": "low", "issues": [], "raw": ""}
-
-
 _saved_pre2 = _judge_mod.prejudge_script
-_judge_mod.prejudge_script = _capture_pre
-try:
-    SH.evaluate(_snap_job, _snap_dir)
-finally:
-    _judge_mod.prejudge_script = _saved_pre2
 
-check("the evaluator judges the RECORDED code, not what is on disk now",
-      _judged, ["print('attempt one')\n"])
-check("...and the live file is left alone",
-      (_snap_dir / "exploit.py").read_text(),
-      "print('attempt three — different code')\n")
-check("...restored under the shadow dir, which the flag scanner never walks",
-      SH.SNAPSHOT_DIRNAME.startswith("."), True)
-(_snap_dir / "work").mkdir(parents=True, exist_ok=True)
-(_snap_dir / "meta.json").write_text(json.dumps({"id": _snap_job}))
-check("...so a restored script adds no flags",
-      scan_job_for_flags(_snap_job), [])
 
-# Unchanged file: judge it in place, no restore.
-_same_job = "shsame"
-_same_dir = DATA / "jobs" / _same_job
-_same_dir.mkdir(parents=True, exist_ok=True)
-(_same_dir / "exploit.py").write_text("print('stable')\n")
-SH.record_input(_same_job, "prejudge", {
-    "script_rel": "exploit.py", **SH.script_snapshot(_same_dir / "exploit.py")})
-_rels: list[str] = []
-_judge_mod.prejudge_script = lambda jd, rel, t, lg, **kw: (
-    _rels.append(rel), {"ok": True, "severity": "low"})[1]
-try:
-    SH.evaluate(_same_job, _same_dir)
-finally:
-    _judge_mod.prejudge_script = _saved_pre2
-check("an unchanged artifact is judged in place", _rels, ["exploit.py"])
-check("...with no snapshot directory created",
-      (_same_dir / SH.SNAPSHOT_DIRNAME).exists(), False)
+def _mk_job(name, *, script="print('one')\n", report=None, chain=None):
+    jd = DATA / "jobs" / name
+    (jd / "work").mkdir(parents=True, exist_ok=True)
+    (jd / "exploit.py").write_text(script)
+    if report is not None:
+        (jd / "work" / "report.md").write_text(report)
+    if chain is not None:
+        (jd / "work" / "chain.json").write_text(chain)
+    (jd / "meta.json").write_text(json.dumps({"id": name}))
+    return jd
 
-# No snapshot and a changed file: refuse, loudly, rather than judge the wrong
-# thing. A missing measurement is honest; a wrong one is not.
-_gone_job = "shgone"
-_gone_dir = DATA / "jobs" / _gone_job
-_gone_dir.mkdir(parents=True, exist_ok=True)
-SH.record_input(_gone_job, "prejudge", {
-    "script_rel": "exploit.py", "script_sha256": "0" * 64, "script_text": None})
-SH.evaluate(_gone_job, _gone_dir)
-_gv = [r["verdict"] for r in SH.read_shadow(_gone_job) if r.get("kind") == "verdict"]
-check("a changed artifact with no snapshot is refused", len(_gv), 1)
-check("...and says why", "ArtifactChanged" in json.dumps(_gv[0]), True)
-check("...rather than reporting a clean review",
-      _gv[0].get("ok"), None)
+
+def _evaluate_with_stub(name, jd):
+    """Run the real default evaluator, capturing what prejudge was handed."""
+    seen: list[str] = []
+
+    def _stub(j, rel, target, log_fn, **kw):
+        seen.append((j / rel).read_text())
+        return {"ok": True, "severity": "low", "issues": [], "raw": ""}
+
+    _judge_mod.prejudge_script = _stub
+    try:
+        SH.evaluate(name, jd)
+    finally:
+        _judge_mod.prejudge_script = _saved_pre2
+    verdicts = [r["verdict"] for r in SH.read_shadow(name)
+                if r.get("kind") == "verdict"]
+    return seen, verdicts
+
+
+# Unchanged: judge it, in place, at the recorded path.
+_same = "shsame"
+_same_dir = _mk_job(_same, report="all good\n", chain='{"steps": []}')
+SH.record_input(_same, "prejudge", {
+    "script_rel": "exploit.py", **SH.prejudge_fingerprint(_same_dir, "exploit.py")})
+_seen, _v = _evaluate_with_stub(_same, _same_dir)
+check("an unchanged artifact is judged in place", _seen, ["print('one')\n"])
+check("...and yields a real verdict", [x.get("ok") for x in _v], [True])
+
+# The SCRIPT moved.
+_chg = "shchg"
+_chg_dir = _mk_job(_chg, report="all good\n")
+SH.record_input(_chg, "prejudge", {
+    "script_rel": "exploit.py", **SH.prejudge_fingerprint(_chg_dir, "exploit.py")})
+(_chg_dir / "exploit.py").write_text("print('attempt three')\n")
+_seen, _v = _evaluate_with_stub(_chg, _chg_dir)
+check("a changed script is NOT judged", _seen, [])
+check("...it is recorded as unevaluable, naming the artifact",
+      ("ArtifactChanged" in json.dumps(_v), "exploit.py" in json.dumps(_v)),
+      (True, True))
+check("...rather than reporting a clean review", _v[0].get("ok"), None)
+
+# A COMPANION moved. Same script, same hash — and prejudge's deterministic
+# gates read report.md for self-defeat admissions, so this alone flips a
+# verdict. Fingerprinting the script only would have missed it.
+_comp = "shcomp"
+_comp_dir = _mk_job(_comp, report="a working write primitive\n")
+SH.record_input(_comp, "prejudge", {
+    "script_rel": "exploit.py", **SH.prejudge_fingerprint(_comp_dir, "exploit.py")})
+(_comp_dir / "work" / "report.md").write_text("No write identified\n")
+_seen, _v = _evaluate_with_stub(_comp, _comp_dir)
+check("a changed report.md is caught even with the script untouched", _seen, [])
+check("...and named", "report.md" in json.dumps(_v), True)
+
+# chain.json appearing where there was none is also a changed input.
+_ch2 = "shchain"
+_ch2_dir = _mk_job(_ch2, report="fine\n")
+SH.record_input(_ch2, "prejudge", {
+    "script_rel": "exploit.py", **SH.prejudge_fingerprint(_ch2_dir, "exploit.py")})
+(_ch2_dir / "work" / "chain.json").write_text('{"steps": [{"id": 1}]}')
+_seen, _v = _evaluate_with_stub(_ch2, _ch2_dir)
+check("chain.json appearing is a changed input", _seen, [])
+check("...and named", "chain.json" in json.dumps(_v), True)
+
+# Bytes that are not UTF-8 must not be laundered into text. A replacement
+# decode would produce a different file wearing the recorded hash.
+_lat = "shlatin"
+_lat_dir = DATA / "jobs" / _lat
+_lat_dir.mkdir(parents=True, exist_ok=True)
+(_lat_dir / "exploit.py").write_bytes(b"# -*- coding: latin-1 -*-\ns = '\xe9'\n")
+_fp = SH.prejudge_fingerprint(_lat_dir, "exploit.py")
+check("a non-UTF-8 script still gets a hash", bool(_fp["script_sha256"]), True)
+check("...but no text, because the round-trip would not be the same bytes",
+      _fp["script_text"], None)
+check("...and the hash is over the RAW bytes",
+      _fp["script_sha256"],
+      __import__("hashlib").sha256((_lat_dir / "exploit.py").read_bytes()).hexdigest())
+
+# ---------------------------------------------------------------------------
+# 12. Two evaluators must not make an input disappear. Completion is matched
+#     by the input's own id: a duplicate verdict is redundant, never a silent
+#     cancellation of some LATER input.
+# ---------------------------------------------------------------------------
+_conc = "shconc"
+_conc_dir = DATA / "jobs" / _conc
+_conc_dir.mkdir(parents=True, exist_ok=True)
+_in1 = SH.record_input(_conc, "supervise", {"stall_seconds": 30})
+check("an input carries an identity", bool(_in1 and _in1.get("id")), True)
+
+# Two evaluators both answer the first input — the concurrency Codex hit.
+SH.evaluate(_conc, _conc_dir, runner=lambda st, i: {"action": "continue"})
+SH.record_verdict(_conc, "supervise", {"action": "continue"},
+                  answers=_in1["id"])          # the duplicate
+_in2 = SH.record_input(_conc, "supervise", {"stall_seconds": 60})
+check("a later input is still pending after a duplicate verdict",
+      [r["id"] for r in SH.pending_inputs(_conc)], [_in2["id"]])
+_seen2: list[int] = []
+SH.evaluate(_conc, _conc_dir,
+            runner=lambda st, i: (_seen2.append(i.get("stall_seconds")),
+                                  {"action": "continue"})[1])
+check("...and it does get evaluated", _seen2, [60])
+
+# Legacy records — written before ids existed — still read correctly.
+_leg = "shlegacy"
+_leg_dir = DATA / "jobs" / _leg
+_leg_dir.mkdir(parents=True, exist_ok=True)
+_lp = SH.shadow_path(_leg)
+_lp.parent.mkdir(parents=True, exist_ok=True)
+_lp.write_text("\n".join(json.dumps(r) for r in [
+    {"ts": "t0", "kind": "input", "stage": "supervise", "inputs": {"stall_seconds": 30}},
+    {"ts": "t1", "kind": "verdict", "stage": "supervise", "verdict": {"action": "continue"}},
+    {"ts": "t2", "kind": "input", "stage": "supervise", "inputs": {"stall_seconds": 60}},
+]) + "\n")
+check("an id-less file falls back to positional matching",
+      [r["inputs"]["stall_seconds"] for r in SH.pending_inputs(_leg)], [60])
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="

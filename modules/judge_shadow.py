@@ -45,6 +45,7 @@ import hashlib
 import json
 import os
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -96,6 +97,12 @@ def record_input(job_id: str, stage: str, inputs: dict) -> dict | None:
     try:
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(),
+            # Identity, not position. Completion used to be matched by
+            # (stage, ordinal), so two evaluators that both answered ordinal 0
+            # produced two verdicts — and the SECOND one silently marked the
+            # next input as done. That input was then never evaluated and
+            # nothing said so.
+            "id": uuid.uuid4().hex,
             "kind": "input",
             "stage": str(stage),
             "inputs": {str(k): _clip_field(str(k), v)
@@ -133,33 +140,56 @@ def record_verdict(job_id: str, stage: str, verdict: dict, **extra) -> dict | No
         return None
 
 
-# A script is small; the reason it is snapshotted at all is that the retry
-# loop REWRITES it between attempts, so by evaluation time the path recorded
-# for attempt 1 holds attempt 3's code. Its own cap, because clipping a script
-# to the generic field limit would silently change what gets judged.
+# The script is kept as EVIDENCE, never as something to restore. Its own cap
+# so the generic field limit cannot silently shorten it.
 _MAX_SCRIPT_CHARS = 400_000
 
-SNAPSHOT_DIRNAME = ".judge_shadow"
 
-
-def script_snapshot(path: Path) -> dict:
-    """Identity + contents of the script as it was AT RECORD TIME.
-
-    `sha256` is the part that matters: it lets the evaluator ask "is the file
-    still the one the gate saw?" instead of assuming it. Without this, an
-    evaluation that runs after the script changed judges different code — and
-    `prejudge_script` returns a silent `ok=True, severity=low` when the file
-    is simply gone, so the failure looks like a clean verdict.
-    """
+def _digest(path: Path) -> str | None:
     try:
-        raw = path.read_bytes()
+        return hashlib.sha256(path.read_bytes()).hexdigest()
     except Exception:
-        return {"script_sha256": None, "script_bytes": None, "script_text": None}
-    text = raw.decode("utf-8", errors="replace")
+        return None
+
+
+def prejudge_fingerprint(job_dir: Path, script_rel: str) -> dict:
+    """Every artifact prejudge reads, hashed as it was AT RECORD TIME.
+
+    Not just the script. `deterministic_prejudge` scans `work/report.md` for
+    self-defeat admissions and validates `work/chain.json`, and either can
+    force severity=high on its own. Fingerprinting the script alone let a
+    later `report.md` flip an evaluation that was supposed to reproduce the
+    gate's own verdict.
+
+    Hashes, not contents, because a recorded artifact CANNOT be put back
+    faithfully: the prejudge prompt embeds both `script_rel` and the absolute
+    `script_path`, so judging a restored copy under some other path is a
+    different prompt — and re-encoding bytes through text does not even
+    round-trip for a non-UTF-8 source. The evaluator's job is to notice that
+    the inputs moved and say so, not to reconstruct them.
+
+    `script_text` rides along as evidence for the operator. It is present only
+    when the bytes are STRICT UTF-8; a replacement-decoded copy would be a
+    different file wearing the same hash.
+    """
+    work = job_dir / "work" if (job_dir / "work").is_dir() else job_dir
+    script = job_dir / script_rel
+    try:
+        raw = script.read_bytes()
+    except Exception:
+        raw = None
+    try:
+        text = raw.decode("utf-8") if raw is not None else None
+    except UnicodeDecodeError:
+        text = None
     return {
-        "script_sha256": hashlib.sha256(raw).hexdigest(),
-        "script_bytes": len(raw),
-        "script_text": text if len(text) <= _MAX_SCRIPT_CHARS else None,
+        "script_sha256": _digest(script),
+        "script_bytes": len(raw) if raw is not None else None,
+        "script_text": text if (text is not None and len(text) <= _MAX_SCRIPT_CHARS) else None,
+        # Companion artifacts the deterministic gates read. `None` means
+        # "absent at record time", which is itself part of the input.
+        "report_sha256": _digest(work / "report.md"),
+        "chain_sha256": _digest(work / "chain.json"),
     }
 
 
@@ -220,69 +250,84 @@ def read_shadow(job_id: str) -> list[dict[str, Any]]:
 def pending_inputs(job_id: str) -> list[dict[str, Any]]:
     """Recorded inputs that have no verdict yet, in order.
 
-    Matched by (stage, ordinal) so a repeated stage — supervise fires more
-    than once — is evaluated once per firing rather than once per stage.
+    Matched by the input's own `id`. Position was the obvious thing to match
+    on and it is wrong under concurrency: two evaluators that both answer the
+    first `supervise` firing write two verdicts, and the extra one marks the
+    SECOND firing done — an input that is then never evaluated, silently.
+    Identity makes a duplicate verdict merely redundant instead of destructive.
+
+    Records written before ids existed fall back to (stage, ordinal), so an
+    older shadow file still reads correctly.
     """
-    seen: dict[str, int] = {}
     inputs: list[tuple[str, int, dict]] = []
-    done: set[tuple[str, int]] = set()
+    legacy_seen: dict[tuple[str, str], int] = {}
+    answered: set[str] = set()
+    legacy_done: set[tuple[str, int]] = set()
     for rec in read_shadow(job_id):
         stage = str(rec.get("stage") or "")
         if rec.get("kind") == "input":
-            n = seen.get(("i", stage), 0)
-            seen[("i", stage)] = n + 1
+            n = legacy_seen.get(("i", stage), 0)
+            legacy_seen[("i", stage)] = n + 1
             inputs.append((stage, n, rec))
         elif rec.get("kind") == "verdict":
-            n = seen.get(("v", stage), 0)
-            seen[("v", stage)] = n + 1
-            done.add((stage, n))
-    return [rec for stage, n, rec in inputs if (stage, n) not in done]
+            n = legacy_seen.get(("v", stage), 0)
+            legacy_seen[("v", stage)] = n + 1
+            ans = rec.get("answers")
+            if ans:
+                answered.add(str(ans))
+            else:
+                legacy_done.add((stage, n))
+    out = []
+    for stage, n, rec in inputs:
+        rid = rec.get("id")
+        if rid:
+            if str(rid) not in answered:
+                out.append(rec)
+        elif (stage, n) not in legacy_done:
+            out.append(rec)
+    return out
 
 
 class ArtifactChanged(RuntimeError):
-    """The thing the gate judged is not the thing on disk any more."""
+    """The inputs the gate judged are not the inputs on disk any more."""
 
 
-def _resolve_script(job_dir: Path, script_rel: str, inputs: dict) -> str:
-    """Which path should the evaluator hand prejudge — and is it the right code?
+def _require_unchanged(job_dir: Path, script_rel: str, inputs: dict) -> None:
+    """Refuse to evaluate unless every recorded input still matches.
 
     The evaluation runs long after the run, and the retry loop rewrites
-    `exploit.py` between attempts. Judging whatever sits at the recorded path
-    would score attempt 3's code against attempt 1's verdict, and if the file
-    is gone `prejudge_script` returns a silent `ok=True, severity=low` that is
+    `exploit.py` between attempts while `report.md` and `chain.json` keep
+    moving too. Judging whatever is on disk now would score later artifacts
+    against an earlier run's verdict — and when the script is simply gone,
+    `prejudge_script` returns `ok=True, severity=low`, which is
     indistinguishable from a clean review.
 
-    So: if the file still hashes to what was recorded, judge it in place. If
-    not, restore the recorded text next to it — inside the job dir, so the
-    judge keeps the same cwd and the same surrounding artifacts — and judge
-    that. With no snapshot to restore, refuse; a missing measurement is
-    honest, a wrong one is not.
+    Restoring the recorded bytes was tried and abandoned: the prompt embeds
+    the script's path, so a copy under any other name is a different prompt,
+    and the companions cannot be restored at all without rewriting the job's
+    live artifacts. An unevaluable measurement that says which artifact moved
+    is worth more than a confident one about the wrong inputs.
     """
-    want = inputs.get("script_sha256")
-    live = job_dir / script_rel
-    if want:
-        try:
-            if hashlib.sha256(live.read_bytes()).hexdigest() == want:
-                return script_rel
-        except Exception:
-            pass
-    text = inputs.get("script_text")
-    if not isinstance(text, str):
-        raise ArtifactChanged(
-            f"{script_rel} is not the file recorded at run time "
-            f"(sha256 {str(want)[:12] or '?'}…) and no snapshot was taken"
-        )
-    dest = job_dir / SNAPSHOT_DIRNAME / (want or "unknown")[:16] / Path(script_rel).name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text, encoding="utf-8")
-    return str(dest.relative_to(job_dir))
+    work = job_dir / "work" if (job_dir / "work").is_dir() else job_dir
+    for label, path, key in (
+        (script_rel, job_dir / script_rel, "script_sha256"),
+        ("work/report.md", work / "report.md", "report_sha256"),
+        ("work/chain.json", work / "chain.json", "chain_sha256"),
+    ):
+        if key not in inputs:
+            continue          # recorded before this field existed; nothing to check
+        want, have = inputs.get(key), _digest(path)
+        if want != have:
+            raise ArtifactChanged(
+                f"{label} changed since the run "
+                f"(recorded {str(want)[:12] or 'absent'}, now {str(have)[:12] or 'absent'})"
+            )
 
 
 def evaluate(
     job_id: str,
     job_dir: Path,
     *,
-    log_fn: Callable[[str], None] | None = None,
     runner: Callable[[str, dict], dict] | None = None,
 ) -> int:
     """Produce verdicts for the recorded inputs, AFTER the run.
@@ -296,9 +341,12 @@ def evaluate(
     Returns how many were evaluated. Best-effort throughout: a shadow that
     cannot be evaluated is a measurement nobody gets, not a job that fails.
 
-    `log_fn` receives ONLY this function's own one-line summary. It is
-    deliberately never forwarded to the judge — see `_shadow_logger`. `runner`
-    is injectable so the evaluation can be tested without a model.
+    There is deliberately NO `log_fn`. It used to take one for its own summary
+    line, and production hands around `log_line(job_id, …)` — which appends to
+    `run.log`. One line is still a changed `run.log`, and "shadow leaves
+    run.log byte-identical" is a review gate, not a preference. The summary
+    goes to the shadow file like everything else. `runner` is injectable so
+    the evaluation can be tested without a model.
     """
     pend = pending_inputs(job_id)
     if not pend:
@@ -311,7 +359,7 @@ def evaluate(
             script_rel = str(inputs.get("script_rel") or "exploit.py")
             jlog = _shadow_logger(job_id, stage)
             if stage == "prejudge":
-                script_rel = _resolve_script(job_dir, script_rel, inputs)
+                _require_unchanged(job_dir, script_rel, inputs)
                 return _judge.prejudge_script(
                     job_dir, script_rel, inputs.get("target"), jlog,
                     job_id=job_id,
@@ -349,10 +397,11 @@ def evaluate(
             verdict = runner(stage, rec.get("inputs") or {})
         except Exception as exc:
             verdict = {"error": f"{type(exc).__name__}: {exc}"}
-        record_verdict(job_id, stage, verdict, evaluated_from=rec.get("ts"))
+        record_verdict(job_id, stage, verdict,
+                       answers=rec.get("id"), evaluated_from=rec.get("ts"))
         count += 1
-    if log_fn is not None:
-        log_fn(f"[judge] shadow: evaluated {count} recorded stage(s) out of band")
+    _shadow_logger(job_id, "evaluate")(
+        f"[judge] shadow: evaluated {count} recorded stage(s) out of band")
     return count
 
 

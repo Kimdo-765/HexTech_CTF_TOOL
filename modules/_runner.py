@@ -815,9 +815,11 @@ def attempt_sandbox_run(
                 job_id, "prejudge",
                 {
                     "script_rel": script_filename, "target": target,
-                    # The retry loop rewrites this file between attempts, so
-                    # the path alone does not identify what the gate reviewed.
-                    **judge_shadow.script_snapshot(work_dir / script_filename),
+                    # The retry loop rewrites the script between attempts and
+                    # report.md / chain.json keep moving too — and prejudge
+                    # reads all three. The path alone does not identify what
+                    # the gate reviewed.
+                    **judge_shadow.prejudge_fingerprint(work_dir, script_filename),
                 },
             )
         if enable_judge:
