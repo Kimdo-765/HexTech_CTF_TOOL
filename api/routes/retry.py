@@ -91,6 +91,19 @@ def _looks_like_api_error(text: str) -> bool:
     return any(p in low for p in _API_ERROR_PATTERNS)
 
 
+def _reviewer_error_kind(detail: str, fallback: str = "api_error") -> str:
+    """Classify a reviewer failure, treating "unknown" as UNclassified.
+
+    `classify_agent_error` answers "unknown" rather than None when nothing
+    matched, so the `... or "api_error"` idiom used throughout this file was
+    dead code: every unrecognised failure was tagged "unknown", which tells a
+    reader — and the ledger — nothing about where it happened. Same trap the
+    judge hit.
+    """
+    kind = classify_agent_error(detail or "")
+    return fallback if kind in (None, "", "unknown") else kind
+
+
 def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
     """Return (kind, message) if the reviewer's accumulated text is unusable
     (empty, or looks like a serialized API error), else None.
@@ -99,7 +112,7 @@ def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
     if not s:
         return ("empty", "reviewer returned no hint")
     if _looks_like_api_error(s):
-        return (classify_agent_error(s) or "api_error", s)
+        return (_reviewer_error_kind(s), s)
     return None
 
 router = APIRouter()
@@ -412,7 +425,7 @@ async def _ask_reviewer_grok(
         )
     except Exception as e:
         raw = str(e)
-        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+        raise ReviewerError(raw, _reviewer_error_kind(raw)) from e
 
     if isinstance(usage_out, dict):
         usage_out["usage"] = r.get("usage") or {}
@@ -420,7 +433,7 @@ async def _ask_reviewer_grok(
         usage_out["reported_cost"] = r.get("total_cost_usd")
     if r.get("error"):
         detail = str(r["error"])
-        raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
+        raise ReviewerError(detail, _reviewer_error_kind(detail))
     hint = (r.get("text") or "").strip()
     diag = _diagnose_reviewer_text(hint)
     if diag is not None:
@@ -464,7 +477,7 @@ async def _ask_reviewer_gpt(
         )
     except Exception as e:
         raw = str(e)
-        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+        raise ReviewerError(raw, _reviewer_error_kind(raw)) from e
     # Filled BEFORE the error check: a refused turn spent tokens too, and a
     # ledger that only bills successes understates every failover.
     if isinstance(usage_out, dict):
@@ -473,7 +486,7 @@ async def _ask_reviewer_gpt(
         usage_out["reported_cost"] = r.get("total_cost_usd")
     if r.get("error"):
         detail = str(r["error"])
-        raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
+        raise ReviewerError(detail, _reviewer_error_kind(detail))
     hint = (r.get("text") or "").strip()
     diag = _diagnose_reviewer_text(hint)
     if diag is not None:
@@ -707,13 +720,14 @@ async def _ask_reviewer(
                         or "reviewer call failed"
                     )
                     raise ReviewerError(
-                        detail, classify_agent_error(detail) or "api_error"
+                        detail, _reviewer_error_kind(detail)
                     )
                 break
       except ReviewerError as e:
         _err["kind"] = e.kind
         raise
       except asyncio.TimeoutError:
+        _err["kind"] = "timeout"
         raise ReviewerError(
             f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with no "
             "completion (possible transport stall or expired auth); not "
@@ -722,19 +736,24 @@ async def _ask_reviewer(
         )
       except Exception as e:
         raw = str(e)
-        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+        _err["kind"] = _reviewer_error_kind(raw)
+        raise ReviewerError(raw, _err["kind"]) from e
+
+      # INSIDE the try: a turn can end with a clean ResultMessage whose TEXT is
+      # a refusal, and diagnosing that after the finally billed the row left
+      # the refusal recorded with no error_kind at all.
+      hint = "\n".join(hint_parts).strip()
+      diag = _diagnose_reviewer_text(hint)
+      if diag is not None:
+        kind, message = diag
+        _err["kind"] = kind
+        raise ReviewerError(message, kind)
+      return hint
     finally:
         _record_reviewer_usage(
             job_id, provider, model, usage_out,
             error_kind=_err.get("kind"), sink=usage_sink,
         )
-
-    hint = "\n".join(hint_parts).strip()
-    diag = _diagnose_reviewer_text(hint)
-    if diag is not None:
-        kind, message = diag
-        raise ReviewerError(message, kind)
-    return hint
 
 
 async def _stream_reviewer_once(
@@ -784,7 +803,7 @@ async def _stream_reviewer_once(
             return
         except Exception as e:
             raw = str(e)
-            _err["kind"] = classify_agent_error(raw) or "api_error"
+            _err["kind"] = _reviewer_error_kind(raw)
             _bill()
             yield "error", {"message": raw, "kind": _err["kind"]}
             return
@@ -808,7 +827,7 @@ async def _stream_reviewer_once(
             return
         except Exception as e:
             raw = str(e)
-            _err["kind"] = classify_agent_error(raw) or "api_error"
+            _err["kind"] = _reviewer_error_kind(raw)
             _bill()
             yield "error", {"message": raw, "kind": _err["kind"]}
             return
@@ -857,7 +876,7 @@ async def _stream_reviewer_once(
                         or "".join(accumulated).strip()
                         or "reviewer call failed"
                     )
-                    _err["kind"] = classify_agent_error(detail) or "api_error"
+                    _err["kind"] = _reviewer_error_kind(detail)
                     _bill()
                     yield "error", {"message": detail, "kind": _err["kind"]}
                     return
@@ -875,7 +894,7 @@ async def _stream_reviewer_once(
         return
     except Exception as e:
         raw = str(e)
-        _err["kind"] = classify_agent_error(raw) or "api_error"
+        _err["kind"] = _reviewer_error_kind(raw)
         _bill()
         yield "error", {"message": raw, "kind": _err["kind"]}
         return
@@ -922,6 +941,13 @@ async def _ask_reviewer_streaming(
         sink.clear()
 
     try:
+        # The first attempt's output is HELD, not streamed. A policy block is
+        # only visible at the end of the turn, and the adapters put the block's
+        # own text through the same `token` events as a real hint — so
+        # streaming live meant the UI accumulated the refusal text and then
+        # appended the recovered hint to it. The reviewer hint is short; the
+        # cost of holding it is a beat of latency, and the alternative is
+        # showing the operator a failure that is about to be undone.
         buffered: list[tuple[str, dict]] = []
         refusal: dict | None = None
         async for kind, payload in _stream_reviewer_once(
@@ -932,9 +958,11 @@ async def _ask_reviewer_streaming(
                 refusal = payload
                 break
             buffered.append((kind, payload))
-            yield kind, payload
         if refusal is None:
+            for kind, payload in buffered:
+                yield kind, payload
             return
+        buffered.clear()
 
         target = failover_target(origin)
         if not target:
@@ -1552,8 +1580,18 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
             provider_display_name,
             provider_for_job,
         )
+        # The gate exists to stop a retry that cannot run, and what runs first
+        # is the REVIEWER. Checking the whole-job provider rejected jobs whose
+        # reviewer was routed to an authed backend, and — worse — admitted
+        # jobs whose routed reviewer had no auth at all, where the failure
+        # then surfaced as an auth error that the policy-refusal failover is
+        # deliberately not allowed to retry.
+        from modules.agent_provider import provider_for_role
+
         provider = normalize_provider(
-            prev_meta.get("agent_provider") or provider_for_job(safe)
+            provider_for_role(safe, "reviewer")
+            or prev_meta.get("agent_provider")
+            or provider_for_job(safe)
         )
         if not has_provider_auth(provider):
             if provider == "gpt":
@@ -1681,12 +1719,23 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 return
 
             _rv_model = resolve_reviewer_model(job_id)
-            yield sse("stage", {"name": "asking", "model": _rv_model})
+            # Announce what will actually run. `resolve_reviewer_model` coerces
+            # to the WHOLE-JOB provider, so a routed reviewer was announced as
+            # one model and then called as another — and the UI presents this
+            # as fact.
+            _rv_provider, _rv_shown = _reviewer_provider_and_model(_rv_model, job_id)
+            yield sse("stage", {
+                "name": "asking", "model": _rv_shown, "provider": _rv_provider,
+            })
             try:
                 async for kind, payload in _ask_reviewer_streaming(
                     context, model=_rv_model, job_id=job_id):
                     if kind == "token":
                         yield sse("token", payload)
+                    elif kind == "note":
+                        # A failover is in progress. Dropping this left the UI
+                        # with an unexplained pause between two providers.
+                        yield sse("note", payload)
                     elif kind == "done":
                         hint = payload.get("hint", "")
                     elif kind == "error":
@@ -1696,7 +1745,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 raw = str(e)
                 yield sse("error", {
                     "message": f"reviewer failed: {raw}",
-                    "kind": classify_agent_error(raw) or "api_error",
+                    "kind": _reviewer_error_kind(raw),
                 })
                 return
 
@@ -2245,12 +2294,23 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 return
 
             _rv_model = resolve_reviewer_model(job_id)
-            yield sse("stage", {"name": "asking", "model": _rv_model})
+            # Announce what will actually run. `resolve_reviewer_model` coerces
+            # to the WHOLE-JOB provider, so a routed reviewer was announced as
+            # one model and then called as another — and the UI presents this
+            # as fact.
+            _rv_provider, _rv_shown = _reviewer_provider_and_model(_rv_model, job_id)
+            yield sse("stage", {
+                "name": "asking", "model": _rv_shown, "provider": _rv_provider,
+            })
             try:
                 async for kind, payload in _ask_reviewer_streaming(
                     context, model=_rv_model, job_id=job_id):
                     if kind == "token":
                         yield sse("token", payload)
+                    elif kind == "note":
+                        # A failover is in progress. Dropping this left the UI
+                        # with an unexplained pause between two providers.
+                        yield sse("note", payload)
                     elif kind == "done":
                         hint = payload.get("hint", "")
                     elif kind == "error":
@@ -2260,7 +2320,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 raw = str(e)
                 yield sse("error", {
                     "message": f"reviewer failed: {raw}",
-                    "kind": classify_agent_error(raw) or "api_error",
+                    "kind": _reviewer_error_kind(raw),
                 })
                 return
 

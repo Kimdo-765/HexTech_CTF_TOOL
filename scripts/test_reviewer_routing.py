@@ -82,7 +82,10 @@ if _missing("fastapi"):
             return lambda *a, **k: (lambda fn: fn)
 
     _fa.APIRouter = lambda *a, **k: _Router()
-    _fa.HTTPException = type("HTTPException", (Exception,), {})
+    _fa.HTTPException = type(
+        "HTTPException", (Exception,),
+        {"__init__": lambda self, **k: Exception.__init__(self, k.get("detail", ""))},
+    )
     _fa.Request = type("Request", (), {})
     _resp = types.ModuleType("fastapi.responses")
     _resp.StreamingResponse = type("StreamingResponse", (), {})
@@ -478,6 +481,96 @@ finally:
     GK.query_grok_once = _orig_grok_once
 
 GA.query_gpt_once = _orig_once
+
+# ---------------------------------------------------------------------------
+# 6. turn 0035 — auth gate, error kinds, held stream, announced model.
+# ---------------------------------------------------------------------------
+# D1: the gate must check the provider the REVIEWER will use. Checking the
+# whole-job provider rejected jobs whose reviewer was routed to an authed
+# backend, and admitted jobs whose routed reviewer had no auth at all — where
+# the failure then surfaces as an auth error, which the policy-refusal
+# failover is deliberately not allowed to retry.
+gate_ok = make_job("gate-ok", module="pwn", status="no_flag",
+                   agent_provider="claude",
+                   agent_role_providers={"reviewer": "gpt"})
+gate_bad = make_job("gate-bad", module="pwn", status="no_flag",
+                    agent_provider="gpt",
+                    agent_role_providers={"reviewer": "claude"})
+AP.has_provider_auth = lambda p=None: p == "gpt"   # only GPT is configured
+try:
+    R._validate_retry(gate_ok)
+    check("a reviewer routed to the AUTHED backend is admitted", True, True)
+except Exception as e:
+    check(f"a reviewer routed to the AUTHED backend is admitted ({e})", False, True)
+try:
+    R._validate_retry(gate_bad)
+    check("a reviewer routed to an UNAUTHED backend is refused", False, True)
+except Exception:
+    check("a reviewer routed to an UNAUTHED backend is refused", True, True)
+AP.has_provider_auth = lambda p=None: True
+
+# D2: every failure path records its classified kind.
+_orig_iter2 = R._iter_reviewer_messages
+
+
+def _iter_raising(exc):
+    async def _f(framed, options, timeout):
+        raise exc
+        yield  # pragma: no cover
+
+    return _f
+
+
+for exc, want in ((asyncio.TimeoutError(), "timeout"),
+                  (RuntimeError("boom"), "api_error")):
+    jk = make_job(f"kind-{want}", agent_provider="claude")
+    R._iter_reviewer_messages = _iter_raising(exc)
+    try:
+        asyncio.run(R._ask_reviewer("ctx", job_id=jk))
+    except R.ReviewerError:
+        pass
+    krows = UL.read_usage(jk)
+    check(f"a {want} failure is billed", len(krows), 1)
+    check(f"...with its kind on the row",
+          krows[0].get("error_kind") if krows else None, want)
+
+# A clean Result whose TEXT is a refusal: diagnosed INSIDE the billed block.
+async def _iter_text_refusal(framed, options, timeout):
+    yield _Asst('{"type":"error","error":{"message":"violates our usage policy"}}')
+    yield _Res()
+
+
+jt = make_job("kind-textrefusal", agent_provider="claude")
+R._iter_reviewer_messages = _iter_text_refusal
+try:
+    asyncio.run(R._ask_reviewer("ctx", job_id=jt))
+except R.ReviewerError:
+    pass
+trows = UL.read_usage(jt)
+check("a text-level refusal is billed", len(trows), 1)
+check("...and the row carries a kind, not None",
+      (trows[0].get("error_kind") is not None) if trows else False, True)
+R._iter_reviewer_messages = _orig_iter2
+
+# D3: the first attempt is HELD, so a refusal never reaches the client when a
+# retry is about to recover it.
+SCALLS.clear()
+scripted_stream({"claude": {"kind": "policy_refusal"}, "gpt": {"text": "recovered"}})
+hj = make_job("held", agent_provider="claude")
+ev = asyncio.run(_drain(hj))
+check("no token from the blocked attempt is emitted",
+      [p_.get("delta") for k, p_ in ev if k == "token"], ["recovered"])
+check("the note precedes the recovered output", [k for k, _ in ev][0], "note")
+
+# ...and a clean stream still emits its tokens.
+SCALLS.clear()
+scripted_stream({"claude": {"text": "plain hint"}})
+cj = make_job("held-clean", agent_provider="claude")
+ev = asyncio.run(_drain(cj))
+check("a clean stream still yields its token",
+      [p_.get("delta") for k, p_ in ev if k == "token"], ["plain hint"])
+check("...and no note", [k for k, _ in ev], ["token", "done"])
+R._stream_reviewer_once = _orig_stream
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="
