@@ -254,7 +254,7 @@ check(
 )
 check(
     "D4 the primary model comes first",
-    mrows[0]["model"],
+    mrows[0]["model"] if mrows else None,
     "claude-opus-4-8",
 )
 _want = round(sum(_est(v, m) for m, v in MULTI.items()), 6)
@@ -279,8 +279,9 @@ J._record_judge_usage(
 rrows = UL.read_usage(jmr)
 check("D4 reported: still one row per model", len(rrows), 2)
 check("D4 reported: the session figure is whole on the primary row",
-      rrows[0]["cost_usd"], 0.42)
-check("D4 reported: it is not duplicated onto the other", rrows[1]["cost_usd"], None)
+      rrows[0]["cost_usd"] if rrows else None, 0.42)
+check("D4 reported: it is not duplicated onto the other",
+      rrows[1]["cost_usd"] if len(rrows) > 1 else "MISSING ROW", None)
 check("D4 reported: the bucket sums to the reported total",
       UL.aggregate_usage(jmr)["providers"]["claude"]["usd"], 0.42)
 check("D4 reported: and says not every row could be priced",
