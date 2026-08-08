@@ -731,34 +731,6 @@ def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
 
 
 def _judge_model_for(provider: str, requested: str | None) -> str:
-    """Judge model for `provider`, honouring THAT provider's active preset."""
-    from modules.agent_provider import role_model_for
-
-    return role_model_for("judge", provider, requested) or (
-        LATEST_JUDGE_MODEL if str(provider).lower() == "claude" else ""
-    )
-
-
-def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
-    """Attach the failover facts to a stage's public verdict.
-
-    The diagnosis is only worth producing if it outlives the call that made
-    it. It goes on the ledger row for accounting and here for the caller —
-    postjudge's dict is what the retry logic reads, so a failover that is
-    invisible there is a failover nobody can act on.
-    """
-    if turn.failover_diagnosis:
-        out["fallback_used"] = True
-        out["failover_from"] = turn.failover_from
-        # The TARGET that was tried, not the provider of whichever result we
-        # ended up returning. When both blocked we return the original, and
-        # reading its provider reported a failover to the place it came from.
-        out["failover_to"] = turn.failover_to or turn.provider
-        out["failover_diagnosis"] = turn.failover_diagnosis
-    return out
-
-
-def _judge_model_for(provider: str, requested: str | None) -> str:
     """Judge model for `provider`, honouring THAT provider's active preset.
 
     `resolve_judge_model()` runs before the provider is known, against the
