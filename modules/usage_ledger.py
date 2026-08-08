@@ -56,7 +56,51 @@ TOKEN_KEYS = (
 COST_BASIS = ("reported", "estimated", "none")
 
 _lock = threading.Lock()
-_attempts: dict[tuple[str, str, str], int] = {}
+
+
+def cost_contract(
+    provider: str,
+    *,
+    reported_cost: Any = None,
+    estimated_cost: Any = None,
+    gpt_runtime: str | None = None,
+) -> tuple[float | None, str, bool]:
+    """Decide (cost_usd, cost_basis, attach_oauth_window) for one invocation.
+
+    The rules differ per BACKEND, not per provider name, and getting that
+    wrong invents money:
+
+    * ``gpt`` + ``codex`` runtime — ChatGPT OAuth does not price a call, so
+      there is no dollar figure to have. Pricing its tokens instead runs GPT
+      usage through the Claude rate table and produces a number that is not
+      an estimate of anything (measured: a 5.8k-token Codex turn priced at
+      $0.049). Null, basis "none", metered by the OAuth window.
+    * ``gpt`` + ``responses`` runtime — API-key billed, and the adapter's
+      ``total_cost_usd`` is its OWN estimate (gpt_responses.py). So it is a
+      dollar figure, but "estimated", and the OAuth window does not apply to
+      it at all — that window belongs to the subscription, not the API key.
+    * ``claude`` / ``grok`` — the SDK's figure when there is one, else an
+      estimate from tokens priced with that vendor's own rates. No window.
+    """
+    p = str(provider or "").strip().lower()
+    runtime = str(gpt_runtime or "").strip().lower()
+
+    def _num(v: Any) -> float | None:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    if p == "gpt" and runtime != "responses":
+        return None, "none", True
+    if p == "gpt":  # responses
+        cost = _num(reported_cost)
+        if cost is None:
+            cost = _num(estimated_cost)
+        return (cost, "estimated", False) if cost is not None else (None, "none", False)
+
+    cost = _num(reported_cost)
+    if cost is not None:
+        return cost, "reported", False
+    cost = _num(estimated_cost)
+    return (cost, "estimated", False) if cost is not None else (None, "none", False)
 
 
 def _jobs_dir() -> Path:
@@ -78,23 +122,64 @@ def _clean_tokens(tokens: Any) -> dict[str, int]:
     return out
 
 
-def next_attempt(job_id: str, role: str, stage: str) -> int:
-    """1-based counter for this (job, role, stage).
+class _ledger_lock:
+    """Cross-PROCESS exclusion around the whole read-decide-append cycle.
 
-    In-process, and seeded from the file so a worker restart mid-job does not
-    reset supervise back to attempt 1 and make two different calls look like
-    the same one.
+    The attempt number and the dedupe check are both derived from the file's
+    current contents, so deriving them outside the lock that guards the append
+    is a read-modify-write race: two workers seeded from the same empty
+    snapshot both allocate attempt 1 (verified with a multiprocessing barrier).
+    A thread lock cannot fix that — the api container and the worker are
+    different PROCESSES, and stage 3 gives the ledger writers in both.
+
+    flock is advisory and Linux-only; on a platform without it this degrades
+    to the in-process lock, which is still correct for the single-process case.
     """
-    key = (str(job_id), str(role), str(stage))
-    with _lock:
-        if key not in _attempts:
-            seen = 0
-            for rec in read_usage(job_id):
-                if rec.get("role") == role and rec.get("stage") == stage:
-                    seen += 1
-            _attempts[key] = seen
-        _attempts[key] += 1
-        return _attempts[key]
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fh = None
+
+    def __enter__(self):
+        _lock.acquire()
+        try:
+            import fcntl
+
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self.path.parent.joinpath(
+                self.path.name + ".lock"
+            ).open("a+")
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            self._close()
+        return self
+
+    def _close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
+
+    def __exit__(self, *exc) -> None:
+        # flock is released by the close; do it before dropping the thread lock
+        # so the two are never held in an inconsistent order.
+        self._close()
+        _lock.release()
+
+
+def next_attempt(job_id: str, role: str, stage: str) -> int:
+    """1-based counter for this (job, role, stage), derived from the file.
+
+    Read-only: the value is only trustworthy while the ledger lock is held, so
+    `record_usage` calls this INSIDE that lock. Exposed for tests/inspection.
+    """
+    seen = 0
+    for rec in read_usage(job_id):
+        if rec.get("role") == role and rec.get("stage") == stage:
+            seen += 1
+    return seen + 1
 
 
 def record_usage(
@@ -107,6 +192,7 @@ def record_usage(
     tokens: dict | None = None,
     cost_usd: float | None = None,
     cost_basis: str = "none",
+    runtime: str | None = None,
     window: dict | None = None,
     error_kind: str | None = None,
     dedupe_key: str | None = None,
@@ -128,10 +214,6 @@ def record_usage(
     ``dedupe_key`` was already recorded for this job.
     """
     try:
-        if dedupe_key:
-            for prior in read_usage(job_id):
-                if prior.get("dedupe_key") == dedupe_key:
-                    return None
         if cost_basis not in COST_BASIS:
             cost_basis = "none"
         if not isinstance(cost_usd, (int, float)) or isinstance(cost_usd, bool):
@@ -143,13 +225,17 @@ def record_usage(
             "ts": datetime.now(timezone.utc).isoformat(),
             "role": str(role),
             "stage": str(stage),
-            "attempt": next_attempt(job_id, role, stage),
             "provider": str(provider),
             "model": str(model) if model else None,
             "tokens": _clean_tokens(tokens),
             "cost_usd": cost_usd,
             "cost_basis": cost_basis,
         }
+        if runtime:
+            # `gpt` alone does not say which billing model applied. An auditor
+            # reading a row needs to know whether "no dollars" meant a
+            # subscription or a failure to record one.
+            rec["runtime"] = str(runtime)
         if dedupe_key:
             rec["dedupe_key"] = str(dedupe_key)
         if isinstance(window, dict) and window:
@@ -163,9 +249,20 @@ def record_usage(
 
         path = ledger_path(job_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with _lock:
+        # The dedupe check and the attempt number are BOTH derived from the
+        # file's current contents, so they have to be inside the same lock as
+        # the append or two writers seeded from one snapshot allocate the same
+        # attempt (and both pass a dedupe check the other was about to fail).
+        with _ledger_lock(path):
+            if dedupe_key:
+                for prior in read_usage(job_id):
+                    if prior.get("dedupe_key") == dedupe_key:
+                        return None
+            rec["attempt"] = next_attempt(job_id, role, stage)
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
         return rec
     except Exception:
         # Never let accounting break the run it is accounting for.

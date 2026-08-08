@@ -65,6 +65,21 @@ class ResultMessage:
         self.model_usage = model_usage
 
 
+class AssistantMessage:
+    """The turn message that actually carries usage.
+
+    Sending only an EMPTY Result — which the first version of this file did —
+    never populates the token accumulator, so the cost-estimate branch is never
+    reached and a whole class of defect passes underneath. The Codex adapter
+    emits usage here and then a Result with total_cost_usd=None.
+    """
+
+    def __init__(self, usage, message_id):
+        self.usage = usage
+        self.message_id = message_id
+        self.content = []
+
+
 def make_job(job_id: str, **meta) -> str:
     d = DATA / "jobs" / job_id
     d.mkdir(parents=True, exist_ok=True)
@@ -75,7 +90,7 @@ def make_job(job_id: str, **meta) -> str:
 def reset(job_id: str) -> None:
     C._heartbeat_state.pop(job_id, None)
     C._token_state.pop(job_id, None)
-    UL._attempts.clear()
+    C._token_seen_ids.pop(job_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +171,56 @@ check("the gpt bucket has no dollar total", agg["usd"], None)
 check("and is flagged incomplete", agg["usd_complete"], False)
 
 # ---------------------------------------------------------------------------
+# 2b. turn 0010 D1 — the REAL Codex message order: usage arrives on an
+#     Assistant turn, then a Result with total_cost_usd=None. That fills the
+#     token accumulator, so the estimate branch fires. Pricing GPT tokens
+#     through the Claude rate table produced $0.049 of money that never
+#     existed. The contract says Codex OAuth is null / none / window-metered.
+# ---------------------------------------------------------------------------
+SETTINGS.write_text(json.dumps({"agent_provider": "gpt", "gpt_runtime": "codex"}))
+j2b = make_job("mu2b", agent_provider="gpt", model="gpt-5.6-sol")
+reset(j2b)
+C.agent_heartbeat(j2b, AssistantMessage({"input_tokens": 5000, "output_tokens": 800}, "m1"))
+C._heartbeat_state.pop(j2b, None)
+C.agent_heartbeat(
+    j2b,
+    ResultMessage(
+        cost=None,
+        session_id="gs1",
+        model_usage={"gpt-5.6-sol": {"input_tokens": 5000, "output_tokens": 800}},
+    ),
+)
+row = UL.read_usage(j2b)[-1]
+check("D1 tokens WERE accumulated (the branch is really reached)", bool(row.get("tokens")), True)
+check("D1 codex OAuth records no dollars", row.get("cost_usd"), None)
+check("D1 basis is none, not estimated", row.get("cost_basis"), "none")
+check("D1 the runtime is on the row", row.get("runtime"), "codex")
+
+# ---------------------------------------------------------------------------
+# 2c. turn 0010 D2 — the Responses runtime is API-key billed and its
+#     total_cost_usd is the ADAPTER's own estimate. So: dollars, but
+#     "estimated", and no Codex OAuth window (that window belongs to the
+#     subscription, not to an API key).
+# ---------------------------------------------------------------------------
+SETTINGS.write_text(json.dumps({"agent_provider": "gpt", "gpt_runtime": "responses"}))
+j2c = make_job("mu2c", agent_provider="gpt", model="gpt-5.6-sol")
+reset(j2c)
+_orig_snap = UL.codex_window_snapshot
+UL.codex_window_snapshot = lambda **k: {"weekly_remaining_pct": 77.0}
+try:
+    C.agent_heartbeat(j2c, ResultMessage(cost=0.008, session_id="rs1"))
+finally:
+    UL.codex_window_snapshot = _orig_snap
+row_r = UL.read_usage(j2c)[-1]
+check("D2 responses reports dollars", row_r.get("cost_usd"), 0.008)
+check("D2 but labelled estimated, not reported", row_r.get("cost_basis"), "estimated")
+check("D2 and carries NO Codex OAuth window", "window" in row_r, False)
+check("D2 the runtime is on the row", row_r.get("runtime"), "responses")
+
+# ---------------------------------------------------------------------------
 # 3. A ledger failure must not break the heartbeat.
 # ---------------------------------------------------------------------------
+SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))
 j3 = make_job("mu3", agent_provider="claude")
 reset(j3)
 _orig = UL.record_usage

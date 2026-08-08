@@ -4970,19 +4970,26 @@ def agent_heartbeat(job_id: str, msg) -> None:
         # See modules/usage_ledger.py. Entirely best-effort — accounting must
         # never break the run it is accounting for.
         try:
-            from modules.agent_provider import provider_for_job
-            from modules.usage_ledger import codex_window_snapshot, record_usage
+            from modules.agent_provider import get_gpt_runtime, provider_for_job
+            from modules.usage_ledger import (
+                codex_window_snapshot,
+                cost_contract,
+                record_usage,
+            )
 
             _prov = provider_for_job(job_id)
-            if session_cost is not None:
-                _cost, _basis = session_cost, "reported"
-            elif isinstance(updates.get("cost_usd_estimate"), (int, float)):
-                _cost, _basis = updates["cost_usd_estimate"], "estimated"
-            else:
-                # Codex OAuth prices nothing (codex_cli returns
-                # total_cost_usd=None). Recording 0.0 here would make a hybrid
-                # job read as cheaper than a pure-Claude one.
-                _cost, _basis = None, "none"
+            # The cost contract is per BACKEND, not per provider name. Codex
+            # OAuth prices nothing, so pricing its tokens would run GPT usage
+            # through the Claude rate table and invent money; the Responses
+            # runtime IS dollar-billed but its figure is the adapter's own
+            # estimate, and the OAuth window does not apply to an API key.
+            _runtime = get_gpt_runtime() if _prov == "gpt" else None
+            _cost, _basis, _wants_window = cost_contract(
+                _prov,
+                reported_cost=session_cost,
+                estimated_cost=updates.get("cost_usd_estimate"),
+                gpt_runtime=_runtime,
+            )
             record_usage(
                 job_id,
                 role="main",
@@ -4992,9 +4999,10 @@ def agent_heartbeat(job_id: str, msg) -> None:
                 tokens=tokens,
                 cost_usd=_cost,
                 cost_basis=_basis,
+                runtime=_runtime,
                 window=(
                     codex_window_snapshot(cached_only=True)
-                    if _prov == "gpt" else None
+                    if _wants_window else None
                 ),
                 # Cumulative-per-session cost plus a stream that can re-emit a
                 # Result means the same session must not add a second row.

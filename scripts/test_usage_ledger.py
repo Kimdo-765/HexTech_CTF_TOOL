@@ -143,12 +143,54 @@ check(
     UL.record_usage("j3", role="judge", stage="postjudge", provider="claude")["attempt"],
     1,
 )
-UL._attempts.clear()  # simulate a worker restart mid-job
 check(
-    "the counter is re-seeded from the file, not reset to 1",
+    "the counter is derived from the file, so a restart does not reset it",
     UL.record_usage("j3", role="judge", stage="supervise", provider="claude")["attempt"],
     4,
 )
+
+# ---------------------------------------------------------------------------
+# 3c. turn 0010 D3: two PROCESSES must not allocate the same attempt.
+#     A thread lock cannot cover this — the api container and the worker are
+#     different processes, and stage 3 gives the ledger writers in both.
+# ---------------------------------------------------------------------------
+import multiprocessing as _mp  # noqa: E402
+
+
+def _concurrent_writer(barrier, data_dir, out):
+    import os as _os
+    import sys as _sys
+
+    _os.environ["DATA_DIR"] = str(data_dir)
+    _sys.path.insert(0, str(ROOT))
+    from modules import usage_ledger as _UL
+
+    barrier.wait()  # both processes start from the same empty snapshot
+    rec = _UL.record_usage("jcc", role="judge", stage="supervise", provider="claude")
+    out.put(rec["attempt"] if rec else None)
+
+
+if __name__ == "__main__" or True:
+    _ctx = _mp.get_context("fork")
+    _barrier = _ctx.Barrier(2)
+    _q = _ctx.Queue()
+    _procs = [
+        _ctx.Process(target=_concurrent_writer, args=(_barrier, DATA, _q))
+        for _ in range(2)
+    ]
+    for _p in _procs:
+        _p.start()
+    for _p in _procs:
+        _p.join(timeout=30)
+    _got = sorted(_q.get() for _ in range(2))
+    check("both concurrent writers succeeded", [x is not None for x in _got], [True, True])
+    check("two processes get DISTINCT attempt numbers", _got, [1, 2])
+    check("and both rows are on disk", len(UL.read_usage("jcc")), 2)
+    check(
+        "attempts on disk are unique",
+        sorted(r["attempt"] for r in UL.read_usage("jcc")),
+        [1, 2],
+    )
 
 # ---------------------------------------------------------------------------
 # 3b. dedupe_key: main's cost is cumulative-per-session, so a re-emitted
@@ -241,6 +283,73 @@ check("j1 and j2 have separate ledgers",
       UL.ledger_path("j1") != UL.ledger_path("j2"), True)
 check("a job id cannot escape the jobs dir",
       UL.ledger_path("../../etc/passwd").parent.name, "passwd")
+
+# ---------------------------------------------------------------------------
+# 6. turn 0010 D1/D2: the cost contract is per BACKEND, not per provider name.
+# ---------------------------------------------------------------------------
+# Codex OAuth: no dollar figure exists. Pricing its tokens would run GPT usage
+# through the Claude rate table and produce money that is not an estimate of
+# anything (measured: a 5.8k-token turn priced at $0.049).
+check(
+    "codex OAuth -> null / none / wants window, even WITH a token estimate",
+    UL.cost_contract("gpt", reported_cost=None, estimated_cost=0.049, gpt_runtime="codex"),
+    (None, "none", True),
+)
+check(
+    "codex OAuth ignores a reported figure too",
+    UL.cost_contract("gpt", reported_cost=1.23, gpt_runtime="codex"),
+    (None, "none", True),
+)
+check(
+    "an unset gpt runtime defaults to codex, not to responses",
+    UL.cost_contract("gpt", estimated_cost=0.049, gpt_runtime=None),
+    (None, "none", True),
+)
+
+# Responses: API-key billed, and the adapter's total_cost_usd is its OWN
+# estimate — so it is dollars, but "estimated", and the OAuth window belongs
+# to the subscription, not to an API key.
+check(
+    "responses -> estimated dollars, and NO OAuth window",
+    UL.cost_contract("gpt", reported_cost=0.008, gpt_runtime="responses"),
+    (0.008, "estimated", False),
+)
+check(
+    "responses with nothing to price -> null / none / no window",
+    UL.cost_contract("gpt", gpt_runtime="responses"),
+    (None, "none", False),
+)
+
+check(
+    "claude with an SDK figure -> reported",
+    UL.cost_contract("claude", reported_cost=1.25, estimated_cost=9.9),
+    (1.25, "reported", False),
+)
+check(
+    "claude with only tokens -> estimated, priced at its own vendor's rates",
+    UL.cost_contract("claude", estimated_cost=0.5),
+    (0.5, "estimated", False),
+)
+check(
+    "grok never asks for a Codex OAuth window",
+    UL.cost_contract("grok", reported_cost=0.2)[2],
+    False,
+)
+check(
+    "a 0.0 figure is still 'reported', not folded into 'none'",
+    UL.cost_contract("claude", reported_cost=0.0),
+    (0.0, "reported", False),
+)
+
+# The runtime rides on the row so an auditor can tell "subscription" from
+# "we failed to record a cost".
+r = UL.record_usage("j9", role="main", stage="main", provider="gpt", runtime="codex")
+check("runtime is recorded", r.get("runtime"), "codex")
+check(
+    "a row with no runtime does not invent one",
+    "runtime" in UL.record_usage("j9", role="judge", stage="prejudge", provider="claude"),
+    False,
+)
 
 print(f"== summary: {PASSED} passed, {FAILED} failed ==")
 _TMP.cleanup()
