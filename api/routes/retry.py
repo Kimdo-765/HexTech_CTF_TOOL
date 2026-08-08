@@ -995,6 +995,19 @@ def _resubmit(
         # on this retry — carried files + hint only, clean SDK context.
         "fresh_session_requested": bool(fresh_session),
     }
+    # A retry IS a job create, so it gets the same create-time provider stamp
+    # the module routes give a first-run job. Without it the literal above
+    # carries no `agent_provider` at all, and every consumer falls back to
+    # whatever Settings says whenever it happens to ask — which for the role
+    # map means the routing chosen for this retry is lost outright.
+    #
+    # Stamping the ACTIVE provider (rather than copying the parent's) is what
+    # retry already assumes: `_resume_id_for_active_provider` above drops the
+    # resume id precisely when the active provider differs from the parent's,
+    # i.e. a retry deliberately follows the current Settings backend.
+    from modules.agent_provider import enrich_job_meta
+
+    enrich_job_meta(meta)
 
     q = get_queue()
 
