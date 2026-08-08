@@ -368,6 +368,46 @@ try:
 finally:
     GK.GrokACPClient = _orig_grok_client
 
+# ---- known tradeoff, pinned deliberately ------------------------------------
+# The accumulated Assistant text is a classification input because that is
+# where the adapters put the failure BODY (codex_cli formats it as
+# "[Codex CLI {stop_reason}] {detail}" — stop_reason names the category, the
+# text carries the server's message). The cost is that a judge which produced
+# analysis prose before erroring could have that prose classified.
+#
+# This is bounded: the path is reachable only when is_error is True, and the
+# stage-4 ladder tries each recovery at most once per job. Pinned here so it
+# is a decision rather than an accident — if it ever misfires, this is the
+# test to change.
+_orig_gpt_client2 = GA.GptAgentClient
+SETTINGS.write_text(json.dumps({"agent_provider": "gpt", "gpt_model": "gpt-5.6"}))
+try:
+    GA.GptAgentClient = _fake_client([
+        RealGptAssistant(content=[RealGptText(
+            'the script would breach the target site usage policy'
+        )]),
+        RealGptResult(is_error=True, stop_reason="turn_failed", session_id="gs1"),
+    ])
+    amb = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check(
+        "analysis prose in a FAILED turn is classified from the text (known tradeoff)",
+        amb.error_kind,
+        "policy_refusal",
+    )
+    # ...but a turn that did NOT error is never classified at all, so ordinary
+    # judge output mentioning policy can never trigger a failover.
+    GA.GptAgentClient = _fake_client([
+        RealGptAssistant(content=[RealGptText(
+            'the script would breach the target site usage policy'
+        )]),
+        RealGptResult(session_id="gs1"),
+    ])
+    fine = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check("a SUCCESSFUL turn is never classified", fine.error_kind, None)
+    check("...and its text is returned intact", "usage policy" in fine.text, True)
+finally:
+    GA.GptAgentClient = _orig_gpt_client2
+
 SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))
 
 # ---------------------------------------------------------------------------
