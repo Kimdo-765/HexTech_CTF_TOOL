@@ -3372,8 +3372,17 @@ async function renderJob(id, opts = {}) {
     || showRetry || showStopResume || showChangeTarget || showStop
   ) {
     const scriptName = job.runnable_script || (job.exploit_present ? "exploit.py" : "solver.py");
+    // A script whose required sibling is absent exits on its second statement.
+    // The button used to promise a run either way; say so instead of letting
+    // the operator find out from an empty sandbox log.
+    const missingDeps = Array.isArray(job.script_missing) ? job.script_missing : [];
     const runHtml = (job.runnable_script || job.exploit_present || job.solver_present)
-      ? `<button class="run-now-btn" data-action="run">▶ Run ${escapeHtml(scriptName)} in sandbox</button>`
+      ? `<button class="run-now-btn" data-action="run"${missingDeps.length
+            ? ` title="${escapeHtml(scriptName)} requires ${escapeHtml(missingDeps.join(", "))}, which ${missingDeps.length > 1 ? "are" : "is"} not in the job dir — it will exit immediately"` : ""
+         }>▶ Run ${escapeHtml(scriptName)} in sandbox</button>${
+           missingDeps.length
+             ? `<span class="script-scaffold">scaffold · missing ${escapeHtml(missingDeps.join(", "))}</span>`
+             : ""}`
       : "";
     const retryHtml = showRetry
       ? `<button class="retry-btn" data-action="retry">↻ Retry with reviewer hint</button>

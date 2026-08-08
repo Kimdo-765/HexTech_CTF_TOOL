@@ -2045,3 +2045,16 @@ body.modal-open { overflow: hidden; }
   background: rgba(59, 130, 246, 0.16);
   border: 1px solid rgba(59, 130, 246, 0.45);
 }
+
+/* The run button stays enabled — an operator may still want to run a scaffold
+   to see it fail — but it should not read as "there is a working exploit". */
+.script-scaffold {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  color: var(--yellow-bright, #e3b341);
+  background: rgba(227, 179, 65, 0.12);
+  border: 1px solid rgba(227, 179, 65, 0.4);
+}

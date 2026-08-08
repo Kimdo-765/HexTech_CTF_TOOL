@@ -2328,6 +2328,48 @@ def _recon_web_research_addendum(module: str) -> str:
     return _RECON_WEB_ADDENDUM.get((module or "").lower(), "")
 
 
+def agent_job_env(
+    job_id: str,
+    role: str,
+    work_dir,
+    extra: dict | None = None,
+) -> dict[str, str]:
+    """The per-job environment EVERY agent process gets.
+
+    Three call sites built this independently — main, sub-agents, and (not at
+    all) pre-recon. The omission was not cosmetic: with no per-job TMPDIR, GPT
+    pre-recon extracted an archive into the container-global /tmp and then
+    analysed a `prob.ko` left there by an earlier job, while the initramfs it
+    was handed contained only `serendipity.ko` (job 6685e3e65add). A whole
+    recon pass answered about the wrong binary.
+
+    So it lives in one place. `TMPDIR`/`TMP`/`TEMP` cover library calls
+    (tempfile, pwntools, pip, pyc cache); absolute-path escapes in Bash are a
+    separate concern the CTF_PREAMBLE scratch-file rule owns.
+    """
+    env: dict[str, str] = {"JOB_ID": str(job_id)}
+    if role:
+        env["AGENT_ROLE"] = str(role)
+    tmp_dir = Path(work_dir) / "tmp"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # A scratch dir we cannot create is not a reason to fail the run; the
+        # agent falls back to the container default exactly as before.
+        pass
+    _t = str(tmp_dir)
+    env["TMPDIR"] = _t
+    env["TMP"] = _t
+    env["TEMP"] = _t
+    # Terminal-mode quietness: pwntools/checksec print a terminfo error per
+    # invocation inside the worker container without these.
+    env.setdefault("TERM", "xterm")
+    env.setdefault("PWNLIB_NOTERM", "1")
+    if extra:
+        env.update({k: str(v) for k, v in extra.items()})
+    return env
+
+
 def make_standalone_options(
     agent_type: str,
     model: str | None,
@@ -2424,23 +2466,7 @@ def make_standalone_options(
     sub_model = resolve_role_model(
         agent_type, _base_sub_model, provider_for_job(job_id)
     )
-    env = {"JOB_ID": job_id, "AGENT_ROLE": agent_type}
-    # Same per-job TMPDIR + terminfo silencing as main session — keeps
-    # subagent Bash output clean and prevents /tmp collision when
-    # concurrent jobs spawn subagents in the same container.
-    sub_tmp = Path(work_dir) / "tmp"
-    try:
-        sub_tmp.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    _sub_tmp_str = str(sub_tmp)
-    env["TMPDIR"] = _sub_tmp_str
-    env["TMP"]    = _sub_tmp_str
-    env["TEMP"]   = _sub_tmp_str
-    env.setdefault("TERM", "xterm")
-    env.setdefault("PWNLIB_NOTERM", "1")
-    if extra_env:
-        env.update({k: str(v) for k, v in extra_env.items()})
+    env = agent_job_env(job_id, agent_type, work_dir, extra_env)
     # Defense-in-depth: strip argv-fatal control bytes from the system
     # prompt before it crosses the SDK → claude CLI argv boundary. An
     # accidental `\0` in a Python string literal anywhere in the prompt
@@ -3190,7 +3216,7 @@ async def run_pre_recon(
             model=gpt_model,
             cwd=str(work_dir),
             effort=None,
-            env={"JOB_ID": job_id, "AGENT_ROLE": "recon"},
+            env=agent_job_env(job_id, "recon", work_dir),
             enable_tools=True,
             enable_subagents=False,
         )
@@ -3246,7 +3272,7 @@ async def run_pre_recon(
             model=grok_model,
             cwd=str(work_dir),
             effort=None,
-            env={"JOB_ID": job_id, "AGENT_ROLE": "recon"},
+            env=agent_job_env(job_id, "recon", work_dir),
         )
         try:
             async with GrokACPClient(opts) as client:
@@ -3612,9 +3638,10 @@ def make_main_session_options(
     system_prompt = sanitize_for_argv(
         system_prompt, label="main-options", log_fn=log_fn_local,
     )
-    env = {"JOB_ID": job_id}
-    if extra_env:
-        env.update({k: str(v) for k, v in extra_env.items()})
+    # Same builder as sub-agents and pre-recon. `role` is empty on purpose:
+    # main never carried AGENT_ROLE, and adding it here would change what the
+    # process sees for a reason unrelated to this fix.
+    env = agent_job_env(job_id, "", work_dir, extra_env)
 
     # Per-job scratch dir under cwd. Keeps tempfile.* / pwntools /
     # pip / pyc cache from colliding when WORKER_CONCURRENCY > 1 in
@@ -3622,12 +3649,6 @@ def make_main_session_options(
     # /tmp/foo) are addressed by the SCRATCH FILES rule in
     # CTF_PREAMBLE — env-vars only cover library calls. Cleanup is
     # implicit: job DELETE rmtree's the whole /data/jobs/<id>/.
-    tmp_dir = Path(work_dir) / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    _tmp_str = str(tmp_dir)
-    env["TMPDIR"] = _tmp_str
-    env["TMP"]    = _tmp_str
-    env["TEMP"]   = _tmp_str
 
     # Terminal-mode quietness:
     #   TERM=xterm — silences `_curses.error: setupterm: could not find
@@ -3645,8 +3666,6 @@ def make_main_session_options(
     # output under PWNLIB_SILENT=1, forcing the agent to derive RELRO/
     # canary/PIE from readelf+nm fallbacks. Letting pwntools log adds
     # one `[*] '<file>'` line per call; minor cost vs. losing checksec.
-    env.setdefault("TERM", "xterm")
-    env.setdefault("PWNLIB_NOTERM", "1")
 
     provider = active_provider()
 

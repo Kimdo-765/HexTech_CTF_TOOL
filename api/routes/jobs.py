@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timezone
+import ast
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -269,6 +270,53 @@ def get_usage():
     }
 
 
+def _script_missing_siblings(script: Path) -> list[str]:
+    """Sibling files the script REQUIRES that are not there.
+
+    "A file named exploit.py exists" was the whole test for `runnable_script`,
+    and it is not the same question. Job 6685e3e65add shipped an uploader
+    skeleton whose second statement is
+
+        payload_path = Path(__file__).resolve().with_name("serendipity_exp")
+        if not payload_path.exists():
+            raise SystemExit(f"missing compiled payload: {payload_path}")
+
+    — so "Run in sandbox" offered to run something that could only exit. The
+    operator reads that button as "there is an exploit"; it meant "there is a
+    filename".
+
+    Deliberately narrow. It resolves LITERAL sibling names only, via
+    `.with_name("x")` and `open("x")` / `Path("x")` with no separator, and says
+    nothing about a script that builds its payload at run time. A wrong "this
+    is fine" is the failure that matters here, so the analysis only reports
+    what it can actually see.
+    """
+    try:
+        tree = ast.parse(script.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    wanted: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = ""
+        if isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            name = node.func.id
+        if name not in {"with_name", "open", "Path"}:
+            continue
+        for arg in node.args[:1]:
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                continue
+            v = arg.value
+            if not v or "/" in v or v.startswith(".") or len(v) > 100:
+                continue
+            wanted.append(v)
+    here = script.parent
+    return sorted({v for v in wanted if not (here / v).exists()})
+
+
 def _detect_runnable_script(job_dir: Path) -> str | None:
     # Primary: <jobdir>/<name> (populated by the analyzer's carry step at
     # the end of a run). Fallback: <jobdir>/work/<name> — present even
@@ -326,6 +374,15 @@ def get_job(job_id: str):
     # the field existed (or whose orchestrator didn't set it).
     _jd = JOBS_DIR / Path(job_id).name
     runnable_script = _detect_runnable_script(_jd)
+    # A script can exist and still be unable to run. Reported alongside rather
+    # than folded into `runnable_script`, so the /file/ link and the retry
+    # paths that key off the name are untouched — only the UI's claim changes.
+    script_missing = []
+    if runnable_script:
+        for _cand in (_jd / runnable_script, _jd / "work" / runnable_script):
+            if _cand.is_file():
+                script_missing = _script_missing_siblings(_cand)
+                break
 
     # WHY_STOPPED.md only exists on abnormal stops (judge_stop / agent_error /
     # no_hint / budget) — written by write_why_stopped() to the work tree and
@@ -343,6 +400,7 @@ def get_job(job_id: str):
         # kept: scripts/job-status.sh prints it, and it identifies the slot
         "rq_worker_name": rq_worker_name,
         "runnable_script": runnable_script,
+        "script_missing": script_missing,
         "has_why_stopped": has_why_stopped,
     }
 
