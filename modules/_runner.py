@@ -586,8 +586,15 @@ def _ping_target(target: str, *, timeout: float = 3.0) -> tuple[bool, str]:
         return True, ""
     if not host or port <= 0 or port > 65535:
         return True, ""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
+    try:
+        # Creating the socket was outside the guard, so on a host that denies
+        # it outright (a hardened container, a restricted CI box) a PermissionError
+        # escaped a probe whose entire contract is warn-not-fail and took
+        # attempt_sandbox_run down with it.
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+    except OSError as e:
+        return True, f"(reachability probe unavailable: {type(e).__name__}: {e})"
     try:
         s.connect((host, port))
     except socket.gaierror as e:

@@ -1280,7 +1280,7 @@ _sess_dir = DATA / "jobs" / _sess
 (_sess_dir / "work").mkdir(parents=True, exist_ok=True)
 _si = SH.record_input(_sess, "prejudge", {"cycle_id": "cs", "script_rel": "exploit.py"})
 SH.record_verdict(_sess, "prejudge", {"ok": True, "severity": "low"},
-                  answers=_si["id"], opened_session=True)
+                  answers=_si["id"], opened_session="sid-prejudge-opened")
 SH.record_input(_sess, "postjudge", {"cycle_id": "cs", "exit_code": 0})
 
 _judge_mod._forget_sid(_sess)          # a fresh process holds no session
@@ -1301,7 +1301,9 @@ check("...saying the session is unreachable, not that the prejudge failed",
 # recorded a refusal), so without this the control would pass on an empty
 # pending list rather than on the session being reachable.
 SH.record_input(_sess, "postjudge", {"cycle_id": "cs", "exit_code": 0})
-_judge_mod._remember_sid(_sess, "sid-live", "claude")
+# The SAME id the prejudge recorded — a DIFFERENT one is cycle A's stale
+# session, which is what D21 was about.
+_judge_mod._remember_sid(_sess, "sid-prejudge-opened", "claude")
 try:
     _scalls2 = []
     SH.evaluate(_sess, _sess_dir,
@@ -1320,9 +1322,9 @@ SH.record_input(_sess2, "prejudge", {"cycle_id": "cs2", "script_rel": "exploit.p
 SH.evaluate(_sess2, _sess2_dir, runner=lambda st, i: (
     _judge_mod._remember_sid(_sess2, "sid-from-prejudge", "claude"),
     {"ok": True, "severity": "low"})[1])
-check("evaluate() stamps that the prejudge opened a session",
+check("evaluate() stamps WHICH session the prejudge opened",
       [r.get("opened_session") for r in SH.read_shadow(_sess2)
-       if r.get("kind") == "verdict"], [True])
+       if r.get("kind") == "verdict"], ["sid-from-prejudge"])
 _judge_mod._forget_sid(_sess2)                 # the sweep ends; a new one starts
 SH.record_input(_sess2, "postjudge", {"cycle_id": "cs2", "exit_code": 0})
 _s2calls = []
@@ -1338,7 +1340,7 @@ _nos_dir = DATA / "jobs" / _nos
 _nos_dir.mkdir(parents=True, exist_ok=True)
 _ni = SH.record_input(_nos, "prejudge", {"cycle_id": "cn", "script_rel": "exploit.py"})
 SH.record_verdict(_nos, "prejudge", {"ok": True}, answers=_ni["id"],
-                  opened_session=False)
+                  opened_session=None)
 SH.record_input(_nos, "postjudge", {"cycle_id": "cn", "exit_code": 0})
 _ncalls = []
 SH.evaluate(_nos, _nos_dir,
@@ -1357,7 +1359,7 @@ _dupc_dir = DATA / "jobs" / _dupc
 _dupc_dir.mkdir(parents=True, exist_ok=True)
 _dci = SH.record_input(_dupc, "prejudge", {"cycle_id": "cd", "script_rel": "exploit.py"})
 SH.record_verdict(_dupc, "prejudge", {"ok": True, "severity": "low"},
-                  answers=_dci["id"], opened_session=False)
+                  answers=_dci["id"], opened_session=None)
 SH.record_verdict(_dupc, "prejudge",
                   {"unevaluable": "the judge never answered: transport_error"},
                   answers=_dci["id"])          # the redundant second answer
@@ -1468,6 +1470,108 @@ check("...the same extra_context",
 check("...and the same flag shapes",
       _handed.get("postjudge", {}).get("flag_shapes"),
       _fwd_in["postjudge"].get("flag_shapes"))
+
+# ---------------------------------------------------------------------------
+# 23. Session provenance belongs to the CYCLE. The session map is keyed by job
+#     and `_remember_sid(job, None, provider)` keeps an existing id, so a sid
+#     left by attempt A made attempt B's prejudge look like it had opened one —
+#     and B's postjudge then resumed A's context. The F2 fix was job-scoped,
+#     which is the very mistake D17 was about.
+# ---------------------------------------------------------------------------
+_st = "shstale"
+_st_dir = DATA / "jobs" / _st
+_st_dir.mkdir(parents=True, exist_ok=True)
+_judge_mod._remember_sid(_st, "sid-from-cycle-a", "claude")   # attempt A's leftover
+_sti = SH.record_input(_st, "prejudge", {"cycle_id": "cycB", "script_rel": "exploit.py"})
+SH.record_input(_st, "postjudge", {"cycle_id": "cycB", "exit_code": 0})
+_stseen = []
+try:
+    SH.evaluate(_st, _st_dir,
+                runner=lambda st, i: (_stseen.append(st), {"ok": True})[1])
+finally:
+    _judge_mod._forget_sid(_st)
+_stv = [r for r in SH.read_shadow(_st) if r.get("kind") == "verdict"]
+check("a stale sid from an earlier attempt is cleared before this prejudge",
+      [r.get("opened_session") for r in _stv if r.get("stage") == "prejudge"],
+      [None])
+check("...so this cycle's postjudge is not blocked by it either",
+      _stseen, ["prejudge", "postjudge"])
+check("...and nothing resumed the previous attempt's session",
+      _judge_mod._recall_sid(_st), None)
+
+# The guard is identity-based: a DIFFERENT live session is not the one the
+# prejudge opened, and must be refused rather than resumed.
+_idj = "shident"
+_idj_dir = DATA / "jobs" / _idj
+_idj_dir.mkdir(parents=True, exist_ok=True)
+_idi = SH.record_input(_idj, "prejudge", {"cycle_id": "ci"})
+SH.record_verdict(_idj, "prejudge", {"ok": True}, answers=_idi["id"],
+                  opened_session="sid-mine")
+SH.record_input(_idj, "postjudge", {"cycle_id": "ci", "exit_code": 0})
+_judge_mod._remember_sid(_idj, "sid-someone-elses", "claude")
+_idseen = []
+try:
+    SH.evaluate(_idj, _idj_dir,
+                runner=lambda st, i: (_idseen.append(st), {"verdict": "x"})[1])
+finally:
+    _judge_mod._forget_sid(_idj)
+check("a DIFFERENT live session is not the one prejudge opened", _idseen, [])
+check("...and says the session is unreachable",
+      any("not available in this process"
+          in str((r["verdict"] or {}).get("unevaluable") or "")
+          for r in SH.read_shadow(_idj) if r.get("kind") == "verdict"), True)
+
+# ---------------------------------------------------------------------------
+# 24. The reachability probe is warn-not-fail, and a host that forbids socket
+#     creation must not take the run down with it. Creating the socket sat
+#     outside the guard, so this suite died before printing on a restricted
+#     host — the checks were fine, the harness was not portable.
+# ---------------------------------------------------------------------------
+import socket as _socket  # noqa: E402
+
+_real_socket = _socket.socket
+
+
+def _denied(*a, **k):
+    raise PermissionError(1, "Operation not permitted")
+
+
+_socket.socket = _denied
+try:
+    _ok, _note = R._ping_target("10.9.8.7:31337", timeout=1)
+finally:
+    _socket.socket = _real_socket
+check("a host that forbids sockets does not fail the probe", _ok, True)
+check("...it says the probe was unavailable",
+      "probe unavailable" in _note, True)
+
+# ...and the whole run survives it, which is what the suite needs to be
+# runnable anywhere.
+_pj2 = "shnosock"
+_pj2_dir = DATA / "jobs" / _pj2
+(_pj2_dir / "work").mkdir(parents=True, exist_ok=True)
+(_pj2_dir / "work" / "exploit.py").write_text("print('x')\n")
+(_pj2_dir / "exploit.py").write_text("print('x')\n")
+(_pj2_dir / "meta.json").write_text(json.dumps({"id": _pj2}))
+set_settings(enable_judge=False, judge_mode="shadow")
+_saved_ns = (R.run_in_sandbox, R.Path)
+R.run_in_sandbox = lambda *a, **k: {"exit_code": 0, "stdout": "o", "stderr": "",
+                                    "timeout": False, "killed_by_supervise": False}
+R.Path = _tmp_path
+_socket.socket = _denied
+try:
+    _nsres = R.attempt_sandbox_run(_pj2, "exploit.py", "10.9.8.7:31337",
+                                   lambda *_: None)
+    _nserr = None
+except BaseException as exc:                      # noqa: BLE001 — reported
+    _nsres, _nserr = None, f"{type(exc).__name__}: {exc}"
+finally:
+    _socket.socket = _real_socket
+    R.run_in_sandbox, R.Path = _saved_ns
+check("a remote-target run completes on a socket-less host", _nserr, None)
+check("...and still records both shadow stages",
+      sorted(r["stage"] for r in SH.read_shadow(_pj2) if r.get("kind") == "input"),
+      ["postjudge", "prejudge"])
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="

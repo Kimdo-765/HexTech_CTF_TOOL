@@ -320,12 +320,12 @@ def _cycle_state(job_id: str) -> tuple[set[str], dict[str, str]]:
     behaviour — the honest reading, since they cannot be told apart.
 
     Returns (cycles that recorded a prejudge INPUT, {cycle: why it was refused},
-    cycles whose prejudge OPENED a judge session).
+    {cycle: the session id its prejudge opened}).
     """
     stage_of: dict[str, tuple[str, str]] = {}       # input id -> (cycle, stage)
     have_prejudge: set[str] = set()
     refused: dict[str, str] = {}
-    opened_session: set[str] = set()
+    opened_session: dict[str, str] = {}
     answered: set[str] = set()
     for rec in read_shadow(job_id):
         if rec.get("kind") == "input":
@@ -350,18 +350,36 @@ def _cycle_state(job_id: str) -> tuple[set[str], dict[str, str]]:
                 if why:
                     refused[cyc] = str(why)
                 elif rec.get("opened_session"):
-                    opened_session.add(cyc)
+                    opened_session[cyc] = str(rec.get("opened_session"))
     return have_prejudge, refused, opened_session
 
 
-def _session_live(job_id: str) -> bool:
-    """Does THIS process still hold the judge session for `job_id`?"""
+def _session_id(job_id: str) -> str | None:
+    """The judge session THIS process holds for `job_id`, if any."""
     try:
         from modules._judge import _recall_sid
 
-        return bool(_recall_sid(job_id))
+        return _recall_sid(job_id)
     except Exception:
-        return False
+        return None
+
+
+def _forget_session(job_id: str) -> None:
+    """Drop the job's judge session, so the next prejudge starts clean.
+
+    The map is keyed by job, not by cycle, and `_remember_sid(job, None, p)`
+    keeps an existing id while updating only the provider. So a sid left by
+    cycle A survived into cycle B and made B's prejudge report that it had
+    opened a session it never opened. Clearing before each cycle's prejudge
+    makes the provenance per-cycle by construction rather than by inference,
+    and mirrors what the enforce path already does per attempt.
+    """
+    try:
+        from modules._judge import _forget_sid
+
+        _forget_sid(job_id)
+    except Exception:
+        pass
 
 
 def _mark_model_failure(verdict: dict) -> dict:
@@ -514,7 +532,7 @@ def evaluate(
                 why = "no prejudge was recorded for this cycle"
             elif cyc in refused:
                 why = f"prejudge for this cycle was unevaluable: {refused[cyc]}"
-            elif cyc in opened_session and not _session_live(job_id):
+            elif cyc in opened_session and _session_id(job_id) != opened_session[cyc]:
                 # The prerequisite was checked against the FILE, but the thing
                 # it exists to guarantee — that this stage resumes the session
                 # prejudge opened — lives in `_judge._session_ids`, a dict in
@@ -529,6 +547,15 @@ def evaluate(
         if why:
             verdict = {"unevaluable": why}
         else:
+            if stage == "prejudge":
+                # Clear the session FIRST, exactly as the enforce path does per
+                # attempt (attempt_sandbox_run's `finally: _forget_sid`). A sid
+                # left by an earlier cycle otherwise made THIS cycle's prejudge
+                # look like it had opened one, and its postjudge resumed the
+                # previous attempt's context. Here rather than inside the
+                # default runner: it is a property of the evaluation cycle, and
+                # an injected runner must not be able to skip it.
+                _forget_session(job_id)
             try:
                 verdict = runner(stage, inputs)
             except ArtifactChanged as exc:
@@ -550,7 +577,7 @@ def evaluate(
                        # prejudge that legitimately yielded none is faithful
                        # (enforce would have had none either), and only the
                        # "opened one, cannot reach it now" case is a defect.
-                       opened_session=(_session_live(job_id)
+                       opened_session=(_session_id(job_id)
                                        if stage == "prejudge" else None))
     _shadow_logger(job_id, "evaluate")(
         f"[judge] shadow: evaluated {count} recorded stage(s) out of band"
