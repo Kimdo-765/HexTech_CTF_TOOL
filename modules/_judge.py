@@ -773,7 +773,7 @@ def _attempt(
     model: str | None,
     provider: str,
 ) -> JudgeTurnResult:
-    """One judge attempt that NEVER raises.
+    """One judge attempt that NEVER raises (bar KeyboardInterrupt / SystemExit).
 
     The exception boundary belongs HERE, at the attempt, not around the public
     stage function — for three reasons that only show up at this level:
@@ -797,13 +797,21 @@ def _attempt(
                 provider_override=provider,
             )
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
+        # CancelledError derives from BaseException, so `except Exception`
+        # left the one failure most likely during a shutdown or a wall-clock
+        # kill escaping a box whose whole contract is "never raises" — and
+        # taking the ledger row with it. KeyboardInterrupt and SystemExit are
+        # deliberately NOT caught: those mean the process is going away, and
+        # a best-effort gate has no business detaining them.
         detail = f"{type(exc).__name__}: {exc}"
         return JudgeTurnResult(
             provider=provider,
             session_id=resume_sid,
-            error_kind=_classify(detail, "transport_error"),
-            error_detail=detail[:500],
+            error_kind=_classify(detail, "cancelled"
+                                 if isinstance(exc, asyncio.CancelledError)
+                                 else "transport_error"),
+            error_detail=detail[:500] or type(exc).__name__,
         )
 
 
@@ -1131,37 +1139,42 @@ def _run_async(coro):
     (e.g. an analyzer that awaited us), we fall back to a thread-isolated
     new loop so we never deadlock.
     """
+    # Decide by ASKING, before running — not by reading the message of an
+    # exception afterwards. Message matching had two failure modes and they
+    # were mirror images: a coroutine whose own RuntimeError happened to say
+    # "running event loop" was re-awaited (turning its real error into
+    # "cannot reuse already awaited coroutine"), and any other RuntimeError
+    # from the coroutine had been swallowed as a loop conflict. The question
+    # "is a loop running in THIS thread" has a direct answer.
     try:
+        asyncio.get_running_loop()
+        loop_is_running = True
+    except RuntimeError:
+        loop_is_running = False
+
+    if not loop_is_running:
         return asyncio.run(coro)
-    except RuntimeError as exc:
-        # ONLY the already-running-loop case falls back. Catching every
-        # RuntimeError meant a RuntimeError raised BY the coroutine was read as
-        # a loop conflict, the already-awaited coroutine was awaited a second
-        # time ("cannot reuse already awaited coroutine"), and the caller got
-        # the `("", None)` default instead of the real failure — a judge that
-        # raised RuntimeError looked like a judge that answered nothing.
-        if "running event loop" not in str(exc).lower():
-            raise
-        result: dict[str, Any] = {}
-        error: dict[str, BaseException] = {}
 
-        def _run():
-            loop = asyncio.new_event_loop()
-            try:
-                result["v"] = loop.run_until_complete(coro)
-            except BaseException as inner:      # noqa: BLE001 — re-raised below
-                error["e"] = inner
-            finally:
-                loop.close()
+    result: dict[str, Any] = {}
+    error: dict[str, BaseException] = {}
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join()
-        if "e" in error:
-            # Surfacing it lets the attempt boundary classify and bill it;
-            # swallowing it here produced a silent empty answer.
-            raise error["e"]
-        return result["v"]
+    def _run():
+        loop = asyncio.new_event_loop()
+        try:
+            result["v"] = loop.run_until_complete(coro)
+        except BaseException as inner:      # noqa: BLE001 — re-raised below
+            error["e"] = inner
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join()
+    if "e" in error:
+        # Surfacing it lets the attempt boundary classify and bill it;
+        # swallowing it here produced a silent empty answer.
+        raise error["e"]
+    return result["v"]
 
 
 # ---------------------------------------------------------------------------

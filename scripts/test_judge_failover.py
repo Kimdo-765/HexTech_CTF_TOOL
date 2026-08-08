@@ -69,6 +69,7 @@ if _missing("claude_agent_sdk"):
     _sdk.project_key_for_directory = lambda *a, **k: ""
     sys.modules["claude_agent_sdk"] = _sdk
 
+import asyncio  # noqa: E402
 import modules._judge as J  # noqa: E402
 import modules.agent_provider as AP  # noqa: E402
 from modules import usage_ledger as UL  # noqa: E402
@@ -131,7 +132,7 @@ def turn(**kw) -> J.JudgeTurnResult:
     """
     try:
         return J.judge_turn(**kw)
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         return J.JudgeTurnResult(
             provider="RAISED", error_kind=f"{type(exc).__name__}: {exc}")
 
@@ -337,6 +338,23 @@ check("...diagnosed as inconclusive, not provider-specific",
       out.failover_diagnosis, "inconclusive")
 
 
+# turn 0046 D5: CancelledError derives from BaseException, so `except
+# Exception` left the failure most likely during a shutdown or a wall-clock
+# kill escaping a box whose contract is "never raises" — and took the ledger
+# row with it.
+CALLS.clear()
+jid = "raise-cancelled"
+make_job(jid, agent_provider="claude")
+raising({"claude": asyncio.CancelledError()})
+out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid,
+           stage="supervise", resume=False)
+check("D5 a cancelled attempt does not escape", out.provider != "RAISED", True)
+check("D5 ...and is classified as cancelled", out.error_kind, "cancelled")
+check("D5 ...on the provider that was tried", out.provider, "claude")
+crows = UL.read_usage(jid)
+check("D5 the cancelled attempt is still billed", len(crows), 1)
+check("D5 ...with its kind", crows[0].get("error_kind") if crows else None, "cancelled")
+
 # ---------------------------------------------------------------------------
 # 5c. `_run_async` itself. `_attempt` catches everything above it, so a bug
 #     here is invisible to every other case: it caught EVERY RuntimeError as
@@ -370,6 +388,46 @@ for coro_fn, exc_type, label in (
               "failed" in str(e) or "not a RuntimeError" in str(e), True)
     except Exception as e:  # pragma: no cover
         check(f"a coroutine raising {label} propagates as {label}", type(e).__name__, exc_type.__name__)
+
+
+# turn 0046 D6: the loop decision is made by ASKING, not by reading an
+# exception message. A coroutine whose own RuntimeError happens to contain
+# "running event loop" used to be re-awaited, replacing its real error with
+# "cannot reuse already awaited coroutine".
+async def _boom_colliding_message():
+    raise RuntimeError("sentinel: running event loop belongs to the coroutine")
+
+
+try:
+    J._run_async(_boom_colliding_message())
+    check("D6 a colliding message still propagates", "returned", "raised")
+except RuntimeError as e:
+    check("D6 a colliding message still propagates", "raised", "raised")
+    check("D6 ...with the ORIGINAL message", "sentinel" in str(e), True)
+    check("D6 ...not the re-await error", "already awaited" in str(e), False)
+
+
+# And the real running-loop path still falls back to a thread.
+async def _inside_loop():
+    return J._run_async(_ok())
+
+
+check("D6 a genuinely running loop still falls back", asyncio.run(_inside_loop()), "value")
+
+
+async def _inside_loop_err():
+    async def _e():
+        raise RuntimeError("sentinel: coroutine failure preserved")
+
+    return J._run_async(_e())
+
+
+try:
+    asyncio.run(_inside_loop_err())
+    check("D6 the thread fallback surfaces the coroutine's error", "returned", "raised")
+except RuntimeError as e:
+    check("D6 the thread fallback surfaces the coroutine's error",
+          "sentinel: coroutine failure preserved" in str(e), True)
 
 # ---------------------------------------------------------------------------
 # 6. BOTH turns are billed. Hiding the refused one makes a failover look free.
