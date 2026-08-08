@@ -106,6 +106,21 @@ def make_job(job_id: str, *, self_defeat: bool = False, chain: dict | None = Non
     return jd
 
 
+def prejudge(jd, **kw) -> dict:
+    """Call prejudge and turn any escape into a REPORTABLE result.
+
+    prejudge is documented as never fatal, so an exception escaping it is
+    itself a failure — and a test that dies on it hides which contract broke
+    instead of naming it. Third time in this work that an unguarded call
+    turned a caught mutation into a stack trace.
+    """
+    try:
+        return J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name, **kw)
+    except Exception as exc:
+        return {"ok": "RAISED", "severity": f"{type(exc).__name__}: {exc}",
+                "issues": [], "raw": ""}
+
+
 # ---------------------------------------------------------------------------
 # 1. The gates stand alone.
 # ---------------------------------------------------------------------------
@@ -141,7 +156,7 @@ for label, answer in (
 ):
     jd = make_job(f"g-noparse-{label.replace(' ', '-')}", self_defeat=True)
     judge_returns(answer)
-    v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+    v = prejudge(jd)
     check(f"{label}: the static gate still blocks", v["ok"], False)
     check(f"{label}: at high severity", v["severity"], "high")
     check(f"{label}: with the reason", any("self-defeat" in i for i in v["issues"]), True)
@@ -150,7 +165,7 @@ for label, answer in (
 # permissive about opinion, not about evidence.
 jd = make_job("g-noparse-clean")
 judge_returns("")
-v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+v = prejudge(jd)
 check("a clean job with no verdict still ships", v["ok"], True)
 check("...at low severity", v["severity"], "low")
 
@@ -158,7 +173,7 @@ check("...at low severity", v["severity"], "low")
 # behave identically — the refusal says nothing about the exploit.
 jd = make_job("g-refused", self_defeat=True)
 judge_returns("", error_kind="policy_refusal", error_detail="violates our usage policy")
-v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+v = prejudge(jd)
 check("a REFUSED judge still runs the static gates", v["ok"], False)
 check("...and blocks", v["severity"], "high")
 
@@ -167,13 +182,13 @@ check("...and blocks", v["severity"], "high")
 # ---------------------------------------------------------------------------
 jd = make_job("g-llm-ok-static-bad", self_defeat=True)
 judge_returns('{"ok": true, "severity": "low", "flag_likelihood": 0.9}')
-v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+v = prejudge(jd)
 check("an 'ok' verdict is overruled by the static gate", v["ok"], False)
 check("...and severity is raised", v["severity"], "high")
 
 jd = make_job("g-llm-bad-static-ok")
 judge_returns('{"ok": false, "severity": "high", "flag_likelihood": 0.9}')
-v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+v = prejudge(jd)
 check("a clean static gate does NOT rescue a blocking verdict", v["ok"], False)
 check("...severity stays high", v["severity"], "high")
 
@@ -181,7 +196,7 @@ check("...severity stays high", v["severity"], "high")
 jd = make_job("g-both-issues", self_defeat=True)
 judge_returns('{"ok": true, "severity": "low", "flag_likelihood": 0.9, '
               '"issues": ["llm noticed something"]}')
-v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+v = prejudge(jd)
 check("the model's own issue survives", any("llm noticed" in i for i in v["issues"]), True)
 check("...beside the static one", any("self-defeat" in i for i in v["issues"]), True)
 
@@ -202,18 +217,15 @@ def judge_raises(exc):
 for exc in (RuntimeError("transport wrapper failure"), ValueError("bug")):
     jd = make_job(f"g-raise-{type(exc).__name__}", self_defeat=True)
     judge_raises(exc)
-    try:
-        v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
-        check(f"{type(exc).__name__}: prejudge does not propagate", True, True)
-        check(f"{type(exc).__name__}: the static gate still blocks", v["ok"], False)
-        check(f"{type(exc).__name__}: at high severity", v["severity"], "high")
-    except Exception as e:  # pragma: no cover
-        check(f"{type(exc).__name__}: prejudge does not propagate ({e})", False, True)
+    v = prejudge(jd)
+    check(f"{type(exc).__name__}: prejudge does not propagate", v["ok"] != "RAISED", True)
+    check(f"{type(exc).__name__}: the static gate still blocks", v["ok"], False)
+    check(f"{type(exc).__name__}: at high severity", v["severity"], "high")
 
 # A clean job whose judge raised still ships.
 jd = make_job("g-raise-clean")
 judge_raises(RuntimeError("boom"))
-v = J.prejudge_script(jd, "exploit.py", None, log, job_id=jd.name)
+v = prejudge(jd)
 check("a clean job whose judge raised still ships", v["ok"], True)
 
 # ---------------------------------------------------------------------------
