@@ -86,12 +86,96 @@ const GROK_MODELS = [
 // one list). Empty = CLI/model default.
 const GROK_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+// OpenAI Codex / Responses model ids. `gpt-5.6` is the flagship alias; the
+// explicit family members let operators choose the quality/cost point.
+const GPT_MODELS = [
+  "gpt-5.6",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+];
+const GPT_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 // Active provider from last Settings load — drives per-job model lists.
 let activeAgentProvider = "claude";
+// Non-secret Settings snapshot used to keep auth readiness visible while the
+// operator changes provider/runtime controls before saving.
+let latestSettingsView = null;
+
+function providerAuthSummary(provider, settings, gptRuntime) {
+  const s = settings || {};
+  if (provider === "gpt") {
+    const runtime = gptRuntime === "responses" ? "responses" : "codex";
+    if (runtime === "responses") {
+      const ready = !!(s.openai_api_key_set || s.openai_api_key_env_set);
+      return {
+        ready,
+        label: "OpenAI GPT Responses API",
+        badge: ready ? "✓ API key ready" : "✗ API key missing",
+        detail: ready
+          ? "API-key billing is ready."
+          : "configure OPENAI_API_KEY first.",
+      };
+    }
+    const ready = !!s.codex_oauth_detected;
+    return {
+      ready,
+      label: "OpenAI Codex",
+      badge: ready ? "✓ ChatGPT OAuth ready" : "✗ OAuth missing",
+      detail: ready
+        ? "ChatGPT OAuth subscription is ready."
+        : "run `codex login` on the host first.",
+    };
+  }
+  if (provider === "grok") {
+    const login = !!s.grok_auth_detected;
+    const key = !!(s.xai_api_key_set || s.xai_api_key_env_set);
+    const ready = login || key;
+    return {
+      ready,
+      label: "Grok Build (ACP)",
+      badge: login ? "✓ login auth ready" : (key ? "✓ API key ready" : "✗ auth missing"),
+      detail: ready
+        ? "ready for jobs."
+        : "configure an xAI key or Grok login first.",
+    };
+  }
+  const oauth = !!s.claude_oauth_detected;
+  const key = !!(s.anthropic_api_key_set || s.anthropic_api_key_env_set);
+  const ready = oauth || key;
+  return {
+    ready,
+    label: "Claude Agent SDK",
+    badge: oauth ? "✓ OAuth ready" : (key ? "✓ API key ready" : "✗ auth missing"),
+    detail: ready ? "ready for jobs." : "set an API key or run `claude login` first.",
+  };
+}
+
+function renderProviderAuthUI(provider, {unsaved = false} = {}) {
+  if (!latestSettingsView) return;
+  const runtime = document.querySelector("#settings-form [name=gpt_runtime]")?.value
+    || latestSettingsView.gpt_runtime || "codex";
+  for (const p of ["claude", "grok", "gpt"]) {
+    const badge = document.getElementById(`${p}-provider-auth`);
+    if (!badge) continue;
+    const state = providerAuthSummary(p, latestSettingsView, runtime);
+    badge.textContent = state.badge;
+    badge.classList.toggle("auth-ready", state.ready);
+    badge.classList.toggle("auth-missing", !state.ready);
+  }
+  const selected = ["claude", "grok", "gpt"].includes(provider)
+    ? provider : "claude";
+  const state = providerAuthSummary(selected, latestSettingsView, runtime);
+  const status = document.getElementById("provider-status");
+  if (!status) return;
+  status.textContent = `${unsaved ? "Selected (unsaved)" : "Active"}: ${state.label} — ${state.detail}`
+    + (unsaved ? " Click Save to apply to the next job." : "");
+  status.style.color = state.ready ? "var(--green)" : "var(--red)";
+}
 
 function fillModelSelects(provider) {
   const p = provider || activeAgentProvider || "claude";
-  const models = p === "grok" ? GROK_MODELS : CLAUDE_MODELS;
+  const models = p === "grok" ? GROK_MODELS : (p === "gpt" ? GPT_MODELS : CLAUDE_MODELS);
   // Per-job selects: empty = "default from Settings"
   document.querySelectorAll('[data-role="model-select"]').forEach((sel) => {
     const prev = sel.value;
@@ -112,11 +196,16 @@ function fillModelSelects(provider) {
     sel.appendChild(new Option("(use env / default)", ""));
     for (const m of GROK_MODELS) sel.appendChild(new Option(m, m));
   });
+  document.querySelectorAll('[data-role="gpt-model-select-settings"]').forEach((sel) => {
+    sel.innerHTML = "";
+    sel.appendChild(new Option("(use env / default)", ""));
+    for (const m of GPT_MODELS) sel.appendChild(new Option(m, m));
+  });
 }
 
 function fillEffortSelects(provider) {
   const p = provider || activeAgentProvider || "claude";
-  const efforts = p === "grok" ? GROK_EFFORTS : CLAUDE_EFFORTS;
+  const efforts = p === "grok" ? GROK_EFFORTS : (p === "gpt" ? GPT_EFFORTS : CLAUDE_EFFORTS);
   // Per-job: empty = Settings value (falls through to SDK default if
   // Settings is also empty). Same UX as fillModelSelects.
   document.querySelectorAll('[data-role="effort-select"]').forEach((sel) => {
@@ -136,10 +225,15 @@ function fillEffortSelects(provider) {
     sel.appendChild(new Option("(use CLI default)", ""));
     for (const e of GROK_EFFORTS) sel.appendChild(new Option(e, e));
   });
+  document.querySelectorAll('[data-role="gpt-effort-select-settings"]').forEach((sel) => {
+    sel.innerHTML = "";
+    sel.appendChild(new Option("(use model default)", ""));
+    for (const e of GPT_EFFORTS) sel.appendChild(new Option(e, e));
+  });
 }
 
 function setProviderUI(provider) {
-  const p = provider === "grok" ? "grok" : "claude";
+  const p = ["claude", "grok", "gpt"].includes(provider) ? provider : "claude";
   activeAgentProvider = p;
   const radio = document.querySelector(
     `#settings-form input[name=agent_provider][value="${p}"]`
@@ -147,10 +241,13 @@ function setProviderUI(provider) {
   if (radio) radio.checked = true;
   const claudeBlock = document.getElementById("settings-claude-block");
   const grokBlock = document.getElementById("settings-grok-block");
+  const gptBlock = document.getElementById("settings-gpt-block");
   if (claudeBlock) claudeBlock.classList.toggle("provider-active", p === "claude");
   if (grokBlock) grokBlock.classList.toggle("provider-active", p === "grok");
+  if (gptBlock) gptBlock.classList.toggle("provider-active", p === "gpt");
   fillModelSelects(p);
   fillEffortSelects(p);
+  if (document.getElementById("preset-active")) setPresetProvider(p);
 }
 
 let selectedJob = null;
@@ -473,6 +570,30 @@ function _setMonitorLang(lang) {
   if (selectedJob) renderJob(selectedJob, { force: true });
 }
 
+// GPT gets an additive structured timeline.  Keep this preference separate
+// from the historical Run-log|Monitor boolean so Claude/Grok retain their
+// exact default and saved behavior.
+let gptLogView = (() => {
+  try {
+    const value = localStorage.getItem("gpt_log_view") || "timeline";
+    return ["timeline", "log"].includes(value) ? value : "timeline";
+  } catch (_) { return "timeline"; }
+})();
+let gptTimelineTools = (() => {
+  try { return localStorage.getItem("gpt_timeline_tools") === "1"; }
+  catch (_) { return false; }
+})();
+function _setGptLogView(view) {
+  gptLogView = ["timeline", "log"].includes(view) ? view : "timeline";
+  try { localStorage.setItem("gpt_log_view", gptLogView); } catch (_) {}
+  if (selectedJob) renderJob(selectedJob, { force: true });
+}
+function _toggleGptTimelineTools() {
+  gptTimelineTools = !gptTimelineTools;
+  try { localStorage.setItem("gpt_timeline_tools", gptTimelineTools ? "1" : "0"); } catch (_) {}
+  if (selectedJob) renderJob(selectedJob, { force: true });
+}
+
 const _MON_SEV_ICON = { good: "🟢", info: "●", warn: "▲", err: "■" };
 
 function _fmtMonTime(iso) {
@@ -528,6 +649,98 @@ function _appendMonitorEntry(id, payload) {
   feed.insertAdjacentHTML("beforeend", _monRowHtml(payload, monitorLang));
   while (feed.children.length > 800) feed.removeChild(feed.firstChild);
   if (wasAtBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+const _GPT_EVENT_ICON = {
+  agent_started: "▶", agent_completed: "✓", turn_started: "↻",
+  turn_completed: "✓", turn_failed: "■", message: "●", artifact: "✎",
+  wait: "◷", tool: "⌘", delegation: "↳", warning: "▲", error: "■",
+};
+const _GPT_STATUS_KO = {
+  running: "실행 중", waiting: "응답 대기", completed: "완료", failed: "실패", configured: "대기",
+  observed: "결과 미기록", warning: "주의", info: "업데이트",
+};
+function _fmtDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1000) return `${Math.round(n)}ms`;
+  const sec = Math.round(n / 1000);
+  if (sec < 60) return `${sec}s`;
+  return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+}
+function _gptTimelineEventHtml(event) {
+  const kind = event.kind || "event";
+  const status = event.status || "info";
+  const role = event.role || "system";
+  const time = _fmtMonTime(event.ts);
+  let durationValue = event.duration_ms;
+  if (durationValue == null && kind === "wait" && ["running", "observed"].includes(status)) {
+    const began = new Date(event.ts).getTime();
+    if (Number.isFinite(began)) durationValue = Math.max(0, Date.now() - began);
+  }
+  const duration = _fmtDuration(durationValue);
+  const title = event.title || event.tool || kind;
+  const fullSummary = String(event.summary || "");
+  const summary = fullSummary.length > 700 ? fullSummary.slice(0, 700) + "…" : fullSummary;
+  const detailParts = [];
+  if (event.input) {
+    const value = typeof event.input === "string"
+      ? event.input : JSON.stringify(event.input, null, 2);
+    if (value) detailParts.push(`INPUT\n${value}`);
+  }
+  if (event.detail) detailParts.push(`OUTPUT\n${event.detail}`);
+  const detail = detailParts.join("\n\n");
+  const stats = [];
+  if (duration) stats.push(duration);
+  if (event.output_lines != null) stats.push(`${event.output_lines} lines`);
+  if (event.output_bytes != null) stats.push(`${Number(event.output_bytes).toLocaleString()} B`);
+  if (event.exit_code != null) stats.push(`exit ${event.exit_code}`);
+  const toolClass = kind === "tool" ? " gpt-tool-event" : "";
+  return `<article class="gpt-event gpt-event-${escapeHtml(kind)} gpt-status-${escapeHtml(status)}${toolClass}">
+    <div class="gpt-event-rail"><span>${_GPT_EVENT_ICON[kind] || "·"}</span></div>
+    <div class="gpt-event-main">
+      <div class="gpt-event-head">
+        <span class="gpt-event-time">${escapeHtml(time)}</span>
+        <span class="gpt-role gpt-role-${escapeHtml(role)}">${escapeHtml(role)}</span>
+        <strong>${escapeHtml(title)}</strong>
+        <span class="gpt-event-status">${escapeHtml(_GPT_STATUS_KO[status] || status)}</span>
+        ${stats.length ? `<span class="gpt-event-stats">${escapeHtml(stats.join(" · "))}</span>` : ""}
+      </div>
+      ${summary ? `<div class="gpt-event-summary">${escapeHtml(summary)}</div>` : ""}
+      ${detail ? `<details class="gpt-event-detail"><summary>원본 입력/출력 보기</summary><pre>${escapeHtml(detail)}</pre></details>` : ""}
+    </div>
+  </article>`;
+}
+function renderGptTimeline(payload) {
+  if (!payload || !payload.enabled) {
+    return `<div class="gpt-timeline-empty">GPT Timeline을 사용할 수 없습니다.</div>`;
+  }
+  const agents = Array.isArray(payload.agents) ? payload.agents : [];
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  const agentHtml = agents.map((agent) => {
+    const status = agent.status || "configured";
+    const current = String(agent.current || "");
+    return `<div class="gpt-agent-card gpt-agent-${escapeHtml(status)}">
+      <div class="gpt-agent-card-head">
+        <strong>${escapeHtml(agent.role || "agent")}</strong>
+        <span>${escapeHtml(_GPT_STATUS_KO[status] || status)}</span>
+      </div>
+      <code>${escapeHtml(agent.model || "model 미확인")}</code>
+      ${current ? `<div>${escapeHtml(current.slice(0, 130))}${current.length > 130 ? "…" : ""}</div>` : ""}
+    </div>`;
+  }).join("");
+  const eventHtml = events.length
+    ? events.map(_gptTimelineEventHtml).join("")
+    : `<div class="gpt-timeline-empty">아직 기록된 GPT 이벤트가 없습니다.</div>`;
+  const fallback = payload.source === "run.log fallback"
+    ? `<span class="gpt-timeline-source fallback" title="이 job은 구조화 이벤트 도입 전에 시작되어 기존 run.log를 읽기 전용으로 정리했습니다.">legacy log projection</span>`
+    : `<span class="gpt-timeline-source">structured events</span>`;
+  return `<div class="gpt-timeline-meta">
+      ${fallback}
+      ${payload.preset ? `<span>preset · ${escapeHtml(payload.preset)}</span>` : ""}
+    </div>
+    <div class="gpt-agent-grid">${agentHtml}</div>
+    <div class="gpt-event-list">${eventHtml}</div>`;
 }
 // Lightweight 1-second tick that updates ONLY the timing pill's
 // textContent on running jobs. Independent of pollTimer (which
@@ -870,11 +1083,17 @@ async function loadSettings() {
   const f = document.getElementById("settings-form");
 
   // Provider first so model/effort catalogs match the selection.
-  const provider = (s.agent_provider === "grok") ? "grok" : "claude";
+  const provider = ["claude", "grok", "gpt"].includes(s.agent_provider)
+    ? s.agent_provider : "claude";
+  latestSettingsView = s;
   setProviderUI(provider);
 
   _setModelField(f, "claude_model", "claude_model_custom", CLAUDE_MODELS, s.claude_model);
   _setModelField(f, "grok_model", "grok_model_custom", GROK_MODELS, s.grok_model);
+  _setModelField(f, "gpt_model", "gpt_model_custom", GPT_MODELS, s.gpt_model);
+  const gptRuntime = s.gpt_runtime === "responses" ? "responses" : "codex";
+  const gptRuntimeSel = f.querySelector("[name=gpt_runtime]");
+  if (gptRuntimeSel) gptRuntimeSel.value = gptRuntime;
 
   // Claude effort (mirrors model: empty = SDK default; otherwise one
   // of low/medium/high/xhigh/max). Stored under `claude_effort` in the
@@ -889,6 +1108,11 @@ async function loadSettings() {
   if (grokEffortSel) {
     const curG = s.grok_effort || "";
     grokEffortSel.value = GROK_EFFORTS.includes(curG) ? curG : "";
+  }
+  const gptEffortSel = f.querySelector("[name=gpt_effort]");
+  if (gptEffortSel) {
+    const curGpt = s.gpt_effort || "";
+    gptEffortSel.value = GPT_EFFORTS.includes(curGpt) ? curGpt : "";
   }
 
   f.querySelector("[name=job_ttl_days]").value =
@@ -912,8 +1136,17 @@ async function loadSettings() {
   const budgetInput = f.querySelector("[name=budget_usd]");
   if (budgetInput) budgetInput.value = s.budget_usd ? s.budget_usd : "";
   f.querySelector("[name=callback_url]").value = s.callback_url || "";
-  // enable_judge default-True; only un-check when explicitly stored false
-  f.querySelector("[name=enable_judge]").checked = s.enable_judge !== false;
+  // judge_mode is the tri-state. `shadow` is deliberately NOT derivable from
+  // the legacy boolean — entering it by inference would leave the operator
+  // believing a gate is live when it gates nothing — so fall back to the
+  // boolean only for off/enforce, exactly as get_judge_mode() does server-side.
+  const modeSel = f.querySelector("[name=judge_mode]");
+  if (modeSel) {
+    const stored = String(s.judge_mode || "").toLowerCase();
+    modeSel.value = ["off", "shadow", "enforce"].includes(stored)
+      ? stored
+      : (s.enable_judge === false ? "off" : "enforce");
+  }
   // enable_exploit_library_hint default-False
   f.querySelector("[name=enable_exploit_library_hint]").checked = !!s.enable_exploit_library_hint;
 
@@ -938,23 +1171,24 @@ async function loadSettings() {
       : "✗ no Grok auth file — run `grok login` on the host (mount ~/.grok) or set XAI_API_KEY";
     grokAuth.style.color = s.grok_auth_detected ? "var(--green)" : "var(--fg-muted)";
   }
-
-  const provStatus = document.getElementById("provider-status");
-  if (provStatus) {
-    if (provider === "grok") {
-      const authOk = s.xai_api_key_set || s.xai_api_key_env_set || s.grok_auth_detected;
-      provStatus.textContent = authOk
-        ? "Active: Grok Build (ACP) — next job uses Grok agent stdio."
-        : "Active: Grok Build — configure xAI key or grok login auth before running jobs.";
-      provStatus.style.color = authOk ? "var(--green)" : "var(--red)";
-    } else {
-      const authOk = s.anthropic_api_key_set || s.anthropic_api_key_env_set || s.claude_oauth_detected;
-      provStatus.textContent = authOk
-        ? "Active: Claude Agent SDK — ready for jobs."
-        : "Active: Claude — no auth detected; set API key or run claude login.";
-      provStatus.style.color = authOk ? "var(--green)" : "var(--red)";
-    }
+  const openaiStatus = document.getElementById("openai-key-status");
+  if (openaiStatus) {
+    openaiStatus.textContent = s.openai_api_key_set
+      ? `set (${s.openai_api_key_masked}) — leave blank to keep, type new to replace`
+      : (s.openai_api_key_env_set ? "using OPENAI_API_KEY from env" : "not set");
   }
+  const codexOauthStatus = document.getElementById("codex-oauth-status");
+  if (codexOauthStatus) {
+    const method = s.codex_auth_method || "none";
+    codexOauthStatus.textContent = s.codex_oauth_detected
+      ? "✓ Codex ChatGPT OAuth detected — API key is not used"
+      : (s.codex_auth_detected
+        ? `✗ Codex auth exists but is '${method}', not ChatGPT OAuth`
+        : "✗ no Codex OAuth file — run `codex login` on the host and rebuild/recreate containers");
+    codexOauthStatus.style.color = s.codex_oauth_detected ? "var(--green)" : "var(--red)";
+  }
+
+  renderProviderAuthUI(provider);
 
   document.getElementById("auth-status").textContent = s.auth_token_set
     ? `set (${s.auth_token_masked})`
@@ -966,34 +1200,36 @@ document.getElementById("settings-form")?.addEventListener("change", (e) => {
   const t = e.target;
   if (t && t.name === "agent_provider") {
     setProviderUI(t.value);
-    const provStatus = document.getElementById("provider-status");
-    if (provStatus) {
-      provStatus.textContent = t.value === "grok"
-        ? "Grok selected (unsaved) — click Save to apply to the next job."
-        : "Claude selected (unsaved) — click Save to apply to the next job.";
-      provStatus.style.color = "var(--yellow)";
-    }
+    renderProviderAuthUI(t.value, {unsaved: true});
+  }
+  if (t && t.name === "gpt_runtime") {
+    const selected = document.querySelector(
+      '#settings-form input[name="agent_provider"]:checked'
+    )?.value || activeAgentProvider;
+    renderProviderAuthUI(selected, {unsaved: selected === "gpt"});
   }
 });
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
-  // Custom-text overrides the dropdown for claude_model / grok_model.
+  // Custom-text overrides the corresponding provider model dropdown.
   const custom = (fd.get("claude_model_custom") || "").toString().trim();
   if (custom) fd.set("claude_model", custom);
   fd.delete("claude_model_custom");
   const grokCustom = (fd.get("grok_model_custom") || "").toString().trim();
   if (grokCustom) fd.set("grok_model", grokCustom);
   fd.delete("grok_model_custom");
+  const gptCustom = (fd.get("gpt_model_custom") || "").toString().trim();
+  if (gptCustom) fd.set("gpt_model", gptCustom);
+  fd.delete("gpt_model_custom");
 
   const payload = {};
   for (const [k, v] of fd.entries()) {
-    if (v === "" && (k === "anthropic_api_key" || k === "xai_api_key" || k === "auth_token")) {
+    if (v === "" && (k === "anthropic_api_key" || k === "xai_api_key" || k === "openai_api_key" || k === "auth_token")) {
       // Empty secret field: skip — keep current value
       continue;
     }
-    if (k === "enable_judge") continue;  // handled explicitly below
     if (k === "enable_exploit_library_hint") continue;  // handled explicitly below
     if (v === "") {
       payload[k] = null;  // null = clear the override
@@ -1009,7 +1245,13 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   }
   // Checkboxes are absent from FormData when unchecked — read directly
   // so the OFF state is sent as `false`, not "clear the override".
-  payload.enable_judge = !!e.target.querySelector("[name=enable_judge]").checked;
+  //
+  // The legacy boolean is written alongside the mode, and only ever to the
+  // value the mode implies. Nothing but get_judge_mode()'s fallback reads it,
+  // but a settings file saying enable_judge=true next to judge_mode=off is a
+  // contradiction the next person to read it has to resolve.
+  const _mode = String(payload.judge_mode || "enforce").toLowerCase();
+  payload.enable_judge = _mode === "enforce";
   payload.enable_exploit_library_hint = !!e.target.querySelector("[name=enable_exploit_library_hint]").checked;
   // Radio always present; default claude if somehow missing.
   if (!payload.agent_provider) {
@@ -1028,6 +1270,8 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   e.target.querySelector("[name=anthropic_api_key]").value = "";
   const xaiIn = e.target.querySelector("[name=xai_api_key]");
   if (xaiIn) xaiIn.value = "";
+  const openaiIn = e.target.querySelector("[name=openai_api_key]");
+  if (openaiIn) openaiIn.value = "";
   e.target.querySelector("[name=auth_token]").value = "";
   let applied = null;
   try { applied = (await res.clone().json()).worker_mem_applied; } catch (_) {}
@@ -1035,9 +1279,14 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   try { savedView = await res.clone().json(); } catch (_) {}
   await loadSettings();
   const savedProvider = (savedView && savedView.agent_provider) || payload.agent_provider || "claude";
-  const providerLine = savedProvider === "grok"
-    ? "Agent provider: Grok Build (ACP) — next job uses Grok."
-    : "Agent provider: Claude (Agent SDK) — next job uses Claude.";
+  const savedGptRuntime = (savedView && savedView.gpt_runtime) || payload.gpt_runtime || "codex";
+  const providerLine = savedProvider === "gpt"
+    ? (savedGptRuntime === "codex"
+      ? "Agent provider: OpenAI Codex — next job uses ChatGPT OAuth."
+      : "Agent provider: OpenAI GPT Responses API — next job uses API-key billing.")
+    : (savedProvider === "grok"
+      ? "Agent provider: Grok Build (ACP) — next job uses Grok."
+      : "Agent provider: Claude (Agent SDK) — next job uses Claude.");
   if (applied && applied.applied === false) {
     alert("Saved, but the per-slot memory limit was NOT applied to the running slots:\n\n" +
           applied.reason + "\n\nIt will take effect on the next `docker compose up -d worker-1 worker-2`.\n\n" +
@@ -1217,11 +1466,29 @@ document.getElementById("tunnel-stop").addEventListener("click", async (e) => {
 
 document.getElementById("tunnel-refresh").addEventListener("click", () => loadTunnelStatus(true));
 
-// --- Model presets ---------------------------------------------------------
-// Named per-role model overrides (judge / report / monitor) the operator can
-// save and switch between. The whole store is edited in memory and PUT as one
-// blob to /api/model-presets. main stays on the per-job / global model.
-let PRESET_STORE = { active: "", presets: {}, configurable_roles: ["main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor"] };
+// --- Provider model presets ------------------------------------------------
+// Each provider owns an independent named-preset collection and active
+// selection. The complete v2 store is edited in memory and PUT as one blob.
+const PRESET_PROVIDERS = ["claude", "grok", "gpt"];
+const PRESET_PROVIDER_LABELS = { claude: "Claude", grok: "Grok", gpt: "GPT" };
+const DEFAULT_PRESET_ROLES = ["main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor"];
+
+function emptyPresetProviders() {
+  return Object.fromEntries(PRESET_PROVIDERS.map((provider) => [
+    provider, { active: "", presets: {} },
+  ]));
+}
+
+let PRESET_STORE = {
+  version: 2,
+  providers: emptyPresetProviders(),
+  configurable_roles: DEFAULT_PRESET_ROLES,
+};
+let PRESET_PROVIDER = "claude";
+// A live-mounted UI can update before the long-running API process restarts.
+// Never send a v2 body to a v1 server: it would interpret it as an empty flat
+// store and erase the old preset file.
+let PRESET_API_VERSION = 0;
 
 // Human-readable default a blank role falls back to (shown in the "(inherit)" option).
 const PRESET_ROLE_DEFAULTS = {
@@ -1232,33 +1499,99 @@ const PRESET_ROLE_DEFAULTS = {
   debugger: "follows main — cache-aligned",
   triage: "follows main — cache-aligned",
   report: "follows main model",
-  monitor: "claude-sonnet-4-6",
+  monitor: "provider monitor default",
 };
 
 async function loadModelPresets() {
+  PRESET_API_VERSION = 0;
   try {
     const res = await fetch(`${API}/model-presets`);
     if (!res.ok) return;
     const s = await res.json();
     if (s && typeof s === "object") {
+      const providers = emptyPresetProviders();
+      if (s.providers && typeof s.providers === "object") {
+        PRESET_API_VERSION = 2;
+        for (const provider of PRESET_PROVIDERS) {
+          const bucket = s.providers[provider];
+          if (!bucket || typeof bucket !== "object") continue;
+          providers[provider] = {
+            active: bucket.active || "",
+            presets: bucket.presets || {},
+          };
+        }
+      } else {
+        PRESET_API_VERSION = 1;
+        // Tolerate a stale/v1 API during rolling container restarts. Its flat
+        // store belonged to whichever provider Settings selected.
+        providers[activeAgentProvider] = {
+          active: s.active || "",
+          presets: s.presets || {},
+        };
+      }
       PRESET_STORE = {
-        active: s.active || "",
-        presets: s.presets || {},
+        version: 2,
+        providers,
         configurable_roles: (s.configurable_roles && s.configurable_roles.length)
-          ? s.configurable_roles : ["main", "judge", "reviewer", "recon", "debugger", "triage", "report", "monitor"],
+          ? s.configurable_roles : DEFAULT_PRESET_ROLES,
       };
     }
   } catch (_) { return; }
   renderPresetControls();
 }
 
+function currentPresetBucket() {
+  if (!PRESET_STORE.providers || typeof PRESET_STORE.providers !== "object") {
+    PRESET_STORE.providers = emptyPresetProviders();
+  }
+  if (!PRESET_STORE.providers[PRESET_PROVIDER]) {
+    PRESET_STORE.providers[PRESET_PROVIDER] = { active: "", presets: {} };
+  }
+  return PRESET_STORE.providers[PRESET_PROVIDER];
+}
+
+function presetCatalog(provider = PRESET_PROVIDER) {
+  if (provider === "grok") return { models: GROK_MODELS, efforts: GROK_EFFORTS };
+  if (provider === "gpt") return { models: GPT_MODELS, efforts: GPT_EFFORTS };
+  return { models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS };
+}
+
+function presetRoles(provider = PRESET_PROVIDER) {
+  const roles = Array.isArray(PRESET_STORE.configurable_roles)
+    ? PRESET_STORE.configurable_roles : DEFAULT_PRESET_ROLES;
+  // GPT activity is already represented by the token-free Timeline. Keep the
+  // shared backend schema backward-compatible, but do not expose an unused
+  // narrator role in GPT presets. Claude/Grok retain every historical role.
+  return provider === "gpt" ? roles.filter((role) => role !== "monitor") : roles;
+}
+
+function setPresetProvider(provider) {
+  PRESET_PROVIDER = PRESET_PROVIDERS.includes(provider) ? provider : "claude";
+  renderPresetControls();
+}
+
 function renderPresetControls() {
   const sel = document.getElementById("preset-active");
   if (!sel) return;
-  const names = Object.keys(PRESET_STORE.presets || {}).sort();
-  const active = PRESET_STORE.active || "";
+  const bucket = currentPresetBucket();
+  const names = Object.keys(bucket.presets || {}).sort();
+  const active = bucket.active || "";
+  document.querySelectorAll("[data-preset-provider]").forEach((button) => {
+    const selected = button.dataset.presetProvider === PRESET_PROVIDER;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
+  const providerLabel = document.getElementById("preset-provider-label");
+  if (providerLabel) providerLabel.textContent = PRESET_PROVIDER_LABELS[PRESET_PROVIDER];
+  const saveButton = document.getElementById("preset-save");
+  if (saveButton) {
+    saveButton.disabled = PRESET_API_VERSION < 2;
+    saveButton.title = PRESET_API_VERSION === 1
+      ? "Restart the API to enable provider-scoped preset saves"
+      : "";
+  }
   sel.innerHTML = "";
-  sel.appendChild(new Option("(none — every agent inherits its default)", ""));
+  sel.appendChild(new Option(`(none — ${PRESET_PROVIDER_LABELS[PRESET_PROVIDER]} agents inherit defaults)`, ""));
   for (const n of names) sel.appendChild(new Option(n, n));
   sel.value = names.includes(active) ? active : "";
   renderPresetRoles();
@@ -1269,19 +1602,23 @@ function renderPresetRoles() {
   const wrap = document.getElementById("preset-roles");
   if (!wrap) return;
   const active = document.getElementById("preset-active").value;
+  const bucket = currentPresetBucket();
   wrap.innerHTML = "";
   if (!active) {
     const p = document.createElement("p");
     p.className = "preset-empty";
     p.textContent =
-      "No preset active — main uses the per-job pick / global Settings model & "
-      + "effort; judge/report follow main; monitor runs cheap. Click “+ New” to "
+      `No ${PRESET_PROVIDER_LABELS[PRESET_PROVIDER]} preset active — main uses the per-job pick / global Settings model & `
+      + (PRESET_PROVIDER === "gpt"
+        ? "effort; judge/report follow main; activity uses the token-free Timeline. Click “+ New” to "
+        : "effort; judge/report follow main; monitor runs cheap. Click “+ New” to ")
       + "create one.";
     wrap.appendChild(p);
     return;
   }
-  const preset = PRESET_STORE.presets[active] || {};
-  for (const role of PRESET_STORE.configurable_roles) {
+  const preset = bucket.presets[active] || {};
+  const {models: providerModels, efforts: providerEfforts} = presetCatalog();
+  for (const role of presetRoles()) {
     const cur = preset[role] || "";
     const lbl = document.createElement("label");
     lbl.className = "preset-role";
@@ -1291,13 +1628,13 @@ function renderPresetRoles() {
       `<select data-preset-role="${role}"></select>`;
     const s = lbl.querySelector("select");
     s.appendChild(new Option(`(inherit — ${inheritTxt})`, ""));
-    for (const m of CLAUDE_MODELS) s.appendChild(new Option(m, m));
+    for (const m of providerModels) s.appendChild(new Option(m, m));
     // A saved custom model that isn't in the catalog: surface it so it's editable.
-    if (cur && !CLAUDE_MODELS.includes(cur)) s.appendChild(new Option(`${cur} (custom)`, cur));
+    if (cur && !providerModels.includes(cur)) s.appendChild(new Option(`${cur} (custom)`, cur));
     s.value = cur;
     s.addEventListener("change", () => {
-      if (!PRESET_STORE.presets[active]) PRESET_STORE.presets[active] = {};
-      PRESET_STORE.presets[active][role] = s.value;
+      if (!bucket.presets[active]) bucket.presets[active] = {};
+      bucket.presets[active][role] = s.value;
       updatePresetStatus();
     });
     wrap.appendChild(lbl);
@@ -1311,11 +1648,11 @@ function renderPresetRoles() {
     `<select data-preset-effort></select>`;
   const es = elbl.querySelector("select");
   es.appendChild(new Option("(inherit — per-job / global Settings effort)", ""));
-  for (const ef of CLAUDE_EFFORTS) es.appendChild(new Option(ef, ef));
+  for (const ef of providerEfforts) es.appendChild(new Option(ef, ef));
   es.value = preset.effort || "";
   es.addEventListener("change", () => {
-    if (!PRESET_STORE.presets[active]) PRESET_STORE.presets[active] = {};
-    PRESET_STORE.presets[active].effort = es.value;
+    if (!bucket.presets[active]) bucket.presets[active] = {};
+    bucket.presets[active].effort = es.value;
     updatePresetStatus();
   });
   wrap.appendChild(elbl);
@@ -1324,75 +1661,107 @@ function renderPresetRoles() {
 function updatePresetStatus() {
   const el = document.getElementById("preset-status");
   if (!el) return;
-  const active = PRESET_STORE.active || "";
-  if (!active || !PRESET_STORE.presets[active]) {
-    el.textContent = "no preset active — defaults in effect. Remember to Save.";
+  const bucket = currentPresetBucket();
+  const active = bucket.active || "";
+  const providerName = PRESET_PROVIDER_LABELS[PRESET_PROVIDER];
+  if (PRESET_API_VERSION === 1) {
+    el.textContent = "API restart required — the running API still uses the legacy single-preset format.";
     return;
   }
-  const p = PRESET_STORE.presets[active];
-  const parts = PRESET_STORE.configurable_roles.map(
+  if (PRESET_API_VERSION === 0) {
+    el.textContent = "preset API unavailable — reload Settings and try again.";
+    return;
+  }
+  if (!active || !bucket.presets[active]) {
+    el.textContent = `${providerName}: no preset active — defaults in effect. Save to apply.`;
+    return;
+  }
+  const p = bucket.presets[active];
+  const parts = presetRoles().map(
     (r) => `${r}=${p[r] ? p[r] : "inherit"}`
   );
   parts.push(`effort=${p.effort ? p.effort : "inherit"}`);
-  el.textContent = `active: ${active} · ${parts.join(" · ")} · Save to apply`;
+  el.textContent = `${providerName} active: ${active} · ${parts.join(" · ")} · Save to apply`;
 }
 
 document.getElementById("preset-active").addEventListener("change", (e) => {
-  PRESET_STORE.active = e.target.value;
+  currentPresetBucket().active = e.target.value;
   renderPresetRoles();
   updatePresetStatus();
 });
 
+document.querySelectorAll("[data-preset-provider]").forEach((button) => {
+  button.addEventListener("click", () => setPresetProvider(button.dataset.presetProvider));
+});
+
 document.getElementById("preset-new").addEventListener("click", () => {
-  const name = (prompt("New preset name:") || "").trim();
+  const bucket = currentPresetBucket();
+  const name = (prompt(`New ${PRESET_PROVIDER_LABELS[PRESET_PROVIDER]} preset name:`) || "").trim();
   if (!name) return;
-  if (PRESET_STORE.presets[name]) { alert(`preset "${name}" already exists`); return; }
-  PRESET_STORE.presets[name] = { judge: "", report: "", monitor: "" };
-  PRESET_STORE.active = name;
+  if (bucket.presets[name]) { alert(`preset "${name}" already exists for ${PRESET_PROVIDER_LABELS[PRESET_PROVIDER]}`); return; }
+  bucket.presets[name] = Object.fromEntries([
+    ...presetRoles().map((role) => [role, ""]),
+    ["effort", ""],
+  ]);
+  bucket.active = name;
   renderPresetControls();
 });
 
 document.getElementById("preset-rename").addEventListener("click", () => {
+  const bucket = currentPresetBucket();
   const cur = document.getElementById("preset-active").value;
   if (!cur) { alert("select a preset to rename first"); return; }
   const nn = (prompt("New name:", cur) || "").trim();
   if (!nn || nn === cur) return;
-  if (PRESET_STORE.presets[nn]) { alert(`preset "${nn}" already exists`); return; }
-  PRESET_STORE.presets[nn] = PRESET_STORE.presets[cur];
-  delete PRESET_STORE.presets[cur];
-  if (PRESET_STORE.active === cur) PRESET_STORE.active = nn;
+  if (bucket.presets[nn]) { alert(`preset "${nn}" already exists`); return; }
+  bucket.presets[nn] = bucket.presets[cur];
+  delete bucket.presets[cur];
+  if (bucket.active === cur) bucket.active = nn;
   renderPresetControls();
 });
 
 document.getElementById("preset-delete").addEventListener("click", () => {
+  const bucket = currentPresetBucket();
   const cur = document.getElementById("preset-active").value;
   if (!cur) { alert("select a preset to delete first"); return; }
   if (!confirm(`Delete preset "${cur}"?`)) return;
-  delete PRESET_STORE.presets[cur];
-  if (PRESET_STORE.active === cur) PRESET_STORE.active = "";
+  delete bucket.presets[cur];
+  if (bucket.active === cur) bucket.active = "";
   renderPresetControls();
 });
 
 document.getElementById("preset-save").addEventListener("click", async (e) => {
+  if (PRESET_API_VERSION < 2) {
+    alert("Restart the API, then reload Settings before saving provider presets.");
+    return;
+  }
   const btn = e.target;
   btn.disabled = true;
   try {
     const res = await fetch(`${API}/model-presets`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ active: PRESET_STORE.active, presets: PRESET_STORE.presets }),
+      body: JSON.stringify({ version: 2, providers: PRESET_STORE.providers }),
     });
     if (!res.ok) { alert(`save failed: ${res.status} ${await res.text()}`); return; }
     const saved = await res.json();
+    const providers = emptyPresetProviders();
+    for (const provider of PRESET_PROVIDERS) {
+      const bucket = saved.providers && saved.providers[provider];
+      if (bucket) providers[provider] = {
+        active: bucket.active || "",
+        presets: bucket.presets || {},
+      };
+    }
     PRESET_STORE = {
-      active: saved.active || "",
-      presets: saved.presets || {},
+      version: 2,
+      providers,
       configurable_roles: (saved.configurable_roles && saved.configurable_roles.length)
         ? saved.configurable_roles : PRESET_STORE.configurable_roles,
     };
     renderPresetControls();
     const el = document.getElementById("preset-status");
-    if (el) el.textContent = "saved ✓ — applies to the next job";
+    if (el) el.textContent = `all provider presets saved ✓ — ${PRESET_PROVIDER_LABELS[PRESET_PROVIDER]} selection applies to the next job`;
   } finally {
     btn.disabled = false;
   }
@@ -1562,9 +1931,9 @@ document.getElementById("logout-btn").addEventListener("click", async () => {
   location.href = "/login";
 });
 
-// ── Rate-limit chip rendering, shared by the Claude and Grok chips ─────────
-// What an operator wants off a weekly pool is how much is LEFT, so both chips
-// lead with that. `remaining_pct` is served for Grok; for Claude only
+// ── Rate-limit chip rendering, shared by Claude, Grok and Codex ────────────
+// What an operator wants off a weekly pool is how much is LEFT, so every chip
+// leads with that. `remaining_pct` is served for Grok/Codex; for Claude only
 // `utilization` (a used fraction) comes back, and the API docs it as
 // "frequently absent for OAuth accounts" — hence the status-word fallback
 // rather than rendering a confident 0%.
@@ -1619,8 +1988,8 @@ async function refreshStats() {
   } catch (_) {}
 }
 
-// Render the operator budget pill + the account rate-limit status chip from
-// GET /api/jobs/usage. Both hide gracefully when there's nothing to show
+// Render the operator budget pill + account rate-limit chips from
+// GET /api/jobs/usage. Each hides gracefully when there's nothing to show
 // (no budget set / no rate-limit event seen yet).
 function renderUsage(u) {
   // --- budget pill: "used / budget" with a color by fraction consumed ---
@@ -1667,7 +2036,7 @@ function renderUsage(u) {
     }
   }
   // --- Claude rate-limit status chip: green/amber/red + "resets in HH:MM" ---
-  // Both provider chips render through the two helpers above so they cannot
+  // All provider chips render through the two helpers above so they cannot
   // drift apart again: the Claude chip used to APPEND `utilization` as a used
   // percentage while the Grok chip showed remaining, so the same 0.37 read as
   // "37%" on one and "63% left" on the other — opposite meanings, same number,
@@ -1718,6 +2087,37 @@ function renderUsage(u) {
         + (gr.updated_at ? `\nlast poll ${new Date(gr.updated_at).toLocaleString()}` : "");
     } else {
       gchip.hidden = true;
+    }
+  }
+
+  // --- OpenAI Codex ChatGPT OAuth usage chip (remaining %) ---
+  // Source: Codex CLI app-server account/rateLimits/read. The API caches the
+  // sanitized response for 60 seconds; no OAuth token reaches this payload.
+  const cchip = document.getElementById("codex-ratelimit-chip");
+  if (cchip) {
+    const cr = u && u.codex_rate_limit;
+    if (cr && cr.status && cr.status !== "unknown") {
+      cchip.hidden = false;
+      cchip.classList.remove("rl-chip--ok", "rl-chip--warn", "rl-chip--rejected");
+      if (cr.status === "rejected") cchip.classList.add("rl-chip--rejected");
+      else if (cr.status === "allowed_warning") cchip.classList.add("rl-chip--warn");
+      else cchip.classList.add("rl-chip--ok");
+      cchip.textContent = `⏳ Codex ${_rlRemainingLabel(cr)}${_rlResetSuffix(cr)}`;
+      const windows = (cr.windows || []).map((w) => {
+        const label = w.limit_name || w.limit_id || "Codex";
+        const reset = w.resets_at
+          ? `, resets ${new Date(w.resets_at * 1000).toLocaleString()}` : "";
+        return `${label} ${w.window || "window"}: ${Math.round(w.remaining_pct)}% left${reset}`;
+      }).join("\n");
+      cchip.title = `Codex ChatGPT OAuth: ${cr.status}`
+        + (cr.plan_type ? ` (${cr.plan_type})` : "")
+        + (typeof cr.used_pct === "number" ? `\nused ${cr.used_pct}%` : "")
+        + (typeof cr.remaining_pct === "number" ? ` · ${cr.remaining_pct}% remaining` : "")
+        + (windows ? `\n${windows}` : "")
+        + (cr.updated_at ? `\nlast poll ${new Date(cr.updated_at).toLocaleString()}` : "")
+        + (cr.stale ? "\nshowing cached data (refresh unavailable)" : "");
+    } else {
+      cchip.hidden = true;
     }
   }
 }
@@ -2519,28 +2919,44 @@ async function renderJob(id, opts = {}) {
     return null;
   }
   const job = await res.json();
+  const isGptJob = job.agent_provider === "gpt";
+  const activityView = isGptJob ? gptLogView : (monitorView ? "monitor" : "log");
 
   // Cap the polling fetch at 256 KB so verbose Claude output (after a
   // big Read or Bash dump) doesn't make every 2s poll re-ship megabytes.
   const logRes = await fetch(`${API}/jobs/${id}/log?tail=262144`);
   const log = await logRes.text();
 
-  // Curated MONITOR feed (LLM-narrated signal commentary). Fetched every
-  // render so it stays authoritative; live SSE `monitor` events fill the gap
-  // between polls. Hitting this endpoint also ensures the job's monitor task
-  // is running api-side. Language variants live in each entry — switching
-  // language re-renders from the same data, no refetch.
+  // Curated MONITOR feed remains exclusive to Claude/Grok. GPT's structured
+  // Timeline is deterministic and must not spend narrator tokens.
   let monitorEntries = [];
-  try {
-    const mr = await fetch(`${API}/jobs/${id}/monitor?tail=400`);
-    if (mr.ok) monitorEntries = (await mr.json()).entries || [];
-  } catch (_) {}
+  if (!isGptJob) {
+    try {
+      const mr = await fetch(`${API}/jobs/${id}/monitor?tail=400`);
+      if (mr.ok) monitorEntries = (await mr.json()).entries || [];
+    } catch (_) {}
+  }
   const monitorFeedHTML = renderMonitorEntries(monitorEntries, monitorLang);
+  let gptTimelinePayload = null;
+  if (isGptJob) {
+    try {
+      const tr = await fetch(`${API}/jobs/${id}/gpt-timeline?tail=800`);
+      if (tr.ok) gptTimelinePayload = await tr.json();
+    } catch (_) {}
+  }
+  const gptTimelineHTML = isGptJob
+    ? renderGptTimeline(gptTimelinePayload)
+    : "";
   const prevMonFeed = detail.querySelector(".monitor-feed");
   const prevMonAtBottom = prevMonFeed
     ? (prevMonFeed.scrollTop + prevMonFeed.clientHeight >= prevMonFeed.scrollHeight - 12)
     : true;
   const prevMonScrollTop = prevMonFeed ? prevMonFeed.scrollTop : 0;
+  const prevTimeline = detail.querySelector(".gpt-timeline-feed");
+  const prevTimelineAtBottom = prevTimeline
+    ? (prevTimeline.scrollTop + prevTimeline.clientHeight >= prevTimeline.scrollHeight - 12)
+    : true;
+  const prevTimelineScrollTop = prevTimeline ? prevTimeline.scrollTop : 0;
 
   // Preserve log scroll position across re-renders. If the user was already
   // at (or near) the bottom, snap to bottom after re-render so new entries
@@ -3034,32 +3450,42 @@ async function renderJob(id, opts = {}) {
       </div>
       <div class="sdk-live-feed"></div>
     </div>
-    <h4>Run log <small style="color:var(--fg-muted);font-weight:normal">(auto-follows when scrolled to bottom)</small></h4>
-    <div class="run-log-window" data-view="${monitorView ? "monitor" : "log"}">
+    <h4>${isGptJob ? "GPT activity" : "Run log"} <small style="color:var(--fg-muted);font-weight:normal">(auto-follows when scrolled to bottom)</small></h4>
+    <div class="run-log-window" data-view="${activityView}" data-show-tools="${gptTimelineTools ? "1" : "0"}">
       <div class="run-log-titlebar">
         <span class="run-log-dot run-log-dot-r"></span>
         <span class="run-log-dot run-log-dot-y"></span>
         <span class="run-log-dot run-log-dot-g"></span>
         <div class="rl-viewtabs">
-          <button class="rl-viewtab ${monitorView ? "" : "active"}" data-action="view-log"
-                  title="Raw run log">Run log</button>
-          <button class="rl-viewtab ${monitorView ? "active" : ""}" data-action="view-monitor"
-                  title="Curated, LLM-narrated monitor commentary">Monitor</button>
+          ${isGptJob ? `
+            <button class="rl-viewtab ${activityView === "timeline" ? "active" : ""}" data-action="view-gpt-timeline"
+                    title="Structured GPT progress and agent state">Timeline</button>
+            <button class="rl-viewtab ${activityView === "log" ? "active" : ""}" data-action="view-gpt-log"
+                    title="Full raw run log">Raw log</button>
+          ` : `
+            <button class="rl-viewtab ${monitorView ? "" : "active"}" data-action="view-log"
+                    title="Raw run log">Run log</button>
+            <button class="rl-viewtab ${monitorView ? "active" : ""}" data-action="view-monitor"
+                    title="Curated, LLM-narrated monitor commentary">Monitor</button>
+          `}
         </div>
+        ${isGptJob ? `<button class="gpt-tools-toggle" data-action="toggle-gpt-tools"
+          title="Timeline에서 일반 tool 호출 표시 전환">${gptTimelineTools ? "도구 숨기기" : "도구 보기"}</button>` : ""}
         <input class="run-log-search" data-job-id="${id}" type="search"
                spellcheck="false" autocomplete="off"
                placeholder="🔎 filter log…" value="${escapeHtml(_logSearch[id] || "")}" />
         <span class="run-log-search-count" data-job-id="${id}"></span>
-        <select class="monitor-lang" data-action="monitor-lang" title="Monitor language">
+        ${isGptJob ? "" : `<select class="monitor-lang" data-action="monitor-lang" title="Monitor language">
           <option value="ko" ${monitorLang === "ko" ? "selected" : ""}>한국어</option>
           <option value="en" ${monitorLang === "en" ? "selected" : ""}>English</option>
-        </select>
+        </select>`}
         <button class="run-log-tz-toggle" data-action="toggle-tz"
                 title="Toggle timestamps (UTC ↔ ${escapeHtml(_localTzName())})"
         >${runlogTz === "utc" ? "UTC" : "Local"}</button>
       </div>
+      ${isGptJob ? `<div class="gpt-timeline-feed" data-job-id="${id}">${gptTimelineHTML}</div>` : ""}
       <pre class="run-log" data-job-id="${id}" data-status="${escapeHtml(job.status || "")}">${log ? colorizeRunLog(log, job.started_at) : "(empty)"}</pre>
-      <div class="monitor-feed" data-job-id="${id}">${monitorFeedHTML}</div>
+      ${isGptJob ? "" : `<div class="monitor-feed" data-job-id="${id}">${monitorFeedHTML}</div>`}
       ${tokensPill ? `
       <div class="run-log-footer">
         ${tokensPill}
@@ -3110,6 +3536,14 @@ async function renderJob(id, opts = {}) {
       newMonFeed.scrollTop = newMonFeed.scrollHeight;
     } else {
       newMonFeed.scrollTop = prevMonScrollTop;
+    }
+  }
+  const newTimeline = detail.querySelector(".gpt-timeline-feed");
+  if (newTimeline) {
+    if (!isSameJob || prevTimelineAtBottom) {
+      newTimeline.scrollTop = newTimeline.scrollHeight;
+    } else {
+      newTimeline.scrollTop = prevTimelineScrollTop;
     }
   }
   // Restore the modal-body scroll for same-job re-renders so reading the
@@ -3335,6 +3769,18 @@ async function renderJob(id, opts = {}) {
   const monLangSel = detail.querySelector('.monitor-lang[data-action="monitor-lang"]');
   if (monLangSel) {
     monLangSel.addEventListener("change", () => _setMonitorLang(monLangSel.value));
+  }
+  const gptTimelineBtn = detail.querySelector('[data-action="view-gpt-timeline"]');
+  if (gptTimelineBtn) {
+    gptTimelineBtn.addEventListener("click", () => _setGptLogView("timeline"));
+  }
+  const gptLogBtn = detail.querySelector('[data-action="view-gpt-log"]');
+  if (gptLogBtn) {
+    gptLogBtn.addEventListener("click", () => _setGptLogView("log"));
+  }
+  const gptToolsBtn = detail.querySelector('[data-action="toggle-gpt-tools"]');
+  if (gptToolsBtn) {
+    gptToolsBtn.addEventListener("click", _toggleGptTimelineTools);
   }
 
   const sdkLiveBtn = detail.querySelector('.sdk-live-toggle[data-action="toggle-sdk-live"]');

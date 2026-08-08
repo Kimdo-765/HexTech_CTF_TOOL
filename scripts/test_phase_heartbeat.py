@@ -12,7 +12,7 @@ THE DEFECT
 main's SDK message loop (`run_main_agent_session`). Four other loops in this
 module drive an SDK client and none of them wrote it:
 
-    run_pre_recon           (x2, Claude and Grok clients)   before main
+    run_pre_recon           (x3, Claude/Grok/GPT clients)  before main
     make_spawn_subagent_mcp                                 during main
     run_report_phase                                        after main
 
@@ -154,8 +154,8 @@ def main() -> int:
     chk("REGRESSION: main does NOT — it owns agent_heartbeat and the ledger, "
         "and two writers would race the actor label",
         loops["run_main_agent_session"] == 0, loops["run_main_agent_session"])
-    chk("both pre-recon clients (Claude and Grok) are covered",
-        loops["run_pre_recon"] == 2, loops["run_pre_recon"])
+    chk("all pre-recon clients (Claude, Grok, and GPT) are covered",
+        loops["run_pre_recon"] == 3, loops["run_pre_recon"])
     chk("agent_heartbeat labels its own events 'main', so a subagent tag "
         "cannot linger", 'last_event_actor="main"' in src)
 

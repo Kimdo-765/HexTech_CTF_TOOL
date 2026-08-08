@@ -302,7 +302,7 @@ def main() -> int:
     chk("the provider switch stamps meta.agent_provider",
         'write_meta(job_id, agent_provider="grok"' in src_c2)
     chk("capture_session_id gates the Claude-only field on the JOB's provider",
-        'get("agent_provider") != "grok"' in src_c2)
+        'get("agent_provider") == "claude"' in src_c2)
     chk("...and still records the provider-neutral id either way",
         src_c2.count("write_meta(job_id, agent_session_id=sid)") == 1, )
     chk("it does NOT gate on Settings (which still says claude after a switch)",

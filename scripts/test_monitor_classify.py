@@ -28,7 +28,9 @@ The invariant these tests protect is small and precise:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -157,6 +159,41 @@ def main() -> int:
         m.classify("[main] TOOL Write: exploit.py", "pwn") == ("artifact", "info"))
     chk("plain tool echo is still dropped",
         m.classify('[main] TOOL Read:   "file_path": "/x"', "pwn") is None)
+
+    # ------------------------------------------------------ provider boundary
+    section("GPT Timeline replaces Monitor, provider-locally")
+    old_jobs_dir = m.JOBS_DIR
+    with tempfile.TemporaryDirectory(prefix="monitor-provider-") as tmp:
+        try:
+            m.JOBS_DIR = Path(tmp)
+
+            def job(job_id: str, provider: str | None, **extra) -> None:
+                d = m.JOBS_DIR / job_id
+                d.mkdir()
+                meta = {"status": "running", **extra}
+                if provider is not None:
+                    meta["agent_provider"] = provider
+                (d / "meta.json").write_text(json.dumps(meta))
+                (d / "run.log").write_text("[00:00:00] started\n")
+
+            job("111111111111", "gpt")
+            job("222222222222", "claude")
+            job("333333333333", "grok")
+            job("444444444444", None)
+            job("555555555555", None, retry_of="111111111111")
+
+            chk("GPT monitor is disabled", not m._monitor_enabled_for_job("111111111111"))
+            chk("GPT retry inherits the disabled boundary",
+                not m._monitor_enabled_for_job("555555555555"))
+            chk("Claude monitor remains enabled", m._monitor_enabled_for_job("222222222222"))
+            chk("Grok monitor remains enabled", m._monitor_enabled_for_job("333333333333"))
+            chk("legacy metadata preserves Monitor", m._monitor_enabled_for_job("444444444444"))
+            running = m._scan_running()
+            chk("supervisor excludes only GPT jobs",
+                set(running) == {"222222222222", "333333333333", "444444444444"},
+                running)
+        finally:
+            m.JOBS_DIR = old_jobs_dir
 
     failed = [r for r in _results if not r[0]]
     print(f"\n{len(_results)} checks, {len(failed)} failed")

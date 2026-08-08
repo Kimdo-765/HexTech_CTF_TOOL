@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "source_job_count": 49,
+  "settings": {
+    "agent_provider": "gpt",
+    "claude_model": "claude-opus-4-7",
+    "grok_model": "grok-build",
+    "gpt_model": "gpt-5.6-sol"
+  },
+  "model_presets": {
+    "version": 2,
+    "providers": {
+      "claude": {
+        "active": "ctf-optimized",
+        "presets": {
+          "ctf-optimized": {
+            "main": "claude-opus-5",
+            "judge": "claude-opus-4-8",
+            "reviewer": "claude-opus-4-8",
+            "recon": "",
+            "debugger": "",
+            "triage": "",
+            "report": "",
+            "monitor": "claude-haiku-4-5",
+            "effort": "xhigh"
+          }
+        }
+      },
+      "grok": {
+        "active": "",
+        "presets": {}
+      },
+      "gpt": {
+        "active": "gpt-ctf-optimized",
+        "presets": {
+          "gpt-ctf-optimized": {
+            "main": "gpt-5.6-sol",
+            "judge": "gpt-5.6",
+            "reviewer": "gpt-5.6-sol",
+            "recon": "gpt-5.6-terra",
+            "debugger": "gpt-5.6-sol",
+            "triage": "gpt-5.6-terra",
+            "report": "gpt-5.6-luna",
+            "monitor": "gpt-5.6-luna",
+            "effort": "xhigh"
+          }
+        }
+      }
+    }
+  },
+  "profiles": {
+    "claude": {
+      "main": ["claude", "claude-opus-5"],
+      "judge": ["claude", "claude-opus-4-8"],
+      "reviewer": ["claude", "claude-opus-4-8"],
+      "recon": ["claude", "claude-opus-5"],
+      "debugger": ["claude", "claude-opus-5"],
+      "triage": ["claude", "claude-opus-5"],
+      "report": ["claude", "claude-opus-5"],
+      "monitor": ["claude", "claude-haiku-4-5"]
+    },
+    "grok": {
+      "main": ["grok", "grok-build"],
+      "judge": ["grok", "grok-build"],
+      "reviewer": ["grok", "grok-build"],
+      "recon": ["grok", "grok-build"],
+      "debugger": ["grok", "grok-build"],
+      "triage": ["grok", "grok-build"],
+      "report": ["grok", "grok-build"],
+      "monitor": ["grok", "grok-build"]
+    },
+    "gpt": {
+      "main": ["gpt", "gpt-5.6-sol"],
+      "judge": ["gpt", "gpt-5.6"],
+      "reviewer": ["gpt", "gpt-5.6-sol"],
+      "recon": ["gpt", "gpt-5.6-terra"],
+      "debugger": ["gpt", "gpt-5.6-sol"],
+      "triage": ["gpt", "gpt-5.6-terra"],
+      "report": ["gpt", "gpt-5.6-luna"],
+      "monitor": ["gpt", "gpt-5.6-luna"]
+    }
+  },
+  "jobs": {
+    "claude": {
+      "model": "claude-opus-5",
+      "explicit": [
+        "04b76bd9c092", "06f3a326d453", "07d256325546", "0c04e636633c",
+        "0f999f0560b4", "1bf94b809103", "273bc705c135", "29046ccbb00b",
+        "299b34fd41f0", "3d8cca4e26de", "46bc4387edff", "4dedfef77339",
+        "545556f31310", "78001419036e", "78a7aa130000", "7ef2402bab91",
+        "8f8e429d4fa5", "ac1291ae5b83", "c1bd22f0b156", "c9059cf7a271",
+        "d6b00ebb6cbc", "f03ece6fa437", "f0ec5abbb79e", "f55e9ec48cd3",
+        "f815a23a1232", "fc328747ca0c"
+      ],
+      "inherited": ["56e21e374f38", "729c62380722", "8abe655962c2", "9d8c801295a3"]
+    },
+    "grok": {
+      "model": "grok-build",
+      "explicit": [
+        "1dd41f434203", "5e0de4572503", "5fd738ca59dc", "75dcbd86bfab",
+        "7db677b584b4", "88cc58737eab", "89d57ebd96cd", "96da1425bc5d",
+        "a34b10c5e8e9", "bbb9d01f87c1", "d1f462195615", "f4da417514f7"
+      ],
+      "inherited": ["26fd834c933c", "ca5234be1c27", "cdcf04783148", "d438240b28d6"]
+    },
+    "gpt": {
+      "model": "gpt-5.6-sol",
+      "explicit": ["4df962049a35", "a80ced612af3", "c1a764377067"],
+      "inherited": []
+    }
+  }
+}

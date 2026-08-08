@@ -62,6 +62,12 @@ for arg in "$@"; do
 done
 
 # --- preflight: docker + compose -------------------------------------------
+# Docker Desktop may leave a non-functional Windows shim earlier on PATH even
+# when this WSL distro's snap Docker daemon is the one actually serving the
+# project. Prefer that local daemon when it is installed and reachable.
+if [ -x /snap/bin/docker ] && /snap/bin/docker info >/dev/null 2>&1; then
+  export PATH="/snap/bin:$PATH"
+fi
 command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
 if docker compose version >/dev/null 2>&1; then
   DC=(docker compose)
@@ -161,6 +167,8 @@ fi
 # Pin mount sources so compose substitution is stable under sudo / different shells.
 export HOST_CLAUDE_HOME="${HOST_CLAUDE_HOME:-$HOME/.claude}"
 export HOST_GROK_HOME="${HOST_GROK_HOME:-$HOME/.grok}"
+CODEX_LOGIN_HOME="$HOME/.codex"
+export HOST_CODEX_HOME="${HOST_CODEX_HOME:-$HOME/.codex-hextech}"
 CLAUDE_HOME="$HOST_CLAUDE_HOME"
 if [ ! -d "$CLAUDE_HOME" ]; then
   warn "Claude config dir not found at $CLAUDE_HOME."
@@ -169,6 +177,15 @@ fi
 if [ ! -f "$HOST_GROK_HOME/auth.json" ] && [ -z "${XAI_API_KEY:-}" ]; then
   warn "No Grok auth at $HOST_GROK_HOME/auth.json and XAI_API_KEY unset."
   warn "Run 'grok login' or set XAI_API_KEY if you plan to use agent_provider=grok."
+fi
+if [ "$HOST_CODEX_HOME" = "$CODEX_LOGIN_HOME" ]; then
+  die "HOST_CODEX_HOME points at the live TUI home ($CODEX_LOGIN_HOME). Root containers can rewrite config.toml as root; use $HOME/.codex-hextech."
+else
+  bash scripts/init-codex-runtime-home.sh "$CODEX_LOGIN_HOME" "$HOST_CODEX_HOME"
+fi
+if [ ! -s "$HOST_CODEX_HOME/auth.json" ]; then
+  warn "No Codex file-backed auth at $HOST_CODEX_HOME/auth.json."
+  warn "Run 'codex login' on the host, then re-run start.sh to bootstrap it."
 fi
 
 # --- which tool images are missing -----------------------------------------

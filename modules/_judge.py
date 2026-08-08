@@ -42,6 +42,7 @@ import asyncio
 import json
 import re
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -61,6 +62,57 @@ from modules._common import (
     resolve_judge_model,
 )
 from modules.pwn import chain_schema
+
+
+@dataclass
+class JudgeTurnResult:
+    """What one judge turn produced, including WHY it produced nothing.
+
+    The previous return type was ``(text, session_id)``, and every failure
+    path collapsed to ``("", sid)``. That is enough to fall back permissively
+    — which the judge always does — but it throws away the two things the
+    hybrid work needs:
+
+      * ``error_kind``. A Claude judge on a Codex job can be refused by the
+        Anthropic classifier for the same content the job is about (this
+        repo has a reviewer that once refused nearly every job on its own
+        prompt scaffolding). Failing over to the other provider is only
+        correct for ``policy_refusal``; doing it on a timeout or an auth
+        error just burns the second provider's quota too.
+      * usage. A cross-provider judge spends real money on a different
+        meter from main's, and "we cannot see judge spend" is exactly the
+        blind spot the ledger exists to close.
+
+    Empty ``text`` with ``error_kind is None`` means the turn ran and said
+    nothing, which is a different fact from a turn that never ran.
+    """
+
+    text: str = ""
+    session_id: str | None = None
+    provider: str = ""
+    model: str | None = None
+    runtime: str | None = None
+    error_kind: str | None = None
+    error_detail: str = ""
+    tokens: dict[str, int] = field(default_factory=dict)
+    reported_cost: float | None = None
+    # Set only when a cross-provider retry happened. `failover_diagnosis`
+    # turns the recovery into a measurement: if the other vendor accepted the
+    # identical request the block was provider-specific, not content-specific.
+    failover_from: str | None = None
+    failover_to: str | None = None
+    failover_diagnosis: str | None = None
+    # Per-model breakdown, kept because a judge session is not necessarily
+    # single-model: the Claude judge registers a recon subagent, and the
+    # active preset can pin recon to a different model from judge. Flattening
+    # that to one figure loses the ledger's own `model` axis AND prices the
+    # cheaper model's tokens at the expensive one's rate (measured: $0.0225
+    # booked where the per-model sum was $0.0165).
+    model_usage: dict[str, dict] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.error_kind is None and bool(self.text)
 
 
 # ---------------------------------------------------------------------------
@@ -341,21 +393,57 @@ Inputs:
 # multiple jobs (shouldn't happen with current orchestrator, but the
 # state is cheap and dictionary-keyed by job_id is more robust than
 # a global).
+#
+# The session id is stored WITH the provider that issued it, and recall only
+# returns it to that same provider. A session id is a handle into one vendor's
+# store; handing a Codex id to the Claude SDK resumes nothing and, worse,
+# looks like it should. Once a stage fails over, the rest of the job's judge
+# stages stay on the provider that answered — a run that alternates providers
+# mid-cycle has no shared context at all, which is the one thing prejudge ->
+# supervise -> postjudge continuity exists to provide.
 
 _session_lock = threading.Lock()
-_session_ids: dict[str, str] = {}
+_session_ids: dict[str, dict[str, str]] = {}
 
 
-def _remember_sid(job_id: str, sid: str | None) -> None:
-    if not sid:
+def _remember_sid(job_id: str, sid: str | None, provider: str | None = None) -> None:
+    """Store this job's judge session id together with its provider.
+
+    A missing sid still records the provider when one is given: that is how a
+    failover pins the remaining stages even if the answering provider returned
+    no resumable session.
+    """
+    p = str(provider or "").strip().lower()
+    if not sid and not p:
         return
     with _session_lock:
-        _session_ids[job_id] = sid
+        entry = dict(_session_ids.get(job_id) or {})
+        if p:
+            if entry.get("provider") and entry["provider"] != p:
+                # Provider changed: the old id belongs to the old vendor.
+                entry.pop("session_id", None)
+            entry["provider"] = p
+        if sid:
+            entry["session_id"] = sid
+        _session_ids[job_id] = entry
 
 
-def _recall_sid(job_id: str) -> str | None:
+def _recall_sid(job_id: str, provider: str | None = None) -> str | None:
+    """This job's judge session id, but only for the provider that issued it."""
     with _session_lock:
-        return _session_ids.get(job_id)
+        entry = _session_ids.get(job_id) or {}
+    if not entry:
+        return None
+    p = str(provider or "").strip().lower()
+    if p and entry.get("provider") and entry["provider"] != p:
+        return None
+    return entry.get("session_id")
+
+
+def _pinned_provider(job_id: str) -> str | None:
+    """Provider this job's judge is pinned to, if a stage already answered."""
+    with _session_lock:
+        return (_session_ids.get(job_id) or {}).get("provider") or None
 
 
 def _forget_sid(job_id: str) -> None:
@@ -368,35 +456,583 @@ def _forget_sid(job_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None, dict[str, dict]]:
+    """(tokens, reported_cost) from any provider's ResultMessage.
+
+    All three adapters mirror the SDK shape, so one reader covers them. The
+    SDK's own ``model_usage`` is preferred over the streamed ``usage`` for the
+    same reason `agent_heartbeat` prefers it: pricing those totals reproduces
+    the reported cost to the cent.
+    """
+    tokens: dict[str, int] = {}
+    per_model: dict[str, dict] = {}
+    try:
+        from modules._common import _tokens_from_model_usage
+
+        mu = getattr(msg, "model_usage", None)
+        if isinstance(mu, dict):
+            tokens = _tokens_from_model_usage(mu) or {}
+            # Keep the split as well as the total. Same normalisation, one
+            # model at a time, so the ledger can carry a row per model.
+            for name, raw in mu.items():
+                if not isinstance(raw, dict):
+                    continue
+                one = _tokens_from_model_usage({name: raw})
+                if one:
+                    per_model[str(name)] = one
+        if not tokens:
+            usage = getattr(msg, "usage", None)
+            if isinstance(usage, dict):
+                from modules._common import _TOKEN_KEYS
+
+                tokens = {
+                    k: int(usage[k])
+                    for k in _TOKEN_KEYS
+                    if isinstance(usage.get(k), (int, float))
+                    and not isinstance(usage.get(k), bool)
+                    and usage[k]
+                }
+    except Exception:
+        tokens, per_model = {}, {}
+    cost = getattr(msg, "total_cost_usd", None)
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        cost = None
+    return tokens, cost, per_model
+
+
+# Stored detail cap. Classification NEVER runs on the truncated string — a
+# real refusal arriving after 1000 characters of normal output was measured
+# being cut away and misfiled as a generic agent_error.
+_DETAIL_MAX_CHARS = 2000
+
+# `stop_reason` values that name the failure CATEGORY themselves.
+#
+# ENUMERATED from all three adapters rather than added one at a time — adding
+# them piecemeal is what produced the last defect here: `codex_cli`'s values
+# were mapped, `grok_acp`'s `eof` and `max_tokens` were not, and both fell
+# through to prose and were poisoned by an earlier analysis that happened to
+# mention a usage policy. Sources:
+#   codex_cli     completed process_error timeout unexpected_eof turn_failed error
+#   grok_acp      eof error process_error timeout  (+ cancelled max_tokens in its
+#                 own is_error set)
+#   gpt_responses api_error completed max_tool_rounds refusal timeout
+_STOP_REASON_KIND = {
+    "timeout": "timeout",
+    "process_error": "transport_error",
+    "unexpected_eof": "transport_error",
+    "eof": "transport_error",
+    "cancelled": "killed",
+    "canceled": "killed",
+    # A budget ceiling is a limit, not a refusal and not a transport fault.
+    "max_tokens": "agent_error",
+    "max_tool_rounds": "agent_error",
+}
+
+# Failure fields across the three adapters. `errors` is a LIST on the Claude
+# SDK ResultMessage and is where its parser puts the wire's error payload;
+# reading only scalars dropped it entirely. `stop_reason` is what GPT and Grok
+# carry — neither has `result` at all.
+def _structured_failure_bits(msg: Any) -> list[str]:
+    """Shared extraction — see modules._common.structured_failure_bits()."""
+    from modules._common import structured_failure_bits
+
+    return structured_failure_bits(msg)
+
+
+def _error_detail(msg: Any, parts: list[str]) -> str:
+    """Failure detail from wherever THIS adapter actually puts it.
+
+    Reading only ``.result`` was wrong for two of the three backends: the GPT
+    and Grok ``ResultMessage`` contracts have no such field at all
+    (gpt_responses.py / grok_acp.py — both carry ``stop_reason``), so every
+    failure arrived as an empty string and classified as the generic
+    `agent_error`. A refusal and a timeout became indistinguishable, which is
+    exactly the distinction stage 4's failover turns on.
+
+    The cause is not lost, just carried elsewhere: the Codex CLI emits turn
+    failure / process error / timeout detail as ASSISTANT text before the
+    error Result, and Grok does the same for ACP errors — so the text already
+    accumulated in `parts` is a first-class source, not a fallback.
+    """
+    bits = _structured_failure_bits(msg)
+    text = "".join(parts).strip()
+    if text:
+        bits.append(text)
+    return " | ".join(bits)[:_DETAIL_MAX_CHARS]
+
+
+def _classify(detail: str, fallback: str) -> str:
+    """Map an error string to an error_kind, defaulting to `fallback`.
+
+    `policy_refusal` is the only kind stage 4 fails over on, so mislabelling
+    a transport blip as one would send a healthy job to the other provider,
+    and mislabelling a refusal as transport would leave the AUP class stuck
+    exactly where it is today.
+    """
+    try:
+        from modules._common import classify_agent_error
+
+        kind = classify_agent_error(detail or "")
+    except Exception:
+        return fallback
+    # `classify_agent_error` answers "unknown" rather than None when nothing
+    # matched, so `or fallback` is dead code — every unrecognised transport
+    # error came back tagged "unknown", which tells stage 4 nothing about
+    # WHERE it happened. Treat it as "not classified" and keep the caller's
+    # more specific tag.
+    return fallback if kind in (None, "", "unknown") else kind
+
+
+def classify_failure(msg: Any, parts: list[str], fallback: str) -> tuple[str, str]:
+    """(error_kind, detail) for a failed turn, structured signal FIRST.
+
+    Joining every source into one blob and classifying that was wrong in both
+    directions at once, and the two failures share a cause: prose and
+    structured fields were treated as interchangeable.
+
+      * A real refusal was HIDDEN. The blob was truncated to a fixed length
+        before classification, so a turn that produced 1000+ characters of
+        normal output before the server's block pushed the block's own words
+        past the cut — measured `agent_error` on text whose tail said
+        "violates our usage policy". Failover would not fire for the exact
+        case it exists for.
+      * A generic failure was POISONED. A judge analysing a challenge that
+        mentions a usage policy, followed by an unrelated `process_error`,
+        classified as `policy_refusal` — a spurious failover on a broken pipe.
+
+    So: structured sources are authoritative and are classified alone, before
+    any prose is consulted. `stop_reason` then names the CATEGORY for adapter
+    failures that carry no message of their own. Only the ambiguous kinds
+    (`turn_failed`, `refusal` — where the body carries the reason) fall
+    through to prose, and prose is read newest-first because the adapters emit
+    the failure detail as the LAST assistant message before the error result.
+
+    Classification always runs on the FULL text; truncation is for storage.
+    """
+    structured = _structured_failure_bits(msg)
+    detail = " | ".join(structured + ([("".join(parts)).strip()] if parts else []))
+    detail = detail.strip(" |")[:_DETAIL_MAX_CHARS]
+
+    # 1. The server's own message, when the adapter preserved one.
+    for src in structured:
+        kind = _classify(src, "")
+        if kind:
+            return kind, detail
+
+    # 2. stop_reason names the category for adapter-level failures.
+    stop_reason = str(getattr(msg, "stop_reason", "") or "").strip().lower()
+    if stop_reason in _STOP_REASON_KIND:
+        return _STOP_REASON_KIND[stop_reason], detail
+
+    # 3. Ambiguous or unmapped stop_reason: the reason is in the body. Read
+    #    ONLY THE LAST message, never earlier ones.
+    #
+    #    Every adapter emits its failure detail as the final assistant message
+    #    before the error result (codex_cli, grok_acp). Anything before that is
+    #    the judge's own output, and scanning it is how an analysis that merely
+    #    DISCUSSED a usage policy turned a broken pipe into a refusal. Reading
+    #    one message instead of all of them removes that whole class, and it
+    #    keeps working for adapter values nobody has mapped yet — which
+    #    matters, because an unmapped value is exactly the case the map above
+    #    was missing twice.
+    tail = next((p for p in reversed(parts) if p and p.strip()), "")
+    kind = _classify(tail, "")
+    if kind:
+        return kind, detail
+
+    return fallback, detail
+
+
+def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
+    """Ledger rows for one judge turn — ONE PER MODEL, keyed by stage.
+
+    Judge spend was invisible before this: `meta.cost_usd` is main's session
+    and `summary["cost_usd"]` is subagents, so a cross-provider judge burned a
+    second vendor's meter with nothing recording it. Best-effort — accounting
+    must never break the gate it is accounting for, and the judge in
+    particular is designed so that every failure falls back permissively.
+
+    `stage` is prejudge / supervise / postjudge: supervise fires repeatedly
+    within one run, so a role-only ledger would say "judge is expensive"
+    without saying which part.
+
+    A judge turn is not necessarily single-model. The Claude judge registers a
+    recon subagent and the active preset can pin recon to a different model,
+    so the SDK's `model_usage` can carry two. Folding that into one row lost
+    the ledger's own `model` axis and priced the cheaper model's tokens at the
+    expensive one's rate — measured $0.0225 booked where the per-model sum was
+    $0.0165.
+
+    A REPORTED cost is a session figure and cannot be split across models
+    without inventing the split, so it stays whole on the primary model's row
+    and the other rows carry tokens with no dollars. The bucket then sums to
+    the reported total rather than to a fabricated one, and `usd_complete`
+    says out loud that not every row could be priced.
+    """
+    try:
+        from modules._common import estimate_cost_from_tokens, model_rates_are_known
+        from modules.usage_ledger import codex_window_snapshot, record_usage_by_model
+
+        record_usage_by_model(
+            job_id,
+            role="judge",
+            stage=stage,
+            provider=res.provider,
+            primary_model=res.model,
+            model_usage=res.model_usage,
+            tokens=res.tokens,
+            reported_cost=res.reported_cost,
+            estimate_for=estimate_cost_from_tokens,
+            rates_known=model_rates_are_known,
+            gpt_runtime=res.runtime,
+            window_for=lambda: codex_window_snapshot(cached_only=True),
+            error_kind=res.error_kind,
+            # The failover diagnosis is only worth producing if it survives
+            # the process that produced it. In-memory it dies with the run.
+            extra={
+                "failover_from": res.failover_from,
+                "failover_diagnosis": res.failover_diagnosis,
+            },
+        )
+    except Exception:
+        pass
+
+
+def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
+    """Attach the turn's transport facts to a stage's public verdict.
+
+    The diagnosis is only worth producing if it outlives the call that made
+    it. It goes on the ledger row for accounting and here for the caller —
+    postjudge's dict is what the retry logic reads, so a failover that is
+    invisible there is a failover nobody can act on.
+
+    `error_kind` rides along for the same reason, and it is the more important
+    of the two. Every stage normalises a missing answer into a permissive
+    default — postjudge into `verdict="unknown"`, prejudge into `ok=True` —
+    which is correct for the RUN (a judge failure must not block a job) and
+    indistinguishable from a real verdict for anything trying to MEASURE the
+    judge. Stage 3 put `error_kind` on `JudgeTurnResult` for exactly this and
+    it stopped at the boundary; a shadow replay counted `auth_error` as an
+    `unknown` opinion. Every stage returns through here, so it is one place.
+    """
+    if turn.error_kind:
+        out["error_kind"] = turn.error_kind
+        if turn.error_detail:
+            out["error_detail"] = turn.error_detail
+    if turn.failover_diagnosis:
+        out["fallback_used"] = True
+        out["failover_from"] = turn.failover_from
+        # The TARGET that was tried, not the provider of whichever result we
+        # ended up returning. When both blocked we return the original, and
+        # reading its provider reported a failover to the place it came from.
+        out["failover_to"] = turn.failover_to or turn.provider
+        out["failover_diagnosis"] = turn.failover_diagnosis
+    return out
+
+
+def _judge_model_for(provider: str, requested: str | None) -> str:
+    """Judge model for `provider`, honouring THAT provider's active preset.
+
+    `resolve_judge_model()` runs before the provider is known, against the
+    job's own backend — so a judge routed (or failed over) to another provider
+    arrives holding a model from the wrong family. Coercing that to the
+    target's *global default* is what the code did, and it silently ignored
+    the target's active preset: a GPT preset pinning judge to `gpt-5.6-terra`
+    was never consulted, on either the primary or the failover path.
+
+    So: keep a same-family request as-is, and otherwise resolve the target's
+    own role preset before falling back to its global default.
+    """
+    from modules.agent_provider import (
+        coerce_model_for_provider,
+        default_model_for,
+        is_claude_model_id,
+        is_gpt_model_id,
+        is_grok_model_id,
+    )
+
+    p = str(provider or "").strip().lower()
+    m = str(requested or "").strip()
+    same_family = bool(m) and (
+        (p == "gpt" and is_gpt_model_id(m))
+        or (p == "grok" and is_grok_model_id(m))
+        or (p == "claude" and is_claude_model_id(m))
+    )
+    if same_family:
+        return m
+
+    fallback = default_model_for(p) or (LATEST_JUDGE_MODEL if p == "claude" else "")
+    try:
+        from modules.model_presets import resolve_role_model
+
+        resolved = resolve_role_model("judge", fallback, p)
+    except Exception:
+        resolved = fallback
+    return coerce_model_for_provider(resolved or fallback, p)
+
+
+def _failover_target(provider: str) -> str | None:
+    """Shared provider policy — see agent_provider.failover_target()."""
+    from modules.agent_provider import failover_target
+
+    return failover_target(provider)
+
+
+def _attempt(
+    user_prompt: str,
+    *,
+    cwd: Path,
+    resume_sid: str | None,
+    model: str | None,
+    provider: str,
+) -> JudgeTurnResult:
+    """One judge attempt that NEVER raises (bar KeyboardInterrupt / SystemExit).
+
+    The exception boundary belongs HERE, at the attempt, not around the public
+    stage function — for three reasons that only show up at this level:
+
+      * All three stages go through it, so supervise and postjudge stop
+        propagating and stop leaving zero ledger rows.
+      * The provider is already known. A catch further out has to re-guess it,
+        and in a failover it guesses WRONG: an exception from the alternate
+        was attributed to the provider the primary ran on.
+      * The primary's row is written after the failover decision, so an
+        alternate that raised took the primary's refusal row down with it.
+        The primary's result now survives its partner's failure.
+    """
+    try:
+        return _run_async(
+            _run_judge_turn(
+                user_prompt,
+                cwd=cwd,
+                resume_sid=resume_sid,
+                model=model,
+                provider_override=provider,
+            )
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        # CancelledError derives from BaseException, so `except Exception`
+        # left the one failure most likely during a shutdown or a wall-clock
+        # kill escaping a box whose whole contract is "never raises" — and
+        # taking the ledger row with it. KeyboardInterrupt and SystemExit are
+        # deliberately NOT caught: those mean the process is going away, and
+        # a best-effort gate has no business detaining them.
+        detail = f"{type(exc).__name__}: {exc}"
+        return JudgeTurnResult(
+            provider=provider,
+            session_id=resume_sid,
+            error_kind=_classify(detail, "cancelled"
+                                 if isinstance(exc, asyncio.CancelledError)
+                                 else "transport_error"),
+            error_detail=detail[:500] or type(exc).__name__,
+        )
+
+
+def judge_turn(
+    user_prompt: str,
+    *,
+    cwd: Path,
+    job_id: str,
+    stage: str,
+    resume: bool,
+    model: str | None = None,
+) -> JudgeTurnResult:
+    """One judge stage, with a single cross-provider retry on a policy block.
+
+    This is the destination the AUP recovery ladder never had. The failure it
+    cures is specific and documented in this repo: a server-side classifier
+    blocks the call over the challenge's own content, and re-running the same
+    request on the same vendor blocks again — a fresh session does not cure
+    it. The other vendor's classifier is a different classifier.
+
+    Deliberately narrow:
+
+      * ONLY `policy_refusal` retries. A timeout or an auth failure means the
+        second provider would be burned for nothing, and stage 3 exists to
+        tell those apart.
+      * ONE retry, never a loop.
+      * The retry starts a FRESH session. A session id is a handle into one
+        vendor's store; there is nothing to resume across the boundary.
+      * On success the job's remaining judge stages are PINNED to the
+        answering provider. Alternating mid-cycle would leave prejudge ->
+        supervise -> postjudge with no shared context, which is the whole
+        reason that continuity exists.
+
+    Both turns are recorded to the ledger. The refused one still cost tokens,
+    and hiding it would make a failover look free.
+    """
+    from modules.agent_provider import provider_for_role
+
+    pinned = _pinned_provider(job_id)
+    primary = pinned or provider_for_role(job_id, "judge")
+    # Resolved HERE, against the provider actually about to run: a session id
+    # only means something to the vendor that issued it.
+    resume_sid = _recall_sid(job_id, primary) if resume else None
+
+    res = _attempt(
+        user_prompt, cwd=cwd, resume_sid=resume_sid,
+        model=model, provider=primary,
+    )
+
+    # Ledger writes are deferred to AFTER the failover decision. The diagnosis
+    # is a property of the whole event, and recording the first turn before
+    # the second has run leaves a row that can never carry it — the two turns
+    # are back to back, so nothing meaningful is at risk in the gap.
+    if res.error_kind != "policy_refusal":
+        _record_judge_usage(job_id, stage, res)
+        _remember_sid(job_id, res.session_id, res.provider or primary)
+        return res
+
+    target = _failover_target(res.provider or primary)
+    if not target:
+        res.error_detail = (
+            (res.error_detail or "") + " | no failover target configured"
+        ).strip(" |")
+        _record_judge_usage(job_id, stage, res)
+        return res
+
+    alt = _attempt(
+        user_prompt, cwd=cwd,
+        resume_sid=None,   # never resume across the provider boundary
+        model=None,        # let the target's own default/preset decide
+        provider=target,
+    )
+    # Turning the recovery into a measurement costs nothing and answers a
+    # question this repo has had to guess at before: when the reviewer refused
+    # nearly every job, the cause was its OWN prompt scaffolding rather than
+    # the artifacts. If the other vendor accepts the identical request, the
+    # block was provider-specific, not content-specific.
+    diagnosis = (
+        "provider_specific" if alt.error_kind is None else
+        "content_or_prompt" if alt.error_kind == "policy_refusal" else
+        "inconclusive"
+    )
+    origin = res.provider or primary
+    res.failover_from = alt.failover_from = origin
+    res.failover_to = alt.failover_to = target
+    res.failover_diagnosis = alt.failover_diagnosis = diagnosis
+    _record_judge_usage(job_id, stage, res)
+    _record_judge_usage(job_id, stage, alt)
+
+    if alt.error_kind is None:
+        _remember_sid(job_id, alt.session_id, alt.provider or target)
+        return alt
+
+    # The second provider failed too. Keep the ORIGINAL result as the answer —
+    # the callers' permissive fallbacks are written against it — but carry the
+    # diagnosis so the operator can see both were tried.
+    res.error_detail = (
+        f"{res.error_detail} | failover to {target}: "
+        f"{alt.error_kind}: {alt.error_detail}"
+    )[:_DETAIL_MAX_CHARS]
+    return res
+
+
 async def _run_judge_turn(
     user_prompt: str,
     *,
     cwd: Path,
     resume_sid: str | None,
     model: str | None = None,
-) -> tuple[str, str | None]:
+    provider_override: str | None = None,
+) -> JudgeTurnResult:
     """Run a single judge turn (which may internally do multiple tool
-    calls). Returns (final_text, captured_session_id).
+    calls). Returns a `JudgeTurnResult` — text, session id, and WHY the turn
+    produced nothing when it did.
 
     Backend follows the job's ``agent_provider`` (Settings / meta):
       * claude — Claude Agent SDK ``query()`` (historical path; session
         continuity via ``resume`` / project-key under ``~/.claude``)
       * grok   — ``GrokACPClient`` with ``JUDGE_AGENT_PROMPT`` so
         prejudge/supervise/postjudge never burn Claude quota on a Grok job
+      * gpt    — Codex CLI OAuth (or explicit Responses API fallback)
 
     `model` follows the job's main model family via ``resolve_judge_model``;
     when None it falls back to LATEST_JUDGE_MODEL (Claude) or the Grok
-    default. Empty string + None on failure — judge errors are NEVER fatal.
+    default. Judge errors are NEVER fatal — a failed turn returns an empty
+    `text` and the callers fall back permissively, exactly as before.
     """
     from modules.agent_provider import (
         coerce_model_for_provider,
-        provider_for_job,
         default_model_for,
+        normalize_provider,
+        provider_for_role,
     )
 
     job_id = Path(cwd).name
-    provider = provider_for_job(job_id)
-    _jm = coerce_model_for_provider(model or LATEST_JUDGE_MODEL, provider)
+    # The judge is the first role to actually consult the per-role map that
+    # stage 1 added; before this it followed the job provider like everything
+    # else. `provider_override` is the failover path handing us the other
+    # backend for one retry.
+    provider = (
+        normalize_provider(provider_override)
+        if provider_override
+        else provider_for_role(job_id, "judge")
+    )
+    _jm = _judge_model_for(provider, model)
+    res = JudgeTurnResult(provider=provider, model=_jm, session_id=resume_sid)
+
+    # ---- OpenAI GPT path --------------------------------------------------
+    if provider == "gpt":
+        try:
+            from modules.gpt_agent import (
+                GptAgentClient,
+                GptSessionOptions,
+                AssistantMessage as GptAssistantMessage,
+                ResultMessage as GptResultMessage,
+            )
+            from modules._prompts import JUDGE_AGENT_PROMPT
+        except Exception as exc:
+            res.error_kind = "import_error"
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            return res
+        if not _jm or str(_jm).lower().startswith(("claude", "grok")):
+            _jm = default_model_for("gpt")
+        res.model = _jm
+        try:
+            from modules.agent_provider import get_gpt_runtime
+
+            res.runtime = get_gpt_runtime()
+        except Exception:
+            pass
+        opts = GptSessionOptions(
+            system_prompt=JUDGE_AGENT_PROMPT,
+            model=_jm,
+            cwd=str(cwd),
+            resume=resume_sid,
+            effort="medium",
+            env={"JOB_ID": job_id, "AGENT_ROLE": "judge"},
+            enable_tools=True,
+            enable_subagents=False,
+        )
+        parts: list[str] = []
+        captured_sid: str | None = resume_sid
+        try:
+            async with GptAgentClient(opts) as client:
+                await client.query(user_prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, GptAssistantMessage):
+                        for blk in (getattr(msg, "content", None) or []):
+                            t = getattr(blk, "text", None)
+                            if t:
+                                parts.append(t)
+                    elif isinstance(msg, GptResultMessage):
+                        captured_sid = getattr(msg, "session_id", None) or captured_sid
+                        res.session_id = captured_sid
+                        res.tokens, res.reported_cost, res.model_usage = _usage_from_result(msg)
+                        if getattr(msg, "is_error", False):
+                            res.error_kind, res.error_detail = classify_failure(
+                                msg, parts, "agent_error")
+                            return res
+                        break
+        except Exception as exc:
+            res.session_id = captured_sid
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            res.error_kind = _classify(res.error_detail, "transport_error")
+            return res
+        res.session_id = captured_sid
+        res.text = "".join(parts).strip()[:8000]
+        return res
 
     # ---- Grok path: full ACP session (tools available like Claude judge) --
     if provider == "grok":
@@ -408,10 +1044,13 @@ async def _run_judge_turn(
                 ResultMessage as GrokResultMessage,
             )
             from modules._prompts import JUDGE_AGENT_PROMPT
-        except Exception:
-            return "", None
+        except Exception as exc:
+            res.error_kind = "import_error"
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            return res
         if not _jm or str(_jm).lower().startswith("claude"):
             _jm = default_model_for("grok")
+        res.model = _jm
         opts = GrokSessionOptions(
             system_prompt=JUDGE_AGENT_PROMPT,
             model=_jm,
@@ -436,12 +1075,21 @@ async def _run_judge_turn(
                         sid = getattr(msg, "session_id", None)
                         if sid and not captured_sid:
                             captured_sid = sid
+                        res.session_id = captured_sid
+                        res.tokens, res.reported_cost, res.model_usage = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            return "", captured_sid
+                            res.error_kind, res.error_detail = classify_failure(
+                                msg, parts, "agent_error")
+                            return res
                         break
-        except Exception:
-            return "", captured_sid
-        return "".join(parts).strip()[:8000], captured_sid
+        except Exception as exc:
+            res.session_id = captured_sid
+            res.error_detail = f"{type(exc).__name__}: {exc}"
+            res.error_kind = _classify(res.error_detail, "transport_error")
+            return res
+        res.session_id = captured_sid
+        res.text = "".join(parts).strip()[:8000]
+        return res
 
     # ---- Claude path (historical) ----------------------------------------
     options = ClaudeAgentOptions(
@@ -478,13 +1126,22 @@ async def _run_judge_turn(
                 sid = getattr(msg, "session_id", None)
                 if sid and not captured_sid:
                     captured_sid = sid
+                res.session_id = captured_sid
+                res.tokens, res.reported_cost, res.model_usage = _usage_from_result(msg)
                 if getattr(msg, "is_error", False):
-                    return "", captured_sid
+                    res.error_kind, res.error_detail = classify_failure(
+                        msg, parts, "agent_error")
+                    return res
                 break
-    except Exception:
-        return "", captured_sid
+    except Exception as exc:
+        res.session_id = captured_sid
+        res.error_detail = f"{type(exc).__name__}: {exc}"
+        res.error_kind = _classify(res.error_detail, "transport_error")
+        return res
 
-    return "".join(parts).strip()[:8000], captured_sid
+    res.session_id = captured_sid
+    res.text = "".join(parts).strip()[:8000]
+    return res
 
 
 def _run_async(coro):
@@ -495,22 +1152,42 @@ def _run_async(coro):
     (e.g. an analyzer that awaited us), we fall back to a thread-isolated
     new loop so we never deadlock.
     """
+    # Decide by ASKING, before running — not by reading the message of an
+    # exception afterwards. Message matching had two failure modes and they
+    # were mirror images: a coroutine whose own RuntimeError happened to say
+    # "running event loop" was re-awaited (turning its real error into
+    # "cannot reuse already awaited coroutine"), and any other RuntimeError
+    # from the coroutine had been swallowed as a loop conflict. The question
+    # "is a loop running in THIS thread" has a direct answer.
     try:
-        return asyncio.run(coro)
+        asyncio.get_running_loop()
+        loop_is_running = True
     except RuntimeError:
-        result: dict[str, Any] = {}
+        loop_is_running = False
 
-        def _run():
-            loop = asyncio.new_event_loop()
-            try:
-                result["v"] = loop.run_until_complete(coro)
-            finally:
-                loop.close()
+    if not loop_is_running:
+        return asyncio.run(coro)
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join()
-        return result.get("v", ("", None))
+    result: dict[str, Any] = {}
+    error: dict[str, BaseException] = {}
+
+    def _run():
+        loop = asyncio.new_event_loop()
+        try:
+            result["v"] = loop.run_until_complete(coro)
+        except BaseException as inner:      # noqa: BLE001 — re-raised below
+            error["e"] = inner
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join()
+    if "e" in error:
+        # Surfacing it lets the attempt boundary classify and bill it;
+        # swallowing it here produced a silent empty answer.
+        raise error["e"]
+    return result["v"]
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +1243,37 @@ def _truncate_tail(text: str, *, max_bytes: int) -> str:
     if len(b) > max_bytes:
         b = b[-max_bytes:]
     return b.decode("utf-8", errors="replace")
+
+
+POSTJUDGE_STDOUT_BYTES = 8000
+POSTJUDGE_STDERR_BYTES = 4000
+
+
+def postjudge_inputs(stdout: str, stderr: str) -> dict:
+    """Exactly what postjudge consumes from a run's output. Nothing more.
+
+    Two different reductions happen inside `postjudge_run`, and a recorder
+    that keeps "the output, shortened" reproduces neither:
+
+      * the PROMPT gets the TAIL — the last 8000/4000 **bytes**. Keeping the
+        head instead hands the judge the start of a long run and drops the
+        end, which is where a capture appears.
+      * the placeholder override scans the WHOLE output for flag shapes and
+        can downgrade a `success` verdict on what it finds. Feed it a tail and
+        it sees a different set.
+
+    Returning both from one place is what keeps a recorder honest: it stores
+    this dict, and `postjudge_run` accepts every field of it back.
+    """
+    from modules._common import FLAG_RE
+
+    return {
+        "stdout_tail": _truncate_tail(stdout, max_bytes=POSTJUDGE_STDOUT_BYTES),
+        "stderr_tail": _truncate_tail(stderr, max_bytes=POSTJUDGE_STDERR_BYTES),
+        "flag_shapes": sorted(set(FLAG_RE.findall(f"{stdout}\n{stderr}"))),
+        "stdout_bytes": len((stdout or "").encode("utf-8", errors="replace")),
+        "stderr_bytes": len((stderr or "").encode("utf-8", errors="replace")),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +1396,171 @@ def _scan_self_defeat_sources(
 # ---------------------------------------------------------------------------
 
 
+_PREJUDGE_ISSUE_CAP = 12
+
+
+def _merge_prejudge_issues(llm: list[str], static: list[str]) -> list[str]:
+    """Merge issue lists so no GATE's cause is lost to another's volume.
+
+    A single trailing cap looked simpler than the staged 6 -> 10 -> 12 caps it
+    replaced, and silently changed behaviour: twelve self-defeat matches ate
+    the whole budget and `chain.critical` — a different, independently
+    blocking cause — vanished from the verdict entirely. The operator then
+    reads "blocked: self-defeat" and never learns the chain was also invalid.
+
+    So the budget is allocated by CAUSE, round-robin, before it is spent:
+    every family that has something to say gets a line before any family gets
+    a second one. Ordering within the result keeps the blocking causes first.
+    """
+    def family(issue: str) -> str:
+        for prefix in ("self-defeat", "chain.critical", "chain.high", "chain.note"):
+            if issue.startswith(prefix):
+                return prefix
+        return "llm"
+
+    groups: dict[str, list[str]] = {}
+    # Blocking causes are listed before advisory ones; `llm` sits between so a
+    # model's own finding is not buried under chain notes.
+    order = ["self-defeat", "chain.critical", "llm", "chain.high", "chain.note"]
+    for issue in list(static) + list(llm):
+        groups.setdefault(family(issue), []).append(str(issue)[:200])
+
+    out: list[str] = []
+    while len(out) < _PREJUDGE_ISSUE_CAP:
+        took = False
+        for name in order:
+            bucket = groups.get(name)
+            if not bucket:
+                continue
+            out.append(bucket.pop(0))
+            took = True
+            if len(out) >= _PREJUDGE_ISSUE_CAP:
+                break
+        if not took:
+            break
+    return out
+
+
+def deterministic_prejudge(jd: Path, script: Path, log_fn) -> dict:
+    """The prejudge gates that need NO model, run on their own.
+
+    These are the ship-blockers that do not depend on a judge answering: a
+    static scan for the agent admitting its own chain has no working path,
+    and structural validation of chain.json. They were written INSIDE the
+    branch that handles a parseable LLM verdict, so a judge that failed to
+    answer — blocked, timed out, returned prose — skipped them entirely and
+    the run shipped on a permissive default.
+
+    That is backwards. A judge failure should lose the judge's OPINION, not
+    the checks that never needed one.
+
+    Returns the public verdict shape so the caller can merge, and escalates
+    ONLY: a static gate can turn ok into not-ok, never the reverse.
+    """
+    issues: list[str] = []
+    ok = True
+    sev = "low"
+
+    # Phase 9 — self-defeat ship gate. Static regex pass on exploit +
+    # report.md catches cases where the agent admits the chain has no
+    # working RCE path. LLM judge sometimes ranks such runs "ok low"
+    # because the script merely runs — but it cannot produce a flag,
+    # so ship is blocked here regardless of the LLM verdict.
+    sd_hits = _scan_self_defeat_sources(jd, script)
+    if sd_hits:
+        for src_name, snippet in sd_hits:
+            issues.append(
+                f"self-defeat in {src_name}: \"{snippet}\" — "
+                f"agent admits no working chain"
+            )
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge SELF-DEFEAT: escalated severity=high "
+            f"({len(sd_hits)} pattern match(es) — exploit/report "
+            f"admit chain incomplete)"
+        )
+
+    # Phase 8 — chain.json structural validation. The ship-gate that
+    # catches "chain step depends on an empirically-blocked primitive"
+    # without paying a sandbox cycle to confirm. chain.json is optional
+    # (advisory `med` if missing); when present, `critical` issues
+    # force severity=high + ok=False, `high` issues are recorded but
+    # don't auto-escalate (LLM's own severity stands).
+    _chain_data, chain_issues = chain_schema.load_chain(_resolve_work_dir(jd))
+    crit = [m for s, m in chain_issues if s == "critical"]
+    hi = [m for s, m in chain_issues if s == "high"]
+    med = [m for s, m in chain_issues if s == "med"]
+    if crit:
+        for m in crit:
+            issues.append(f"chain.critical: {m}")
+        sev = "high"
+        ok = False
+        log_fn(
+            f"[judge] prejudge CHAIN-INVALID: escalated severity=high "
+            f"({len(crit)} critical chain issue(s) — step depends on "
+            f"empirically-blocked primitive or broken DAG)"
+        )
+    if hi:
+        for m in hi:
+            issues.append(f"chain.high: {m}")
+    if med:
+        for m in med[:2]:
+            issues.append(f"chain.note: {m}")
+
+    return {"ok": ok, "severity": sev, "issues": issues}
+
+
+def prejudge_blocks_ship(prejudge: dict | None) -> bool:
+    """Would THIS prejudge verdict stop the sandbox from starting?
+
+    The contract this file hands the judge says severity=high blocks and
+    low/med are advisory — the run proceeds. `ok=False` alone therefore does
+    NOT block, and anything that counts it as a block (an operator rollup, a
+    confusion matrix) turns advisory findings into false positives.
+
+    It lives here, next to the prompt that defines it, because two callers
+    need the same answer: the runner that acts on it and the shadow rollup
+    that reports what the runner WOULD have done. Asked separately, those two
+    drift — and a drifted shadow measures something the gate never did.
+    """
+    if not prejudge:
+        return False
+    return (not prejudge.get("ok")) and str(prejudge.get("severity") or "").lower() == "high"
+
+
+def postjudge_would_retry(verdict: dict | None) -> bool:
+    """Would THIS postjudge verdict have cost the job another attempt?
+
+    `next_action` never takes the value "retry". `_normalize_verdict` clamps it
+    to exactly {"continue", "stop"} — a model that answers "retry" is coerced
+    to "continue" — so any rollup comparing against "retry" is a constant
+    False, which is what `would_have_retried` was.
+
+    The loop's real rule, read from `_common.py`:
+
+      * "stop" halts, EXCEPT the one-shot method-change conversion: a STOP with
+        `retry_worthwhile` and either a hint or `alternative_paths`, on a
+        verdict that is not `network_error`, is turned into a continue and
+        spends exactly one retry.
+      * anything else re-queries the agent with the hint — but a verdict with
+        no `retry_hint` is the loop's natural exit, so it costs nothing.
+
+    Answered for a FRESH budget: the loop also caps method-change retries at
+    one per job and has an overall attempt ceiling, and neither is a property
+    of the verdict.
+    """
+    v = verdict or {}
+    hint = str(v.get("retry_hint") or "").strip()
+    if str(v.get("next_action") or "continue").lower() == "stop":
+        return bool(
+            v.get("retry_worthwhile")
+            and (hint or (v.get("alternative_paths") or []))
+            and v.get("verdict") != "network_error"
+        )
+    return bool(hint)
+
+
 def prejudge_script(
     jd: Path,
     script_rel: str,
@@ -714,21 +1587,68 @@ def prejudge_script(
         cwd=jd,
         script_path=script,
     )
-    raw, sid = _run_async(
-        _run_judge_turn(
-            user_prompt, cwd=jd, resume_sid=None,
-            model=resolve_judge_model(job_id),
+    # BEFORE the judge call, not after it. "Runs whether or not the judge
+    # answered" was only true for a judge that RETURNED — a wrapper that
+    # raised (transport, auth, a bug in the failover path) escaped past the
+    # gates entirely, and the runner turns that exception into ok=True /
+    # severity=low. A run whose own artifact admits the chain is incomplete
+    # then went to the sandbox because a network call failed.
+    static = deterministic_prejudge(jd, script, log_fn)
+
+    try:
+        turn = judge_turn(
+            user_prompt, cwd=jd, job_id=job_id, stage="prejudge",
+            resume=False, model=resolve_judge_model(job_id),
         )
-    )
-    _remember_sid(job_id, sid)
+    except Exception as exc:
+        # The static verdict survives (that was the point of moving the gates
+        # above this call) — but the CAUSE has to survive with it. Swallowing
+        # the exception here re-opened the hole stage 3 closed: `error_kind`
+        # exists to tell "ran and said nothing" from "never ran", and a
+        # wrapper that raised is emphatically the second. It also has to reach
+        # the ledger, or a judge that burned tokens before dying bills nothing.
+        detail = f"{type(exc).__name__}: {exc}"
+        kind = _classify(detail, "transport_error")
+        try:
+            from modules.agent_provider import provider_for_role
+
+            _p = _pinned_provider(job_id) or provider_for_role(job_id, "judge")
+        except Exception:
+            _p = ""
+        _record_judge_usage(
+            job_id, "prejudge",
+            JudgeTurnResult(provider=_p, error_kind=kind, error_detail=detail[:500]),
+        )
+        log_fn(
+            f"[judge] prejudge: judge call raised ({detail}) — static gates "
+            f"stand (ok={static['ok']} severity={static['severity']}), "
+            f"error_kind={kind}"
+        )
+        return {
+            **static,
+            "issues": _merge_prejudge_issues([], static["issues"]),
+            "raw": "",
+            # The runner's own error-preservation branch is no longer reached
+            # now that this catch exists, so the fields it looked for are
+            # carried here instead of vanishing.
+            "error": detail[:500],
+            "error_kind": kind,
+        }
+    raw, sid = turn.text, turn.session_id
+
     parsed = _parse_json(raw)
 
     if not parsed:
         log_fn(
             "[judge] prejudge: no parseable JSON returned — "
-            "running anyway (permissive default)"
+            f"falling back to the static gates alone "
+            f"(ok={static['ok']} severity={static['severity']} "
+            f"issues={len(static['issues'])})"
         )
-        return {"ok": True, "severity": "low", "issues": [], "raw": raw}
+        return _with_failover(
+            {**static,
+             "issues": _merge_prejudge_issues([], static["issues"]),
+             "raw": raw}, turn)
 
     ok = bool(parsed.get("ok", True))
     sev = str(parsed.get("severity") or ("low" if ok else "med")).lower()
@@ -758,59 +1678,15 @@ def prejudge_script(
         raw_issues = [str(raw_issues)]
     issues = [str(x)[:200] for x in raw_issues][:6]
 
-    # Phase 9 — self-defeat ship gate. Static regex pass on exploit +
-    # report.md catches cases where the agent admits the chain has no
-    # working RCE path. LLM judge sometimes ranks such runs "ok low"
-    # because the script merely runs — but it cannot produce a flag,
-    # so ship is blocked here regardless of the LLM verdict.
-    sd_hits = _scan_self_defeat_sources(jd, script)
-    if sd_hits:
-        for src_name, snippet in sd_hits:
-            issues.append(
-                f"self-defeat in {src_name}: \"{snippet}\" — "
-                f"agent admits no working chain"
-            )
-        # Raise cap from 6 → 10 so original LLM issues survive when
-        # self-defeat appends; still bounded so log lines stay readable.
-        issues = issues[:10]
-        sev = "high"
+    # Merge the static gates. They ESCALATE only — a model that says "ok" can
+    # be overruled by a regex that found the agent admitting no working chain,
+    # never the other way round.
+    if static["issues"]:
+        issues = _merge_prejudge_issues(issues, static["issues"])
+    if not static["ok"]:
         ok = False
-        log_fn(
-            f"[judge] prejudge SELF-DEFEAT: escalated severity=high "
-            f"({len(sd_hits)} pattern match(es) — exploit/report "
-            f"admit chain incomplete)"
-        )
-
-    # Phase 8 — chain.json structural validation. The ship-gate that
-    # catches "chain step depends on an empirically-blocked primitive"
-    # without paying a sandbox cycle to confirm. chain.json is optional
-    # (advisory `med` if missing); when present, `critical` issues
-    # force severity=high + ok=False, `high` issues are recorded but
-    # don't auto-escalate (LLM's own severity stands).
-    _chain_data, chain_issues = chain_schema.load_chain(_resolve_work_dir(jd))
-    crit = [m for s, m in chain_issues if s == "critical"]
-    hi = [m for s, m in chain_issues if s == "high"]
-    med = [m for s, m in chain_issues if s == "med"]
-    if crit:
-        for m in crit:
-            issues.append(f"chain.critical: {m}")
-        # cap 10 → 12 so chain issues land without dropping LLM/self-defeat
-        issues = issues[:12]
+    if static["severity"] == "high":
         sev = "high"
-        ok = False
-        log_fn(
-            f"[judge] prejudge CHAIN-INVALID: escalated severity=high "
-            f"({len(crit)} critical chain issue(s) — step depends on "
-            f"empirically-blocked primitive or broken DAG)"
-        )
-    if hi:
-        for m in hi:
-            issues.append(f"chain.high: {m}")
-        issues = issues[:12]
-    if med:
-        for m in med[:2]:
-            issues.append(f"chain.note: {m}")
-        issues = issues[:12]
 
     # Tier 1.7 #1 — flag_likelihood threshold gate. Runs LAST so the
     # regex / chain.json checks above can also raise severity; this
@@ -840,10 +1716,10 @@ def prejudge_script(
     for it in issues:
         log_fn(f"[judge] prejudge issue: {it}")
 
-    return {
+    return _with_failover({
         "ok": ok, "severity": sev, "issues": issues,
         "flag_likelihood": flag_likelihood, "raw": raw,
-    }
+    }, turn)
 
 
 # ---------------------------------------------------------------------------
@@ -872,13 +1748,11 @@ def supervise_run_once(
         stdout_tail=_truncate_tail(stdout_tail, max_bytes=4096) or "(empty)",
         stderr_tail=_truncate_tail(stderr_tail, max_bytes=4096) or "(empty)",
     )
-    raw, sid = _run_async(
-        _run_judge_turn(
-            user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
-            model=resolve_judge_model(job_id),
-        )
+    turn = judge_turn(
+        user_prompt, cwd=jd, job_id=job_id, stage="supervise",
+        resume=True, model=resolve_judge_model(job_id),
     )
-    _remember_sid(job_id, sid)
+    raw, sid = turn.text, turn.session_id
     parsed = _parse_json(raw)
 
     action = str(parsed.get("action") or "continue").lower()
@@ -887,7 +1761,7 @@ def supervise_run_once(
     reason = str(parsed.get("reason") or "")[:400]
 
     log_fn(f"[judge] supervise action={action} reason={reason[:200]}")
-    return {"action": action, "reason": reason, "raw": raw}
+    return _with_failover({"action": action, "reason": reason, "raw": raw}, turn)
 
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1920,7 @@ def postjudge_run(
     *,
     extra_context: str = "",
     job_id: str | None = None,
+    flag_shapes: list[str] | None = None,
 ) -> dict:
     """Categorize a finished run and produce a retry hint.
 
@@ -1054,8 +1929,8 @@ def postjudge_run(
     in-memory map after (post is the last stage).
     """
     job_id = job_id or jd.name
-    out_t = _truncate_tail(stdout, max_bytes=8000)
-    err_t = _truncate_tail(stderr, max_bytes=4000)
+    out_t = _truncate_tail(stdout, max_bytes=POSTJUDGE_STDOUT_BYTES)
+    err_t = _truncate_tail(stderr, max_bytes=POSTJUDGE_STDERR_BYTES)
 
     user_prompt = _POSTJUDGE_USER_TMPL.format(
         exit_code=exit_code,
@@ -1064,13 +1939,11 @@ def postjudge_run(
         stdout_tail=out_t or "(empty)",
         stderr_tail=err_t or "(empty)",
     )
-    raw, sid = _run_async(
-        _run_judge_turn(
-            user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
-            model=resolve_judge_model(job_id),
-        )
+    turn = judge_turn(
+        user_prompt, cwd=jd, job_id=job_id, stage="postjudge",
+        resume=True, model=resolve_judge_model(job_id),
     )
-    _remember_sid(job_id, sid)
+    raw, sid = turn.text, turn.session_id
     parsed = _parse_json(raw)
 
     # All verdict/next_action/stop_reason/failure_code + success-collapse
@@ -1099,7 +1972,13 @@ def postjudge_run(
     # the operator to fix the target and /retry — exactly dc981's real fix.
     if norm["verdict"] == "success":
         from modules._common import FLAG_RE as _FRE, _is_placeholder_flag as _isph
-        _run_shapes = set(_FRE.findall(f"{stdout}\n{stderr}"))
+        # `flag_shapes`, when given, is the set scanned from the FULL output
+        # at the time it existed. A caller replaying a recorded run has only
+        # the tails left, and re-deriving from those would consult a smaller
+        # string than the live gate did — the verdict would differ for a
+        # reason that has nothing to do with the judge.
+        _run_shapes = (set(flag_shapes) if flag_shapes is not None
+                       else set(_FRE.findall(f"{stdout}\n{stderr}")))
         if _run_shapes and not any(
             not _isph(s, trusted=True) for s in _run_shapes
         ):
@@ -1146,7 +2025,7 @@ def postjudge_run(
     # Last stage — release session bookkeeping for this job_id.
     _forget_sid(job_id)
 
-    return {
+    return _with_failover({
         "verdict": verdict,
         "summary": summary,
         "retry_hint": retry_hint,
@@ -1159,4 +2038,4 @@ def postjudge_run(
         "alternative_paths": alternative_paths,
         "retry_worthwhile": retry_worthwhile,
         "raw": raw,
-    }
+    }, turn)

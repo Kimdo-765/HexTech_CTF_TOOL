@@ -56,14 +56,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     yara \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js + the Claude Code CLI. PINNED to >=2.1.156 — the version that fixes
+# Node.js + the Claude Code and Codex CLIs. Codex is used by the GPT provider's
+# default ChatGPT OAuth runtime (``codex exec --json``).
+# Claude is PINNED to >=2.1.156 — the version that fixes
 # the deterministic opus-4-8 thinking-block API 400 (see the bundle-removal step
 # after pip install below, and memory sdk_bundled_cli_thinking_400). The SDK is
 # made to use THIS system CLI, not its own stale bundled copy.
+ARG CODEX_CLI_VERSION=0.147.0
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g @anthropic-ai/claude-code@2.1.158
+ && npm install -g @anthropic-ai/claude-code@2.1.158 \
+                   "@openai/codex@${CODEX_CLI_VERSION}" \
+ && echo "Codex CLI = $(codex --version 2>&1)"
 
 # Docker CLI (so worker can spawn sibling containers via the mounted socket)
 RUN install -m 0755 -d /etc/apt/keyrings \

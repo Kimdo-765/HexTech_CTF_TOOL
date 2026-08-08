@@ -895,11 +895,34 @@ the full pipeline.
 The loop above is provider-agnostic. `agent_provider` (Settings, or
 `AGENT_PROVIDER` in `.env`) picks which backend actually runs it:
 
-| | `claude` (default) | `grok` |
-|---|---|---|
-| Backend | Claude Agent SDK, `claude` CLI subprocess per peer | `grok agent --always-approve --no-leader stdio`, driven over the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC on stdio) |
-| Code | the SDK | `modules/grok_acp.py` (client) + `modules/agent_provider.py` (resolution / readiness) |
-| Credentials | `~/.claude` bind-mount, or `ANTHROPIC_API_KEY` | `~/.grok` bind-mount from `grok login` |
+| | `claude` (default) | `grok` | `gpt` |
+|---|---|---|---|
+| Backend | Claude Agent SDK, `claude` CLI subprocess per peer | `grok agent --always-approve --no-leader stdio`, driven over [ACP](https://agentclientprotocol.com) | OpenAI [`codex exec --json`](https://learn.chatgpt.com/docs/non-interactive-mode) by default; direct Responses API is optional |
+| Code | the SDK | `modules/grok_acp.py` | `modules/codex_cli.py` via `modules/gpt_agent.py` (`modules/gpt_responses.py` fallback) |
+| Credentials | `~/.claude` bind-mount, or `ANTHROPIC_API_KEY` | `~/.grok` from `grok login`, or `XAI_API_KEY` | OAuth bootstrapped from `~/.codex/auth.json` into isolated `~/.codex-hextech` (default), or `OPENAI_API_KEY` in Responses mode |
+| Default model | `claude-opus-4-7` | `grok-build` | `gpt-5.6-sol` |
+
+The default GPT runtime is Codex CLI with ChatGPT subscription OAuth. Run
+`codex login` on the host, choose **Sign in with ChatGPT**, and make sure
+`~/.codex/auth.json` exists. `start.sh` copies only that credential into
+`~/.codex-hextech` on first use, and `HOST_CODEX_HOME` bind-mounts the isolated
+directory read-write so Codex can refresh tokens and persist sessions without
+changing the host TUI's `~/.codex/config.toml`, locks, or rollouts. The app never returns token
+values from its status endpoint or copies them into prompts. If
+`codex login status` succeeds but `auth.json` is absent because credentials
+are stored in an OS keyring, set `cli_auth_credentials_store = "file"` in
+`~/.codex/config.toml` and sign in again. It also removes inherited
+`OPENAI_API_KEY` / `CODEX_API_KEY` from Codex child processes so OAuth cannot
+silently become API-key billing. Main, pre-recon, judge, retry reviewer,
+report, monitor, forensic, and misc phases all follow the selected provider.
+When Compose is invoked directly without the launch scripts or an explicit
+`HOST_CODEX_HOME`, its safe fallback is project-local `./data/codex-home`—it
+never falls back to the live TUI directory.
+
+Set `GPT_RUNTIME=responses` (or choose it in Settings) only when direct
+usage-billed Responses API behavior is wanted; that mode requires
+`OPENAI_API_KEY`. Configure the OAuth path with `AGENT_PROVIDER=gpt`,
+`GPT_RUNTIME=codex`, and optionally `GPT_MODEL` / `GPT_EFFORT`.
 
 `grok_acp.py` names its message classes after the SDK's (`AssistantMessage`,
 `ToolUseBlock`, `ToolResultBlock`, `ResultMessage`, …), so
@@ -928,7 +951,7 @@ running unrestricted). What a `grok` job still does **not** get:
   says so.
 
 Treat `grok` as usable-but-watched, and prefer `claude` when a run depends on
-those guards. Both providers share the runner, the judge, the monitor and the
+those guards. All providers share the runner, the judge, the monitor and the
 whole artifact/flag pipeline.
 
 ### Cookbook alignment
@@ -966,7 +989,12 @@ matrix, custom chal-author library auto-detection.
   - **Anthropic API key**: set in `.env` or via the Settings tab, OR
   - **Grok Build**: run `grok login` once on the host so `~/.grok/` exists, then
     set `AGENT_PROVIDER=grok`. See [Agent providers](#agent-providers) for what
-    that path does and does not give you.
+    that path does and does not give you, OR
+  - **OpenAI Codex OAuth**: run `codex login` on the host, choose ChatGPT
+    sign-in, then select `AGENT_PROVIDER=gpt` (the default `GPT_RUNTIME=codex`
+    uses your ChatGPT subscription rather than Platform API billing), OR
+  - **OpenAI Responses API**: set `GPT_RUNTIME=responses` plus
+    `OPENAI_API_KEY` when usage-based API billing is explicitly desired.
 
 ## Quick start
 
@@ -1002,8 +1030,12 @@ All knobs live in two places:
    | `JOB_TTL_DAYS` | `7` | auto-delete jobs older than N days (`0`=keep) |
    | `JOB_TIMEOUT` | `900` | **not a deadline** — only scales RQ's hard ceiling (`×4`, floor 24 h, cap 7 d). See [Timeouts](#timeouts) |
    | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. |
-   | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude` (Agent SDK) or `grok` (Grok Build over ACP). See [Agent providers](#agent-providers) |
+   | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude`, `grok`, or `gpt`. See [Agent providers](#agent-providers) |
    | `GROK_MODEL` / `GROK_EFFORT` | `grok-build` / empty | model + reasoning effort used when `AGENT_PROVIDER=grok` |
+   | `GPT_RUNTIME` | `codex` | `codex` = Codex CLI + ChatGPT OAuth; `responses` = direct Platform API-key billing |
+   | `OPENAI_API_KEY` | empty | only used when `GPT_RUNTIME=responses`; never passed to the Codex OAuth subprocess |
+   | `GPT_MODEL` / `GPT_EFFORT` | `gpt-5.6-sol` / `medium` | model + reasoning effort used by Codex CLI (or the optional Responses backend) |
+   | `HOST_CODEX_HOME` | `${HOME}/.codex-hextech` | HexTech-only Codex auth/session directory, bind-mounted rw into api + workers. `start.sh` bootstraps only OAuth from the host TUI's `~/.codex/auth.json`; keeping the homes separate prevents root containers from breaking the live TUI's `config.toml` ownership. |
    | `HOST_GROK_HOME` | `${HOME}/.grok` | host path of the Grok Build config, bind-mounted into api + worker. **Pin it explicitly.** A snap-confined `docker` CLI reports `HOME` as `~/snap/docker/<rev>`, so `docker compose up -d` through `/snap/bin/docker` resolves the default to an empty directory and silently mounts that — the worker then has no `grok` binary and no auth, with no error anywhere. (`docker compose restart` keeps the old mount, so only a *recreate* exposes it.) Same reason `HOST_CLAUDE_HOME` is pinned. |
    | `WEB_PORT` | `8000` | host port |
    | `GHIDRA_VERSION` / `GHIDRA_BUILD_DATE` | `12.0.4` / `20260303` | Ghidra release used by decompiler image |
@@ -1027,7 +1059,7 @@ All knobs live in two places:
    without restart for: Anthropic API key, Claude model, Auth token, Job TTL,
    Job timeout, Worker concurrency, Callback URL, **Spend budget (USD)**,
    **Enable judge**, **Use Exploit Library hints**, **Agent provider**
-   (`claude` / `grok`) and **Worker memory limit**. It also hosts the
+   (`claude` / `grok` / `gpt`) and **Worker memory limit**. It also hosts the
    **Model presets** and **Cloudflared tunnel** panels (below).
    (Concurrency is the slot COUNT — edit `docker-compose.yml`. The memory
    limit is applied live via `docker update` — no restart.)
@@ -1036,25 +1068,30 @@ Precedence: `settings.json` > `.env` > defaults.
 
 ### Model presets (`/data/model_presets.json`)
 
-**Settings → Model presets** stores several NAMED per-agent presets and
-activates one at a time. They live outside `settings.json` because the flat
+**Settings → Provider model presets** stores several NAMED per-agent presets.
+Claude, Grok, and GPT each have an independent preset collection and active
+selection; changing the job provider automatically uses that provider's active
+preset. They live outside `settings.json` because the flat
 `(key, env, type, default)` SCHEMA in `modules/settings_io.py` cannot hold a
 nested structure. Configurable slots, in UI order:
 
 | Slot | Drives | Blank = inherit |
 |---|---|---|
-| `main` | the CTF agent itself | per-job pick → global `claude_model` → `claude-opus-4-7` |
+| `main` | the CTF agent itself | per-job pick → provider global model (`claude_model` / `grok_model` / `gpt_model`) → provider default |
 | `judge` | prejudge / stall-supervise / postjudge, **and** the `judge` peer subagent | orchestrator stages follow main; the subagent falls back to `LATEST_JUDGE_MODEL` |
 | `reviewer` | the `/retry` + `/resume` hint writer ONLY | the `judge` slot, then main |
 | `recon` / `debugger` / `triage` | peer subagents | the spawner's model (main) |
 | `report` | terminal `findings.json` transform | main |
 | `monitor` | live narrator | `MONITOR_MODEL` |
-| `effort` | reasoning effort of the MAIN session — a sibling key, not a role | per-job `effort` → SDK default |
+| `effort` | reasoning effort of the MAIN session — a sibling key, not a role | per-job `effort` → provider global effort → SDK/CLI default |
 
 An explicit per-job model/effort still wins over the preset, and with no
 active preset every resolver is byte-identical to the pre-preset behaviour.
-`GET/PUT /api/model-presets`; the PUT REPLACES the whole store (the UI edits
-client-side, then PUTs). Changes apply to the NEXT job.
+`GET/PUT /api/model-presets`; the v2 PUT replaces the whole provider store (the
+UI edits client-side, then PUTs). Existing flat v1 files are migrated by their
+recognizable model family (falling back to the provider selected in Settings
+for inherited/custom-only presets), and legacy PUT requests update only the
+selected provider without deleting the others. Changes apply to the NEXT job.
 
 > The UI warns that pinning `recon`/`debugger`/`triage` off main's model
 > costs prompt-cache alignment. That rationale belongs to the LEGACY
@@ -1062,10 +1099,11 @@ client-side, then PUTs). Changes apply to the NEXT job.
 > each subagent is already a separate CLI subprocess with its own system
 > prompt, so there is no shared prefix to lose.
 
-**Model catalog.** Every dropdown is filled from one array, `CLAUDE_MODELS`
-in `web-ui/app.js` — Opus 5 / Fable 5 / Sonnet 5, Opus 4.8/4.7/4.6/4.1,
-Sonnet 4.6/4.5, Haiku 4.5, plus dated snapshots, with `[1m]` long-context
-variants next to their alias. **Adding a model is a one-line edit there;
+**Model catalog.** Preset dropdowns use the selected provider's catalog:
+`CLAUDE_MODELS`, `GROK_MODELS`, or `GPT_MODELS` in `web-ui/app.js`. The Claude
+catalog includes Opus 5 / Fable 5 / Sonnet 5, Opus 4.8/4.7/4.6/4.1, Sonnet
+4.6/4.5, Haiku 4.5, dated snapshots, and supported `[1m]` variants.
+**Adding a model is a one-line edit in the matching provider array;
 there is no server-side allowlist** (the upload routes take `model` as a
 free-form string and Settings filters by key, not value), and a Settings
 free-text field accepts a custom id. Entries are added only after a real
@@ -1075,7 +1113,7 @@ long context requests"* here.
 
 ### Usage widgets
 
-The top bar shows two chips, both best-effort:
+The top bar shows a budget pill plus provider usage chips, all best-effort:
 
 - **Budget pill** — `budget_usd` from Settings vs summed job spend
   (`GET /api/jobs/usage`). Purely informational: **nothing enforces it**
@@ -1084,7 +1122,14 @@ The top bar shows two chips, both best-effort:
   utilization + reset time), persisted account-globally to
   `/data/rate_limit.json` by `record_rate_limit_event`. It appears only
   after a job has produced an API response, and a true account
-  "remaining %" is NOT retrievable on the headless OAuth path.
+  "remaining %" is not always present on Claude's headless OAuth path.
+- **Grok quota chip** — polls the mounted SuperGrok OAuth account's weekly
+  billing pool and caches the sanitized result for 60 seconds.
+- **Codex quota chip** — asks Codex CLI app-server for the mounted ChatGPT
+  OAuth account's rate-limit windows, then displays the most constrained
+  ordinary Codex window as `⏳ Codex 94% left · resets 6d21h`. The sanitized
+  response is cached in `/data/codex_rate_limit.json` for 60 seconds; OAuth
+  tokens and raw auth data never enter the API response.
 
 ## Authentication options
 
@@ -1098,6 +1143,11 @@ The top bar shows two chips, both best-effort:
   from `grok login` are used directly — no key in `.env`. Settings shows the
   detected state, and the top bar carries a rate-limit chip fed by the billing
   proxy (`/data/grok_rate_limit.json`).
+- **OpenAI Codex OAuth** (default GPT runtime): host login stays in
+  `~/.codex/`, while worker + api mount an isolated `~/.codex-hextech/` rw.
+  `start.sh` imports only `auth.json` on first use. Run `codex login` on the host;
+  Settings shows `✓ ChatGPT OAuth ready`, and the top bar reads the remaining
+  Codex subscription window through the installed CLI app-server.
 
 UI access can additionally be gated by a shared **Auth Token** (`/login`,
 cookie-based). Empty = no auth (dev mode).
@@ -1983,10 +2033,11 @@ real flag, so placeholder-only jobs never enter the curated set.
   separately and rendered with a `~` — an in-flight run used to read `$0` for
   its whole life. Beside it, one chip per provider reports the rate-limit
   window as **remaining**, not used: `⏳ Claude 63% left · resets 6d6h`. Grok
-  serves `remaining_pct` directly; for Claude only `utilization` (a used
-  fraction) comes back, so the chip derives `1 - utilization` and falls back to
+  serves `remaining_pct` directly, while Codex derives it from the OAuth
+  account window returned by CLI app-server. For Claude only `utilization` (a
+  used fraction) comes back, so the chip derives `1 - utilization` and falls back to
   a status word when the field is absent, which the API notes is common on
-  OAuth accounts. Both chips render through the same two helpers so they cannot
+  OAuth accounts. All chips render through the same two helpers so they cannot
   disagree — the Claude one used to append `utilization` as a USED percentage
   while Grok showed remaining, making the same `0.37` read as "37%" on one chip
   and "63% left" on the other.

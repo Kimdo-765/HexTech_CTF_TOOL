@@ -1,7 +1,7 @@
 """Retry-with-hint endpoint.
 
 Given an existing job whose exploit/solver failed (or finished without a
-flag), spin up a quick Claude turn that:
+flag), spin up a quick reviewer turn on the selected agent provider that:
 
 1. Reads the original description, run.log, exploit.py / solver.py,
    their stdout/stderr, plus 1-2 key source files.
@@ -91,6 +91,20 @@ def _looks_like_api_error(text: str) -> bool:
     return any(p in low for p in _API_ERROR_PATTERNS)
 
 
+def _reviewer_error_kind(detail: str, fallback: str = "api_error") -> str:
+    """Classify a reviewer failure, treating "unknown" as UNclassified.
+
+    `classify_agent_error` answers "unknown" rather than None when nothing
+    matched, so the `... or "api_error"` idiom used throughout this file was
+    dead code: every unrecognised failure was tagged "unknown", which tells a
+    reader — and the ledger — nothing about where it happened. Same trap the
+    judge hit.
+    """
+    from modules._common import classify_failure_kind
+
+    return classify_failure_kind(detail, fallback)
+
+
 def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
     """Return (kind, message) if the reviewer's accumulated text is unusable
     (empty, or looks like a serialized API error), else None.
@@ -99,14 +113,14 @@ def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
     if not s:
         return ("empty", "reviewer returned no hint")
     if _looks_like_api_error(s):
-        return (classify_agent_error(s) or "api_error", s)
+        return (_reviewer_error_kind(s), s)
     return None
 
 router = APIRouter()
 
-# Reviewer shares the same "latest model" pin as the in-runner judge —
-# both are short, no-tools Claude calls and we want to upgrade them in
-# lockstep. Single source of truth lives in modules._common.
+# Reviewer shares the same "latest model" pin as the in-runner judge. Provider
+# coercion below replaces that Claude-family fallback when GPT/Grok is active.
+# The single source of truth lives in modules._common.
 LATEST_REVIEWER_MODEL = LATEST_JUDGE_MODEL
 
 # Always burn max extended-thinking budget on the reviewer. The hint is
@@ -325,25 +339,54 @@ async def _iter_reviewer_messages(framed_context: str, options, deadline_s: floa
                 await asyncio.wait_for(aclose(), timeout=10)
 
 
-def _reviewer_provider_and_model(model: str | None) -> tuple[str, str]:
+def _reviewer_provider_and_model(
+    model: str | None, job_id: str | None = None
+) -> tuple[str, str]:
     """Resolve (provider, model) for the retry reviewer.
 
-    Provider follows Settings / active job stamp; model is coerced so a
-    Grok selection never launches a Claude reviewer (and vice versa).
+    With a job id this follows the job's SNAPSHOTTED role route — the reviewer
+    is one of the two roles v1 routes, and reading live `active_provider()`
+    instead meant a job stamped "reviewer -> claude" still ran its reviewer on
+    whatever Settings said at retry time. Without one (no job in hand) the
+    live provider is all there is.
+
+    The model comes from the RESOLVED provider's own active preset, not from a
+    coerced global default — see agent_provider.role_model_for().
     """
     from modules.agent_provider import (
         active_provider,
-        coerce_model_for_provider,
-        default_model_for,
+        provider_for_role,
+        role_model_for,
     )
+
+    provider = (
+        provider_for_role(job_id, "reviewer") if job_id else active_provider()
+    )
+    # Pass the caller's model THROUGH, not `model or LATEST_REVIEWER_MODEL`:
+    # that constant is same-family with a Claude target, so it short-circuited
+    # the preset lookup and a preset pinning reviewer to claude-opus-4-8 was
+    # never consulted. A default is a last resort, not a request.
+    resolved = role_model_for("reviewer", provider, model)
+    return provider, resolved or LATEST_REVIEWER_MODEL
+
+
+def _resume_id_for_active_provider(meta: dict) -> str | None:
+    """Return the prior session id only when it belongs to today's backend."""
+    from modules.agent_provider import active_provider, normalize_provider
+
     provider = active_provider()
-    m = coerce_model_for_provider(model or LATEST_REVIEWER_MODEL, provider)
-    if provider == "grok" and (not m or m.lower().startswith("claude")):
-        m = default_model_for("grok")
-    return provider, m
+    previous = normalize_provider(meta.get("agent_provider"))
+    if provider != previous:
+        return None
+    if provider == "claude":
+        return meta.get("claude_session_id")
+    # GPT response ids and Grok ACP ids are provider-neutral in meta.
+    return meta.get("agent_session_id")
 
 
-async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
+async def _ask_reviewer_grok(
+    framed_context: str, *, model: str, usage_out: dict | None = None
+) -> str:
     """One-shot Grok reviewer (text only). Raises ReviewerError on failure.
 
     Effort is capped at medium — ``high`` on a large artifact dump routinely
@@ -383,11 +426,15 @@ async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
         )
     except Exception as e:
         raw = str(e)
-        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+        raise ReviewerError(raw, _reviewer_error_kind(raw)) from e
 
+    if isinstance(usage_out, dict):
+        usage_out["usage"] = r.get("usage") or {}
+        usage_out["model_usage"] = r.get("model_usage") or {}
+        usage_out["reported_cost"] = r.get("total_cost_usd")
     if r.get("error"):
         detail = str(r["error"])
-        raise ReviewerError(detail, classify_agent_error(detail) or "api_error")
+        raise ReviewerError(detail, _reviewer_error_kind(detail))
     hint = (r.get("text") or "").strip()
     diag = _diagnose_reviewer_text(hint)
     if diag is not None:
@@ -396,19 +443,248 @@ async def _ask_reviewer_grok(framed_context: str, *, model: str) -> str:
     return hint
 
 
-async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
+async def _ask_reviewer_gpt(
+    framed_context: str, *, model: str, usage_out: dict | None = None
+) -> str:
+    """One-shot Codex OAuth / GPT Responses reviewer.
+
+    `usage_out` is filled with the adapter's own usage so the caller can bill
+    the turn. Returning text alone is why reviewer calls left zero rows in a
+    ledger whose whole point is provider x model x role accounting.
+    """
+    from modules.gpt_agent import query_gpt_once
+
+    prompt = framed_context
+    if len(prompt) > 60_000:
+        prompt = prompt[:40_000] + "\n\n…[context truncated]…\n\n" + prompt[-18_000:]
+    try:
+        r = await asyncio.wait_for(
+            query_gpt_once(
+                prompt=prompt,
+                cwd="/tmp",
+                system_prompt=_REVIEWER_PROMPT,
+                model=model,
+                effort="medium",
+                timeout_s=float(_REVIEWER_WALL_CLOCK_S),
+                enable_tools=False,
+            ),
+            timeout=_REVIEWER_WALL_CLOCK_S + 30,
+        )
+    except asyncio.TimeoutError:
+        raise ReviewerError(
+            f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s; "
+            "not enqueuing a retry",
+            "timeout",
+        )
+    except Exception as e:
+        raw = str(e)
+        raise ReviewerError(raw, _reviewer_error_kind(raw)) from e
+    # Filled BEFORE the error check: a refused turn spent tokens too, and a
+    # ledger that only bills successes understates every failover.
+    if isinstance(usage_out, dict):
+        usage_out["model_usage"] = r.get("model_usage") or {}
+        usage_out["usage"] = r.get("usage") or {}
+        usage_out["reported_cost"] = r.get("total_cost_usd")
+    if r.get("error"):
+        detail = str(r["error"])
+        raise ReviewerError(detail, _reviewer_error_kind(detail))
+    hint = (r.get("text") or "").strip()
+    diag = _diagnose_reviewer_text(hint)
+    if diag is not None:
+        kind, message = diag
+        raise ReviewerError(message, kind)
+    return hint
+
+
+def _record_reviewer_usage(
+    job_id: str | None,
+    provider: str,
+    model: str,
+    usage_out: dict | None,
+    *,
+    error_kind: str | None = None,
+    failover: dict | None = None,
+    sink: list | None = None,
+) -> None:
+    """Ledger rows for one reviewer turn. Best-effort.
+
+    The reviewer was the last role spending real money with nothing recording
+    it — `meta.cost_usd` is main's session and `summary["cost_usd"]` is
+    subagents, so a Claude reviewer running against a Codex job billed a
+    second vendor invisibly.
+    """
+    if sink is not None:
+        # Deferred: the failover diagnosis is a property of the WHOLE event and
+        # is not known until the second attempt has run. Writing now and adding
+        # a diagnostic row later inflated two real calls into three attempts
+        # and left the refusal row with no error_kind — the diagnosis has to
+        # ride on the rows the adapters already produce, not beside them.
+        sink.append({
+            "provider": provider, "model": model,
+            "usage_out": dict(usage_out or {}), "error_kind": error_kind,
+        })
+        return
+    if not job_id:
+        return
+    try:
+        from modules._common import estimate_cost_from_tokens, model_rates_are_known
+        from modules.agent_provider import get_gpt_runtime
+        from modules.usage_ledger import (
+            codex_window_snapshot,
+            record_usage_by_model,
+        )
+
+        u = usage_out or {}
+        record_usage_by_model(
+            job_id,
+            role="reviewer",
+            stage="reviewer",
+            provider=provider,
+            primary_model=model,
+            model_usage=u.get("model_usage") or {},
+            tokens=u.get("usage") or {},
+            reported_cost=u.get("reported_cost"),
+            estimate_for=estimate_cost_from_tokens,
+            rates_known=model_rates_are_known,
+            gpt_runtime=get_gpt_runtime() if provider == "gpt" else None,
+            window_for=lambda: codex_window_snapshot(cached_only=True),
+            error_kind=error_kind,
+            extra=failover or {},
+        )
+    except Exception:
+        pass
+
+
+async def _ask_reviewer_with_failover(
+    context: str, *, model: str | None = None, job_id: str | None = None
+) -> str:
+    """`_ask_reviewer`, plus one cross-provider retry on a policy block.
+
+    Same rule as the judge's, and deliberately the same shape: only a
+    policy_refusal retries, only once, and the recovery doubles as a
+    measurement — if the other vendor accepts the identical request the block
+    was provider-specific rather than content-specific. That question is not
+    academic here: this repo has had a reviewer refuse nearly every job over
+    its OWN prompt scaffolding.
+
+    The caller contract is unchanged — a hint on success, ReviewerError on
+    failure, and no retry is ever enqueued when it raises.
+    """
+    from modules.agent_provider import failover_target, provider_for_role
+
+    # Resolved BEFORE the attempt. Reading it afterwards means reporting
+    # whatever the resolver says by then, which is not necessarily where the
+    # call actually went.
+    origin, _ = _reviewer_provider_and_model(model, job_id)
+    sink: list = []
+    failover: dict = {}
+
+    def _flush() -> None:
+        for entry in sink:
+            _record_reviewer_usage(
+                job_id,
+                entry["provider"],
+                entry["model"],
+                entry["usage_out"],
+                error_kind=entry["error_kind"],
+                failover=failover or None,
+            )
+        sink.clear()
+
+    try:
+        try:
+            return await _ask_reviewer(
+                context, model=model, job_id=job_id,
+                provider_override=origin, usage_sink=sink,
+            )
+        except ReviewerError as first:
+            if getattr(first, "kind", None) != "policy_refusal":
+                raise
+            target = failover_target(origin)
+            if not target:
+                raise
+            failover.update({
+                "failover_from": origin,
+                "failover_to": target,
+            })
+            try:
+                hint = await _ask_reviewer(
+                    context,
+                    # The retry has to be TOLD the target. Calling back in
+                    # without it just re-resolves to the provider that already
+                    # refused, so the "failover" never leaves the first vendor.
+                    model=None,
+                    job_id=job_id,
+                    provider_override=target,
+                    usage_sink=sink,
+                )
+            except ReviewerError as second:
+                failover["failover_diagnosis"] = (
+                    "content_or_prompt"
+                    if getattr(second, "kind", None) == "policy_refusal"
+                    else "inconclusive"
+                )
+                raise first
+            failover["failover_diagnosis"] = "provider_specific"
+            return hint
+    finally:
+        # Every real attempt is billed, once, carrying whatever diagnosis the
+        # event ended with. No synthetic row.
+        _flush()
+
+
+async def _ask_reviewer(
+    context: str,
+    *,
+    model: str | None = None,
+    job_id: str | None = None,
+    provider_override: str | None = None,
+    usage_sink: list | None = None,
+) -> str:
     """Synchronous reviewer call. Raises ReviewerError if the reviewer
     fails or returns unusable text — callers MUST NOT enqueue a new job
     when this raises.
 
-    Backend follows Settings ``agent_provider``: Grok jobs get a Grok
-    reviewer (never Claude weekly-quota on a Grok-selected stack).
+    Backend follows Settings ``agent_provider``: GPT and Grok use their
+    provider adapters; Claude keeps the historical SDK path.
     """
-    provider, model = _reviewer_provider_and_model(model)
-    framed_context = _frame_reviewer_context(context)
+    if provider_override:
+        from modules.agent_provider import normalize_provider, role_model_for
 
+        provider = normalize_provider(provider_override)
+        model = role_model_for("reviewer", provider, None) or model or ""
+    else:
+        provider, model = _reviewer_provider_and_model(model, job_id)
+    framed_context = _frame_reviewer_context(context)
+    usage_out: dict = {}
+
+    _err: dict = {}
+    if provider == "gpt":
+        try:
+            return await _ask_reviewer_gpt(
+                framed_context, model=model, usage_out=usage_out
+            )
+        except ReviewerError as e:
+            _err["kind"] = e.kind
+            raise
+        finally:
+            _record_reviewer_usage(
+                job_id, provider, model, usage_out,
+                error_kind=_err.get("kind"), sink=usage_sink,
+            )
     if provider == "grok":
-        return await _ask_reviewer_grok(framed_context, model=model)
+        try:
+            return await _ask_reviewer_grok(
+                framed_context, model=model, usage_out=usage_out
+            )
+        except ReviewerError as e:
+            _err["kind"] = e.kind
+            raise
+        finally:
+            _record_reviewer_usage(
+                job_id, provider, model, usage_out,
+                error_kind=_err.get("kind"), sink=usage_sink,
+            )
 
     work_dir = Path("/tmp")
     options = ClaudeAgentOptions(
@@ -426,6 +702,7 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
     )
     hint_parts: list[str] = []
     try:
+      try:
         async for msg in _iter_reviewer_messages(
             framed_context, options, _REVIEWER_WALL_CLOCK_S
         ):
@@ -434,39 +711,65 @@ async def _ask_reviewer(context: str, *, model: str | None = None) -> str:
                     if isinstance(blk, TextBlock):
                         hint_parts.append(blk.text)
             elif isinstance(msg, ResultMessage):
+                usage_out["model_usage"] = getattr(msg, "model_usage", None) or {}
+                usage_out["usage"] = getattr(msg, "usage", None) or {}
+                usage_out["reported_cost"] = getattr(msg, "total_cost_usd", None)
                 if getattr(msg, "is_error", False):
-                    detail = (
-                        (getattr(msg, "result", None) or "").strip()
-                        or "\n".join(hint_parts).strip()
-                        or "reviewer call failed"
-                    )
-                    raise ReviewerError(
-                        detail, classify_agent_error(detail) or "api_error"
-                    )
+                    # Every field the SDK might have used, not just `result`:
+                    # the Claude parser puts the wire's AUP payload in the
+                    # `errors` LIST, and reading only `result` classified a
+                    # structured policy block as a generic api_error — which
+                    # the policy-refusal-only failover then declined to retry.
+                    from modules._common import structured_failure_bits
+
+                    bits = structured_failure_bits(msg)
+                    text = "\n".join(hint_parts).strip()
+                    detail = " | ".join(
+                        [b for b in bits if b] + ([text] if text else [])
+                    ) or "reviewer call failed"
+                    _err["kind"] = _reviewer_error_kind(detail)
+                    raise ReviewerError(detail, _err["kind"])
                 break
-    except ReviewerError:
+      except ReviewerError as e:
+        _err["kind"] = e.kind
         raise
-    except asyncio.TimeoutError:
+      except asyncio.TimeoutError:
+        _err["kind"] = "timeout"
         raise ReviewerError(
             f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with no "
             "completion (possible transport stall or expired auth); not "
             "enqueuing a retry",
             "timeout",
         )
-    except Exception as e:
+      except Exception as e:
         raw = str(e)
-        raise ReviewerError(raw, classify_agent_error(raw) or "api_error") from e
+        _err["kind"] = _reviewer_error_kind(raw)
+        raise ReviewerError(raw, _err["kind"]) from e
 
-    hint = "\n".join(hint_parts).strip()
-    diag = _diagnose_reviewer_text(hint)
-    if diag is not None:
+      # INSIDE the try: a turn can end with a clean ResultMessage whose TEXT is
+      # a refusal, and diagnosing that after the finally billed the row left
+      # the refusal recorded with no error_kind at all.
+      hint = "\n".join(hint_parts).strip()
+      diag = _diagnose_reviewer_text(hint)
+      if diag is not None:
         kind, message = diag
+        _err["kind"] = kind
         raise ReviewerError(message, kind)
-    return hint
+      return hint
+    finally:
+        _record_reviewer_usage(
+            job_id, provider, model, usage_out,
+            error_kind=_err.get("kind"), sink=usage_sink,
+        )
 
 
-async def _ask_reviewer_streaming(
-    context: str, *, model: str | None = None
+async def _stream_reviewer_once(
+    context: str,
+    *,
+    model: str | None = None,
+    job_id: str | None = None,
+    provider_override: str | None = None,
+    usage_sink: list | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Yield ('event_kind', payload) tuples while the reviewer runs.
 
@@ -476,27 +779,66 @@ async def _ask_reviewer_streaming(
       - 'error'  : reviewer failed     -> {"message": "...", "kind": "..."}
 
     On 'error' the caller MUST stop and NOT enqueue a new job.
-    Backend follows Settings ``agent_provider`` (Grok → Grok ACP).
+    Backend follows Settings ``agent_provider`` (GPT → selected Codex/API runtime,
+    Grok → Grok ACP, Claude → Agent SDK).
     """
-    provider, model = _reviewer_provider_and_model(model)
+    if provider_override:
+        from modules.agent_provider import normalize_provider, role_model_for
+
+        provider = normalize_provider(provider_override)
+        model = role_model_for("reviewer", provider, None) or model or ""
+    else:
+        provider, model = _reviewer_provider_and_model(model, job_id)
     framed_context = _frame_reviewer_context(context)
+    usage_out: dict = {}
+    _err: dict = {}
+
+    def _bill() -> None:
+        _record_reviewer_usage(
+            job_id, provider, model, usage_out,
+            error_kind=_err.get("kind"), sink=usage_sink,
+        )
+
+    if provider == "gpt":
+        try:
+            hint = await _ask_reviewer_gpt(
+                framed_context, model=model, usage_out=usage_out)
+        except ReviewerError as e:
+            _err["kind"] = e.kind or "api_error"
+            _bill()
+            yield "error", {"message": str(e), "kind": _err["kind"]}
+            return
+        except Exception as e:
+            raw = str(e)
+            _err["kind"] = _reviewer_error_kind(raw)
+            _bill()
+            yield "error", {"message": raw, "kind": _err["kind"]}
+            return
+        _bill()
+        if hint:
+            yield "token", {"delta": hint}
+        yield "done", {"hint": hint}
+        return
 
     if provider == "grok":
         # Grok one-shot doesn't stream token deltas cleanly; emit one token
         # burst then done (UI still shows progressive text via the final
         # delta). Errors surface as 'error' events same as Claude path.
         try:
-            hint = await _ask_reviewer_grok(framed_context, model=model)
+            hint = await _ask_reviewer_grok(
+                framed_context, model=model, usage_out=usage_out)
         except ReviewerError as e:
-            yield "error", {"message": str(e), "kind": e.kind or "api_error"}
+            _err["kind"] = e.kind or "api_error"
+            _bill()
+            yield "error", {"message": str(e), "kind": _err["kind"]}
             return
         except Exception as e:
             raw = str(e)
-            yield "error", {
-                "message": raw,
-                "kind": classify_agent_error(raw) or "api_error",
-            }
+            _err["kind"] = _reviewer_error_kind(raw)
+            _bill()
+            yield "error", {"message": raw, "kind": _err["kind"]}
             return
+        _bill()
         if hint:
             yield "token", {"delta": hint}
         yield "done", {"hint": hint}
@@ -532,19 +874,25 @@ async def _ask_reviewer_streaming(
                             last_emitted = len(full)
                             yield "token", {"delta": delta}
             elif isinstance(msg, ResultMessage):
+                usage_out["model_usage"] = getattr(msg, "model_usage", None) or {}
+                usage_out["usage"] = getattr(msg, "usage", None) or {}
+                usage_out["reported_cost"] = getattr(msg, "total_cost_usd", None)
                 if getattr(msg, "is_error", False):
-                    detail = (
-                        (getattr(msg, "result", None) or "").strip()
-                        or "".join(accumulated).strip()
-                        or "reviewer call failed"
-                    )
-                    yield "error", {
-                        "message": detail,
-                        "kind": classify_agent_error(detail) or "api_error",
-                    }
+                    from modules._common import structured_failure_bits
+
+                    bits = structured_failure_bits(msg)
+                    text = "".join(accumulated).strip()
+                    detail = " | ".join(
+                        [b for b in bits if b] + ([text] if text else [])
+                    ) or "reviewer call failed"
+                    _err["kind"] = _reviewer_error_kind(detail)
+                    _bill()
+                    yield "error", {"message": detail, "kind": _err["kind"]}
                     return
                 break
     except asyncio.TimeoutError:
+        _err["kind"] = "timeout"
+        _bill()
         yield "error", {
             "message": (
                 f"reviewer timed out after {int(_REVIEWER_WALL_CLOCK_S)}s with "
@@ -555,19 +903,105 @@ async def _ask_reviewer_streaming(
         return
     except Exception as e:
         raw = str(e)
-        yield "error", {
-            "message": raw,
-            "kind": classify_agent_error(raw) or "api_error",
-        }
+        _err["kind"] = _reviewer_error_kind(raw)
+        _bill()
+        yield "error", {"message": raw, "kind": _err["kind"]}
         return
 
     hint = "".join(accumulated).strip()
     diag = _diagnose_reviewer_text(hint)
     if diag is not None:
         kind, message = diag
+        _err["kind"] = kind
+        _bill()
         yield "error", {"message": message, "kind": kind}
         return
+    _bill()
     yield "done", {"hint": hint}
+
+
+async def _ask_reviewer_streaming(
+    context: str, *, model: str | None = None, job_id: str | None = None
+) -> AsyncIterator[tuple[str, dict]]:
+    """Streaming reviewer, with the same routing / billing / failover as the
+    synchronous path.
+
+    It had none of them: no job id reached it, so it resolved against live
+    Settings instead of the job's snapshot, wrote no ledger rows, and ended a
+    policy block as a terminal `error` — the one failure a second vendor can
+    actually cure.
+
+    A refusal is not streamed to the client as an error until BOTH providers
+    have refused, so the UI does not show a failure that is about to be
+    retried; a `note` event says a failover is happening.
+    """
+    from modules.agent_provider import failover_target
+
+    origin, _ = _reviewer_provider_and_model(model, job_id)
+    sink: list = []
+    failover: dict = {}
+
+    def _flush() -> None:
+        for entry in sink:
+            _record_reviewer_usage(
+                job_id, entry["provider"], entry["model"], entry["usage_out"],
+                error_kind=entry["error_kind"], failover=failover or None,
+            )
+        sink.clear()
+
+    try:
+        # The first attempt's output is HELD, not streamed. A policy block is
+        # only visible at the end of the turn, and the adapters put the block's
+        # own text through the same `token` events as a real hint — so
+        # streaming live meant the UI accumulated the refusal text and then
+        # appended the recovered hint to it. The reviewer hint is short; the
+        # cost of holding it is a beat of latency, and the alternative is
+        # showing the operator a failure that is about to be undone.
+        buffered: list[tuple[str, dict]] = []
+        refusal: dict | None = None
+        async for kind, payload in _stream_reviewer_once(
+            context, model=model, job_id=job_id,
+            provider_override=origin, usage_sink=sink,
+        ):
+            if kind == "error" and payload.get("kind") == "policy_refusal":
+                refusal = payload
+                break
+            buffered.append((kind, payload))
+        if refusal is None:
+            for kind, payload in buffered:
+                yield kind, payload
+            return
+        buffered.clear()
+
+        target = failover_target(origin)
+        if not target:
+            yield "error", refusal
+            return
+
+        failover.update({"failover_from": origin, "failover_to": target})
+        yield "note", {
+            "message": f"{origin} reviewer was blocked by policy; retrying on {target}",
+        }
+        blocked_again = False
+        async for kind, payload in _stream_reviewer_once(
+            context, model=None, job_id=job_id,
+            provider_override=target, usage_sink=sink,
+        ):
+            if kind == "error":
+                blocked_again = True
+                failover["failover_diagnosis"] = (
+                    "content_or_prompt"
+                    if payload.get("kind") == "policy_refusal" else "inconclusive"
+                )
+                # The caller must not enqueue on a failed reviewer, so the
+                # ORIGINAL refusal is what surfaces.
+                yield "error", refusal
+                return
+            yield kind, payload
+        if not blocked_again:
+            failover["failover_diagnosis"] = "provider_specific"
+    finally:
+        _flush()
 
 
 _CLAUDE_HOME = Path("/root/.claude")
@@ -816,7 +1250,10 @@ def _resubmit(
         # derives the project key from cwd; without copying the jsonl
         # into the *new* cwd's key directory, the fork attempt silently
         # fails (~2s exit 1, no init message).
-        prev_sid = prev_meta.get("claude_session_id")
+        prev_sid = (
+            prev_meta.get("claude_session_id")
+            if prev_meta.get("agent_provider") == "claude" else None
+        )
         if prev_sid:
             _carry_session_jsonl(prev_sid, prev_work, new_jd / "work")
         # The sentinel was carried into the new work tree by copytree —
@@ -886,9 +1323,7 @@ def _resubmit(
     if prior_stopped or fresh_session or prior_aup_blocked:
         resume_sid = None
     else:
-        resume_sid = (
-            prev_meta.get("claude_session_id") if carry_work else None
-        )
+        resume_sid = _resume_id_for_active_provider(prev_meta) if carry_work else None
 
     meta = {
         "id": new_id,
@@ -919,6 +1354,19 @@ def _resubmit(
         # on this retry — carried files + hint only, clean SDK context.
         "fresh_session_requested": bool(fresh_session),
     }
+    # A retry IS a job create, so it gets the same create-time provider stamp
+    # the module routes give a first-run job. Without it the literal above
+    # carries no `agent_provider` at all, and every consumer falls back to
+    # whatever Settings says whenever it happens to ask — which for the role
+    # map means the routing chosen for this retry is lost outright.
+    #
+    # Stamping the ACTIVE provider (rather than copying the parent's) is what
+    # retry already assumes: `_resume_id_for_active_provider` above drops the
+    # resume id precisely when the active provider differs from the parent's,
+    # i.e. a retry deliberately follows the current Settings backend.
+    from modules.agent_provider import enrich_job_meta
+
+    enrich_job_meta(meta)
 
     q = get_queue()
 
@@ -1041,7 +1489,7 @@ def _continue_in_place(prev_meta: dict, comment: str,
 
     # Same cwd → the prior session jsonl is already under this cwd's project
     # key, so fork_session=True finds it without any carry step.
-    resume_sid = prev_meta.get("claude_session_id")
+    resume_sid = _resume_id_for_active_provider(prev_meta)
     cont_n = int(prev_meta.get("continue_count") or 0) + 1
     target, target_urls = _resolve_targets(target_override, prev_meta)
     auto_run = bool(prev_meta.get("auto_run"))
@@ -1135,16 +1583,38 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
     if require_claude_auth:
         apply_to_env()
         from modules.agent_provider import (
+            get_gpt_runtime,
             has_provider_auth,
             normalize_provider,
             provider_display_name,
             provider_for_job,
         )
+        # The gate exists to stop a retry that cannot run, and what runs first
+        # is the REVIEWER. Checking the whole-job provider rejected jobs whose
+        # reviewer was routed to an authed backend, and — worse — admitted
+        # jobs whose routed reviewer had no auth at all, where the failure
+        # then surfaced as an auth error that the policy-refusal failover is
+        # deliberately not allowed to retry.
+        from modules.agent_provider import provider_for_role
+
         provider = normalize_provider(
-            prev_meta.get("agent_provider") or provider_for_job(safe)
+            provider_for_role(safe, "reviewer")
+            or prev_meta.get("agent_provider")
+            or provider_for_job(safe)
         )
         if not has_provider_auth(provider):
-            if provider == "grok":
+            if provider == "gpt":
+                if get_gpt_runtime() == "codex":
+                    detail = (
+                        "no Codex ChatGPT OAuth configured (run `codex login` "
+                        "and mount the isolated HOST_CODEX_HOME)"
+                    )
+                else:
+                    detail = (
+                        "no OpenAI API key configured "
+                        "(Settings → OpenAI API key)"
+                    )
+            elif provider == "grok":
                 detail = (
                     "no Grok/xAI auth configured (Settings → xAI API key, "
                     "or `grok login` with ~/.grok mounted)"
@@ -1258,11 +1728,23 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 return
 
             _rv_model = resolve_reviewer_model(job_id)
-            yield sse("stage", {"name": "asking", "model": _rv_model})
+            # Announce what will actually run. `resolve_reviewer_model` coerces
+            # to the WHOLE-JOB provider, so a routed reviewer was announced as
+            # one model and then called as another — and the UI presents this
+            # as fact.
+            _rv_provider, _rv_shown = _reviewer_provider_and_model(_rv_model, job_id)
+            yield sse("stage", {
+                "name": "asking", "model": _rv_shown, "provider": _rv_provider,
+            })
             try:
-                async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
+                async for kind, payload in _ask_reviewer_streaming(
+                    context, model=_rv_model, job_id=job_id):
                     if kind == "token":
                         yield sse("token", payload)
+                    elif kind == "note":
+                        # A failover is in progress. Dropping this left the UI
+                        # with an unexplained pause between two providers.
+                        yield sse("note", payload)
                     elif kind == "done":
                         hint = payload.get("hint", "")
                     elif kind == "error":
@@ -1272,7 +1754,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 raw = str(e)
                 yield sse("error", {
                     "message": f"reviewer failed: {raw}",
-                    "kind": classify_agent_error(raw) or "api_error",
+                    "kind": _reviewer_error_kind(raw),
                 })
                 return
 
@@ -1339,7 +1821,8 @@ async def retry_with_hint(job_id: str, request: Request):
         if not context.strip():
             raise HTTPException(status_code=400, detail="no context to review")
         try:
-            hint = await _ask_reviewer(context, model=resolve_reviewer_model(job_id))
+            hint = await _ask_reviewer_with_failover(
+                context, model=resolve_reviewer_model(job_id), job_id=job_id)
         except ReviewerError as e:
             # 502 = upstream (Claude API) failure. The retry never reached
             # the queue, so the client knows nothing new was scheduled.
@@ -1405,7 +1888,7 @@ async def continue_with_comment(job_id: str, request: Request):
         "job_id": new_id,
         "status": "queued",
         "continued": True,
-        "resumed_session": bool(prev_meta.get("claude_session_id")),
+        "resumed_session": bool(_resume_id_for_active_provider(prev_meta)),
     }
 
 
@@ -1820,11 +2303,23 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 return
 
             _rv_model = resolve_reviewer_model(job_id)
-            yield sse("stage", {"name": "asking", "model": _rv_model})
+            # Announce what will actually run. `resolve_reviewer_model` coerces
+            # to the WHOLE-JOB provider, so a routed reviewer was announced as
+            # one model and then called as another — and the UI presents this
+            # as fact.
+            _rv_provider, _rv_shown = _reviewer_provider_and_model(_rv_model, job_id)
+            yield sse("stage", {
+                "name": "asking", "model": _rv_shown, "provider": _rv_provider,
+            })
             try:
-                async for kind, payload in _ask_reviewer_streaming(context, model=_rv_model):
+                async for kind, payload in _ask_reviewer_streaming(
+                    context, model=_rv_model, job_id=job_id):
                     if kind == "token":
                         yield sse("token", payload)
+                    elif kind == "note":
+                        # A failover is in progress. Dropping this left the UI
+                        # with an unexplained pause between two providers.
+                        yield sse("note", payload)
                     elif kind == "done":
                         hint = payload.get("hint", "")
                     elif kind == "error":
@@ -1834,7 +2329,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 raw = str(e)
                 yield sse("error", {
                     "message": f"reviewer failed: {raw}",
-                    "kind": classify_agent_error(raw) or "api_error",
+                    "kind": _reviewer_error_kind(raw),
                 })
                 return
 

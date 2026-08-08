@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import socket
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -154,13 +155,76 @@ def _host_path(job_id: str) -> str:
     return f"{host_root.rstrip('/')}/jobs/{job_id}"
 
 
-def _judge_enabled() -> bool:
-    """Default ON; off only if the user explicitly disabled it."""
+def _judge_mode() -> str:
+    """`off` | `shadow` | `enforce`. See settings_io.get_judge_mode()."""
     try:
-        v = get_setting("enable_judge")
+        from modules.settings_io import get_judge_mode
+
+        return get_judge_mode()
     except Exception:
-        return True
-    return bool(v) if v is not None else True
+        return "enforce"
+
+
+def _postjudge_extra(
+    target_note: str,
+    res: dict,
+    prior_hints: list[str] | None,
+) -> str:
+    """The `extra_context` postjudge is judged WITH.
+
+    Shared rather than inlined in the enforce branch, because shadow has to
+    record the identical string. Built separately, the two drift and the
+    shadow verdict is scored on a prompt the gate never saw.
+    """
+    extra = ""
+    if target_note:
+        # Surface pre-run target reachability notes to postjudge FIRST so its
+        # verdict can distinguish "remote was down" (network_error, operator
+        # must refresh instance) from "script's own bug" (parse_error, retry
+        # will help).
+        extra = target_note + "\n"
+    if res.get("timeout"):
+        extra += "(runner timeout fired before container exit)\n"
+    elif res.get("killed_by_supervise"):
+        extra += (
+            "(supervise judge killed the container due to stalled output)\n"
+        )
+    if prior_hints:
+        # Attach the retry-hint history so judge can detect "I'm about to
+        # repeat myself" — the strongest signal for next_action=stop. Each
+        # entry is one of the judge's prior postjudge_retry_hints (already
+        # capped at ~600 chars upstream).
+        extra += (
+            "\nPRIOR RETRY HINTS (this job has already iterated "
+            f"{len(prior_hints)} time(s); your new hint MUST NOT "
+            "rhyme with these — if it does, next_action=stop):\n"
+        )
+        for i, h in enumerate(prior_hints, 1):
+            if h:
+                extra += f"  #{i}: {h[:300]}\n"
+    return extra
+
+
+def _judge_gates(mode: str) -> bool:
+    """Does THIS mode let the judge's verdicts gate the run?
+
+    Takes the mode rather than reading it, so a caller that needs both the
+    mode and the gate answers them from ONE snapshot. Reading twice lets a
+    settings change land in between and produce a pair that never existed —
+    enforce's gating together with shadow's recording, in one attempt.
+    """
+    return str(mode) == "enforce"
+
+
+def _judge_enabled() -> bool:
+    """True when the judge's verdicts actually GATE the run.
+
+    Shadow is deliberately False here: it records what the judge would have
+    said and gates nothing, so every branch that reads this keeps behaving
+    exactly as it does with the judge off. That identity is the whole basis
+    for comparing a shadow job against the recorded outcome.
+    """
+    return _judge_gates(_judge_mode())
 
 
 def _wait_with_supervise(
@@ -522,8 +586,15 @@ def _ping_target(target: str, *, timeout: float = 3.0) -> tuple[bool, str]:
         return True, ""
     if not host or port <= 0 or port > 65535:
         return True, ""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
+    try:
+        # Creating the socket was outside the guard, so on a host that denies
+        # it outright (a hardened container, a restricted CI box) a PermissionError
+        # escaped a probe whose entire contract is warn-not-fail and took
+        # attempt_sandbox_run down with it.
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+    except OSError as e:
+        return True, f"(reachability probe unavailable: {type(e).__name__}: {e})"
     try:
         s.connect((host, port))
     except socket.gaierror as e:
@@ -630,7 +701,16 @@ def attempt_sandbox_run(
     # via job DELETE rmtree on /data/jobs/<id>/.
     (work_tree / "tmp").mkdir(parents=True, exist_ok=True)
 
-    enable_judge = _judge_enabled()
+    # ONE read, both answers derived from it. Two reads let a settings change
+    # land between them, and the pair that comes out never existed as a
+    # configuration: enforce's gating with shadow's recording, same attempt.
+    judge_mode = _judge_mode()
+    enable_judge = _judge_gates(judge_mode)
+    # One id per ATTEMPT. prejudge -> supervise -> postjudge share a judge
+    # session within a cycle, so "this stage's prerequisite" is a question
+    # about the cycle, not about the job. Keyed job-wide, one attempt's
+    # unevaluable prejudge silenced the NEXT attempt's healthy postjudge.
+    cycle_id = uuid.uuid4().hex[:12] if judge_mode == "shadow" else ""
 
     # ---------- Stage 0: target reachability probe ----------
     # If the chal is remote-targeted, do a single TCP connect ping
@@ -738,6 +818,24 @@ def attempt_sandbox_run(
         # point, and postjudge still backstops anything that slips
         # through with severity≤med.
         prejudge: dict | None = None
+        if judge_mode == "shadow":
+            # INPUTS ONLY. Calling the judge here would lengthen every run and
+            # leave a shadow job incomparable with the control it exists to be
+            # compared against; the verdicts are produced after the run.
+            from modules import judge_shadow
+
+            judge_shadow.record_input(
+                job_id, "prejudge",
+                {
+                    "cycle_id": cycle_id,
+                    "script_rel": script_filename, "target": target,
+                    # The retry loop rewrites the script between attempts and
+                    # report.md / chain.json keep moving too — and prejudge
+                    # reads all three. The path alone does not identify what
+                    # the gate reviewed.
+                    **judge_shadow.prejudge_fingerprint(work_dir, script_filename),
+                },
+            )
         if enable_judge:
             try:
                 prejudge = _judge.prejudge_script(
@@ -758,7 +856,7 @@ def attempt_sandbox_run(
                 severity=(prejudge or {}).get("severity"),
                 issues=len((prejudge or {}).get("issues") or []),
             )
-            if prejudge and not prejudge.get("ok") and prejudge.get("severity") == "high":
+            if _judge.prejudge_blocks_ship(prejudge):
                 log_fn(
                     f"[runner] prejudge BLOCKED ship: severity=high, "
                     f"{len(prejudge.get('issues') or [])} issues — "
@@ -843,35 +941,40 @@ def attempt_sandbox_run(
         (work_dir / f"{script_filename}.stderr").write_text(res["stderr"])
 
         # ---------- Stage 3: postjudge ----------
+        # Shadow recording sits OUTSIDE the enforce gate. It used to be nested
+        # under `if enable_judge:`, which is False in shadow — so the live
+        # path recorded a prejudge input and then nothing, ever. The suite
+        # missed it because every functional check called judge_shadow
+        # directly instead of going through this function.
+        if judge_mode == "shadow":
+            from modules import judge_shadow
+
+            judge_shadow.record_input(
+                job_id, "postjudge",
+                {
+                    "cycle_id": cycle_id,
+                    "script_rel": script_filename,
+                    "exit_code": res["exit_code"],
+                    # The files a delayed postjudge could still Read from cwd
+                    # (the prompt invites it), overwritten by the next attempt.
+                    **judge_shadow.postjudge_fingerprint(work_dir, script_filename),
+                    # What postjudge actually CONSUMES — the byte tails that
+                    # reach the prompt and the flag shapes the placeholder
+                    # override scans for across the whole output. Recording
+                    # "stdout, shortened" reproduced neither: the generic clip
+                    # keeps the HEAD, the prompt uses the TAIL, and the
+                    # override reads the FULL string.
+                    **_judge.postjudge_inputs(res["stdout"], res["stderr"]),
+                    # The SAME extra_context enforce would judge on. Without
+                    # it shadow scores a different prompt — no timeout note,
+                    # no target-reachability note, no prior-hint history — and
+                    # a comparison against the real gate measures the wrong
+                    # thing.
+                    "extra_context": _postjudge_extra(target_note, res, prior_hints),
+                },
+            )
         if enable_judge:
-            extra = ""
-            if target_note:
-                # Surface pre-run target reachability notes to postjudge
-                # FIRST so its verdict can distinguish "remote was down"
-                # (network_error, operator must refresh instance) from
-                # "script's own bug" (parse_error, retry will help).
-                extra = target_note + "\n"
-            if res.get("timeout"):
-                extra += "(runner timeout fired before container exit)\n"
-            elif res.get("killed_by_supervise"):
-                extra += (
-                    "(supervise judge killed the container due to stalled "
-                    "output)\n"
-                )
-            if prior_hints:
-                # Attach the retry-hint history so judge can detect
-                # "I'm about to repeat myself" — which is the strongest
-                # signal for next_action=stop. Each entry is one of the
-                # judge's prior postjudge_retry_hints (already capped at
-                # ~600 chars upstream).
-                extra += (
-                    "\nPRIOR RETRY HINTS (this job has already iterated "
-                    f"{len(prior_hints)} time(s); your new hint MUST NOT "
-                    "rhyme with these — if it does, next_action=stop):\n"
-                )
-                for i, h in enumerate(prior_hints, 1):
-                    if h:
-                        extra += f"  #{i}: {h[:300]}\n"
+            extra = _postjudge_extra(target_note, res, prior_hints)
             try:
                 post = _judge.postjudge_run(
                     work_dir,

@@ -2415,12 +2415,15 @@ def make_standalone_options(
     # Base = existing behavior: judge pinned to LATEST_JUDGE_MODEL, everyone
     # else follows the spawner (main). An active model-preset can override the
     # role (recon / debugger / triage / judge); a blank entry keeps the base.
+    from modules.agent_provider import provider_for_job
     from modules.model_presets import resolve_role_model
     _base_sub_model = (
         LATEST_JUDGE_MODEL if agent_type == "judge"
         else (model or LATEST_JUDGE_MODEL)
     )
-    sub_model = resolve_role_model(agent_type, _base_sub_model)
+    sub_model = resolve_role_model(
+        agent_type, _base_sub_model, provider_for_job(job_id)
+    )
     env = {"JOB_ID": job_id, "AGENT_ROLE": agent_type}
     # Same per-job TMPDIR + terminfo silencing as main session — keeps
     # subagent Bash output clean and prevents /tmp collision when
@@ -2835,11 +2838,17 @@ async def run_report_phase(
         label="report-options", log_fn=log_fn,
     )
 
-    from modules.agent_provider import active_provider, default_model_for
+    from modules.agent_provider import (
+        coerce_model_for_provider, default_model_for, provider_for_job,
+    )
     from modules.model_presets import resolve_role_model
 
-    report_model = resolve_role_model("report", model or REPORT_PHASE_MODEL)
-    if active_provider() == "grok" and (
+    provider = provider_for_job(job_id)
+    report_model = resolve_role_model(
+        "report", model or REPORT_PHASE_MODEL, provider
+    )
+    report_model = coerce_model_for_provider(report_model, provider)
+    if provider == "grok" and (
         not report_model
         or str(report_model).lower().startswith("claude")
         or str(report_model).lower().startswith("anthropic")
@@ -2847,7 +2856,7 @@ async def run_report_phase(
         report_model = default_model_for("grok")
 
     # ---- Grok path: avoid Claude weekly-limit failures on Grok jobs -------
-    if active_provider() == "grok":
+    if provider == "grok":
         from modules.grok_acp import query_grok_once
         log_fn(
             f"[report] launching report phase via Grok (model={report_model}, "
@@ -2870,6 +2879,29 @@ async def run_report_phase(
             return False
         accumulated = (r.get("text") or "").strip()
         # fall through to shared JSON extract / write below
+    elif provider == "gpt":
+        from modules.gpt_agent import query_gpt_once
+        log_fn(
+            f"[report] launching report phase via OpenAI Codex/GPT "
+            f"(model={report_model}, sources={[n for n, _ in sources]})"
+        )
+        try:
+            r = await query_gpt_once(
+                prompt=report_prompt,
+                cwd=str(work_dir),
+                system_prompt=sys_prompt,
+                model=report_model,
+                effort="low",
+                timeout_s=float(timeout_s),
+                enable_tools=False,
+            )
+        except Exception as e:
+            log_fn(f"[report] GPT report phase failed ({e}); skipping")
+            return False
+        if r.get("error"):
+            log_fn(f"[report] GPT error: {r['error']}; skipping")
+            return False
+        accumulated = (r.get("text") or "").strip()
     else:
         try:
             from claude_agent_sdk import ClaudeAgentOptions, query
@@ -3113,20 +3145,78 @@ async def run_pre_recon(
       * claude — standalone ``ClaudeSDKClient`` (historical path)
       * grok   — standalone ``GrokACPClient`` (avoids burning Claude quota
         / weekly limits when the job itself is on Grok)
+      * gpt    — Codex CLI OAuth by default (Responses API is optional)
 
     Returns ONLY recon's final text (joined assistant TextBlocks), capped
     at 8 KB. Best-effort: crashes return partial/empty text; caller falls
     back to "main delegates as needed".
     """
-    from modules.agent_provider import active_provider, default_model_for
+    from modules.agent_provider import (
+        active_provider,
+        default_model_for,
+        provider_display_name,
+    )
 
     chunks: list[str] = []
     crashed = False
     result_is_error = False
     provider = active_provider()
 
+    # ---- OpenAI GPT path --------------------------------------------------
+    if provider == "gpt":
+        try:
+            from modules.gpt_agent import (
+                GptAgentClient,
+                GptSessionOptions,
+                AssistantMessage as GptAssistantMessage,
+                ResultMessage as GptResultMessage,
+            )
+        except Exception as e:
+            log_fn(f"[{tag}] GPT adapter import failed ({e}); skipping pre-recon")
+            return ""
+        gpt_model = (model or "").strip()
+        if not gpt_model or gpt_model.lower().startswith(("claude", "grok")):
+            gpt_model = default_model_for("gpt")
+        # GPT has its own provider-scoped preset bucket.  Pre-recon used to
+        # bypass its ``recon`` slot and always inherit main's model, which is
+        # why job 0e215989d8dc launched pre-recon on gpt-5.6-sol even though
+        # the active GPT preset pins recon to gpt-5.6-terra.  Keep this inside
+        # the GPT branch so Claude/Grok resolution is unchanged.
+        from modules.model_presets import resolve_role_model
+        gpt_model = resolve_role_model("recon", gpt_model, "gpt")
+        log_fn(f"[{tag}] backend={provider_display_name('gpt')} model={gpt_model}")
+        opts = GptSessionOptions(
+            system_prompt=RECON_AGENT_PROMPT,
+            model=gpt_model,
+            cwd=str(work_dir),
+            effort=None,
+            env={"JOB_ID": job_id, "AGENT_ROLE": "recon"},
+            enable_tools=True,
+            enable_subagents=False,
+        )
+        try:
+            async with GptAgentClient(opts) as client:
+                await client.query(prompt)
+                async for msg in client.receive_response():
+                    phase_heartbeat(job_id, "pre-recon", msg)
+                    if isinstance(msg, GptAssistantMessage):
+                        for block in (getattr(msg, "content", None) or []):
+                            kind = type(block).__name__
+                            if kind == "TextBlock":
+                                txt = getattr(block, "text", "") or ""
+                                if txt.strip():
+                                    chunks.append(txt)
+                                    log_line(job_id, f"[{tag}] AGENT: {txt[:500]}")
+                            elif kind == "ToolUseBlock":
+                                log_line(job_id, f"[{tag}] TOOL {getattr(block, 'name', '?')}")
+                    elif isinstance(msg, GptResultMessage):
+                        result_is_error = bool(getattr(msg, "is_error", False))
+        except Exception as e:
+            crashed = True
+            log_fn(f"[{tag}] crashed: {e!r} — returning partial output")
+
     # ---- Grok path --------------------------------------------------------
-    if provider == "grok":
+    elif provider == "grok":
         try:
             from modules.grok_acp import (
                 GrokACPClient,
@@ -3371,15 +3461,21 @@ async def run_pre_recon(
     return PreReconReply(out, full_text)
 
 
-_VALID_EFFORTS_BACKEND = frozenset(("low", "medium", "high", "xhigh", "max"))
+_VALID_EFFORTS_BACKEND = frozenset(
+    ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+)
 
 
-def resolve_effort(meta_effort: str | None) -> str | None:
+def resolve_effort(
+    meta_effort: str | None,
+    provider: str | None = None,
+) -> str | None:
     """Resolve the per-job effort with the global Settings fallback.
 
     Per-job effort (saved in meta.json by api/routes/*_module.py)
     wins when set; otherwise fall back to the active provider's effort
-    Setting (``claude_effort`` or ``grok_effort``); otherwise return None
+    Setting (``claude_effort``, ``grok_effort``, or ``gpt_effort``);
+    otherwise return None
     and let the SDK/CLI pick its own default (model-dependent).
     """
     from modules.agent_provider import default_effort_for
@@ -3399,41 +3495,39 @@ def resolve_effort(meta_effort: str | None) -> str | None:
     # global effort Setting); a blank preset slot falls through to global.
     try:
         from modules.model_presets import get_preset_effort
-        preset_e = _norm(get_preset_effort())
+        preset_e = _norm(get_preset_effort(provider))
         if preset_e is not None:
             return preset_e
     except Exception:
         pass
-    return _norm(default_effort_for())
+    return _norm(default_effort_for(provider))
 
 
-def resolve_main_model(model_override: str | None) -> str:
+def resolve_main_model(
+    model_override: str | None,
+    provider: str | None = None,
+) -> str:
     """Resolve the MAIN CTF agent's model.
 
     Precedence: explicit per-job pick (``model_override``) > active preset's
-    ``main`` slot > global provider model Setting (``claude_model`` or
-    ``grok_model``) > provider default. When no preset is active (or its
+    ``main`` slot > global provider model Setting (``claude_model``,
+    ``grok_model``, or ``gpt_model``) > provider default. When no preset is active (or its
     ``main`` slot is blank), this is byte-identical to the historical
     ``model_override or get_setting("claude_model") or default`` for the
     Claude provider.
 
-    Provider safety: if Settings selects Grok but a model-preset still pins
-    a ``claude-*`` main model (common after switching providers), ignore the
-    preset and use the Grok default. Otherwise Grok sessions launch with a
-    Claude model id and/or logs claim the wrong backend.
+    Provider safety: if a model-preset pins a model from another provider
+    (common after switching providers), coerce it to the selected provider's
+    default so sessions never launch with a mismatched model id.
     """
-    from modules.agent_provider import active_provider, default_model_for
+    from modules.agent_provider import coerce_model_for_provider, default_model_for
     from modules.model_presets import resolve_role_model
 
     if model_override and str(model_override).strip():
-        return str(model_override).strip()
-    global_default = default_model_for()
-    resolved = resolve_role_model("main", global_default)
-    if active_provider() == "grok":
-        r = (resolved or "").strip().lower()
-        if r.startswith("claude") or r.startswith("anthropic"):
-            return global_default
-    return resolved
+        return coerce_model_for_provider(str(model_override).strip(), provider)
+    global_default = default_model_for(provider)
+    resolved = resolve_role_model("main", global_default, provider)
+    return coerce_model_for_provider(resolved, provider)
 
 
 def resolve_judge_model(job_id: str | None) -> str:
@@ -3452,10 +3546,11 @@ def resolve_judge_model(job_id: str | None) -> str:
     from modules.agent_provider import coerce_model_for_provider, provider_for_job
     from modules.model_presets import resolve_role_model
 
+    provider = provider_for_job(job_id)
     meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
-    base = resolve_main_model(meta_model)
-    resolved = resolve_role_model("judge", base)
-    return coerce_model_for_provider(resolved, provider_for_job(job_id))
+    base = resolve_main_model(meta_model, provider)
+    resolved = resolve_role_model("judge", base, provider)
+    return coerce_model_for_provider(resolved, provider)
 
 
 def resolve_reviewer_model(job_id: str | None) -> str:
@@ -3470,11 +3565,12 @@ def resolve_reviewer_model(job_id: str | None) -> str:
     from modules.agent_provider import coerce_model_for_provider, provider_for_job
     from modules.model_presets import resolve_role_model
 
+    provider = provider_for_job(job_id)
     meta_model = (read_meta(job_id) or {}).get("model") if job_id else None
-    base = resolve_main_model(meta_model)
-    judge_base = resolve_role_model("judge", base)   # current reviewer default
-    resolved = resolve_role_model("reviewer", judge_base)
-    return coerce_model_for_provider(resolved, provider_for_job(job_id))
+    base = resolve_main_model(meta_model, provider)
+    judge_base = resolve_role_model("judge", base, provider)  # reviewer default
+    resolved = resolve_role_model("reviewer", judge_base, provider)
+    return coerce_model_for_provider(resolved, provider)
 
 
 def make_main_session_options(
@@ -3490,9 +3586,10 @@ def make_main_session_options(
     extra_env: dict | None = None,
     effort: str | None = None,
 ):
-    """Build agent options for a main session (Claude SDK or Grok ACP).
+    """Build agent options for a main session (Claude, Grok, or Codex/GPT).
 
     When Settings ``agent_provider=grok``, returns ``GrokSessionOptions``.
+    When ``agent_provider=gpt``, returns ``GptSessionOptions``.
     Otherwise builds ``ClaudeAgentOptions`` and selects isolated-subagent
     (MCP) vs legacy in-process (``agents=``) based on
     ``USE_ISOLATED_SUBAGENTS`` (default ON).
@@ -3551,7 +3648,39 @@ def make_main_session_options(
     env.setdefault("TERM", "xterm")
     env.setdefault("PWNLIB_NOTERM", "1")
 
-    if active_provider() == "grok":
+    provider = active_provider()
+
+    if provider == "gpt":
+        from modules.gpt_agent import GptSessionOptions
+        from modules.agent_provider import get_gpt_runtime
+        turn_timeout_s = 1800.0
+        try:
+            jt = int((read_meta(job_id) or {}).get("job_timeout") or 0)
+            if jt > 0:
+                turn_timeout_s = float(max(jt, 1800))
+        except Exception:
+            pass
+        log_fn_local(
+            "[orchestrator] agent backend: "
+            + (
+                "OpenAI Codex CLI (ChatGPT OAuth); native Codex tools/subagents; "
+                if get_gpt_runtime() == "codex"
+                else "OpenAI GPT (Responses API); local tools/subagents; "
+            )
+            + f"turn_timeout={turn_timeout_s:.0f}s"
+        )
+        return GptSessionOptions(
+            system_prompt=system_prompt,
+            model=model,
+            cwd=str(work_dir),
+            effort=effort,
+            env=env,
+            resume=resume_sid,
+            add_dirs=list(add_dirs or []),
+            turn_timeout_s=turn_timeout_s,
+        )
+
+    if provider == "grok":
         from modules.grok_acp import GrokSessionOptions
         # Rewrite Claude MCP delegation (mcp__team__spawn_subagent, recon
         # as a Claude type, …) into Grok native spawn_subagent + role map.
@@ -4752,12 +4881,17 @@ def agent_heartbeat(job_id: str, msg) -> None:
               else _accumulate_tokens(job_id, usage, msg_id))
     turns = _token_turns.get(job_id, 0)
 
+    session_cost = None
     if is_result:
         cost = getattr(msg, "total_cost_usd", None)
         if isinstance(cost, (int, float)):
             # + earlier sessions of this same job (stop -> continue in place),
             # otherwise each session's cumulative total overwrites the last.
             updates["cost_usd"] = prior_session_cost(job_id) + float(cost)
+            # THIS session's figure, un-summed. meta.cost_usd is the job total;
+            # the usage ledger wants one row per session, so adding the prior
+            # sessions again there would double every earlier one.
+            session_cost = float(cost)
         # Result also carries the SDK's own authoritative model_usage
         # — surface alongside our running sum for cross-checking.
         model_usage = getattr(msg, "model_usage", None)
@@ -4798,6 +4932,25 @@ def agent_heartbeat(job_id: str, msg) -> None:
     # it — never under `cost_usd`, which is the authoritative SDK number and
     # whose meaning must not be diluted (an earlier estimate-into-cost_usd
     # bug poisoned the spend meter; see the _snapshot_cost fix).
+    # The job's provider and model, resolved ONCE. Both the estimate below and
+    # the usage-ledger row further down need them, and resolving them
+    # separately let them disagree: the estimate omitted the provider, so it
+    # fell through to whatever Settings says NOW, while the ledger row used the
+    # job's create-time snapshot. A job stamped `claude` with no model override,
+    # running while Settings said `gpt`, produced a row reading
+    # model=claude-opus-4-8 with a dollar figure computed at gpt-5.6-luna rates
+    # — $0.13 against $0.625 for the model the row names. Resolving once makes
+    # that divergence impossible rather than asking two call sites to agree.
+    _job_provider = None
+    _job_model = None
+    try:
+        from modules.agent_provider import provider_for_job as _pfj
+
+        _job_provider = _pfj(job_id)
+        _job_model = resolve_main_model(read_meta(job_id).get("model"), _job_provider)
+    except Exception:
+        pass
+
     if tokens and "cost_usd" not in updates:
         try:
             # RESOLVE the model — do not read meta.model raw. That key holds the
@@ -4807,9 +4960,7 @@ def agent_heartbeat(job_id: str, msg) -> None:
             # through to _rates_for_model's unknown-model default and priced an
             # opus-5 run at the legacy $15/$75 — the live job c552faf18d31 was
             # parked at $13.28 against a true-rate estimate of $7.14.
-            est = estimate_cost_from_tokens(
-                tokens, resolve_main_model(read_meta(job_id).get("model"))
-            )
+            est = estimate_cost_from_tokens(tokens, _job_model)
             if est > 0:
                 updates["cost_usd_estimate"] = round(est, 4)
         except Exception:
@@ -4828,6 +4979,50 @@ def agent_heartbeat(job_id: str, msg) -> None:
         flag_candidates=candidates or None,
         **updates,
     )
+
+    if is_result:
+        # One usage-ledger row per MAIN session. Separate from meta because a
+        # hybrid job's spend is in two units that must not be added: Claude
+        # reports dollars, Codex OAuth reports none and is metered in windows.
+        # See modules/usage_ledger.py. Entirely best-effort — accounting must
+        # never break the run it is accounting for.
+        try:
+            from modules.agent_provider import get_gpt_runtime
+            from modules.usage_ledger import (
+                codex_window_snapshot,
+                record_usage_by_model,
+            )
+
+            # Same values the estimate above was priced with — see the comment
+            # there. Never re-resolve here.
+            _prov = _job_provider or "claude"
+            # The cost contract is per BACKEND, not per provider name, and a
+            # turn is not necessarily single-model: the Responses adapter
+            # merges every subagent's usage into the parent map, and the
+            # preset can pin a subagent to a different model. Both concerns
+            # live in usage_ledger.record_usage_by_model, shared with the
+            # judge wiring — the model-collapse defect was found once in each
+            # because the logic lived in neither.
+            _runtime = get_gpt_runtime() if _prov == "gpt" else None
+            record_usage_by_model(
+                job_id,
+                role="main",
+                stage="main",
+                provider=_prov,
+                primary_model=_job_model,
+                model_usage=updates.get("model_usage"),
+                tokens=tokens,
+                reported_cost=session_cost,
+                estimate_for=estimate_cost_from_tokens,
+                rates_known=model_rates_are_known,
+                gpt_runtime=_runtime,
+                window_for=lambda: codex_window_snapshot(cached_only=True),
+                # Cumulative-per-session cost plus a stream that can re-emit a
+                # Result means the same session must not add a second row.
+                dedupe_key=getattr(msg, "session_id", None) or None,
+            )
+        except Exception:
+            pass
 
     # SSE meta delta — fires on the same throttle as write_meta so the
     # frontend never gets out of sync with on-disk meta.json.
@@ -4930,7 +5125,7 @@ def capture_session_id(msg, job_id: str) -> None:
     # so gating on it would never fire on the one path that needs it.
     # _aup_restart_session stamps meta.agent_provider when it switches.
     try:
-        _is_claude = (read_meta(job_id) or {}).get("agent_provider") != "grok"
+        _is_claude = (read_meta(job_id) or {}).get("agent_provider") == "claude"
     except Exception:
         _is_claude = True
     if _is_claude:
@@ -5603,6 +5798,12 @@ def classify_agent_error(message: str) -> str | None:
 # ResultMessage costs on finished opus-5 jobs, the old row produced 4.2x and
 # 5.2x overestimates.
 _MODEL_RATES_USD_PER_MTOK = {
+    # OpenAI GPT-5.6 family (Responses API). Explicit cache-write pricing is
+    # 1.25x input; cached reads use the documented discounted input rate.
+    "gpt-5.6-terra": (2.5, 3.125, 0.25, 15.0),
+    "gpt-5.6-luna":  (1.0, 1.25,  0.10,  6.0),
+    "gpt-5.6-sol":   (5.0, 6.25,  0.50, 30.0),
+    "gpt-5.6":       (5.0, 6.25,  0.50, 30.0),
     "opus-5": (5.0,  6.25,  0.50, 25.0),
     "opus-4-8": (5.0, 6.25, 0.50, 25.0),
     "opus-4-7": (5.0, 6.25, 0.50, 25.0),
@@ -5627,6 +5828,64 @@ def _rates_for_model(model: str | None) -> tuple[float, float, float, float]:
     # family this deployment actually runs, and it is still the most expensive
     # of the modern tiers, so it stays an upper bound among plausible models.
     return _MODEL_RATES_USD_PER_MTOK["opus-5"]
+
+
+# Failure fields across every adapter. `errors` is a LIST on the Claude SDK
+# ResultMessage and is where its parser puts the wire's error payload; GPT and
+# Grok carry `stop_reason` and have no `result` at all. Reading only one of
+# these is how a structured AUP block came back classified as a generic error.
+AGENT_FAILURE_ATTRS = ("errors", "result", "error", "error_detail", "api_error_status")
+
+
+def structured_failure_bits(msg: Any) -> list[str]:
+    """Authoritative failure strings an adapter/SDK set on a result message.
+
+    Shared deliberately. This extraction lived in the judge only, so the
+    reviewer — asked the SAME question about the SAME SDK object — answered
+    `api_error` where the judge answered `policy_refusal`, and the
+    policy-refusal-only failover never fired. Third time in this work that
+    logic living in one caller instead of between them produced the same
+    defect twice.
+    """
+    bits: list[str] = []
+    for attr in AGENT_FAILURE_ATTRS:
+        value = getattr(msg, attr, None)
+        if not value:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            bits.extend(str(v) for v in value if v)
+        else:
+            bits.append(str(value))
+    stop_reason = getattr(msg, "stop_reason", None)
+    if stop_reason:
+        bits.append(str(stop_reason))
+    return bits
+
+
+def classify_failure_kind(detail: str, fallback: str) -> str:
+    """`classify_agent_error`, with "unknown" treated as UNclassified.
+
+    It answers "unknown" rather than None when nothing matched, so the
+    `... or "fallback"` idiom is dead code — every unrecognised failure came
+    back tagged "unknown", which tells a reader nothing about where it
+    happened.
+    """
+    kind = classify_agent_error(detail or "")
+    return fallback if kind in (None, "", "unknown") else kind
+
+
+def model_rates_are_known(model: str | None) -> bool:
+    """True when the rate table has a row that actually matches `model`.
+
+    `_rates_for_model` deliberately falls back to the current Opus row for
+    anything it does not recognise, which is a defensible upper bound for the
+    SPEND METER — but it is fabrication in a ledger. `grok-build` has no row,
+    so its "estimate" is Opus-5 pricing applied to Grok tokens: not an
+    inaccurate estimate, an estimate of nothing. Callers that record money
+    must ask this first and record null instead.
+    """
+    low = (model or "").strip().lower()
+    return bool(low) and any(needle in low for needle in _MODEL_RATES_USD_PER_MTOK)
 
 
 def estimate_cost_from_tokens(
@@ -7706,11 +7965,21 @@ async def run_main_agent_session(
         provider_meta_fields,
     )
     from modules.grok_acp import GrokSessionOptions
+    from modules.gpt_agent import GptSessionOptions
 
     # Fail fast when Settings selects an unready backend (missing auth,
     # or Grok runtime not yet wired). Stamps agent_provider on meta so
     # the UI /retry path can show which backend was intended.
-    _provider = ensure_provider_ready()
+    # AUP recovery may deliberately hand this function options for a backend
+    # different from the global Settings value. Treat an adapter-specific
+    # options object as authoritative; otherwise use the active provider and
+    # retain the defensive rebuild path below for a late Settings switch.
+    _requested_provider = None
+    if isinstance(options, GrokSessionOptions):
+        _requested_provider = "grok"
+    elif isinstance(options, GptSessionOptions):
+        _requested_provider = "gpt"
+    _provider = ensure_provider_ready(_requested_provider)
     try:
         write_meta(job_id, **provider_meta_fields(_provider))
     except Exception:
@@ -7727,6 +7996,16 @@ async def run_main_agent_session(
             UserMessage,
         )
         _use_grok = True
+        _use_gpt = False
+    elif _provider == "gpt" or isinstance(options, GptSessionOptions):
+        from modules.gpt_agent import (
+            GptAgentClient as AgentClient,
+            AssistantMessage,
+            ResultMessage,
+            UserMessage,
+        )
+        _use_grok = False
+        _use_gpt = True
     else:
         from claude_agent_sdk import (
             AssistantMessage,
@@ -7735,6 +8014,7 @@ async def run_main_agent_session(
             UserMessage,
         )
         _use_grok = False
+        _use_gpt = False
     import anyio
 
     max_retries = auto_retry_max() if auto_run else 0
@@ -8018,10 +8298,21 @@ async def run_main_agent_session(
             add_dirs=list(getattr(options, "add_dirs", None) or []),
         )
 
-    _client_kwargs = (
-        {"options": options} if _use_grok
-        else {"options": options}
-    )
+    if _use_gpt and not isinstance(options, GptSessionOptions):
+        # Same defensive rebuild as the Grok branch for a Settings flip that
+        # occurred after an analyzer created its options object.
+        from modules.agent_provider import default_model_for
+        options = GptSessionOptions(
+            system_prompt=getattr(options, "system_prompt", "") or "",
+            model=default_model_for("gpt"),
+            cwd=str(getattr(options, "cwd", work_dir) or work_dir),
+            effort=getattr(options, "effort", None),
+            env=dict(getattr(options, "env", None) or {}),
+            resume=getattr(options, "resume", None),
+            add_dirs=list(getattr(options, "add_dirs", None) or []),
+        )
+
+    _client_kwargs = {"options": options}
     async with AgentClient(**_client_kwargs) as client:
         await client.query(initial_prompt)
 

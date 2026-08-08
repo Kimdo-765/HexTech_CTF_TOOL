@@ -172,7 +172,7 @@ label.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
 }
 .provider-radios {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.6rem;
 }
 @media (max-width: 640px) {
@@ -202,9 +202,29 @@ label.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+  min-width: 0;
 }
 .provider-card-body strong { color: var(--fg-bright); font-size: 0.95rem; }
 .provider-card-body small { color: var(--fg-muted); font-size: 0.8rem; }
+.provider-card-body .provider-auth-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 0.2rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.provider-card-body .provider-auth-badge.auth-ready {
+  color: var(--green);
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+.provider-card-body .provider-auth-badge.auth-missing {
+  color: var(--fg-muted);
+}
 .provider-settings-block {
   border: 1px solid var(--surface-2);
   border-radius: 8px;
@@ -1251,12 +1271,32 @@ mark.log-hit {
 /* view switching: show the raw log OR the monitor feed, plus the controls
    relevant to each. .run-log-search pushes right via margin-left:auto, so
    when it's hidden the language select keeps that alignment. */
-.run-log-window[data-view="log"] .monitor-feed { display: none; }
-.run-log-window[data-view="monitor"] .run-log { display: none; }
+.run-log-window .gpt-timeline-feed { display: none; }
+.run-log-window[data-view="log"] .monitor-feed,
+.run-log-window[data-view="log"] .gpt-timeline-feed { display: none; }
+.run-log-window[data-view="monitor"] .run-log,
+.run-log-window[data-view="monitor"] .gpt-timeline-feed { display: none; }
+.run-log-window[data-view="timeline"] .run-log,
+.run-log-window[data-view="timeline"] .monitor-feed { display: none; }
+.run-log-window[data-view="timeline"] .gpt-timeline-feed { display: block; }
 .run-log-window[data-view="monitor"] .run-log-search,
-.run-log-window[data-view="monitor"] .run-log-search-count { display: none; }
+.run-log-window[data-view="monitor"] .run-log-search-count,
+.run-log-window[data-view="timeline"] .run-log-search,
+.run-log-window[data-view="timeline"] .run-log-search-count { display: none; }
 .run-log-window[data-view="log"] .monitor-lang { display: none; }
 .run-log-window[data-view="monitor"] .monitor-lang { margin-left: auto; }
+.run-log-window[data-view="timeline"] .monitor-lang { display: none; }
+.gpt-tools-toggle {
+  display: none;
+  margin-left: auto;
+  background: var(--surface-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 4px;
+  padding: 0.1rem 0.5rem; font-size: 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer; white-space: nowrap;
+}
+.run-log-window[data-view="timeline"] .gpt-tools-toggle { display: inline-block; }
+.gpt-tools-toggle:hover { border-color: var(--line-hi); color: var(--fg-max); }
 
 .monitor-feed {
   background: var(--bg-deep);
@@ -1290,6 +1330,106 @@ mark.log-hit {
 .mon-err  { border-left-color: var(--red); }
 .mon-err  .mon-text { color: var(--red-bright); }
 .mon-info { border-left-color: var(--line); }
+
+/* GPT-only structured timeline. Claude/Grok never render this element. */
+.gpt-timeline-feed {
+  background: var(--bg-deep);
+  max-height: min(64vh, 820px); min-height: 180px;
+  overflow-y: auto;
+  padding: 0.65rem 0.7rem 1.2rem;
+  color: var(--fg);
+}
+.gpt-timeline-meta {
+  display: flex; gap: 0.45rem; align-items: center;
+  margin-bottom: 0.55rem;
+  color: var(--fg-dim); font-size: 0.68rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.gpt-timeline-meta > span {
+  border: 1px solid var(--line-soft); border-radius: 999px;
+  padding: 0.1rem 0.45rem; background: var(--surface);
+}
+.gpt-timeline-source.fallback { color: var(--yellow-bright); }
+.gpt-agent-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.38rem; margin-bottom: 0.75rem;
+}
+.gpt-agent-card {
+  min-width: 0; border: 1px solid var(--line-soft); border-left: 3px solid var(--line-hi);
+  border-radius: 6px; background: var(--surface); padding: 0.42rem 0.5rem;
+}
+.gpt-agent-card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.gpt-agent-card-head strong { font-size: 0.75rem; color: var(--fg-max); }
+.gpt-agent-card-head span { font-size: 0.64rem; color: var(--fg-muted); }
+.gpt-agent-card code {
+  display: block; margin-top: 0.12rem; color: var(--blue-bright);
+  font-size: 0.68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gpt-agent-card > div:last-child:not(.gpt-agent-card-head) {
+  margin-top: 0.24rem; color: var(--fg-muted); font-size: 0.68rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gpt-agent-running { border-left-color: var(--green); }
+.gpt-agent-waiting { border-left-color: var(--yellow); }
+.gpt-agent-failed { border-left-color: var(--red); }
+.gpt-agent-completed { border-left-color: var(--blue); }
+.gpt-event-list { border-top: 1px solid var(--line-soft); }
+.gpt-event {
+  display: grid; grid-template-columns: 1.1rem minmax(0, 1fr);
+  gap: 0.35rem; padding: 0.5rem 0.2rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+}
+.run-log-window[data-show-tools="0"] .gpt-tool-event { display: none; }
+.gpt-event-rail { position: relative; color: var(--fg-dim); text-align: center; }
+.gpt-event-rail::after {
+  content: ""; position: absolute; top: 1.15rem; bottom: -0.75rem; left: 50%;
+  border-left: 1px solid var(--line-soft);
+}
+.gpt-event:last-child .gpt-event-rail::after { display: none; }
+.gpt-event-main { min-width: 0; }
+.gpt-event-head { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.gpt-event-time {
+  color: var(--fg-dim); font-size: 0.66rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.gpt-role {
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 0.3rem;
+  color: var(--blue-bright); background: var(--surface-2);
+  font-size: 0.62rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.gpt-event-head strong { color: var(--fg-max); font-size: 0.76rem; }
+.gpt-event-status {
+  color: var(--fg-muted); font-size: 0.62rem; border-radius: 999px;
+  background: var(--surface); padding: 0.04rem 0.35rem;
+}
+.gpt-event-stats {
+  margin-left: auto; color: var(--fg-dim); font-size: 0.63rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.gpt-event-summary {
+  margin-top: 0.28rem; color: var(--fg); font-size: 0.76rem; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.gpt-event-detail { margin-top: 0.3rem; }
+.gpt-event-detail > summary { color: var(--fg-dim); cursor: pointer; font-size: 0.67rem; }
+.gpt-event-detail > pre {
+  max-height: 280px; overflow: auto; margin: 0.35rem 0 0; padding: 0.5rem;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-muted);
+  background: var(--bg-sunken); border: 1px solid var(--line-soft); border-radius: 4px;
+  font-size: 0.68rem;
+}
+.gpt-status-running .gpt-event-rail { color: var(--green-bright); }
+.gpt-status-completed .gpt-event-rail { color: var(--green); }
+.gpt-status-failed .gpt-event-rail { color: var(--red); }
+.gpt-status-warning .gpt-event-rail { color: var(--yellow); }
+.gpt-event-artifact .gpt-event-rail { color: var(--blue-bright); }
+.gpt-event-wait .gpt-event-rail { color: var(--yellow-bright); }
+.gpt-timeline-empty { color: var(--fg-dim); padding: 1.5rem; text-align: center; }
+
+@media (max-width: 720px) {
+  .gpt-agent-grid { grid-template-columns: 1fr; }
+  .gpt-event-stats { display: none; }
+}
 
 /* The <pre.run-log> sitting inside the window frame */
 .run-log-window .run-log {
@@ -1710,6 +1850,21 @@ body.modal-open { overflow: hidden; }
   align-items: flex-end;
   margin: 0.6rem 0;
   flex-wrap: wrap;
+}
+.preset-provider-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin: 0.75rem 0 0.4rem;
+}
+.preset-provider-tabs button {
+  width: 100%;
+}
+.preset-provider-tabs button.active {
+  color: var(--fg-bright);
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 16%, var(--surface-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 35%, transparent);
 }
 .preset-btns { display: flex; gap: 0.4rem; }
 .preset-block select {

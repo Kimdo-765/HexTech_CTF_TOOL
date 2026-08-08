@@ -60,7 +60,10 @@ def test_settings_schema_and_provider():
     view = s.get_settings_view()
     report("default provider is claude", view.get("agent_provider") == "claude")
     report("grok_model default present", bool(view.get("grok_model")))
-    report("agent_providers list", view.get("agent_providers") == ["claude", "grok"])
+    report(
+        "agent_providers list",
+        view.get("agent_providers") == ["claude", "grok", "gpt"],
+    )
 
     try:
         s.update_settings({"agent_provider": "not-a-provider"})
