@@ -699,9 +699,72 @@ def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
             gpt_runtime=res.runtime,
             window_for=lambda: codex_window_snapshot(cached_only=True),
             error_kind=res.error_kind,
+            # The failover diagnosis is only worth producing if it survives
+            # the process that produced it. In-memory it dies with the run.
+            extra={
+                "failover_from": res.failover_from,
+                "failover_diagnosis": res.failover_diagnosis,
+            },
         )
     except Exception:
         pass
+
+
+def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
+    """Attach the failover facts to a stage's public verdict.
+
+    The diagnosis is only worth producing if it outlives the call that made
+    it. It goes on the ledger row for accounting and here for the caller —
+    postjudge's dict is what the retry logic reads, so a failover that is
+    invisible there is a failover nobody can act on.
+    """
+    if turn.failover_diagnosis:
+        out["fallback_used"] = True
+        out["failover_from"] = turn.failover_from
+        out["failover_to"] = turn.provider
+        out["failover_diagnosis"] = turn.failover_diagnosis
+    return out
+
+
+def _judge_model_for(provider: str, requested: str | None) -> str:
+    """Judge model for `provider`, honouring THAT provider's active preset.
+
+    `resolve_judge_model()` runs before the provider is known, against the
+    job's own backend — so a judge routed (or failed over) to another provider
+    arrives holding a model from the wrong family. Coercing that to the
+    target's *global default* is what the code did, and it silently ignored
+    the target's active preset: a GPT preset pinning judge to `gpt-5.6-terra`
+    was never consulted, on either the primary or the failover path.
+
+    So: keep a same-family request as-is, and otherwise resolve the target's
+    own role preset before falling back to its global default.
+    """
+    from modules.agent_provider import (
+        coerce_model_for_provider,
+        default_model_for,
+        is_claude_model_id,
+        is_gpt_model_id,
+        is_grok_model_id,
+    )
+
+    p = str(provider or "").strip().lower()
+    m = str(requested or "").strip()
+    same_family = bool(m) and (
+        (p == "gpt" and is_gpt_model_id(m))
+        or (p == "grok" and is_grok_model_id(m))
+        or (p == "claude" and is_claude_model_id(m))
+    )
+    if same_family:
+        return m
+
+    fallback = default_model_for(p) or (LATEST_JUDGE_MODEL if p == "claude" else "")
+    try:
+        from modules.model_presets import resolve_role_model
+
+        resolved = resolve_role_model("judge", fallback, p)
+    except Exception:
+        resolved = fallback
+    return coerce_model_for_provider(resolved or fallback, p)
 
 
 def _failover_target(provider: str) -> str | None:
@@ -715,6 +778,14 @@ def _failover_target(provider: str) -> str | None:
     from modules.agent_provider import ROLE_TARGET_PROVIDERS, has_provider_auth
 
     current = str(provider or "").strip().lower()
+    # The exclusion has to hold on the SOURCE side too. Iterating the target
+    # set and skipping `current` looks symmetric but is not: a Grok job is not
+    # in that set, so nothing was skipped and Grok fell over to Claude —
+    # leaving the role boundary Grok is supposed to stay behind. v1 keeps Grok
+    # a whole-job provider, which means it neither receives a routed role nor
+    # hands one off.
+    if current not in ROLE_TARGET_PROVIDERS:
+        return None
     for candidate in sorted(ROLE_TARGET_PROVIDERS):
         if candidate == current:
             continue
@@ -776,9 +847,13 @@ def judge_turn(
             provider_override=primary,
         )
     )
-    _record_judge_usage(job_id, stage, res)
 
+    # Ledger writes are deferred to AFTER the failover decision. The diagnosis
+    # is a property of the whole event, and recording the first turn before
+    # the second has run leaves a row that can never carry it — the two turns
+    # are back to back, so nothing meaningful is at risk in the gap.
     if res.error_kind != "policy_refusal":
+        _record_judge_usage(job_id, stage, res)
         _remember_sid(job_id, res.session_id, res.provider or primary)
         return res
 
@@ -787,6 +862,7 @@ def judge_turn(
         res.error_detail = (
             (res.error_detail or "") + " | no failover target configured"
         ).strip(" |")
+        _record_judge_usage(job_id, stage, res)
         return res
 
     alt = _run_async(
@@ -798,19 +874,22 @@ def judge_turn(
             provider_override=target,
         )
     )
-    _record_judge_usage(job_id, stage, alt)
-
     # Turning the recovery into a measurement costs nothing and answers a
     # question this repo has had to guess at before: when the reviewer refused
     # nearly every job, the cause was its OWN prompt scaffolding rather than
     # the artifacts. If the other vendor accepts the identical request, the
     # block was provider-specific, not content-specific.
-    alt.failover_from = res.provider or primary
-    alt.failover_diagnosis = (
+    diagnosis = (
         "provider_specific" if alt.error_kind is None else
         "content_or_prompt" if alt.error_kind == "policy_refusal" else
         "inconclusive"
     )
+    origin = res.provider or primary
+    res.failover_from = alt.failover_from = origin
+    res.failover_diagnosis = alt.failover_diagnosis = diagnosis
+    _record_judge_usage(job_id, stage, res)
+    _record_judge_usage(job_id, stage, alt)
+
     if alt.error_kind is None:
         _remember_sid(job_id, alt.session_id, alt.provider or target)
         return alt
@@ -818,8 +897,6 @@ def judge_turn(
     # The second provider failed too. Keep the ORIGINAL result as the answer —
     # the callers' permissive fallbacks are written against it — but carry the
     # diagnosis so the operator can see both were tried.
-    res.failover_from = res.provider or primary
-    res.failover_diagnosis = alt.failover_diagnosis
     res.error_detail = (
         f"{res.error_detail} | failover to {target}: "
         f"{alt.error_kind}: {alt.error_detail}"
@@ -868,7 +945,7 @@ async def _run_judge_turn(
         if provider_override
         else provider_for_role(job_id, "judge")
     )
-    _jm = coerce_model_for_provider(model or LATEST_JUDGE_MODEL, provider)
+    _jm = _judge_model_for(provider, model)
     res = JudgeTurnResult(provider=provider, model=_jm, session_id=resume_sid)
 
     # ---- OpenAI GPT path --------------------------------------------------
@@ -1282,7 +1359,8 @@ def prejudge_script(
             "[judge] prejudge: no parseable JSON returned — "
             "running anyway (permissive default)"
         )
-        return {"ok": True, "severity": "low", "issues": [], "raw": raw}
+        return _with_failover(
+            {"ok": True, "severity": "low", "issues": [], "raw": raw}, turn)
 
     ok = bool(parsed.get("ok", True))
     sev = str(parsed.get("severity") or ("low" if ok else "med")).lower()
@@ -1394,10 +1472,10 @@ def prejudge_script(
     for it in issues:
         log_fn(f"[judge] prejudge issue: {it}")
 
-    return {
+    return _with_failover({
         "ok": ok, "severity": sev, "issues": issues,
         "flag_likelihood": flag_likelihood, "raw": raw,
-    }
+    }, turn)
 
 
 # ---------------------------------------------------------------------------
@@ -1439,7 +1517,7 @@ def supervise_run_once(
     reason = str(parsed.get("reason") or "")[:400]
 
     log_fn(f"[judge] supervise action={action} reason={reason[:200]}")
-    return {"action": action, "reason": reason, "raw": raw}
+    return _with_failover({"action": action, "reason": reason, "raw": raw}, turn)
 
 
 # ---------------------------------------------------------------------------
@@ -1696,7 +1774,7 @@ def postjudge_run(
     # Last stage — release session bookkeeping for this job_id.
     _forget_sid(job_id)
 
-    return {
+    return _with_failover({
         "verdict": verdict,
         "summary": summary,
         "retry_hint": retry_hint,
@@ -1709,4 +1787,4 @@ def postjudge_run(
         "alternative_paths": alternative_paths,
         "retry_worthwhile": retry_worthwhile,
         "raw": raw,
-    }
+    }, turn)

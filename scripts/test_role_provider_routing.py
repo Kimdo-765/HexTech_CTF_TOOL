@@ -41,6 +41,7 @@ from modules.agent_provider import (  # noqa: E402
     provider_for_job,
     provider_for_role,
     provider_meta_fields,
+    role_provider_intent,
     role_provider_routes,
 )
 from modules.model_presets import CONFIGURABLE_ROLES  # noqa: E402
@@ -238,6 +239,68 @@ check(
     "the scalar agent_provider is preserved, never replaced",
     provider_meta_fields("gpt").get("agent_provider"),
     "gpt",
+)
+
+# ---------------------------------------------------------------------------
+# 5b. turn 0029 D2: meta stores INTENT, not the base-pruned view.
+#     `role_provider_routes` drops routes whose target equals the current base
+#     because they change nothing right now — correct for resolving, wrong for
+#     storing. The base moves under a job when the AUP ladder switches the
+#     whole-job provider, and the pruned entries are exactly the ones that
+#     become meaningful after the switch.
+# ---------------------------------------------------------------------------
+set_settings(agent_provider="gpt", agent_role_providers={"judge": "gpt"})
+check(
+    "the pruned VIEW still drops a no-op route",
+    role_provider_routes("gpt"),
+    {},
+)
+check(
+    "but the stored INTENT keeps it",
+    role_provider_intent(),
+    {"judge": "gpt"},
+)
+check(
+    "so meta carries it even though it changes nothing yet",
+    provider_meta_fields("gpt", include_routes=True).get("agent_role_providers"),
+    {"judge": "gpt"},
+)
+
+# The scenario that made this matter: created under `claude` with a
+# judge->claude route (a no-op then), the job is switched to grok by the AUP
+# ladder. The route must now take effect — under the old pruned storage it had
+# been dropped at create and was unrecoverable.
+set_settings(agent_provider="claude", agent_role_providers={"judge": "claude"})
+aup = make_job(
+    "aup-switch",
+    agent_provider="claude",
+    **{k: v for k, v in provider_meta_fields("claude", include_routes=True).items()
+       if k != "agent_provider"},
+)
+check(
+    "created under claude: judge follows the base",
+    provider_for_role(aup, "judge"),
+    "claude",
+)
+# The ladder rewrites only the scalar (modules/_common.py, other_provider rung).
+_d = DATA / "jobs" / aup
+_m = json.loads((_d / "meta.json").read_text())
+_m["agent_provider"] = "grok"
+(_d / "meta.json").write_text(json.dumps(_m))
+check(
+    "after the switch the base is grok",
+    provider_for_job(aup),
+    "grok",
+)
+check(
+    "and the stored route now MEANS something: judge stays on claude",
+    provider_for_role(aup, "judge"),
+    "claude",
+)
+check(
+    "an unrouted role follows the new base",
+    provider_for_role(aup, "reviewer"),
+    "grok",
 )
 
 # ---------------------------------------------------------------------------

@@ -208,8 +208,14 @@ def record_usage(
     window: dict | None = None,
     error_kind: str | None = None,
     dedupe_key: str | None = None,
+    extra: dict | None = None,
 ) -> dict[str, Any] | None:
     """Append one role invocation to the job's ledger.
+
+    ``extra`` merges caller-specific scalars onto the row (the judge uses it
+    for its failover diagnosis). Kept generic so the ledger does not grow a
+    field per caller, and merged UNDER the reserved keys so a caller cannot
+    overwrite provider/model/cost by accident.
 
     ``cost_usd=None`` is preserved as null. Callers must NOT pass 0.0 to mean
     "the provider did not tell us" — that is what ``cost_basis="none"`` is for,
@@ -258,6 +264,11 @@ def record_usage(
             }
         if error_kind:
             rec["error_kind"] = str(error_kind)
+        for k, v in (extra or {}).items():
+            if k in rec or v is None:
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                rec[str(k)] = v
 
         path = ledger_path(job_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +308,7 @@ def record_usage_by_model(
     window_for=None,
     error_kind: str | None = None,
     dedupe_key: str | None = None,
+    extra: dict | None = None,
 ) -> list[dict[str, Any]]:
     """One row PER MODEL for a turn that may have spanned several.
 
@@ -363,6 +375,7 @@ def record_usage_by_model(
             runtime=gpt_runtime,
             window=window if wants_window else None,
             error_kind=error_kind,
+            extra=extra,
             dedupe_key=(
                 f"{dedupe_key}:{model or ''}" if dedupe_key and len(rows) > 1
                 else dedupe_key

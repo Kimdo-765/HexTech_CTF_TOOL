@@ -333,7 +333,12 @@ def provider_meta_fields(
     # when empty, so pre-hybrid meta stays byte-identical and every existing
     # consumer is unaffected.
     if include_routes:
-        routes = role_provider_routes(p)
+        # INTENT, not the base-pruned view — see role_provider_intent(). The
+        # base can move under a job (the AUP ladder switches the whole-job
+        # provider), and a map pruned against the old base cannot be
+        # re-evaluated against the new one: the pruned entries are exactly the
+        # ones that become meaningful after the switch.
+        routes = role_provider_intent()
         if routes:
             fields["agent_role_providers"] = routes
     if p == "gpt":
@@ -437,6 +442,39 @@ def provider_for_job(job_id: str | None = None) -> str:
         except Exception:
             pass
     return active_provider()
+
+
+def role_provider_intent() -> dict[str, str]:
+    """The operator's per-role routing as stated, independent of any base.
+
+    Distinct from `role_provider_routes`, which additionally drops routes whose
+    target equals the CURRENT base because they change nothing right now. That
+    drop is correct for resolving, and wrong for STORING: the base can move
+    under a job — the AUP ladder switches the whole-job provider mid-run — and
+    a map that was pruned against the old base cannot be re-evaluated against
+    the new one. The pruned entries are exactly the ones that become
+    meaningful after the switch.
+
+    So meta stores intent and resolution applies it. Nothing has to be
+    recomputed when the base moves, and live Settings are still never
+    consulted for a job that already exists.
+    """
+    if _sio_get_agent_role_providers is not None:
+        try:
+            raw = dict(_sio_get_agent_role_providers())
+        except Exception:
+            raw = {}
+    else:  # pragma: no cover — stale worker process
+        value = get_setting("agent_role_providers")
+        raw = dict(value) if isinstance(value, dict) else {}
+
+    out: dict[str, str] = {}
+    for role, provider in raw.items():
+        r = str(role or "").strip().lower()
+        p = str(provider or "").strip().lower()
+        if r in ROLE_OVERRIDABLE and p in ROLE_TARGET_PROVIDERS:
+            out[r] = p
+    return out
 
 
 def role_provider_routes(job_provider: str | None = None) -> dict[str, str]:

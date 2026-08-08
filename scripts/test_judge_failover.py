@@ -238,10 +238,21 @@ check("the result says why there was no retry", "no failover target" in out.erro
 check("and it is not diagnosed", out.failover_diagnosis, None)
 AP.has_provider_auth = lambda p=None: True
 
-check("grok is never a failover target", J._failover_target("claude") != "grok", True)
 check("claude fails over to gpt", J._failover_target("claude"), "gpt")
 check("gpt fails over to claude", J._failover_target("gpt"), "claude")
-check("a provider with no other option gets None", J._failover_target("gpt") != "gpt", True)
+
+# turn 0029 D4: the Grok exclusion has to hold on the SOURCE side too.
+# Iterating the target set and skipping `current` looks symmetric but is not —
+# a Grok job is not IN that set, so nothing was skipped and Grok failed over
+# to Claude, leaving the role boundary it is supposed to stay behind.
+#
+# The assertion this replaces was written as `!= "gpt"` under a label that
+# claimed to check for None. It checked something else and would have passed
+# on any wrong answer but one.
+check("grok never fails over at all (whole-job in v1)", J._failover_target("grok"), None)
+check("an unknown provider has no target", J._failover_target("gemini"), None)
+check("an empty provider has no target", J._failover_target(""), None)
+check("grok is never a TARGET either", "grok" in AP.ROLE_TARGET_PROVIDERS, False)
 
 # ---------------------------------------------------------------------------
 # 6. BOTH turns are billed. Hiding the refused one makes a failover look free.
@@ -270,6 +281,96 @@ check(
     "the two providers are billed separately",
     sorted(UL.aggregate_usage(jid)["providers"]),
     ["claude", "gpt"],
+)
+
+# ---------------------------------------------------------------------------
+# 7. turn 0029 D1 — the diagnosis has to OUTLIVE the call that made it.
+#    In memory it dies with the run; it is only useful if the ledger and the
+#    caller's verdict carry it.
+# ---------------------------------------------------------------------------
+CALLS.clear()
+jid = "fo-serialize"
+jd = make_job(jid, agent_provider="claude")
+(jd / "exploit.py").write_text("print(1)\n")
+scripted({
+    "claude": {"error_kind": "policy_refusal", "error_detail": "blocked"},
+    "gpt": {"text": '{"ok": true, "severity": "low", "flag_likelihood": 0.9}',
+            "sid": "g7"},
+})
+verdict = J.prejudge_script(jd, "exploit.py", None, lambda *_: None, job_id=jid)
+check("the public verdict says a fallback was used", verdict.get("fallback_used"), True)
+check("...naming where it came from", verdict.get("failover_from"), "claude")
+check("...and where it went", verdict.get("failover_to"), "gpt")
+check("...with the diagnosis", verdict.get("failover_diagnosis"), "provider_specific")
+check("the verdict itself still works", verdict.get("ok"), True)
+
+lrows = UL.read_usage(jid)
+check("both turns on the ledger", len(lrows), 2)
+check(
+    "the diagnosis is on the ledger row too",
+    [r.get("failover_diagnosis") for r in lrows],
+    ["provider_specific", "provider_specific"],
+)
+check(
+    "with its origin",
+    {r.get("failover_from") for r in lrows},
+    {"claude"},
+)
+
+# A turn with no failover must not grow the keys.
+CALLS.clear()
+jid = "fo-none"
+jd2 = make_job(jid, agent_provider="claude")
+(jd2 / "exploit.py").write_text("print(1)\n")
+scripted({"claude": {"text": '{"ok": true, "severity": "low"}', "sid": "c9"}})
+plain = J.prejudge_script(jd2, "exploit.py", None, lambda *_: None, job_id=jid)
+check("no failover -> no fallback_used key", "fallback_used" in plain, False)
+check("no failover -> no diagnosis key", "failover_diagnosis" in plain, False)
+check(
+    "no failover -> the ledger row has no diagnosis either",
+    "failover_diagnosis" in (UL.read_usage(jid)[0] if UL.read_usage(jid) else {}),
+    False,
+)
+
+# ---------------------------------------------------------------------------
+# 8. turn 0029 D3 — a routed/failover provider uses ITS OWN judge preset.
+#    resolve_judge_model runs before the provider is known, so a routed judge
+#    arrives holding a model from the wrong family; coercing that to the
+#    target's GLOBAL default silently ignored the target's active preset.
+# ---------------------------------------------------------------------------
+PRESETS.write_text(json.dumps({
+    "version": 2,
+    "providers": {
+        "gpt": {"active": "p", "presets": {"p": {"judge": "gpt-5.6-terra"}}},
+        "claude": {"active": "p", "presets": {"p": {"judge": "claude-opus-4-8"}}},
+    },
+}))
+SETTINGS.write_text(json.dumps({"agent_provider": "claude", "gpt_model": "gpt-global-default"}))
+check(
+    "a wrong-family request resolves to the TARGET's preset, not its default",
+    J._judge_model_for("gpt", "claude-sonnet-4-6"),
+    "gpt-5.6-terra",
+)
+check(
+    "no request at all also resolves to the target's preset",
+    J._judge_model_for("gpt", None),
+    "gpt-5.6-terra",
+)
+check(
+    "a same-family request is honoured as given",
+    J._judge_model_for("gpt", "gpt-5.6-luna"),
+    "gpt-5.6-luna",
+)
+check(
+    "claude resolves against its own preset",
+    J._judge_model_for("claude", None),
+    "claude-opus-4-8",
+)
+PRESETS.write_text(json.dumps({"version": 2, "providers": {}}))
+check(
+    "with no preset it falls back to the provider default",
+    J._judge_model_for("gpt", "claude-sonnet-4-6"),
+    "gpt-global-default",
 )
 
 J._run_judge_turn = _orig_turn
