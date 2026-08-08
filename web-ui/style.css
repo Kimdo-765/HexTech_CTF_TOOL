@@ -2005,3 +2005,13 @@ body.modal-open { overflow: hidden; }
 /* A guessed job id must not read the same as a labelled one — the operator is
    about to delete something on the strength of it. */
 .c-guess { color: var(--yellow-bright); opacity: 0.9; }
+
+/* Per-role provider overrides: four short selects, one row on a wide screen
+   and wrapping on a narrow one rather than a fixed column count. */
+.role-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+.role-provider-grid label { margin: 0; }

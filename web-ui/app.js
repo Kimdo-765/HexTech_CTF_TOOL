@@ -1076,6 +1076,24 @@ function _setModelField(f, name, customName, catalog, value) {
   }
 }
 
+// Mirrors modules/agent_provider.py: ROLE_OVERRIDABLE and ROLE_TARGET_PROVIDERS.
+// Grok is deliberately absent from the targets — it stays a whole-job backend,
+// and the server drops a role pointed at it rather than half-switching.
+const ROLE_OVERRIDABLE = ["judge", "reviewer", "report", "monitor"];
+const ROLE_TARGETS = ["claude", "gpt"];
+
+function renderRoleProviderStatus(form) {
+  const el = document.getElementById("role-provider-status");
+  if (!el) return;
+  const base = form.querySelector("[name=agent_provider]:checked")?.value || "claude";
+  const routed = ROLE_OVERRIDABLE
+    .map((r) => [r, String(form.querySelector(`[name=role_provider_${r}]`)?.value || "")])
+    .filter(([, v]) => v && v !== base);
+  el.textContent = routed.length
+    ? `${routed.map(([r, v]) => `${r} → ${v}`).join(" · ")}  (job runs on ${base})`
+    : `every role follows the job provider (${base}) — no hybrid routing`;
+}
+
 async function loadSettings() {
   const res = await fetch(`${API}/settings`);
   if (!res.ok) return;
@@ -1140,6 +1158,20 @@ async function loadSettings() {
   // the legacy boolean — entering it by inference would leave the operator
   // believing a gate is live when it gates nothing — so fall back to the
   // boolean only for off/enforce, exactly as get_judge_mode() does server-side.
+  // Per-role provider overrides. Absent key means "no routing", which is not
+  // the same as an empty map — both render as "follow job provider", but only
+  // the map is ever written back, so a job created while this was empty keeps
+  // byte-identical meta.
+  const roleRoutes = (s.agent_role_providers && typeof s.agent_role_providers === "object")
+    ? s.agent_role_providers : {};
+  for (const role of ROLE_OVERRIDABLE) {
+    const sel = f.querySelector(`[name=role_provider_${role}]`);
+    if (!sel) continue;
+    const want = String(roleRoutes[role] || "").toLowerCase();
+    sel.value = ROLE_TARGETS.includes(want) ? want : "";
+  }
+  renderRoleProviderStatus(f);
+
   const modeSel = f.querySelector("[name=judge_mode]");
   if (modeSel) {
     const stored = String(s.judge_mode || "").toLowerCase();
@@ -1201,6 +1233,12 @@ document.getElementById("settings-form")?.addEventListener("change", (e) => {
   if (t && t.name === "agent_provider") {
     setProviderUI(t.value);
     renderProviderAuthUI(t.value, {unsaved: true});
+    // The status line reads "judge → claude (job runs on gpt)", so it has to
+    // be recomputed when either side of that sentence changes.
+    renderRoleProviderStatus(e.currentTarget);
+  }
+  if (t && t.name && t.name.startsWith("role_provider_")) {
+    renderRoleProviderStatus(e.currentTarget);
   }
   if (t && t.name === "gpt_runtime") {
     const selected = document.querySelector(
@@ -1231,6 +1269,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       continue;
     }
     if (k === "enable_exploit_library_hint") continue;  // handled explicitly below
+    if (k.startsWith("role_provider_")) continue;  // assembled into one map below
     if (v === "") {
       payload[k] = null;  // null = clear the override
       continue;
@@ -1252,6 +1291,16 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   // contradiction the next person to read it has to resolve.
   const _mode = String(payload.judge_mode || "enforce").toLowerCase();
   payload.enable_judge = _mode === "enforce";
+
+  // The four selects are ONE setting. Sent as a whole map every time, so
+  // clearing a role is a real clear rather than a key the server keeps from a
+  // previous save. "follow job provider" is expressed by omitting the role.
+  const routes = {};
+  for (const role of ROLE_OVERRIDABLE) {
+    const v = String(e.target.querySelector(`[name=role_provider_${role}]`)?.value || "").toLowerCase();
+    if (ROLE_TARGETS.includes(v)) routes[role] = v;
+  }
+  payload.agent_role_providers = routes;
   payload.enable_exploit_library_hint = !!e.target.querySelector("[name=enable_exploit_library_hint]").checked;
   // Radio always present; default claude if somehow missing.
   if (!payload.agent_provider) {

@@ -585,6 +585,51 @@
             </label>
           </div>
           <small id="provider-status" style="color:var(--fg-muted)"></small>
+
+          <h3 class="provider-block-title" style="margin-top:1rem">Per-role override (hybrid)</h3>
+          <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.5rem">
+            Run a single role on a different backend from the one above — the point of
+            hybrid operation (e.g. Codex drives the job, Claude judges it). Snapshotted
+            into each job at <strong>create</strong> time, so a change here applies to the
+            <strong>next</strong> job and never re-routes one already running.
+            Grok is not a target: it stays a whole-job backend, and a role pointed at it
+            falls back to the job's own provider rather than half-switching.
+          </p>
+          <div class="role-provider-grid">
+            <label>
+              Judge
+              <select name="role_provider_judge">
+                <option value="">follow job provider</option>
+                <option value="claude">Claude</option>
+                <option value="gpt">Codex / GPT</option>
+              </select>
+            </label>
+            <label>
+              Reviewer
+              <select name="role_provider_reviewer">
+                <option value="">follow job provider</option>
+                <option value="claude">Claude</option>
+                <option value="gpt">Codex / GPT</option>
+              </select>
+            </label>
+            <label>
+              Report
+              <select name="role_provider_report">
+                <option value="">follow job provider</option>
+                <option value="claude">Claude</option>
+                <option value="gpt">Codex / GPT</option>
+              </select>
+            </label>
+            <label>
+              Monitor
+              <select name="role_provider_monitor">
+                <option value="">follow job provider</option>
+                <option value="claude">Claude</option>
+                <option value="gpt">Codex / GPT</option>
+              </select>
+            </label>
+          </div>
+          <small id="role-provider-status" style="color:var(--fg-muted)"></small>
         </fieldset>
 
         <div id="settings-claude-block" class="provider-settings-block">
