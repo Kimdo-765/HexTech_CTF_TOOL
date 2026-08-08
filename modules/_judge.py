@@ -765,6 +765,48 @@ def _failover_target(provider: str) -> str | None:
     return failover_target(provider)
 
 
+def _attempt(
+    user_prompt: str,
+    *,
+    cwd: Path,
+    resume_sid: str | None,
+    model: str | None,
+    provider: str,
+) -> JudgeTurnResult:
+    """One judge attempt that NEVER raises.
+
+    The exception boundary belongs HERE, at the attempt, not around the public
+    stage function — for three reasons that only show up at this level:
+
+      * All three stages go through it, so supervise and postjudge stop
+        propagating and stop leaving zero ledger rows.
+      * The provider is already known. A catch further out has to re-guess it,
+        and in a failover it guesses WRONG: an exception from the alternate
+        was attributed to the provider the primary ran on.
+      * The primary's row is written after the failover decision, so an
+        alternate that raised took the primary's refusal row down with it.
+        The primary's result now survives its partner's failure.
+    """
+    try:
+        return _run_async(
+            _run_judge_turn(
+                user_prompt,
+                cwd=cwd,
+                resume_sid=resume_sid,
+                model=model,
+                provider_override=provider,
+            )
+        )
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return JudgeTurnResult(
+            provider=provider,
+            session_id=resume_sid,
+            error_kind=_classify(detail, "transport_error"),
+            error_detail=detail[:500],
+        )
+
+
 def judge_turn(
     user_prompt: str,
     *,
@@ -806,14 +848,9 @@ def judge_turn(
     # only means something to the vendor that issued it.
     resume_sid = _recall_sid(job_id, primary) if resume else None
 
-    res = _run_async(
-        _run_judge_turn(
-            user_prompt,
-            cwd=cwd,
-            resume_sid=resume_sid,
-            model=model,
-            provider_override=primary,
-        )
+    res = _attempt(
+        user_prompt, cwd=cwd, resume_sid=resume_sid,
+        model=model, provider=primary,
     )
 
     # Ledger writes are deferred to AFTER the failover decision. The diagnosis
@@ -833,14 +870,11 @@ def judge_turn(
         _record_judge_usage(job_id, stage, res)
         return res
 
-    alt = _run_async(
-        _run_judge_turn(
-            user_prompt,
-            cwd=cwd,
-            resume_sid=None,   # never resume across the provider boundary
-            model=None,        # let the target's own default/preset decide
-            provider_override=target,
-        )
+    alt = _attempt(
+        user_prompt, cwd=cwd,
+        resume_sid=None,   # never resume across the provider boundary
+        model=None,        # let the target's own default/preset decide
+        provider=target,
     )
     # Turning the recovery into a measurement costs nothing and answers a
     # question this repo has had to guess at before: when the reviewer refused
@@ -1099,20 +1133,35 @@ def _run_async(coro):
     """
     try:
         return asyncio.run(coro)
-    except RuntimeError:
+    except RuntimeError as exc:
+        # ONLY the already-running-loop case falls back. Catching every
+        # RuntimeError meant a RuntimeError raised BY the coroutine was read as
+        # a loop conflict, the already-awaited coroutine was awaited a second
+        # time ("cannot reuse already awaited coroutine"), and the caller got
+        # the `("", None)` default instead of the real failure — a judge that
+        # raised RuntimeError looked like a judge that answered nothing.
+        if "running event loop" not in str(exc).lower():
+            raise
         result: dict[str, Any] = {}
+        error: dict[str, BaseException] = {}
 
         def _run():
             loop = asyncio.new_event_loop()
             try:
                 result["v"] = loop.run_until_complete(coro)
+            except BaseException as inner:      # noqa: BLE001 — re-raised below
+                error["e"] = inner
             finally:
                 loop.close()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         t.join()
-        return result.get("v", ("", None))
+        if "e" in error:
+            # Surfacing it lets the attempt boundary classify and bill it;
+            # swallowing it here produced a silent empty answer.
+            raise error["e"]
+        return result["v"]
 
 
 # ---------------------------------------------------------------------------

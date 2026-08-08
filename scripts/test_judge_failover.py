@@ -259,6 +259,70 @@ check("an empty provider has no target", J._failover_target(""), None)
 check("grok is never a TARGET either", "grok" in AP.ROLE_TARGET_PROVIDERS, False)
 
 # ---------------------------------------------------------------------------
+# 5b. turn 0044 D4 — the exception boundary belongs at the ATTEMPT.
+#     Catching further out meant supervise/postjudge propagated with zero
+#     ledger rows, and in a failover an exception from the ALTERNATE was
+#     attributed to the primary's provider while the primary's own refusal row
+#     was lost with it.
+# ---------------------------------------------------------------------------
+def raising(outcomes: dict):
+    """Provider -> either a spec dict or an exception to raise."""
+
+    async def _fake(user_prompt, *, cwd, resume_sid, model=None, provider_override=None):
+        provider = provider_override or "claude"
+        CALLS.append({"provider": provider, "resume_sid": resume_sid, "model": model})
+        spec = outcomes.get(provider)
+        if isinstance(spec, BaseException):
+            raise spec
+        spec = dict(spec or {})
+        return J.JudgeTurnResult(
+            text=spec.get("text", ""), session_id=spec.get("sid"),
+            provider=provider, model=f"{provider}-model",
+            error_kind=spec.get("error_kind"),
+            error_detail=spec.get("error_detail", ""),
+            tokens={"input_tokens": 5},
+        )
+
+    J._run_judge_turn = _fake
+
+
+# Every stage survives a raising attempt, and bills it.
+for stage in ("prejudge", "supervise", "postjudge"):
+    CALLS.clear()
+    jid = f"raise-{stage}"
+    make_job(jid, agent_provider="claude")
+    raising({"claude": RuntimeError("wrapper exploded")})
+    out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage=stage, resume=False)
+    check(f"{stage}: judge_turn does not propagate", isinstance(out, J.JudgeTurnResult), True)
+    check(f"{stage}: the failure is classified", out.error_kind, "transport_error")
+    check(f"{stage}: the provider is the one that was TRIED", out.provider, "claude")
+    rows = UL.read_usage(jid)
+    check(f"{stage}: the dead attempt is billed", len(rows), 1)
+    check(f"{stage}: under its own stage", rows[0].get("stage") if rows else None, stage)
+
+# A raising ALTERNATE must not take the primary's row with it, and must not be
+# attributed to the primary's provider.
+CALLS.clear()
+jid = "raise-alt"
+make_job(jid, agent_provider="claude")
+raising({
+    "claude": {"error_kind": "policy_refusal", "error_detail": "blocked"},
+    "gpt": RuntimeError("alternate exploded"),
+})
+out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
+arows = UL.read_usage(jid)
+check("both attempts are billed even when the alternate raised", len(arows), 2)
+check("...the primary's refusal row survives",
+      [r.get("provider") for r in arows], ["claude", "gpt"])
+check("...the primary keeps its own kind",
+      arows[0].get("error_kind") if arows else None, "policy_refusal")
+check("...and the exception is attributed to the ALTERNATE",
+      arows[1].get("error_kind") if len(arows) > 1 else None, "transport_error")
+check("the caller still sees the original refusal", out.error_kind, "policy_refusal")
+check("...diagnosed as inconclusive, not provider-specific",
+      out.failover_diagnosis, "inconclusive")
+
+# ---------------------------------------------------------------------------
 # 6. BOTH turns are billed. Hiding the refused one makes a failover look free.
 # ---------------------------------------------------------------------------
 CALLS.clear()
