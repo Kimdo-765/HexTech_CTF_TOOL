@@ -164,6 +164,17 @@ def _judge_mode() -> str:
         return "enforce"
 
 
+def _judge_gates(mode: str) -> bool:
+    """Does THIS mode let the judge's verdicts gate the run?
+
+    Takes the mode rather than reading it, so a caller that needs both the
+    mode and the gate answers them from ONE snapshot. Reading twice lets a
+    settings change land in between and produce a pair that never existed —
+    enforce's gating together with shadow's recording, in one attempt.
+    """
+    return str(mode) == "enforce"
+
+
 def _judge_enabled() -> bool:
     """True when the judge's verdicts actually GATE the run.
 
@@ -172,7 +183,7 @@ def _judge_enabled() -> bool:
     exactly as it does with the judge off. That identity is the whole basis
     for comparing a shadow job against the recorded outcome.
     """
-    return _judge_mode() == "enforce"
+    return _judge_gates(_judge_mode())
 
 
 def _wait_with_supervise(
@@ -642,8 +653,11 @@ def attempt_sandbox_run(
     # via job DELETE rmtree on /data/jobs/<id>/.
     (work_tree / "tmp").mkdir(parents=True, exist_ok=True)
 
-    enable_judge = _judge_enabled()
+    # ONE read, both answers derived from it. Two reads let a settings change
+    # land between them, and the pair that comes out never existed as a
+    # configuration: enforce's gating with shadow's recording, same attempt.
     judge_mode = _judge_mode()
+    enable_judge = _judge_gates(judge_mode)
 
     # ---------- Stage 0: target reachability probe ----------
     # If the chal is remote-targeted, do a single TCP connect ping
@@ -866,6 +880,23 @@ def attempt_sandbox_run(
         (work_dir / f"{script_filename}.stderr").write_text(res["stderr"])
 
         # ---------- Stage 3: postjudge ----------
+        # Shadow recording sits OUTSIDE the enforce gate. It used to be nested
+        # under `if enable_judge:`, which is False in shadow — so the live
+        # path recorded a prejudge input and then nothing, ever. The suite
+        # missed it because every functional check called judge_shadow
+        # directly instead of going through this function.
+        if judge_mode == "shadow":
+            from modules import judge_shadow
+
+            judge_shadow.record_input(
+                job_id, "postjudge",
+                {
+                    "script_rel": script_filename,
+                    "exit_code": res["exit_code"],
+                    "stdout": res["stdout"],
+                    "stderr": res["stderr"],
+                },
+            )
         if enable_judge:
             extra = ""
             if target_note:
@@ -895,25 +926,6 @@ def attempt_sandbox_run(
                 for i, h in enumerate(prior_hints, 1):
                     if h:
                         extra += f"  #{i}: {h[:300]}\n"
-            if judge_mode == "shadow":
-                from modules import judge_shadow
-
-                judge_shadow.record_input(
-                    job_id, "postjudge",
-                    {
-                        "script_rel": script_filename,
-                        "exit_code": res["exit_code"],
-                        "stdout": res["stdout"],
-                        "stderr": res["stderr"],
-                    },
-                )
-                # Out of band, and AFTER the run: the sandbox has finished, so
-                # nothing the judge does now can lengthen it or move the
-                # supervise watchdog it would otherwise be racing.
-                try:
-                    judge_shadow.evaluate(job_id, work_dir, log_fn)
-                except Exception as _sh:
-                    log_fn(f"[judge] shadow evaluation skipped: {_sh}")
             try:
                 post = _judge.postjudge_run(
                     work_dir,

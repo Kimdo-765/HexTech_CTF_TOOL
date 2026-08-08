@@ -72,7 +72,9 @@ if _missing("claude_agent_sdk"):
     _sdk = types.ModuleType("claude_agent_sdk")
     for _n in ("AssistantMessage", "ClaudeAgentOptions", "ResultMessage",
                "SystemMessage", "TextBlock", "ClaudeSDKClient", "UserMessage"):
-        setattr(_sdk, _n, type(_n, (), {}))
+        # kwargs-accepting: the real ClaudeAgentOptions is built with keywords,
+        # and a stub that rejects them fails BEFORE the seam under test.
+        setattr(_sdk, _n, type(_n, (), {"__init__": lambda s, **k: None}))
 
     async def _query(*a, **k):  # pragma: no cover
         if False:
@@ -135,6 +137,7 @@ check(
 # 2. Shadow gates NOTHING. The runner's enable flag stays False.
 # ---------------------------------------------------------------------------
 import modules._runner as R  # noqa: E402
+from modules import _judge as _judge_mod  # noqa: E402
 
 for cfg, mode, gates in (
     ({"enable_judge": False}, "off", False),
@@ -185,13 +188,13 @@ def fake_runner(stage, inputs):
     return {"action": "continue"} if stage == "supervise" else {"verdict": "unknown"}
 
 
-n = SH.evaluate(jid2, DATA / "jobs" / jid2, lambda *_: None, runner=fake_runner)
+n = SH.evaluate(jid2, DATA / "jobs" / jid2, runner=fake_runner)
 check("every recording is evaluated", n, 4)
 check("...including each supervise firing",
       [s for s, _ in seen].count("supervise"), 3)
 check("nothing is left pending", SH.pending_inputs(jid2), [])
 check("a second pass re-evaluates nothing",
-      SH.evaluate(jid2, DATA / "jobs" / jid2, lambda *_: None, runner=fake_runner), 0)
+      SH.evaluate(jid2, DATA / "jobs" / jid2, runner=fake_runner), 0)
 
 # PARTIAL evaluation is the case stage-only matching gets wrong: with one
 # supervise verdict already on file, the other two firings are still pending.
@@ -205,7 +208,7 @@ check("one verdict does not clear three firings",
 check("...and the ones left are the LATER firings",
       [r["inputs"]["stall_seconds"] for r in SH.pending_inputs(jid2b)], [60, 90])
 seen2: list[int] = []
-SH.evaluate(jid2b, DATA / "jobs" / jid2b, lambda *_: None,
+SH.evaluate(jid2b, DATA / "jobs" / jid2b,
             runner=lambda st, inp: seen2.append(inp.get("stall_seconds")) or {"action": "continue"})
 check("evaluation resumes where it left off", seen2, [60, 90])
 
@@ -220,7 +223,7 @@ def boom(stage, inputs):
 
 
 check("an exploding evaluator still consumes the entry",
-      SH.evaluate(jid3, DATA / "jobs" / jid3, lambda *_: None, runner=boom), 1)
+      SH.evaluate(jid3, DATA / "jobs" / jid3, runner=boom), 1)
 check("...and records why",
       "exploded" in json.dumps(SH.read_shadow(jid3)[-1].get("verdict") or {}), True)
 check("...leaving nothing pending", SH.pending_inputs(jid3), [])
@@ -286,10 +289,17 @@ check("...and specifically not that one",
       any("shadow_prose_flag" in f for f in after), False)
 
 # ---------------------------------------------------------------------------
-# 7. The runner WIRING. Driving auto_run needs a live Docker daemon, so this
-#    is a structural assertion — weaker than execution, and labelled as such.
-#    Without it the whole shadow branch could be deleted and every test above
-#    would still pass, because they exercise judge_shadow directly.
+# 7. The runner WIRING — structurally.
+#
+#    This section used to be the ONLY thing standing between the shadow branch
+#    and deletion, and it was labelled "weaker than execution" while being
+#    trusted like execution. It missed a fatal defect: the postjudge shadow
+#    block sat inside `if enable_judge:`, which is False in shadow, so the live
+#    path recorded one prejudge input and then nothing, forever. Every check
+#    above passed because they call judge_shadow directly.
+#
+#    So the structural checks are now BOUNDS on the branch (what may enclose
+#    it, what it may call) and section 8 drives the real function.
 # ---------------------------------------------------------------------------
 import ast  # noqa: E402
 
@@ -297,75 +307,246 @@ _runner_src = (ROOT / "modules" / "_runner.py").read_text()
 _runner_ast = ast.parse(_runner_src)
 
 
-def _calls_in(tree, dotted: str) -> list[int]:
-    out = []
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-            if n.func.attr == dotted.split(".")[-1] and isinstance(n.func.value, ast.Name):
-                if n.func.value.id == dotted.split(".")[0]:
-                    out.append(n.lineno)
+def _is_shadow_test(node) -> bool:
+    """`judge_mode == "shadow"` — the real test, not the substring.
+
+    Requiring ast.Eq also rejects an inverted guard; `if False:` leaves the
+    text in the file but produces no Compare at all.
+    """
+    for sub in ast.walk(node):
+        if not (isinstance(sub, ast.Compare) and isinstance(sub.left, ast.Name)):
+            continue
+        if sub.left.id != "judge_mode":
+            continue
+        for op, c in zip(sub.ops, sub.comparators):
+            if isinstance(op, ast.Eq) and isinstance(c, ast.Constant) and c.value == "shadow":
+                return True
+    return False
+
+
+def _names_in(node) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _callee(func) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        base = _callee(func.value)
+        return f"{base}.{func.attr}" if base else func.attr
+    return "<expr>"
+
+
+# Parent links, so a block can be asked what encloses it.
+_parent = {}
+for _n in ast.walk(_runner_ast):
+    for _c in ast.iter_child_nodes(_n):
+        _parent[id(_c)] = _n
+
+
+def _enclosing_if_tests(node) -> list[ast.expr]:
+    out, cur = [], _parent.get(id(node))
+    while cur is not None:
+        if isinstance(cur, ast.If):
+            out.append(cur.test)
+        cur = _parent.get(id(cur))
     return out
 
 
-_records = _calls_in(_runner_ast, "judge_shadow.record_input")
-_evals = _calls_in(_runner_ast, "judge_shadow.evaluate")
-check("the runner records shadow inputs", len(_records) >= 2, True)
-check("the runner evaluates out of band", len(_evals), 1)
-check(
-    "evaluation comes AFTER the last input is recorded",
-    _evals[0] > max(_records) if _evals and _records else False,
-    True,
-)
-# Substring checks cannot tell a live branch from a dead one: replacing the
-# guard with `if False:` leaves the string in the file. Walk the tree and
-# require each call to sit under a test that actually compares judge_mode.
-def _guarded_by_shadow_mode(tree, attr: str) -> list[bool]:
-    """One entry per `judge_shadow.<attr>(...)` call: does SOME enclosing `if`
-    actually test `judge_mode == "shadow"`?
+_shadow_blocks = [n for n in ast.walk(_runner_ast)
+                  if isinstance(n, ast.If) and _is_shadow_test(n.test)]
+_shadow_blocks.sort(key=lambda n: n.lineno)
 
-    Per call site, not per (If, call) pair — a call sits inside several nested
-    conditionals, and an unrelated outer one (`if enable_judge:`) says nothing
-    about whether the shadow guard is live.
-    """
+check("the runner has exactly two shadow blocks", len(_shadow_blocks), 2)
 
-    def _is_shadow_test(node) -> bool:
-        for sub in ast.walk(node):
-            if not (isinstance(sub, ast.Compare) and isinstance(sub.left, ast.Name)):
-                continue
-            if sub.left.id != "judge_mode":
-                continue
-            for op, c in zip(sub.ops, sub.comparators):
-                if (isinstance(op, ast.Eq)
-                        and isinstance(c, ast.Constant) and c.value == "shadow"):
-                    return True
-        return False
+# THE D1 CLASS. `enable_judge` is False in shadow, so a shadow block nested
+# under it — or guarded by it — is dead code that a "is the guard live?" check
+# reads as healthy.
+_enclosed_by_gate = [
+    any("enable_judge" in _names_in(t) for t in _enclosing_if_tests(b))
+    or "enable_judge" in _names_in(b.test)
+    for b in _shadow_blocks
+]
+check("no shadow block sits under the enforce gate", _enclosed_by_gate,
+      [False] * len(_shadow_blocks))
 
-    def _calls(nodes) -> list:
-        out = []
-        for node in nodes:
-            for sub in ast.walk(node):
-                if (isinstance(sub, ast.Call)
-                        and isinstance(sub.func, ast.Attribute)
-                        and sub.func.attr == attr
-                        and isinstance(sub.func.value, ast.Name)
-                        and sub.func.value.id == "judge_shadow"):
-                    out.append(sub)
-        return out
+# What a shadow block may call. Recording is a file append; anything else here
+# runs in the auto_run cycle, which is the wall-clock change §8.2 forbids.
+# `evaluate` is deliberately absent: the run path never evaluates.
+_ALLOWED_IN_BLOCK = {"judge_shadow.record_input"}
+_block_callees = [{_callee(c.func) for s in b.body for c in ast.walk(s)
+                   if isinstance(c, ast.Call)} for b in _shadow_blocks]
+check("every shadow block only records", _block_callees,
+      [_ALLOWED_IN_BLOCK] * len(_shadow_blocks))
+check("nothing in the run path evaluates",
+      any("judge_shadow.evaluate" in c for c in _block_callees), False)
+check("...anywhere in _runner.py, guarded or not",
+      "judge_shadow.evaluate" in {_callee(c.func) for c in ast.walk(_runner_ast)
+                                  if isinstance(c, ast.Call)},
+      False)
 
-    guarded = set()
-    for node in ast.walk(tree):
-        # `node.body` only: the same call in an `else` runs when NOT shadow.
-        if isinstance(node, ast.If) and _is_shadow_test(node.test):
-            guarded.update(id(c) for c in _calls(node.body))
-    return [id(c) in guarded for c in _calls([tree])]
+# The mode snapshot must be taken ONCE. Two reads let a settings change land
+# between them and yield a pair that never existed as a configuration.
+check("the mode is read once per attempt",
+      _runner_src.count("judge_mode = _judge_mode()"), 1)
+check("...and the gate is derived from that snapshot, not re-read",
+      _runner_src.count("enable_judge = _judge_gates(judge_mode)"), 1)
+check("...with no second _judge_enabled() read in the run path",
+      "enable_judge = _judge_enabled()" in _runner_src, False)
+
+# ---------------------------------------------------------------------------
+# 8. THE PATH. Everything above tests judge_shadow, or the shape of _runner.py.
+#    Neither noticed that the live path recorded nothing. So drive the public
+#    `attempt_sandbox_run()` with doubles and read what actually landed.
+#
+#    Three doubles, each load-bearing:
+#      * the sandbox, so no container is needed;
+#      * `Path`, because the job dir is hardcoded to /data;
+#      * every model-client seam, which RAISES — that is the review gate
+#        "shadow 라이브 구간에서 클라이언트 생성 시 raise 하는 test double",
+#        and it is proved non-vacuous below rather than assumed.
+# ---------------------------------------------------------------------------
+_real_Path = R.Path
 
 
-_guards = _guarded_by_shadow_mode(_runner_ast, "record_input")
-check("every shadow recording is guarded", len(_guards) >= 2, True)
-check("...by a live judge_mode == 'shadow' test, not a dead branch",
-      all(_guards), True)
-check("the evaluation call is guarded the same way",
-      all(_guarded_by_shadow_mode(_runner_ast, "evaluate")), True)
+def _tmp_path(p="", *a):
+    s = str(p)
+    if s.startswith("/data/jobs/"):
+        s = str(DATA / "jobs" / s[len("/data/jobs/"):])
+    return _real_Path(s, *a)
+
+
+class ModelCallInLiveWindow(RuntimeError):
+    """Raised the instant anything builds a model client."""
+
+
+def _poison(*a, **k):
+    raise ModelCallInLiveWindow("the live window built a model client")
+
+
+_SEAMS = [("modules._judge", "query"), ("modules.gpt_agent", "GptAgentClient"),
+          ("modules.grok_acp", "GrokACPClient")]
+_seam_saved = []
+for _mn, _at in _SEAMS:
+    try:
+        _m = __import__(_mn, fromlist=["_"])
+    except Exception:
+        continue
+    if hasattr(_m, _at):
+        _seam_saved.append((_m, _at, getattr(_m, _at)))
+        setattr(_m, _at, _poison)
+check("every model-client seam is poisoned", len(_seam_saved), 3)
+
+# NON-VACUITY: if a judge turn can complete without tripping the poison, the
+# clean live window below proves nothing at all.
+_probe_dir = DATA / "jobs" / "seamprobe"
+_probe_dir.mkdir(parents=True, exist_ok=True)
+_tripped = []
+for _prov in ("claude", "gpt", "grok"):
+    try:
+        _r = _judge_mod._run_async(_judge_mod._run_judge_turn(
+            "probe", cwd=_probe_dir, resume_sid=None, provider_override=_prov))
+        _tripped.append("ModelCallInLiveWindow" in str(getattr(_r, "error_detail", "") or ""))
+    except ModelCallInLiveWindow:
+        _tripped.append(True)
+    except Exception:
+        _tripped.append(False)
+check("...and the poison is on all three provider paths", _tripped, [True] * 3)
+
+
+def _drive(job_id: str, *, mode: str, exit_code: int = 0):
+    """Run the real attempt_sandbox_run() and report what it produced."""
+    jd = DATA / "jobs" / job_id
+    (jd / "work").mkdir(parents=True, exist_ok=True)
+    (jd / "work" / "exploit.py").write_text("print('x')\n")
+    (jd / "meta.json").write_text(json.dumps({"id": job_id}))
+    set_settings(enable_judge=(mode == "enforce"), judge_mode=mode)
+    logged: list[str] = []
+    sandbox_calls: list[tuple] = []
+
+    def _fake_sandbox(*a, **k):
+        sandbox_calls.append((a, k))
+        return {"exit_code": exit_code, "stdout": "sandbox stdout",
+                "stderr": "", "timeout": False, "killed_by_supervise": False}
+
+    _saved = (R.run_in_sandbox, R.Path)
+    R.run_in_sandbox, R.Path = _fake_sandbox, _tmp_path
+    try:
+        res = R.attempt_sandbox_run(job_id, "exploit.py", None, logged.append)
+        err = None
+    except BaseException as exc:            # noqa: BLE001 — reported, not raised
+        res, err = None, f"{type(exc).__name__}: {exc}"
+    finally:
+        R.run_in_sandbox, R.Path = _saved
+    kinds = [(r.get("kind"), r.get("stage")) for r in SH.read_shadow(job_id)]
+    return {"res": res, "err": err, "log": logged, "records": kinds,
+            "pending": len(SH.pending_inputs(job_id)),
+            "sandbox_ran": len(sandbox_calls)}
+
+
+_sh = _drive("pathshadow", mode="shadow")
+check("shadow: the run completes", (_sh["err"], _sh["sandbox_ran"]), (None, 1))
+check("shadow: BOTH stages are recorded on the live path",
+      _sh["records"], [("input", "prejudge"), ("input", "postjudge")])
+check("...and both are still pending — the run path never evaluates",
+      _sh["pending"], 2)
+check("...and no model client was built", "ModelCallInLiveWindow" in
+      " ".join(_sh["log"]), False)
+check("...and the judge did not gate the run",
+      (_sh["res"] or {}).get("judge_aborted"), None)
+
+# Identity: with the judge OFF the same drive must produce no shadow file at
+# all. That equality is the basis for comparing a shadow job to a control.
+_off = _drive("pathoff", mode="off")
+check("off: nothing is recorded", _off["records"], [])
+check("off: the run is otherwise identical",
+      (_off["err"], _off["sandbox_ran"], (_off["res"] or {}).get("judge")),
+      (_sh["err"], _sh["sandbox_ran"], (_sh["res"] or {}).get("judge")))
+
+for _m, _at, _orig in _seam_saved:
+    setattr(_m, _at, _orig)
+
+# ---------------------------------------------------------------------------
+# 9. The default evaluator must not write judge prose into the run's log.
+#    §8.1: the judge writes issues/summary/retry_hint to whatever callback it
+#    is handed, and in production that callback appends to run.log.
+# ---------------------------------------------------------------------------
+_leak_job = "shleak"
+(DATA / "jobs" / _leak_job).mkdir(parents=True, exist_ok=True)
+SH.record_input(_leak_job, "prejudge", {"script_rel": "exploit.py"})
+_run_log: list[str] = []
+_saved_pre = _judge_mod.prejudge_script
+
+
+def _prose_judge(job_dir, script_rel, target, log_fn, **kw):
+    log_fn("[judge] prejudge issue: the agent claims DH{shadow_prose_leak}")
+    return {"ok": False, "severity": "high",
+            "issues": ["DH{shadow_prose_leak}"]}
+
+
+_judge_mod.prejudge_script = _prose_judge
+try:
+    SH.evaluate(_leak_job, DATA / "jobs" / _leak_job, log_fn=_run_log.append)
+finally:
+    _judge_mod.prejudge_script = _saved_pre
+
+check("the judge's prose never reaches the caller's logger",
+      any("shadow_prose_leak" in line for line in _run_log), False)
+check("...it lands in the shadow file instead",
+      any(r.get("kind") == "log" and "shadow_prose_leak" in str(r.get("line"))
+          for r in SH.read_shadow(_leak_job)), True)
+check("...and the caller still learns the evaluation happened",
+      any("evaluated 1 recorded stage" in line for line in _run_log), True)
+check("...while the verdict itself is recorded",
+      any(r.get("kind") == "verdict" for r in SH.read_shadow(_leak_job)), True)
+# And the API gives a caller no way to hand the judge a production logger.
+import inspect  # noqa: E402
+
+_sig = inspect.signature(SH.evaluate)
+check("evaluate() takes log_fn keyword-only, so it cannot be passed by habit",
+      _sig.parameters["log_fn"].kind, inspect.Parameter.KEYWORD_ONLY)
+check("...and defaults to writing nowhere",
+      _sig.parameters["log_fn"].default, None)
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="

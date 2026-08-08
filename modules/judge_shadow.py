@@ -12,6 +12,20 @@ both are handled here rather than left to discipline:
     records the INPUTS during the run — a file append, no model call — and
     the verdicts are produced afterwards, out of band.
 
+    "Out of band" is literal: `attempt_sandbox_run()` does not call
+    `evaluate()` at all. Calling it there — even after the container exits —
+    puts the judge's latency back on the return path of every attempt, and
+    attempts run in a retry loop under a wall clock. `evaluate()`'s caller is
+    the replay / sweep harness, never the runner.
+
+WHAT SHADOW DOES NOT SEE: supervise. That stage fires from inside
+`_wait_with_supervise` under the same `enable_judge` gate, which shadow leaves
+False, so a shadow job records prejudge and postjudge only. Reaching it would
+mean splitting the branch that also holds `container.kill()`, and a shadow
+mode that can kill is the one failure this design must not have. Read a replay
+with zero supervise rows as "shadow never looked", NOT as "supervise never
+fired".
+
   * **The flag scanner.** Judge prose has been scraped as a job's flag before
     (job a15ff70a6ed5: the judge wrote an abbreviated `DH{...}` into a
     prejudge issue and it landed in meta.flags[0]). `_NARRATIVE_FLAG_SOURCES`
@@ -102,6 +116,40 @@ def record_verdict(job_id: str, stage: str, verdict: dict, **extra) -> dict | No
         return None
 
 
+def _shadow_logger(job_id: str, stage: str) -> Callable[[str], None]:
+    """A log sink that lands in the shadow file and NEVER in `run.log`.
+
+    The judge writes its issues, summary and retry_hint to whatever callback
+    it is handed (`_judge.py` prejudge/postjudge). In production that callback
+    is `log_line(job_id, …)` — i.e. `run.log`. Handing the judge the run's own
+    logger would put judge prose into the run's log the moment an evaluation
+    happened, which is exactly what §8.1 forbids and what the "run.log
+    unchanged" review gate measures.
+
+    So the default evaluator hands it THIS instead. It is not a matter of
+    remembering to pass the right logger: `evaluate()` gives callers no way to
+    reach the judge's logger at all.
+    """
+
+    def _log(line: str) -> None:
+        try:
+            rec = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "kind": "log",
+                "stage": str(stage),
+                "line": _clip(str(line)),
+            }
+            path = shadow_path(job_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _lock:
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    return _log
+
+
 def read_shadow(job_id: str) -> list[dict[str, Any]]:
     """Every shadow record for a job, oldest first. Bad lines are skipped."""
     out: list[dict[str, Any]] = []
@@ -147,16 +195,24 @@ def pending_inputs(job_id: str) -> list[dict[str, Any]]:
 def evaluate(
     job_id: str,
     job_dir: Path,
-    log_fn: Callable[[str], None],
     *,
+    log_fn: Callable[[str], None] | None = None,
     runner: Callable[[str, dict], dict] | None = None,
 ) -> int:
     """Produce verdicts for the recorded inputs, AFTER the run.
 
+    **This is not called from the run path.** `attempt_sandbox_run()` only
+    records; a synchronous evaluation there would add the judge's latency back
+    onto every attempt, which is the wall-clock change §8.2 exists to prevent
+    (and this project has been bitten by runner timeouts repeatedly). The
+    caller is the out-of-band sweep / replay harness.
+
     Returns how many were evaluated. Best-effort throughout: a shadow that
     cannot be evaluated is a measurement nobody gets, not a job that fails.
 
-    `runner` is injectable so the evaluation can be tested without a model.
+    `log_fn` receives ONLY this function's own one-line summary. It is
+    deliberately never forwarded to the judge — see `_shadow_logger`. `runner`
+    is injectable so the evaluation can be tested without a model.
     """
     pend = pending_inputs(job_id)
     if not pend:
@@ -167,9 +223,10 @@ def evaluate(
             from modules import _judge
 
             script_rel = str(inputs.get("script_rel") or "exploit.py")
+            jlog = _shadow_logger(job_id, stage)
             if stage == "prejudge":
                 return _judge.prejudge_script(
-                    job_dir, script_rel, inputs.get("target"), log_fn,
+                    job_dir, script_rel, inputs.get("target"), jlog,
                     job_id=job_id,
                 )
             if stage == "supervise":
@@ -178,14 +235,14 @@ def evaluate(
                     int(inputs.get("stall_seconds") or 0),
                     inputs.get("stdout_tail") or "",
                     inputs.get("stderr_tail") or "",
-                    log_fn, job_id=job_id,
+                    jlog, job_id=job_id,
                 )
             return _judge.postjudge_run(
                 job_dir, script_rel,
                 int(inputs.get("exit_code") or 0),
                 inputs.get("stdout") or "",
                 inputs.get("stderr") or "",
-                log_fn, job_id=job_id,
+                jlog, job_id=job_id,
             )
 
     count = 0
@@ -197,7 +254,8 @@ def evaluate(
             verdict = {"error": f"{type(exc).__name__}: {exc}"}
         record_verdict(job_id, stage, verdict, evaluated_from=rec.get("ts"))
         count += 1
-    log_fn(f"[judge] shadow: evaluated {count} recorded stage(s) out of band")
+    if log_fn is not None:
+        log_fn(f"[judge] shadow: evaluated {count} recorded stage(s) out of band")
     return count
 
 
