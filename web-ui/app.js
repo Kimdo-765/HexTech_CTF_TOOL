@@ -1136,8 +1136,17 @@ async function loadSettings() {
   const budgetInput = f.querySelector("[name=budget_usd]");
   if (budgetInput) budgetInput.value = s.budget_usd ? s.budget_usd : "";
   f.querySelector("[name=callback_url]").value = s.callback_url || "";
-  // enable_judge default-True; only un-check when explicitly stored false
-  f.querySelector("[name=enable_judge]").checked = s.enable_judge !== false;
+  // judge_mode is the tri-state. `shadow` is deliberately NOT derivable from
+  // the legacy boolean — entering it by inference would leave the operator
+  // believing a gate is live when it gates nothing — so fall back to the
+  // boolean only for off/enforce, exactly as get_judge_mode() does server-side.
+  const modeSel = f.querySelector("[name=judge_mode]");
+  if (modeSel) {
+    const stored = String(s.judge_mode || "").toLowerCase();
+    modeSel.value = ["off", "shadow", "enforce"].includes(stored)
+      ? stored
+      : (s.enable_judge === false ? "off" : "enforce");
+  }
   // enable_exploit_library_hint default-False
   f.querySelector("[name=enable_exploit_library_hint]").checked = !!s.enable_exploit_library_hint;
 
@@ -1221,7 +1230,6 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       // Empty secret field: skip — keep current value
       continue;
     }
-    if (k === "enable_judge") continue;  // handled explicitly below
     if (k === "enable_exploit_library_hint") continue;  // handled explicitly below
     if (v === "") {
       payload[k] = null;  // null = clear the override
@@ -1237,7 +1245,13 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   }
   // Checkboxes are absent from FormData when unchecked — read directly
   // so the OFF state is sent as `false`, not "clear the override".
-  payload.enable_judge = !!e.target.querySelector("[name=enable_judge]").checked;
+  //
+  // The legacy boolean is written alongside the mode, and only ever to the
+  // value the mode implies. Nothing but get_judge_mode()'s fallback reads it,
+  // but a settings file saying enable_judge=true next to judge_mode=off is a
+  // contradiction the next person to read it has to resolve.
+  const _mode = String(payload.judge_mode || "enforce").toLowerCase();
+  payload.enable_judge = _mode === "enforce";
   payload.enable_exploit_library_hint = !!e.target.querySelector("[name=enable_exploit_library_hint]").checked;
   // Radio always present; default claude if somehow missing.
   if (!payload.agent_provider) {
