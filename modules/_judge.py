@@ -96,6 +96,11 @@ class JudgeTurnResult:
     error_detail: str = ""
     tokens: dict[str, int] = field(default_factory=dict)
     reported_cost: float | None = None
+    # Set only when a cross-provider retry happened. `failover_diagnosis`
+    # turns the recovery into a measurement: if the other vendor accepted the
+    # identical request the block was provider-specific, not content-specific.
+    failover_from: str | None = None
+    failover_diagnosis: str | None = None
     # Per-model breakdown, kept because a judge session is not necessarily
     # single-model: the Claude judge registers a recon subagent, and the
     # active preset can pin recon to a different model from judge. Flattening
@@ -387,21 +392,57 @@ Inputs:
 # multiple jobs (shouldn't happen with current orchestrator, but the
 # state is cheap and dictionary-keyed by job_id is more robust than
 # a global).
+#
+# The session id is stored WITH the provider that issued it, and recall only
+# returns it to that same provider. A session id is a handle into one vendor's
+# store; handing a Codex id to the Claude SDK resumes nothing and, worse,
+# looks like it should. Once a stage fails over, the rest of the job's judge
+# stages stay on the provider that answered — a run that alternates providers
+# mid-cycle has no shared context at all, which is the one thing prejudge ->
+# supervise -> postjudge continuity exists to provide.
 
 _session_lock = threading.Lock()
-_session_ids: dict[str, str] = {}
+_session_ids: dict[str, dict[str, str]] = {}
 
 
-def _remember_sid(job_id: str, sid: str | None) -> None:
-    if not sid:
+def _remember_sid(job_id: str, sid: str | None, provider: str | None = None) -> None:
+    """Store this job's judge session id together with its provider.
+
+    A missing sid still records the provider when one is given: that is how a
+    failover pins the remaining stages even if the answering provider returned
+    no resumable session.
+    """
+    p = str(provider or "").strip().lower()
+    if not sid and not p:
         return
     with _session_lock:
-        _session_ids[job_id] = sid
+        entry = dict(_session_ids.get(job_id) or {})
+        if p:
+            if entry.get("provider") and entry["provider"] != p:
+                # Provider changed: the old id belongs to the old vendor.
+                entry.pop("session_id", None)
+            entry["provider"] = p
+        if sid:
+            entry["session_id"] = sid
+        _session_ids[job_id] = entry
 
 
-def _recall_sid(job_id: str) -> str | None:
+def _recall_sid(job_id: str, provider: str | None = None) -> str | None:
+    """This job's judge session id, but only for the provider that issued it."""
     with _session_lock:
-        return _session_ids.get(job_id)
+        entry = _session_ids.get(job_id) or {}
+    if not entry:
+        return None
+    p = str(provider or "").strip().lower()
+    if p and entry.get("provider") and entry["provider"] != p:
+        return None
+    return entry.get("session_id")
+
+
+def _pinned_provider(job_id: str) -> str | None:
+    """Provider this job's judge is pinned to, if a stage already answered."""
+    with _session_lock:
+        return (_session_ids.get(job_id) or {}).get("provider") or None
 
 
 def _forget_sid(job_id: str) -> None:
@@ -663,12 +704,136 @@ def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
         pass
 
 
+def _failover_target(provider: str) -> str | None:
+    """The other backend to try after a policy refusal, or None.
+
+    Only `claude` <-> `gpt`. Grok stays a whole-job provider in v1 (the same
+    exclusion `agent_provider.ROLE_TARGET_PROVIDERS` makes), and a target with
+    no auth configured is not a target — trying it would turn one refusal into
+    two failures and a wasted turn.
+    """
+    from modules.agent_provider import ROLE_TARGET_PROVIDERS, has_provider_auth
+
+    current = str(provider or "").strip().lower()
+    for candidate in sorted(ROLE_TARGET_PROVIDERS):
+        if candidate == current:
+            continue
+        try:
+            if has_provider_auth(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def judge_turn(
+    user_prompt: str,
+    *,
+    cwd: Path,
+    job_id: str,
+    stage: str,
+    resume: bool,
+    model: str | None = None,
+) -> JudgeTurnResult:
+    """One judge stage, with a single cross-provider retry on a policy block.
+
+    This is the destination the AUP recovery ladder never had. The failure it
+    cures is specific and documented in this repo: a server-side classifier
+    blocks the call over the challenge's own content, and re-running the same
+    request on the same vendor blocks again — a fresh session does not cure
+    it. The other vendor's classifier is a different classifier.
+
+    Deliberately narrow:
+
+      * ONLY `policy_refusal` retries. A timeout or an auth failure means the
+        second provider would be burned for nothing, and stage 3 exists to
+        tell those apart.
+      * ONE retry, never a loop.
+      * The retry starts a FRESH session. A session id is a handle into one
+        vendor's store; there is nothing to resume across the boundary.
+      * On success the job's remaining judge stages are PINNED to the
+        answering provider. Alternating mid-cycle would leave prejudge ->
+        supervise -> postjudge with no shared context, which is the whole
+        reason that continuity exists.
+
+    Both turns are recorded to the ledger. The refused one still cost tokens,
+    and hiding it would make a failover look free.
+    """
+    from modules.agent_provider import provider_for_role
+
+    pinned = _pinned_provider(job_id)
+    primary = pinned or provider_for_role(job_id, "judge")
+    # Resolved HERE, against the provider actually about to run: a session id
+    # only means something to the vendor that issued it.
+    resume_sid = _recall_sid(job_id, primary) if resume else None
+
+    res = _run_async(
+        _run_judge_turn(
+            user_prompt,
+            cwd=cwd,
+            resume_sid=resume_sid,
+            model=model,
+            provider_override=primary,
+        )
+    )
+    _record_judge_usage(job_id, stage, res)
+
+    if res.error_kind != "policy_refusal":
+        _remember_sid(job_id, res.session_id, res.provider or primary)
+        return res
+
+    target = _failover_target(res.provider or primary)
+    if not target:
+        res.error_detail = (
+            (res.error_detail or "") + " | no failover target configured"
+        ).strip(" |")
+        return res
+
+    alt = _run_async(
+        _run_judge_turn(
+            user_prompt,
+            cwd=cwd,
+            resume_sid=None,   # never resume across the provider boundary
+            model=None,        # let the target's own default/preset decide
+            provider_override=target,
+        )
+    )
+    _record_judge_usage(job_id, stage, alt)
+
+    # Turning the recovery into a measurement costs nothing and answers a
+    # question this repo has had to guess at before: when the reviewer refused
+    # nearly every job, the cause was its OWN prompt scaffolding rather than
+    # the artifacts. If the other vendor accepts the identical request, the
+    # block was provider-specific, not content-specific.
+    alt.failover_from = res.provider or primary
+    alt.failover_diagnosis = (
+        "provider_specific" if alt.error_kind is None else
+        "content_or_prompt" if alt.error_kind == "policy_refusal" else
+        "inconclusive"
+    )
+    if alt.error_kind is None:
+        _remember_sid(job_id, alt.session_id, alt.provider or target)
+        return alt
+
+    # The second provider failed too. Keep the ORIGINAL result as the answer —
+    # the callers' permissive fallbacks are written against it — but carry the
+    # diagnosis so the operator can see both were tried.
+    res.failover_from = res.provider or primary
+    res.failover_diagnosis = alt.failover_diagnosis
+    res.error_detail = (
+        f"{res.error_detail} | failover to {target}: "
+        f"{alt.error_kind}: {alt.error_detail}"
+    )[:_DETAIL_MAX_CHARS]
+    return res
+
+
 async def _run_judge_turn(
     user_prompt: str,
     *,
     cwd: Path,
     resume_sid: str | None,
     model: str | None = None,
+    provider_override: str | None = None,
 ) -> JudgeTurnResult:
     """Run a single judge turn (which may internally do multiple tool
     calls). Returns a `JudgeTurnResult` — text, session id, and WHY the turn
@@ -688,12 +853,21 @@ async def _run_judge_turn(
     """
     from modules.agent_provider import (
         coerce_model_for_provider,
-        provider_for_job,
         default_model_for,
+        normalize_provider,
+        provider_for_role,
     )
 
     job_id = Path(cwd).name
-    provider = provider_for_job(job_id)
+    # The judge is the first role to actually consult the per-role map that
+    # stage 1 added; before this it followed the job provider like everything
+    # else. `provider_override` is the failover path handing us the other
+    # backend for one retry.
+    provider = (
+        normalize_provider(provider_override)
+        if provider_override
+        else provider_for_role(job_id, "judge")
+    )
     _jm = coerce_model_for_provider(model or LATEST_JUDGE_MODEL, provider)
     res = JudgeTurnResult(provider=provider, model=_jm, session_id=resume_sid)
 
@@ -1096,15 +1270,11 @@ def prejudge_script(
         cwd=jd,
         script_path=script,
     )
-    turn = _run_async(
-        _run_judge_turn(
-            user_prompt, cwd=jd, resume_sid=None,
-            model=resolve_judge_model(job_id),
-        )
+    turn = judge_turn(
+        user_prompt, cwd=jd, job_id=job_id, stage="prejudge",
+        resume=False, model=resolve_judge_model(job_id),
     )
-    _record_judge_usage(job_id, "prejudge", turn)
     raw, sid = turn.text, turn.session_id
-    _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
     if not parsed:
@@ -1256,15 +1426,11 @@ def supervise_run_once(
         stdout_tail=_truncate_tail(stdout_tail, max_bytes=4096) or "(empty)",
         stderr_tail=_truncate_tail(stderr_tail, max_bytes=4096) or "(empty)",
     )
-    turn = _run_async(
-        _run_judge_turn(
-            user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
-            model=resolve_judge_model(job_id),
-        )
+    turn = judge_turn(
+        user_prompt, cwd=jd, job_id=job_id, stage="supervise",
+        resume=True, model=resolve_judge_model(job_id),
     )
-    _record_judge_usage(job_id, "supervise", turn)
     raw, sid = turn.text, turn.session_id
-    _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
     action = str(parsed.get("action") or "continue").lower()
@@ -1450,15 +1616,11 @@ def postjudge_run(
         stdout_tail=out_t or "(empty)",
         stderr_tail=err_t or "(empty)",
     )
-    turn = _run_async(
-        _run_judge_turn(
-            user_prompt, cwd=jd, resume_sid=_recall_sid(job_id),
-            model=resolve_judge_model(job_id),
-        )
+    turn = judge_turn(
+        user_prompt, cwd=jd, job_id=job_id, stage="postjudge",
+        resume=True, model=resolve_judge_model(job_id),
     )
-    _record_judge_usage(job_id, "postjudge", turn)
     raw, sid = turn.text, turn.session_id
-    _remember_sid(job_id, sid)
     parsed = _parse_json(raw)
 
     # All verdict/next_action/stop_reason/failure_code + success-collapse
