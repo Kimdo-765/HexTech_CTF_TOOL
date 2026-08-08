@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import socket
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -698,6 +699,11 @@ def attempt_sandbox_run(
     # configuration: enforce's gating with shadow's recording, same attempt.
     judge_mode = _judge_mode()
     enable_judge = _judge_gates(judge_mode)
+    # One id per ATTEMPT. prejudge -> supervise -> postjudge share a judge
+    # session within a cycle, so "this stage's prerequisite" is a question
+    # about the cycle, not about the job. Keyed job-wide, one attempt's
+    # unevaluable prejudge silenced the NEXT attempt's healthy postjudge.
+    cycle_id = uuid.uuid4().hex[:12] if judge_mode == "shadow" else ""
 
     # ---------- Stage 0: target reachability probe ----------
     # If the chal is remote-targeted, do a single TCP connect ping
@@ -814,6 +820,7 @@ def attempt_sandbox_run(
             judge_shadow.record_input(
                 job_id, "prejudge",
                 {
+                    "cycle_id": cycle_id,
                     "script_rel": script_filename, "target": target,
                     # The retry loop rewrites the script between attempts and
                     # report.md / chain.json keep moving too — and prejudge
@@ -938,6 +945,7 @@ def attempt_sandbox_run(
             judge_shadow.record_input(
                 job_id, "postjudge",
                 {
+                    "cycle_id": cycle_id,
                     "script_rel": script_filename,
                     "exit_code": res["exit_code"],
                     # The files a delayed postjudge could still Read from cwd

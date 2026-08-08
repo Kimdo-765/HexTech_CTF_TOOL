@@ -699,13 +699,26 @@ def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
 
 
 def _with_failover(out: dict, turn: JudgeTurnResult) -> dict:
-    """Attach the failover facts to a stage's public verdict.
+    """Attach the turn's transport facts to a stage's public verdict.
 
     The diagnosis is only worth producing if it outlives the call that made
     it. It goes on the ledger row for accounting and here for the caller —
     postjudge's dict is what the retry logic reads, so a failover that is
     invisible there is a failover nobody can act on.
+
+    `error_kind` rides along for the same reason, and it is the more important
+    of the two. Every stage normalises a missing answer into a permissive
+    default — postjudge into `verdict="unknown"`, prejudge into `ok=True` —
+    which is correct for the RUN (a judge failure must not block a job) and
+    indistinguishable from a real verdict for anything trying to MEASURE the
+    judge. Stage 3 put `error_kind` on `JudgeTurnResult` for exactly this and
+    it stopped at the boundary; a shadow replay counted `auth_error` as an
+    `unknown` opinion. Every stage returns through here, so it is one place.
     """
+    if turn.error_kind:
+        out["error_kind"] = turn.error_kind
+        if turn.error_detail:
+            out["error_detail"] = turn.error_detail
     if turn.failover_diagnosis:
         out["fallback_used"] = True
         out["failover_from"] = turn.failover_from

@@ -169,15 +169,31 @@ big = SH.record_input(jid, "postjudge", {"stdout": "x" * 50_000})
 check("a huge field is clipped", len(big["inputs"]["stdout"]) < 20_000, True)
 check("...and says it was", "clipped" in big["inputs"]["stdout"], True)
 
+def _seed_cycle(job_id: str, job_dir: Path, cycle: str = "c1") -> str:
+    """Record a prejudge for `cycle` and measure it, so dependents can run.
+
+    A postjudge with no prejudge in its cycle is refused now — it would have
+    no session to resume. Fixtures that only care about a LATER stage still
+    have to establish the prerequisite, exactly as a real run does.
+    """
+    job_dir.mkdir(parents=True, exist_ok=True)
+    rec = SH.record_input(job_id, "prejudge",
+                          {"cycle_id": cycle, "script_rel": "exploit.py"})
+    SH.record_verdict(job_id, "prejudge", {"ok": True, "severity": "low"},
+                      answers=rec["id"])
+    return cycle
+
+
 # ---------------------------------------------------------------------------
 # 4. Evaluation happens afterwards, once per RECORDING — supervise fires more
 #    than once, so matching by stage alone would evaluate it once.
 # ---------------------------------------------------------------------------
 jid2 = "sh2"
 (DATA / "jobs" / jid2).mkdir(parents=True, exist_ok=True)
+_c2 = _seed_cycle(jid2, DATA / "jobs" / jid2)
 for stall in (30, 60, 90):
-    SH.record_input(jid2, "supervise", {"stall_seconds": stall})
-SH.record_input(jid2, "postjudge", {"exit_code": 1})
+    SH.record_input(jid2, "supervise", {"cycle_id": _c2, "stall_seconds": stall})
+SH.record_input(jid2, "postjudge", {"cycle_id": _c2, "exit_code": 1})
 check("four inputs recorded", len(SH.pending_inputs(jid2)), 4)
 
 seen: list[tuple[str, dict]] = []
@@ -200,8 +216,9 @@ check("a second pass re-evaluates nothing",
 # supervise verdict already on file, the other two firings are still pending.
 jid2b = "sh2b"
 (DATA / "jobs" / jid2b).mkdir(parents=True, exist_ok=True)
+_c2b = _seed_cycle(jid2b, DATA / "jobs" / jid2b)
 for stall in (30, 60, 90):
-    SH.record_input(jid2b, "supervise", {"stall_seconds": stall})
+    SH.record_input(jid2b, "supervise", {"cycle_id": _c2b, "stall_seconds": stall})
 _first = SH.pending_inputs(jid2b)[0]
 SH.record_verdict(jid2b, "supervise", {"action": "continue"},
                   answers=_first.get("id"))
@@ -730,8 +747,9 @@ check("the record says how much was elided",
 # Recording it must not re-clip: the generic cap counts CHARACTERS and would
 # cut a byte-exact tail into a different string.
 _long_job = "shlong"
-(DATA / "jobs" / _long_job).mkdir(parents=True, exist_ok=True)
-_rec_long = SH.record_input(_long_job, "postjudge", {"exit_code": 0, **_pi})
+_cl = _seed_cycle(_long_job, DATA / "jobs" / _long_job)
+_rec_long = SH.record_input(_long_job, "postjudge",
+                            {"cycle_id": _cl, "exit_code": 0, **_pi})
 check("the recorded tail is byte-identical to the derived one",
       _rec_long["inputs"]["stdout_tail"] if _rec_long else None, _pi["stdout_tail"])
 
@@ -759,7 +777,7 @@ try:
     # through the real default evaluator — no injected runner
     SH.evaluate(_long_job, DATA / "jobs" / _long_job)
     _shadow_v = [r["verdict"] for r in SH.read_shadow(_long_job)
-                 if r.get("kind") == "verdict"]
+                 if r.get("kind") == "verdict" and r.get("stage") == "postjudge"]
 finally:
     _judge_mod.judge_turn = _saved_turn
 
@@ -781,15 +799,15 @@ check("...but the recorded shapes still carry the real one",
       _REAL in _pi2["flag_shapes"], True)
 
 _long2 = "shlong2"
-(DATA / "jobs" / _long2).mkdir(parents=True, exist_ok=True)
-SH.record_input(_long2, "postjudge", {"exit_code": 0, **_pi2})
+_cl2 = _seed_cycle(_long2, DATA / "jobs" / _long2)
+SH.record_input(_long2, "postjudge", {"cycle_id": _cl2, "exit_code": 0, **_pi2})
 _judge_mod.judge_turn = _echo_success
 try:
     _direct2 = _judge_mod.postjudge_run(
         DATA / "jobs" / _long2, "exploit.py", 0, _LONG2, "", lambda *_: None)
     SH.evaluate(_long2, DATA / "jobs" / _long2)
     _shadow2 = [r["verdict"] for r in SH.read_shadow(_long2)
-                if r.get("kind") == "verdict"]
+                if r.get("kind") == "verdict" and r.get("stage") == "postjudge"]
 finally:
     _judge_mod.judge_turn = _saved_turn
 check("a capture at the START is still a success directly",
@@ -925,14 +943,15 @@ check("...and the hash is over the RAW bytes",
 _conc = "shconc"
 _conc_dir = DATA / "jobs" / _conc
 _conc_dir.mkdir(parents=True, exist_ok=True)
-_in1 = SH.record_input(_conc, "supervise", {"stall_seconds": 30})
+_cc = _seed_cycle(_conc, _conc_dir)
+_in1 = SH.record_input(_conc, "supervise", {"cycle_id": _cc, "stall_seconds": 30})
 check("an input carries an identity", bool(_in1 and _in1.get("id")), True)
 
 # Two evaluators both answer the first input — the concurrency Codex hit.
 SH.evaluate(_conc, _conc_dir, runner=lambda st, i: {"action": "continue"})
 SH.record_verdict(_conc, "supervise", {"action": "continue"},
                   answers=_in1["id"])          # the duplicate
-_in2 = SH.record_input(_conc, "supervise", {"stall_seconds": 60})
+_in2 = SH.record_input(_conc, "supervise", {"cycle_id": _cc, "stall_seconds": 60})
 check("a later input is still pending after a duplicate verdict",
       [r["id"] for r in SH.pending_inputs(_conc)], [_in2["id"]])
 _seen2: list[int] = []
@@ -970,8 +989,9 @@ _pj_dir = DATA / "jobs" / _pj
 _pjfp = SH.postjudge_fingerprint(_pj_dir, "exploit.py")
 check("the postjudge fingerprint covers the readable artifacts",
       sorted(_pjfp), ["script_sha256", "stderr_file_sha256", "stdout_file_sha256"])
+_cpj = _seed_cycle(_pj, _pj_dir)
 SH.record_input(_pj, "postjudge", {
-    "script_rel": "exploit.py", "exit_code": 0,
+    "cycle_id": _cpj, "script_rel": "exploit.py", "exit_code": 0,
     **_pjfp, **_judge_mod.postjudge_inputs("FIRST_ATTEMPT_GOOD\n", "")})
 
 # The next attempt overwrites the fixed-name file.
@@ -1028,7 +1048,8 @@ _depv = [r["verdict"] for r in SH.read_shadow(_dep) if r.get("kind") == "verdict
 check("both stages are recorded, both unevaluable",
       [bool(v.get("unevaluable")) for v in _depv], [True, True])
 check("...and the postjudge says WHY it was blocked",
-      "prejudge was unevaluable" in str(_depv[1].get("unevaluable")), True)
+      "prejudge for this cycle was unevaluable"
+      in str(_depv[1].get("unevaluable")), True)
 check("evaluate() reports no measurements", _n_dep, 0)
 
 # The rollup must not report this job as fully evaluated.
@@ -1054,6 +1075,164 @@ try:
 finally:
     _judge_mod.postjudge_run = _saved_post2
 check("a resumed evaluation is still blocked", _post2, [])
+
+# ---------------------------------------------------------------------------
+# 15. A refusal belongs to its CYCLE. A job retries; each attempt opens its own
+#     judge session. Keyed job-wide, attempt 1's refusal silenced attempt 2's
+#     perfectly healthy postjudge — and the rollup called both unevaluable.
+# ---------------------------------------------------------------------------
+_ret = "shretry"
+_ret_dir = DATA / "jobs" / _ret
+(_ret_dir / "work").mkdir(parents=True, exist_ok=True)
+
+
+def _record_cycle(job, jd, cyc):
+    SH.record_input(job, "prejudge", {
+        "cycle_id": cyc, "script_rel": "exploit.py",
+        **SH.prejudge_fingerprint(jd, "exploit.py")})
+    SH.record_input(job, "postjudge", {
+        "cycle_id": cyc, "script_rel": "exploit.py", "exit_code": 0,
+        **SH.postjudge_fingerprint(jd, "exploit.py"),
+        **_judge_mod.postjudge_inputs("out\n", "")})
+
+
+(_ret_dir / "exploit.py").write_text("print('one')\n")
+(_ret_dir / "exploit.py.stdout").write_text("out\n")
+(_ret_dir / "exploit.py.stderr").write_text("")
+_record_cycle(_ret, _ret_dir, "cycA")          # attempt 1
+(_ret_dir / "exploit.py").write_text("print('two')\n")   # the retry rewrites it
+_record_cycle(_ret, _ret_dir, "cycB")          # attempt 2 — matches disk NOW
+
+_rpre, _rpost = [], []
+_judge_mod.prejudge_script = lambda *a, **k: (
+    _rpre.append("x"), {"ok": True, "severity": "low"})[1]
+_judge_mod.postjudge_run = lambda *a, **k: (
+    _rpost.append("x"), {"verdict": "success"})[1]
+try:
+    _rn = SH.evaluate(_ret, _ret_dir)
+finally:
+    _judge_mod.prejudge_script = _saved_pre2
+    _judge_mod.postjudge_run = _saved_post2
+
+check("attempt 1 is refused — its artifacts moved", len(_rpre), 1)
+check("...and attempt 2 IS measured, both stages", len(_rpost), 1)
+check("...so the run yields two measurements, not zero", _rn, 2)
+_rs = SH.summary(_ret)
+check("the rollup splits them by cycle, not by job",
+      (_rs["evaluated"], _rs["unevaluable"]), (2, 2))
+_rpost_v = [r["verdict"] for r in SH.read_shadow(_ret)
+            if r.get("kind") == "verdict" and r.get("stage") == "postjudge"]
+check("attempt 1's postjudge is refused, attempt 2's is measured",
+      [bool(v.get("unevaluable")) for v in _rpost_v], [True, False])
+check("...and attempt 2's verdict is the real one", _rpost_v[1].get("verdict"),
+      "success")
+
+# The cycle id has to come from the RUNNER, one per attempt. The fixtures
+# above mint their own, so they cannot tell whether the live path emits one at
+# all — the same blind spot that let the whole shadow branch sit dead in round
+# 1. Drive the real function twice and read what it wrote.
+_cyc_job = "shcycrun"
+_cyc_dir = DATA / "jobs" / _cyc_job
+(_cyc_dir / "work").mkdir(parents=True, exist_ok=True)
+(_cyc_dir / "work" / "exploit.py").write_text("print('x')\n")
+(_cyc_dir / "exploit.py").write_text("print('x')\n")
+(_cyc_dir / "meta.json").write_text(json.dumps({"id": _cyc_job}))
+set_settings(enable_judge=False, judge_mode="shadow")
+_saved_run = (R.run_in_sandbox, R.Path)
+R.run_in_sandbox = lambda *a, **k: {"exit_code": 0, "stdout": "o", "stderr": "",
+                                    "timeout": False, "killed_by_supervise": False}
+R.Path = _tmp_path
+try:
+    R.attempt_sandbox_run(_cyc_job, "exploit.py", None, lambda *_: None)
+    R.attempt_sandbox_run(_cyc_job, "exploit.py", None, lambda *_: None)
+finally:
+    R.run_in_sandbox, R.Path = _saved_run
+
+_cyc_rows = [(r["stage"], (r["inputs"] or {}).get("cycle_id"))
+             for r in SH.read_shadow(_cyc_job) if r.get("kind") == "input"]
+check("two attempts record four rows", len(_cyc_rows), 4)
+check("...one prejudge and one postjudge each",
+      sorted(st for st, _ in _cyc_rows),
+      ["postjudge", "postjudge", "prejudge", "prejudge"])
+_cyc_ids = [c for _st, c in _cyc_rows]
+check("...every row carries a cycle id", all(bool(c) for c in _cyc_ids), True)
+check("...the two stages of one attempt SHARE it, and the attempts differ",
+      (_cyc_ids[0] == _cyc_ids[1], _cyc_ids[2] == _cyc_ids[3],
+       _cyc_ids[0] == _cyc_ids[2]),
+      (True, True, False))
+
+# ---------------------------------------------------------------------------
+# 16. A stage whose model never answered is not a measurement. Every stage
+#     normalises a failed turn into a permissive default so the RUN is not
+#     blocked; that default is indistinguishable from an opinion unless
+#     `error_kind` survives to the public verdict.
+# ---------------------------------------------------------------------------
+check("_with_failover carries error_kind out to the verdict",
+      _judge_mod._with_failover(
+          {"verdict": "unknown"},
+          _judge_mod.JudgeTurnResult(provider="claude", model="m",
+                                     error_kind="auth_error",
+                                     error_detail="no creds")),
+      {"verdict": "unknown", "error_kind": "auth_error",
+       "error_detail": "no creds"})
+check("...and adds nothing when the turn was fine",
+      _judge_mod._with_failover(
+          {"verdict": "success"},
+          _judge_mod.JudgeTurnResult(provider="claude", model="m", text="{}")),
+      {"verdict": "success"})
+
+_ek = "shek"
+_ek_dir = DATA / "jobs" / _ek
+_ek_dir.mkdir(parents=True, exist_ok=True)
+_cek = _seed_cycle(_ek, _ek_dir)
+SH.record_input(_ek, "postjudge", {"cycle_id": _cek, "exit_code": 0})
+_nek = SH.evaluate(_ek, _ek_dir,
+                   runner=lambda st, i: {"verdict": "unknown",
+                                         "error_kind": "auth_error"})
+check("a verdict carrying error_kind counts as no measurement", _nek, 0)
+_eks = SH.summary(_ek)
+check("...and lands in the unevaluable column",
+      (_eks["evaluated"], _eks["unevaluable_by_stage"].get("postjudge")), (1, 1))
+check("...saying the judge never answered",
+      any("never answered" in str((r["verdict"] or {}).get("unevaluable") or "")
+          for r in SH.read_shadow(_ek) if r.get("kind") == "verdict"), True)
+
+# ---------------------------------------------------------------------------
+# 17. One measurement per INPUT. `pending_inputs` already folds duplicate
+#     answers; the rollup was appending every row, so `evaluated` could exceed
+#     `inputs` — a number that cannot be true.
+# ---------------------------------------------------------------------------
+_dup = "shdup"
+_dup_dir = DATA / "jobs" / _dup
+_dup_dir.mkdir(parents=True, exist_ok=True)
+_cdup = _seed_cycle(_dup, _dup_dir)
+_di = SH.record_input(_dup, "supervise", {"cycle_id": _cdup, "stall_seconds": 30})
+SH.evaluate(_dup, _dup_dir, runner=lambda st, i: {"action": "continue"})
+SH.record_verdict(_dup, "supervise", {"action": "continue"}, answers=_di["id"])
+_dsum = SH.summary(_dup)
+check("a duplicate verdict does not inflate the rollup",
+      _dsum["by_stage"].get("supervise"), 1)
+check("...and evaluated never exceeds inputs",
+      _dsum["evaluated"] <= _dsum["inputs"], True)
+check("...with nothing left pending", SH.pending_inputs(_dup), [])
+
+# ---------------------------------------------------------------------------
+# 18. An orphan postjudge has no session to resume. Recording is best-effort
+#     per stage, so a lost prejudge append leaves exactly this shape — and the
+#     old check looked for a REFUSED prejudge, which reads the same as "fine".
+# ---------------------------------------------------------------------------
+_orp = "shorphan"
+_orp_dir = DATA / "jobs" / _orp
+_orp_dir.mkdir(parents=True, exist_ok=True)
+SH.record_input(_orp, "postjudge", {"cycle_id": "cycZ", "exit_code": 0})
+_ocalls = []
+_norp = SH.evaluate(_orp, _orp_dir,
+                    runner=lambda st, i: (_ocalls.append(st), {"verdict": "x"})[1])
+check("an orphan postjudge is not judged", _ocalls, [])
+check("...and counts as no measurement", _norp, 0)
+check("...saying the prerequisite is missing, not that it failed",
+      any("no prejudge was recorded" in str((r["verdict"] or {}).get("unevaluable") or "")
+          for r in SH.read_shadow(_orp) if r.get("kind") == "verdict"), True)
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="

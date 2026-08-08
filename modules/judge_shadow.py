@@ -306,18 +306,57 @@ def pending_inputs(job_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def _blocked_reason(job_id: str) -> str | None:
-    """Why later stages cannot be evaluated, if a prejudge already failed.
+def _cycle_state(job_id: str) -> tuple[set[str], dict[str, str]]:
+    """Per CYCLE: which ones recorded a prejudge, and which had it refused.
 
-    Read from the file rather than kept in a local, so a second `evaluate()`
-    call — the resume path — reaches the same conclusion as the first.
+    Per cycle, not per job. A job retries, and each attempt opens its own
+    judge session — so "was my prerequisite evaluated?" is a question about
+    the attempt. Keyed job-wide, attempt 1's refusal silenced attempt 2's
+    perfectly healthy postjudge and the rollup called both unevaluable.
+
+    Read from the file rather than kept in a local, so a resumed `evaluate()`
+    reaches the same conclusion as the first one. Records written before
+    cycle ids existed all carry `""`, which collapses to the old job-wide
+    behaviour — the honest reading, since they cannot be told apart.
+
+    Returns (cycles that recorded a prejudge INPUT, {cycle: why it was refused}).
     """
+    stage_of: dict[str, tuple[str, str]] = {}       # input id -> (cycle, stage)
+    have_prejudge: set[str] = set()
+    refused: dict[str, str] = {}
     for rec in read_shadow(job_id):
-        if rec.get("kind") == "verdict" and str(rec.get("stage")) == "prejudge":
+        if rec.get("kind") == "input":
+            cyc = str((rec.get("inputs") or {}).get("cycle_id") or "")
+            stage = str(rec.get("stage") or "")
+            stage_of[str(rec.get("id") or "")] = (cyc, stage)
+            if stage == "prejudge":
+                have_prejudge.add(cyc)
+        elif rec.get("kind") == "verdict":
+            cyc, stage = stage_of.get(str(rec.get("answers") or ""), ("", ""))
             why = (rec.get("verdict") or {}).get("unevaluable")
-            if why:
-                return str(why)
-    return None
+            if stage == "prejudge" and why:
+                refused[cyc] = str(why)
+    return have_prejudge, refused
+
+
+def _mark_model_failure(verdict: dict) -> dict:
+    """A stage whose model never answered is not a measurement either.
+
+    Every stage normalises a failed turn into a permissive default so the RUN
+    is not blocked — postjudge into `verdict="unknown"`, prejudge into
+    `ok=True, severity=low`. That is right for the gate and wrong for anyone
+    counting: `auth_error` came back as an `unknown` opinion and landed in the
+    evaluated column. `_with_failover` now carries `error_kind` out to the
+    public verdict, so the distinction is available here.
+    """
+    if not isinstance(verdict, dict) or verdict.get("unevaluable"):
+        return verdict
+    kind = verdict.get("error_kind")
+    if not kind:
+        return verdict
+    out = dict(verdict)
+    out["unevaluable"] = f"the judge never answered: {kind}"
+    return out
 
 
 class ArtifactChanged(RuntimeError):
@@ -434,23 +473,37 @@ def evaluate(
     # evaluated without a prejudge has none of the context the gate's
     # postjudge had. Judging it anyway produces a number that looks like a
     # measurement of the gate and is not one.
-    blocked = _blocked_reason(job_id)
+    have_prejudge, refused = _cycle_state(job_id)
     count = unevaluable = 0
     for rec in pend:
         stage = str(rec.get("stage") or "")
-        if blocked and stage != "prejudge":
-            verdict = {"unevaluable": f"prejudge was unevaluable: {blocked}"}
+        inputs = rec.get("inputs") or {}
+        cyc = str(inputs.get("cycle_id") or "")
+        why = None
+        if stage != "prejudge":
+            if cyc not in have_prejudge:
+                # Nothing to resume. Recording is best-effort per stage, so a
+                # prejudge append can be lost while its postjudge lands; the
+                # old check looked for a REFUSED prejudge and saw nothing,
+                # which reads identically to "the prerequisite was fine".
+                why = "no prejudge was recorded for this cycle"
+            elif cyc in refused:
+                why = f"prejudge for this cycle was unevaluable: {refused[cyc]}"
+        if why:
+            verdict = {"unevaluable": why}
         else:
             try:
-                verdict = runner(stage, rec.get("inputs") or {})
+                verdict = runner(stage, inputs)
             except ArtifactChanged as exc:
                 verdict = {"unevaluable": str(exc)}
             except Exception as exc:
                 verdict = {"unevaluable": f"{type(exc).__name__}: {exc}"}
+            else:
+                verdict = _mark_model_failure(verdict)
         if verdict.get("unevaluable"):
             unevaluable += 1
             if stage == "prejudge":
-                blocked = str(verdict["unevaluable"])
+                refused[cyc] = str(verdict["unevaluable"])
         else:
             count += 1
         record_verdict(job_id, stage, verdict,
@@ -475,11 +528,22 @@ def summary(job_id: str) -> dict[str, Any]:
     inputs = 0
     verdicts: dict[str, list[dict]] = {}
     refused: dict[str, list[dict]] = {}
+    answered_ids: set[str] = set()
     for rec in read_shadow(job_id):
         if rec.get("kind") == "input":
             inputs += 1
         elif rec.get("kind") == "verdict":
             v = rec.get("verdict") or {}
+            # One measurement per INPUT. `pending_inputs` already folds
+            # duplicate answers to the same id — two evaluators racing, or a
+            # re-run — but the rollup was appending every row, so `evaluated`
+            # could exceed `inputs`. Rows with no `answers` are legacy and
+            # cannot be deduped, so they still count individually.
+            ans = str(rec.get("answers") or "")
+            if ans:
+                if ans in answered_ids:
+                    continue
+                answered_ids.add(ans)
             # A refusal is not a measurement. Counting it as one reported a
             # job where the judge was never called as fully evaluated.
             bucket = refused if v.get("unevaluable") else verdicts
