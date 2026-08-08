@@ -37,6 +37,7 @@ for _k in ("AGENT_PROVIDER", "CLAUDE_MODEL", "GROK_MODEL", "GPT_MODEL"):
 from modules.agent_provider import (  # noqa: E402
     ROLE_OVERRIDABLE,
     ROLE_TARGET_PROVIDERS,
+    enrich_job_meta,
     provider_for_job,
     provider_for_role,
     provider_meta_fields,
@@ -162,12 +163,49 @@ check(
     "gpt",
 )
 
-# Legacy meta (no map at all) may still consult live Settings.
+# Legacy meta (no map at all) must NOT consult live Settings either.
+# turn 0004 D1: a job created while the map was empty omits the key (to keep
+# meta byte-identical), so "key absent" and "pre-hybrid job" are the same
+# observation. If either fell through, adding a route in Settings would
+# re-route jobs that are already running.
 legacy = make_job("legacy", agent_provider="gpt")
 check(
-    "pre-hybrid meta falls through to live Settings routes",
+    "pre-hybrid meta stays on the job provider (no live fallthrough)",
     provider_for_role(legacy, "reviewer"),
-    "claude",
+    "gpt",
+)
+
+# D1 regression, end to end: create with an EMPTY map, then add a route.
+set_settings(agent_provider="gpt")
+empty_meta = {"id": "d1", **provider_meta_fields("gpt", include_routes=True)}
+check("D1 empty routes -> key omitted at create", "agent_role_providers" in empty_meta, False)
+d1 = make_job("d1", **{k: v for k, v in empty_meta.items() if k != "id"})
+set_settings(agent_provider="gpt", agent_role_providers={"judge": "claude"})
+check(
+    "D1 a Settings edit cannot re-route an existing job",
+    provider_for_role(d1, "judge"),
+    "gpt",
+)
+
+# D2 regression: the mid-run re-stamp must not overwrite the snapshot.
+set_settings(agent_provider="gpt", agent_role_providers={"judge": "claude"})
+d2_created = provider_meta_fields("gpt", include_routes=True)
+check(
+    "D2 create-time snapshot",
+    d2_created.get("agent_role_providers"),
+    {"judge": "claude"},
+)
+set_settings(agent_provider="gpt", agent_role_providers={"reviewer": "claude"})
+restamp = provider_meta_fields("gpt")  # what the orchestrator re-stamps
+check(
+    "D2 the re-stamp carries no route key at all",
+    "agent_role_providers" in restamp,
+    False,
+)
+check(
+    "D2 the re-stamp still carries the scalar provider",
+    restamp.get("agent_provider"),
+    "gpt",
 )
 
 # ---------------------------------------------------------------------------
@@ -176,14 +214,24 @@ check(
 set_settings(agent_provider="gpt")
 check(
     "no routes -> key absent from meta entirely",
-    "agent_role_providers" in provider_meta_fields("gpt"),
+    "agent_role_providers" in provider_meta_fields("gpt", include_routes=True),
     False,
 )
 
 set_settings(agent_provider="gpt", agent_role_providers={"judge": "claude"})
 check(
     "routes -> stamped onto meta",
-    provider_meta_fields("gpt").get("agent_role_providers"),
+    provider_meta_fields("gpt", include_routes=True).get("agent_role_providers"),
+    {"judge": "claude"},
+)
+check(
+    "routes are opt-in: the default call omits them",
+    "agent_role_providers" in provider_meta_fields("gpt"),
+    False,
+)
+check(
+    "enrich_job_meta is the create path and DOES stamp them",
+    enrich_job_meta({}, "gpt").get("agent_role_providers"),
     {"judge": "claude"},
 )
 check(

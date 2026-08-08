@@ -312,20 +312,30 @@ def ensure_provider_ready(provider: str | None = None) -> str:
     return p
 
 
-def provider_meta_fields(provider: str | None = None) -> dict[str, Any]:
-    """Fields to stamp onto job meta so retries / UI show what ran."""
+def provider_meta_fields(
+    provider: str | None = None, *, include_routes: bool = False
+) -> dict[str, Any]:
+    """Fields to stamp onto job meta so retries / UI show what ran.
+
+    ``include_routes`` defaults to False and only ``enrich_job_meta`` passes
+    True. This function is called a SECOND time mid-run (``_common.py``, the
+    orchestrator re-stamps the provider it actually launched), and route
+    entries are computed from LIVE Settings — so stamping them there would
+    replace the create-time snapshot with whatever Settings says now. That is
+    exactly the mid-run leak the snapshot exists to prevent.
+    """
     p = normalize_provider(provider or active_provider())
     fields = {
         "agent_provider": p,
         "agent_provider_label": provider_display_name(p),
     }
-    # Per-role overrides are snapshotted at CREATE time so editing Settings
-    # mid-run cannot half-switch a job (same reason `agent_provider` itself is
-    # stamped). Omitted entirely when empty, so pre-hybrid meta stays
-    # byte-identical and every existing consumer is unaffected.
-    routes = role_provider_routes(p)
-    if routes:
-        fields["agent_role_providers"] = routes
+    # Per-role overrides are snapshotted at CREATE time only. Omitted entirely
+    # when empty, so pre-hybrid meta stays byte-identical and every existing
+    # consumer is unaffected.
+    if include_routes:
+        routes = role_provider_routes(p)
+        if routes:
+            fields["agent_role_providers"] = routes
     if p == "gpt":
         fields["gpt_runtime"] = get_gpt_runtime()
         # Snapshot the GPT preset used when the job starts. Timeline role cards
@@ -358,8 +368,12 @@ def provider_meta_fields(provider: str | None = None) -> dict[str, Any]:
 def enrich_job_meta(
     meta: dict[str, Any], provider: str | None = None
 ) -> dict[str, Any]:
-    """In-place stamp of provider fields onto a newly-created job meta dict."""
-    meta.update(provider_meta_fields(provider))
+    """In-place stamp of provider fields onto a newly-created job meta dict.
+
+    The ONLY caller that stamps role routes — this is job-create time, which
+    is the moment the routing is decided for the life of the job.
+    """
+    meta.update(provider_meta_fields(provider, include_routes=True))
     return meta
 
 
@@ -485,23 +499,26 @@ def provider_for_role(job_id: str | None, role: str) -> str:
         return base
 
     if job_id:
+        # A job's routing was decided at create time. Live Settings are NOT
+        # consulted for an existing job under ANY condition — not even when
+        # the key is absent. An absent key means "this job has no role
+        # routing", never "look it up now": a job created while the map was
+        # empty omits the key entirely (to keep meta byte-identical), and
+        # falling through would let a later Settings edit re-route a job that
+        # is already running. Same reason a read failure returns `base`
+        # instead of guessing — the job's own provider is the safe direction.
         try:
             from modules._common import read_meta
 
-            meta = read_meta(job_id) or {}
-            stamped = meta.get("agent_role_providers")
-            if isinstance(stamped, dict):
-                # A stamped map is authoritative even when it has no entry for
-                # this role: the operator's routing at create time said this
-                # role follows the job provider. Falling through to live
-                # Settings here would let a mid-run edit leak in, which is the
-                # exact failure the snapshot exists to prevent.
-                target = str(stamped.get(r) or "").strip().lower()
-                if target in ROLE_TARGET_PROVIDERS:
-                    return target
-                return base
+            stamped = (read_meta(job_id) or {}).get("agent_role_providers")
         except Exception:
-            pass
+            stamped = None
+        if isinstance(stamped, dict):
+            target = str(stamped.get(r) or "").strip().lower()
+            if target in ROLE_TARGET_PROVIDERS:
+                return target
+        return base
 
+    # No job yet — a pre-create decision is the only place live Settings win.
     target = role_provider_routes(base).get(r, "")
     return target or base
