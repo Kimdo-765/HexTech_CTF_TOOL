@@ -4881,12 +4881,17 @@ def agent_heartbeat(job_id: str, msg) -> None:
               else _accumulate_tokens(job_id, usage, msg_id))
     turns = _token_turns.get(job_id, 0)
 
+    session_cost = None
     if is_result:
         cost = getattr(msg, "total_cost_usd", None)
         if isinstance(cost, (int, float)):
             # + earlier sessions of this same job (stop -> continue in place),
             # otherwise each session's cumulative total overwrites the last.
             updates["cost_usd"] = prior_session_cost(job_id) + float(cost)
+            # THIS session's figure, un-summed. meta.cost_usd is the job total;
+            # the usage ledger wants one row per session, so adding the prior
+            # sessions again there would double every earlier one.
+            session_cost = float(cost)
         # Result also carries the SDK's own authoritative model_usage
         # — surface alongside our running sum for cross-checking.
         model_usage = getattr(msg, "model_usage", None)
@@ -4957,6 +4962,46 @@ def agent_heartbeat(job_id: str, msg) -> None:
         flag_candidates=candidates or None,
         **updates,
     )
+
+    if is_result:
+        # One usage-ledger row per MAIN session. Separate from meta because a
+        # hybrid job's spend is in two units that must not be added: Claude
+        # reports dollars, Codex OAuth reports none and is metered in windows.
+        # See modules/usage_ledger.py. Entirely best-effort — accounting must
+        # never break the run it is accounting for.
+        try:
+            from modules.agent_provider import provider_for_job
+            from modules.usage_ledger import codex_window_snapshot, record_usage
+
+            _prov = provider_for_job(job_id)
+            if session_cost is not None:
+                _cost, _basis = session_cost, "reported"
+            elif isinstance(updates.get("cost_usd_estimate"), (int, float)):
+                _cost, _basis = updates["cost_usd_estimate"], "estimated"
+            else:
+                # Codex OAuth prices nothing (codex_cli returns
+                # total_cost_usd=None). Recording 0.0 here would make a hybrid
+                # job read as cheaper than a pure-Claude one.
+                _cost, _basis = None, "none"
+            record_usage(
+                job_id,
+                role="main",
+                stage="main",
+                provider=_prov,
+                model=resolve_main_model(read_meta(job_id).get("model"), _prov),
+                tokens=tokens,
+                cost_usd=_cost,
+                cost_basis=_basis,
+                window=(
+                    codex_window_snapshot(cached_only=True)
+                    if _prov == "gpt" else None
+                ),
+                # Cumulative-per-session cost plus a stream that can re-emit a
+                # Result means the same session must not add a second row.
+                dedupe_key=getattr(msg, "session_id", None) or None,
+            )
+        except Exception:
+            pass
 
     # SSE meta delta — fires on the same throttle as write_meta so the
     # frontend never gets out of sync with on-disk meta.json.
