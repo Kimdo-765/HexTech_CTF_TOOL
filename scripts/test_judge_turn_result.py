@@ -238,34 +238,34 @@ check(
 )
 
 # ---------------------------------------------------------------------------
-# 6. The REAL `_run_judge_turn` GPT branch preserves the failure cause.
-#    Driven by injecting a fake gpt_agent module, so the control flow under
-#    test is the production one.
+# 6. The REAL `_run_judge_turn` GPT and Grok branches, driven with the REAL
+#    adapter message classes.
+#
+#    turn 0017: the first version of this section defined its own Result class
+#    with a `.result` attribute. Production has no such field — gpt_responses
+#    and grok_acp both carry `stop_reason` — so the test drove the production
+#    control flow through a message shape that does not exist, and every
+#    failure classified as the generic `agent_error` underneath it. Importing
+#    the adapters' own classes is what makes the isinstance checks and the
+#    attribute contract both real.
 # ---------------------------------------------------------------------------
-class _Blk:
-    def __init__(self, text):
-        self.text = text
+from modules.gpt_responses import (  # noqa: E402
+    AssistantMessage as RealGptAssistant,
+    ResultMessage as RealGptResult,
+    TextBlock as RealGptText,
+)
+import modules.gpt_agent as GA  # noqa: E402
+import modules.grok_acp as GK  # noqa: E402
+
+check("the real GPT Result has no .result field", hasattr(RealGptResult(), "result"), False)
+check("it carries stop_reason instead", hasattr(RealGptResult(), "stop_reason"), True)
+check("the real Grok Result has no .result field", hasattr(GK.ResultMessage(), "result"), False)
 
 
-class _Asst:
-    def __init__(self, text):
-        self.content = [_Blk(text)]
-
-
-class _Res:
-    def __init__(self, is_error=False, result="", sid="gs1", **kw):
-        self.is_error = is_error
-        self.result = result
-        self.session_id = sid
-        self.model_usage = kw.get("model_usage")
-        self.usage = kw.get("usage")
-        self.total_cost_usd = kw.get("total_cost_usd")
-
-
-def _install_fake_gpt(messages=None, raise_exc=None):
-    mod = types.ModuleType("modules.gpt_agent")
-
+def _fake_client(messages=None, raise_exc=None):
     class _Client:
+        session_id = "gs1"
+
         def __init__(self, opts):
             self.opts = opts
 
@@ -284,39 +284,91 @@ def _install_fake_gpt(messages=None, raise_exc=None):
             for m in (messages or []):
                 yield m
 
-    mod.GptAgentClient = _Client
-    mod.GptSessionOptions = lambda **kw: types.SimpleNamespace(**kw)
-    mod.AssistantMessage = _Asst
-    mod.ResultMessage = _Res
-    sys.modules["modules.gpt_agent"] = mod
+    return _Client
 
+
+AUP = "request violates our usage policy"
 
 jid3 = "jt3"
 jd3 = make_job(jid3, agent_provider="gpt")
 SETTINGS.write_text(json.dumps({"agent_provider": "gpt", "gpt_model": "gpt-5.6"}))
 
-_install_fake_gpt([_Asst('{"ok": true}'), _Res(model_usage={"m": {"input_tokens": 9}})])
-ok_turn = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
-check("a good gpt turn returns its text", ok_turn.text, '{"ok": true}')
-check("with no error kind", ok_turn.error_kind, None)
-check("the provider is recorded", ok_turn.provider, "gpt")
-check("usage survives", ok_turn.tokens, {"input_tokens": 9})
-check("the session id survives", ok_turn.session_id, "gs1")
+_orig_gpt_client = GA.GptAgentClient
+try:
+    GA.GptAgentClient = _fake_client([
+        RealGptAssistant(content=[RealGptText('{"ok": true}')]),
+        RealGptResult(session_id="gs1", model_usage={"m": {"input_tokens": 9}}),
+    ])
+    ok_turn = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check("a good gpt turn returns its text", ok_turn.text, '{"ok": true}')
+    check("with no error kind", ok_turn.error_kind, None)
+    check("the provider is recorded", ok_turn.provider, "gpt")
+    check("usage survives", ok_turn.tokens, {"input_tokens": 9})
+    check("the session id survives", ok_turn.session_id, "gs1")
 
-_install_fake_gpt([_Res(is_error=True, result="request violates our usage policy")])
-ref_turn = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
-check("an is_error refusal is classified", ref_turn.error_kind, "policy_refusal")
-check("the detail is kept", "usage policy" in ref_turn.error_detail, True)
-check("and text is empty", ref_turn.text, "")
+    # The adapters emit failure detail as ASSISTANT text before the error
+    # Result — so that text is a first-class classification source.
+    GA.GptAgentClient = _fake_client([
+        RealGptAssistant(content=[RealGptText(AUP)]),
+        RealGptResult(is_error=True, stop_reason="refusal", session_id="gs1"),
+    ])
+    ref = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check("a real GPT refusal is classified", ref.error_kind, "policy_refusal")
+    check("the detail is not empty", bool(ref.error_detail.strip()), True)
+    check("and names the cause", "usage policy" in ref.error_detail, True)
 
-_install_fake_gpt(raise_exc=RuntimeError("connection reset"))
-exc_turn = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
-check("a transport exception is NOT called a refusal", exc_turn.error_kind, "transport_error")
-check("its detail names the exception", "connection reset" in exc_turn.error_detail, True)
+    GA.GptAgentClient = _fake_client([
+        RealGptAssistant(content=[RealGptText("stream timed out after 600s")]),
+        RealGptResult(is_error=True, stop_reason="timeout", session_id="gs1"),
+    ])
+    to = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check("a real GPT timeout is NOT a refusal", to.error_kind, "timeout")
 
-_install_fake_gpt(raise_exc=RuntimeError("request timed out"))
-to_turn = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
-check("a timeout exception is classified as timeout", to_turn.error_kind, "timeout")
+    # stop_reason alone must be enough when the adapter emitted no text.
+    GA.GptAgentClient = _fake_client([
+        RealGptResult(is_error=True, stop_reason="request timed out", session_id="gs1"),
+    ])
+    sr = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check("stop_reason alone still classifies", sr.error_kind, "timeout")
+
+    GA.GptAgentClient = _fake_client(raise_exc=RuntimeError("connection reset"))
+    exc_turn = J._run_async(J._run_judge_turn("p", cwd=jd3, resume_sid=None))
+    check("a transport exception is NOT called a refusal", exc_turn.error_kind, "transport_error")
+    check("its detail names the exception", "connection reset" in exc_turn.error_detail, True)
+finally:
+    GA.GptAgentClient = _orig_gpt_client
+
+# ---- the Grok branch, same contract -----------------------------------------
+jid3g = "jt3g"
+jd3g = make_job(jid3g, agent_provider="grok")
+SETTINGS.write_text(json.dumps({"agent_provider": "grok", "grok_model": "grok-build"}))
+
+_orig_grok_client = GK.GrokACPClient
+try:
+    GK.GrokACPClient = _fake_client([
+        GK.AssistantMessage(content=[GK.TextBlock(AUP)]),
+        GK.ResultMessage(is_error=True, stop_reason="refusal", session_id="ks1"),
+    ])
+    gref = J._run_async(J._run_judge_turn("p", cwd=jd3g, resume_sid=None))
+    check("a real Grok refusal is classified", gref.error_kind, "policy_refusal")
+    check("the Grok detail is not empty", bool(gref.error_detail.strip()), True)
+
+    GK.GrokACPClient = _fake_client([
+        GK.AssistantMessage(content=[GK.TextBlock('{"ok": true}')]),
+        GK.ResultMessage(
+            session_id="ks1",
+            model_usage={"grok-build": {"input_tokens": 17, "output_tokens": 3}},
+            total_cost_usd=0.2,
+        ),
+    ])
+    gok = J._run_async(J._run_judge_turn("p", cwd=jd3g, resume_sid=None))
+    check("a good Grok turn returns its text", gok.text, '{"ok": true}')
+    check("its reported cost survives", gok.reported_cost, 0.2)
+    check("its usage survives", gok.tokens, {"input_tokens": 17, "output_tokens": 3})
+finally:
+    GK.GrokACPClient = _orig_grok_client
+
+SETTINGS.write_text(json.dumps({"agent_provider": "claude"}))
 
 # ---------------------------------------------------------------------------
 # 7. The call sites are wired: prejudge records under its own stage.

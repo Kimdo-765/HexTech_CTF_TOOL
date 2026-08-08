@@ -442,6 +442,32 @@ def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
     return tokens, cost
 
 
+def _error_detail(msg: Any, parts: list[str]) -> str:
+    """Failure detail from wherever THIS adapter actually puts it.
+
+    Reading only ``.result`` was wrong for two of the three backends: the GPT
+    and Grok ``ResultMessage`` contracts have no such field at all
+    (gpt_responses.py / grok_acp.py — both carry ``stop_reason``), so every
+    failure arrived as an empty string and classified as the generic
+    `agent_error`. A refusal and a timeout became indistinguishable, which is
+    exactly the distinction stage 4's failover turns on.
+
+    The cause is not lost, just carried elsewhere: the Codex CLI emits turn
+    failure / process error / timeout detail as ASSISTANT text before the
+    error Result, and Grok does the same for ACP errors — so the text already
+    accumulated in `parts` is a first-class source, not a fallback.
+    """
+    bits: list[str] = []
+    for attr in ("result", "stop_reason", "error", "error_detail"):
+        value = getattr(msg, attr, None)
+        if value:
+            bits.append(str(value))
+    text = "".join(parts).strip()
+    if text:
+        bits.append(text)
+    return " | ".join(bits)[:1000]
+
+
 def _classify(detail: str, fallback: str) -> str:
     """Map an error string to an error_kind, defaulting to `fallback`.
 
@@ -597,7 +623,7 @@ async def _run_judge_turn(
                         res.session_id = captured_sid
                         res.tokens, res.reported_cost = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            detail = str(getattr(msg, "result", "") or "")
+                            detail = _error_detail(msg, parts)
                             res.error_kind = _classify(detail, "agent_error")
                             res.error_detail = detail[:500]
                             return res
@@ -655,7 +681,7 @@ async def _run_judge_turn(
                         res.session_id = captured_sid
                         res.tokens, res.reported_cost = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
-                            detail = str(getattr(msg, "result", "") or "")
+                            detail = _error_detail(msg, parts)
                             res.error_kind = _classify(detail, "agent_error")
                             res.error_detail = detail[:500]
                             return res
@@ -707,7 +733,7 @@ async def _run_judge_turn(
                 res.session_id = captured_sid
                 res.tokens, res.reported_cost = _usage_from_result(msg)
                 if getattr(msg, "is_error", False):
-                    detail = str(getattr(msg, "result", "") or "")
+                    detail = _error_detail(msg, parts)
                     res.error_kind = _classify(detail, "agent_error")
                     res.error_detail = detail[:500]
                     return res
