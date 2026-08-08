@@ -316,16 +316,56 @@ check(
     _evals[0] > max(_records) if _evals and _records else False,
     True,
 )
-check(
-    "the shadow branch is guarded on the mode, not on enable_judge",
-    'judge_mode == "shadow"' in _runner_src,
-    True,
-)
-check(
-    "shadow recording never sits under the gating flag",
-    'if enable_judge:\n            from modules import judge_shadow' in _runner_src,
-    False,
-)
+# Substring checks cannot tell a live branch from a dead one: replacing the
+# guard with `if False:` leaves the string in the file. Walk the tree and
+# require each call to sit under a test that actually compares judge_mode.
+def _guarded_by_shadow_mode(tree, attr: str) -> list[bool]:
+    """One entry per `judge_shadow.<attr>(...)` call: does SOME enclosing `if`
+    actually test `judge_mode == "shadow"`?
+
+    Per call site, not per (If, call) pair — a call sits inside several nested
+    conditionals, and an unrelated outer one (`if enable_judge:`) says nothing
+    about whether the shadow guard is live.
+    """
+
+    def _is_shadow_test(node) -> bool:
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.Compare) and isinstance(sub.left, ast.Name)):
+                continue
+            if sub.left.id != "judge_mode":
+                continue
+            for op, c in zip(sub.ops, sub.comparators):
+                if (isinstance(op, ast.Eq)
+                        and isinstance(c, ast.Constant) and c.value == "shadow"):
+                    return True
+        return False
+
+    def _calls(nodes) -> list:
+        out = []
+        for node in nodes:
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == attr
+                        and isinstance(sub.func.value, ast.Name)
+                        and sub.func.value.id == "judge_shadow"):
+                    out.append(sub)
+        return out
+
+    guarded = set()
+    for node in ast.walk(tree):
+        # `node.body` only: the same call in an `else` runs when NOT shadow.
+        if isinstance(node, ast.If) and _is_shadow_test(node.test):
+            guarded.update(id(c) for c in _calls(node.body))
+    return [id(c) in guarded for c in _calls([tree])]
+
+
+_guards = _guarded_by_shadow_mode(_runner_ast, "record_input")
+check("every shadow recording is guarded", len(_guards) >= 2, True)
+check("...by a live judge_mode == 'shadow' test, not a dead branch",
+      all(_guards), True)
+check("the evaluation call is guarded the same way",
+      all(_guarded_by_shadow_mode(_runner_ast, "evaluate")), True)
 
 print(
     f"== summary: {PASSED} passed, {FAILED} failed =="
