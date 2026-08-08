@@ -122,6 +122,20 @@ def scripted(outcomes: dict):
     J._run_judge_turn = _fake
 
 
+def turn(**kw) -> J.JudgeTurnResult:
+    """Call judge_turn and turn any escape into a REPORTABLE result.
+
+    judge_turn is documented as never fatal, so an exception escaping it IS
+    the failure — and a suite that dies on it hides which contract broke.
+    Fourth time in this work an unguarded call did that.
+    """
+    try:
+        return J.judge_turn(**kw)
+    except Exception as exc:
+        return J.JudgeTurnResult(
+            provider="RAISED", error_kind=f"{type(exc).__name__}: {exc}")
+
+
 _orig_turn = J._run_judge_turn
 
 # ---------------------------------------------------------------------------
@@ -147,7 +161,7 @@ for kind in ("timeout", "auth", "transport_error", "agent_error", None):
     jid = f"only-{kind}"
     make_job(jid, agent_provider="claude")
     scripted({"claude": {"error_kind": kind, "text": "" if kind else "{}", "sid": "c1"}})
-    out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
+    out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
     check(f"{kind or 'success'}: exactly one turn, no failover", len(CALLS), 1)
     check(f"{kind or 'success'}: no failover diagnosis", out.failover_diagnosis, None)
 
@@ -162,7 +176,7 @@ scripted({
     "claude": {"error_kind": "policy_refusal", "error_detail": "violates our usage policy"},
     "gpt": {"text": '{"ok": true}', "sid": "g1", "tokens": {"input_tokens": 10}},
 })
-out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=True)
+out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=True)
 check("two turns: the block, then the retry", len(CALLS), 2)
 check("the first ran on the job's provider", CALLS[0]["provider"], "claude")
 check("...resuming its own session", CALLS[0]["resume_sid"], "claude-session")
@@ -178,7 +192,7 @@ check("a provider-specific block is diagnosed as such", out.failover_diagnosis, 
 check("the job is pinned to the answering provider", J._pinned_provider(jid), "gpt")
 CALLS.clear()
 scripted({"gpt": {"text": '{"action": "continue"}', "sid": "g2"}})
-J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="supervise", resume=True)
+turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="supervise", resume=True)
 check("the next stage stays on the pinned provider", CALLS[0]["provider"], "gpt")
 check("...and resumes the pinned provider's session", CALLS[0]["resume_sid"], "g1")
 
@@ -192,7 +206,7 @@ scripted({
     "claude": {"error_kind": "policy_refusal", "error_detail": "blocked A"},
     "gpt": {"error_kind": "policy_refusal", "error_detail": "blocked B"},
 })
-out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="postjudge", resume=False)
+out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="postjudge", resume=False)
 check("both were tried", len(CALLS), 2)
 check("the ORIGINAL result is returned", out.provider, "claude")
 check("...still a policy_refusal", out.error_kind, "policy_refusal")
@@ -211,7 +225,7 @@ scripted({
     "claude": {"error_kind": "policy_refusal", "error_detail": "blocked A"},
     "gpt": {"text": '{"action": "continue"}', "sid": "g5"},
 })
-nxt = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="supervise", resume=True)
+nxt = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="supervise", resume=True)
 check("so the next stage still gets its own retry", len(CALLS), 2)
 check("...and can succeed where the last one did not", nxt.error_kind, None)
 check("...which finally pins the job", J._pinned_provider(jid), "gpt")
@@ -224,7 +238,7 @@ scripted({
     "claude": {"error_kind": "policy_refusal", "error_detail": "blocked"},
     "gpt": {"error_kind": "timeout", "error_detail": "timed out"},
 })
-out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
+out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
 check("a retry that timed out is inconclusive", out.failover_diagnosis, "inconclusive")
 check("the original block is still what callers see", out.error_kind, "policy_refusal")
 
@@ -236,7 +250,7 @@ CALLS.clear()
 jid = "fo-noauth"
 make_job(jid, agent_provider="claude")
 scripted({"claude": {"error_kind": "policy_refusal", "error_detail": "blocked"}})
-out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
+out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
 check("with no authed target, only one turn runs", len(CALLS), 1)
 check("the result says why there was no retry", "no failover target" in out.error_detail, True)
 check("and it is not diagnosed", out.failover_diagnosis, None)
@@ -292,8 +306,8 @@ for stage in ("prejudge", "supervise", "postjudge"):
     jid = f"raise-{stage}"
     make_job(jid, agent_provider="claude")
     raising({"claude": RuntimeError("wrapper exploded")})
-    out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage=stage, resume=False)
-    check(f"{stage}: judge_turn does not propagate", isinstance(out, J.JudgeTurnResult), True)
+    out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage=stage, resume=False)
+    check(f"{stage}: judge_turn does not propagate", out.provider != "RAISED", True)
     check(f"{stage}: the failure is classified", out.error_kind, "transport_error")
     check(f"{stage}: the provider is the one that was TRIED", out.provider, "claude")
     rows = UL.read_usage(jid)
@@ -309,7 +323,7 @@ raising({
     "claude": {"error_kind": "policy_refusal", "error_detail": "blocked"},
     "gpt": RuntimeError("alternate exploded"),
 })
-out = J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
+out = turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
 arows = UL.read_usage(jid)
 check("both attempts are billed even when the alternate raised", len(arows), 2)
 check("...the primary's refusal row survives",
@@ -322,6 +336,41 @@ check("the caller still sees the original refusal", out.error_kind, "policy_refu
 check("...diagnosed as inconclusive, not provider-specific",
       out.failover_diagnosis, "inconclusive")
 
+
+# ---------------------------------------------------------------------------
+# 5c. `_run_async` itself. `_attempt` catches everything above it, so a bug
+#     here is invisible to every other case: it caught EVERY RuntimeError as
+#     "the loop is already running", re-awaited the spent coroutine, and
+#     returned a default — a judge that raised RuntimeError looked exactly
+#     like a judge that answered nothing.
+# ---------------------------------------------------------------------------
+async def _ok():
+    return "value"
+
+
+async def _boom_runtime():
+    raise RuntimeError("the coroutine itself failed")
+
+
+async def _boom_value():
+    raise ValueError("not a RuntimeError")
+
+
+check("a normal coroutine returns its value", J._run_async(_ok()), "value")
+for coro_fn, exc_type, label in (
+    (_boom_runtime, RuntimeError, "RuntimeError"),
+    (_boom_value, ValueError, "ValueError"),
+):
+    try:
+        got = J._run_async(coro_fn())
+        check(f"a coroutine raising {label} propagates", f"returned {got!r}", "raised")
+    except exc_type as e:
+        check(f"a coroutine raising {label} propagates", "raised", "raised")
+        check(f"...with its own message ({label})",
+              "failed" in str(e) or "not a RuntimeError" in str(e), True)
+    except Exception as e:  # pragma: no cover
+        check(f"a coroutine raising {label} propagates as {label}", type(e).__name__, exc_type.__name__)
+
 # ---------------------------------------------------------------------------
 # 6. BOTH turns are billed. Hiding the refused one makes a failover look free.
 # ---------------------------------------------------------------------------
@@ -333,7 +382,7 @@ scripted({
                "tokens": {"input_tokens": 500}},
     "gpt": {"text": "{}", "sid": "g9", "tokens": {"input_tokens": 700}},
 })
-J.judge_turn("p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
+turn(user_prompt="p", cwd=DATA / "jobs" / jid, job_id=jid, stage="prejudge", resume=False)
 rows = UL.read_usage(jid)
 check("both turns are in the ledger", len(rows), 2)
 # Indexed defensively: a mutation that drops a row should NAME the contract it
