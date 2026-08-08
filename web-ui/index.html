@@ -595,6 +595,22 @@
             Grok is not a target: it stays a whole-job backend, and a role pointed at it
             falls back to the job's own provider rather than half-switching.
           </p>
+          <label style="max-width:22rem">
+            Topology preset
+            <select name="topology_preset">
+              <option value="custom">custom</option>
+              <option value="codex">all Codex</option>
+              <option value="claude">all Claude</option>
+              <option value="hybrid">hybrid — Codex drives, Claude judges &amp; reviews</option>
+            </select>
+            <small style="color:var(--fg-muted)">
+              Fills the controls below; nothing is stored until you press Save. It sets
+              routing only — the models each side uses come from that provider's own
+              preset, and a role routed to Claude already picks up the Claude preset's
+              entry for it. Shows <b>custom</b> when the current selection matches none
+              of these.
+            </small>
+          </label>
           <div class="role-provider-grid">
             <label>
               Judge
