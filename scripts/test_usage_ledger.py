@@ -326,15 +326,51 @@ check(
     (1.25, "reported", False),
 )
 check(
-    "claude with only tokens -> estimated, priced at its own vendor's rates",
-    UL.cost_contract("claude", estimated_cost=0.5),
+    "claude with only tokens -> estimated, when the model IS priced",
+    UL.cost_contract("claude", estimated_cost=0.5, estimate_priced=True),
     (0.5, "estimated", False),
+)
+
+# turn 0012 D1: `_rates_for_model` falls back to the Opus row for anything it
+# does not recognise, so `grok-build` — which has no row — priced out at
+# Opus-5 rates and booked $0.0075 of Grok spend nobody was charged. An
+# estimate is only money if the model is actually priced.
+check(
+    "an UNPRICED model's estimate is refused, not booked",
+    UL.cost_contract("grok", estimated_cost=0.0075),
+    (None, "none", False),
+)
+check(
+    "estimate_priced DEFAULTS to False, so a forgetful caller under-reports "
+    "visibly rather than inventing money",
+    UL.cost_contract("claude", estimated_cost=9.99),
+    (None, "none", False),
+)
+check(
+    "a REPORTED grok figure is still preserved — that branch was correct",
+    UL.cost_contract("grok", reported_cost=0.2),
+    (0.2, "reported", False),
+)
+check(
+    "a reported figure wins even when the model is unpriced",
+    UL.cost_contract("grok", reported_cost=0.2, estimated_cost=0.0075),
+    (0.2, "reported", False),
 )
 check(
     "grok never asks for a Codex OAuth window",
     UL.cost_contract("grok", reported_cost=0.2)[2],
     False,
 )
+
+# And the predicate itself: the rate table must not claim to price grok.
+from modules._common import model_rates_are_known  # noqa: E402
+
+check("grok-build is NOT priced", model_rates_are_known("grok-build"), False)
+check("an invented model is NOT priced", model_rates_are_known("totally-made-up-xyz"), False)
+check("claude-opus-4-8 IS priced", model_rates_are_known("claude-opus-4-8"), True)
+check("gpt-5.6-sol IS priced", model_rates_are_known("gpt-5.6-sol"), True)
+check("an empty model is NOT priced", model_rates_are_known(""), False)
+check("None is NOT priced", model_rates_are_known(None), False)
 check(
     "a 0.0 figure is still 'reported', not folded into 'none'",
     UL.cost_contract("claude", reported_cost=0.0),

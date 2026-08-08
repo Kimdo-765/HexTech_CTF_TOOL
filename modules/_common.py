@@ -4984,18 +4984,23 @@ def agent_heartbeat(job_id: str, msg) -> None:
             # runtime IS dollar-billed but its figure is the adapter's own
             # estimate, and the OAuth window does not apply to an API key.
             _runtime = get_gpt_runtime() if _prov == "gpt" else None
+            _model = resolve_main_model(read_meta(job_id).get("model"), _prov)
             _cost, _basis, _wants_window = cost_contract(
                 _prov,
                 reported_cost=session_cost,
                 estimated_cost=updates.get("cost_usd_estimate"),
                 gpt_runtime=_runtime,
+                # `grok-build` has no row in the rate table, so its estimate
+                # was Opus-5 pricing applied to Grok tokens. An estimate is
+                # only money if the model is actually priced.
+                estimate_priced=model_rates_are_known(_model),
             )
             record_usage(
                 job_id,
                 role="main",
                 stage="main",
                 provider=_prov,
-                model=resolve_main_model(read_meta(job_id).get("model"), _prov),
+                model=_model,
                 tokens=tokens,
                 cost_usd=_cost,
                 cost_basis=_basis,
@@ -5815,6 +5820,20 @@ def _rates_for_model(model: str | None) -> tuple[float, float, float, float]:
     # family this deployment actually runs, and it is still the most expensive
     # of the modern tiers, so it stays an upper bound among plausible models.
     return _MODEL_RATES_USD_PER_MTOK["opus-5"]
+
+
+def model_rates_are_known(model: str | None) -> bool:
+    """True when the rate table has a row that actually matches `model`.
+
+    `_rates_for_model` deliberately falls back to the current Opus row for
+    anything it does not recognise, which is a defensible upper bound for the
+    SPEND METER — but it is fabrication in a ledger. `grok-build` has no row,
+    so its "estimate" is Opus-5 pricing applied to Grok tokens: not an
+    inaccurate estimate, an estimate of nothing. Callers that record money
+    must ask this first and record null instead.
+    """
+    low = (model or "").strip().lower()
+    return bool(low) and any(needle in low for needle in _MODEL_RATES_USD_PER_MTOK)
 
 
 def estimate_cost_from_tokens(

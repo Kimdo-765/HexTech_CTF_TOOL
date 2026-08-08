@@ -64,6 +64,7 @@ def cost_contract(
     reported_cost: Any = None,
     estimated_cost: Any = None,
     gpt_runtime: str | None = None,
+    estimate_priced: bool = False,
 ) -> tuple[float | None, str, bool]:
     """Decide (cost_usd, cost_basis, attach_oauth_window) for one invocation.
 
@@ -79,8 +80,18 @@ def cost_contract(
       ``total_cost_usd`` is its OWN estimate (gpt_responses.py). So it is a
       dollar figure, but "estimated", and the OAuth window does not apply to
       it at all — that window belongs to the subscription, not the API key.
-    * ``claude`` / ``grok`` — the SDK's figure when there is one, else an
-      estimate from tokens priced with that vendor's own rates. No window.
+    * ``claude`` / ``grok`` — the SDK's figure when there is one. Grok's ACP
+      adapter reports a real one whenever the transport carries it, and that
+      is preserved. When there is none, an estimate is only accepted if the
+      rate table actually prices this model.
+
+    ``estimate_priced`` is the guard for that last clause and defaults to
+    **False**. `_rates_for_model` falls back to the Opus row for any model it
+    does not recognise, so `grok-build` — which has no row — priced out at
+    Opus-5 rates and booked $0.0075 of Grok spend that no one was charged.
+    A caller that cannot say whether its estimate is priced should not have it
+    believed: the row then reads null / "none" and the bucket says
+    `usd_complete: False`, which is visibly missing rather than quietly wrong.
     """
     p = str(provider or "").strip().lower()
     runtime = str(gpt_runtime or "").strip().lower()
@@ -88,19 +99,20 @@ def cost_contract(
     def _num(v: Any) -> float | None:
         return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
+    est = _num(estimated_cost) if estimate_priced else None
+
     if p == "gpt" and runtime != "responses":
         return None, "none", True
-    if p == "gpt":  # responses
+    if p == "gpt":  # responses — API-key billed; its figure is its own estimate
         cost = _num(reported_cost)
         if cost is None:
-            cost = _num(estimated_cost)
+            cost = est
         return (cost, "estimated", False) if cost is not None else (None, "none", False)
 
     cost = _num(reported_cost)
     if cost is not None:
         return cost, "reported", False
-    cost = _num(estimated_cost)
-    return (cost, "estimated", False) if cost is not None else (None, "none", False)
+    return (est, "estimated", False) if est is not None else (None, "none", False)
 
 
 def _jobs_dir() -> Path:

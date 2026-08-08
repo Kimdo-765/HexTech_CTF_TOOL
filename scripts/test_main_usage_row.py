@@ -171,6 +171,22 @@ check("the gpt bucket has no dollar total", agg["usd"], None)
 check("and is flagged incomplete", agg["usd_complete"], False)
 
 # ---------------------------------------------------------------------------
+# 1b. The guard must not suppress a LEGITIMATE estimate. Claude can end a
+#     session without a total_cost_usd (see prior_session_cost's history), and
+#     claude-opus-4-8 IS in the rate table — so the estimate is real money and
+#     must still be recorded, marked "estimated".
+# ---------------------------------------------------------------------------
+j1b = make_job("mu1c", agent_provider="claude", model="claude-opus-4-8")
+reset(j1b)
+C.agent_heartbeat(j1b, AssistantMessage({"input_tokens": 100000, "output_tokens": 5000}, "cm1"))
+C._heartbeat_state.pop(j1b, None)
+C.agent_heartbeat(j1b, ResultMessage(cost=None, session_id="cs1"))
+row_c = UL.read_usage(j1b)[-1]
+check("a priced claude model still gets its estimate", isinstance(row_c.get("cost_usd"), float), True)
+check("...above zero", (row_c.get("cost_usd") or 0) > 0, True)
+check("...labelled estimated", row_c.get("cost_basis"), "estimated")
+
+# ---------------------------------------------------------------------------
 # 2b. turn 0010 D1 — the REAL Codex message order: usage arrives on an
 #     Assistant turn, then a Result with total_cost_usd=None. That fills the
 #     token accumulator, so the estimate branch fires. Pricing GPT tokens
@@ -216,6 +232,32 @@ check("D2 responses reports dollars", row_r.get("cost_usd"), 0.008)
 check("D2 but labelled estimated, not reported", row_r.get("cost_basis"), "estimated")
 check("D2 and carries NO Codex OAuth window", "window" in row_r, False)
 check("D2 the runtime is on the row", row_r.get("runtime"), "responses")
+
+# ---------------------------------------------------------------------------
+# 2d. turn 0012 D1 — Grok through the REAL heartbeat. `grok-build` has no row
+#     in the rate table, so its estimate was Opus-5 pricing applied to Grok
+#     tokens. A reported ACP figure is still preserved.
+# ---------------------------------------------------------------------------
+SETTINGS.write_text(json.dumps({"agent_provider": "grok", "grok_model": "grok-build"}))
+j2d = make_job("mu2d", agent_provider="grok", model="grok-build")
+reset(j2d)
+C.agent_heartbeat(j2d, AssistantMessage({"input_tokens": 1000, "output_tokens": 100}, "gm1"))
+C._heartbeat_state.pop(j2d, None)
+C.agent_heartbeat(j2d, ResultMessage(cost=None, session_id="ks1"))
+row_g = UL.read_usage(j2d)[-1]
+check("D1 grok tokens were accumulated (branch reached)", bool(row_g.get("tokens")), True)
+check("D1 an unpriced grok model books NO dollars", row_g.get("cost_usd"), None)
+check("D1 basis is none, not estimated", row_g.get("cost_basis"), "none")
+check("D1 the bucket says so out loud",
+      UL.aggregate_usage(j2d)["providers"]["grok"]["usd_complete"], False)
+
+# The reported branch was correct and must stay correct.
+j2e = make_job("mu2e", agent_provider="grok", model="grok-build")
+reset(j2e)
+C.agent_heartbeat(j2e, ResultMessage(cost=0.2, session_id="ks2"))
+row_g2 = UL.read_usage(j2e)[-1]
+check("a reported ACP figure is preserved", row_g2.get("cost_usd"), 0.2)
+check("...as reported", row_g2.get("cost_basis"), "reported")
 
 # ---------------------------------------------------------------------------
 # 3. A ledger failure must not break the heartbeat.
