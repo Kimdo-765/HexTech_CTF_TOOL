@@ -96,6 +96,13 @@ class JudgeTurnResult:
     error_detail: str = ""
     tokens: dict[str, int] = field(default_factory=dict)
     reported_cost: float | None = None
+    # Per-model breakdown, kept because a judge session is not necessarily
+    # single-model: the Claude judge registers a recon subagent, and the
+    # active preset can pin recon to a different model from judge. Flattening
+    # that to one figure loses the ledger's own `model` axis AND prices the
+    # cheaper model's tokens at the expensive one's rate (measured: $0.0225
+    # booked where the per-model sum was $0.0165).
+    model_usage: dict[str, dict] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -407,7 +414,7 @@ def _forget_sid(job_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
+def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None, dict[str, dict]]:
     """(tokens, reported_cost) from any provider's ResultMessage.
 
     All three adapters mirror the SDK shape, so one reader covers them. The
@@ -416,12 +423,21 @@ def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
     the reported cost to the cent.
     """
     tokens: dict[str, int] = {}
+    per_model: dict[str, dict] = {}
     try:
         from modules._common import _tokens_from_model_usage
 
         mu = getattr(msg, "model_usage", None)
         if isinstance(mu, dict):
             tokens = _tokens_from_model_usage(mu) or {}
+            # Keep the split as well as the total. Same normalisation, one
+            # model at a time, so the ledger can carry a row per model.
+            for name, raw in mu.items():
+                if not isinstance(raw, dict):
+                    continue
+                one = _tokens_from_model_usage({name: raw})
+                if one:
+                    per_model[str(name)] = one
         if not tokens:
             usage = getattr(msg, "usage", None)
             if isinstance(usage, dict):
@@ -435,11 +451,11 @@ def _usage_from_result(msg: Any) -> tuple[dict[str, int], float | None]:
                     and usage[k]
                 }
     except Exception:
-        tokens = {}
+        tokens, per_model = {}, {}
     cost = getattr(msg, "total_cost_usd", None)
     if not isinstance(cost, (int, float)) or isinstance(cost, bool):
         cost = None
-    return tokens, cost
+    return tokens, cost, per_model
 
 
 # Stored detail cap. Classification NEVER runs on the truncated string — a
@@ -599,7 +615,7 @@ def classify_failure(msg: Any, parts: list[str], fallback: str) -> tuple[str, st
 
 
 def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
-    """One ledger row per judge turn, keyed by stage.
+    """Ledger rows for one judge turn — ONE PER MODEL, keyed by stage.
 
     Judge spend was invisible before this: `meta.cost_usd` is main's session
     and `summary["cost_usd"]` is subagents, so a cross-provider judge burned a
@@ -610,6 +626,19 @@ def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
     `stage` is prejudge / supervise / postjudge: supervise fires repeatedly
     within one run, so a role-only ledger would say "judge is expensive"
     without saying which part.
+
+    A judge turn is not necessarily single-model. The Claude judge registers a
+    recon subagent and the active preset can pin recon to a different model,
+    so the SDK's `model_usage` can carry two. Folding that into one row lost
+    the ledger's own `model` axis and priced the cheaper model's tokens at the
+    expensive one's rate — measured $0.0225 booked where the per-model sum was
+    $0.0165.
+
+    A REPORTED cost is a session figure and cannot be split across models
+    without inventing the split, so it stays whole on the primary model's row
+    and the other rows carry tokens with no dollars. The bucket then sums to
+    the reported total rather than to a fabricated one, and `usd_complete`
+    says out loud that not every row could be priced.
     """
     try:
         from modules._common import estimate_cost_from_tokens, model_rates_are_known
@@ -619,31 +648,45 @@ def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:
             record_usage,
         )
 
-        est = None
-        if res.tokens and res.reported_cost is None:
-            est = estimate_cost_from_tokens(res.tokens, res.model) or None
-        cost, basis, wants_window = cost_contract(
-            res.provider,
-            reported_cost=res.reported_cost,
-            estimated_cost=est,
-            gpt_runtime=res.runtime,
-            estimate_priced=model_rates_are_known(res.model),
-        )
-        record_usage(
-            job_id,
-            role="judge",
-            stage=stage,
-            provider=res.provider,
-            model=res.model,
-            tokens=res.tokens,
-            cost_usd=cost,
-            cost_basis=basis,
-            runtime=res.runtime,
-            window=(
-                codex_window_snapshot(cached_only=True) if wants_window else None
-            ),
-            error_kind=res.error_kind,
-        )
+        window = None
+        breakdown = res.model_usage or {}
+        if len(breakdown) > 1:
+            rows = list(breakdown.items())
+            # The turn's own model is the primary one; anything else came from
+            # a subagent the judge spawned.
+            rows.sort(key=lambda kv: kv[0] != (res.model or ""))
+        else:
+            rows = [(res.model, res.tokens)]
+
+        for index, (model, tokens) in enumerate(rows):
+            is_primary = index == 0
+            # Only the primary row may carry the session's reported figure.
+            reported = res.reported_cost if is_primary else None
+            est = None
+            if tokens and res.reported_cost is None:
+                est = estimate_cost_from_tokens(tokens, model) or None
+            cost, basis, wants_window = cost_contract(
+                res.provider,
+                reported_cost=reported,
+                estimated_cost=est,
+                gpt_runtime=res.runtime,
+                estimate_priced=model_rates_are_known(model),
+            )
+            if wants_window and window is None:
+                window = codex_window_snapshot(cached_only=True)
+            record_usage(
+                job_id,
+                role="judge",
+                stage=stage,
+                provider=res.provider,
+                model=model,
+                tokens=tokens,
+                cost_usd=cost,
+                cost_basis=basis,
+                runtime=res.runtime,
+                window=window if wants_window else None,
+                error_kind=res.error_kind,
+            )
     except Exception:
         pass
 
@@ -729,7 +772,7 @@ async def _run_judge_turn(
                     elif isinstance(msg, GptResultMessage):
                         captured_sid = getattr(msg, "session_id", None) or captured_sid
                         res.session_id = captured_sid
-                        res.tokens, res.reported_cost = _usage_from_result(msg)
+                        res.tokens, res.reported_cost, res.model_usage = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
                             res.error_kind, res.error_detail = classify_failure(
                                 msg, parts, "agent_error")
@@ -786,7 +829,7 @@ async def _run_judge_turn(
                         if sid and not captured_sid:
                             captured_sid = sid
                         res.session_id = captured_sid
-                        res.tokens, res.reported_cost = _usage_from_result(msg)
+                        res.tokens, res.reported_cost, res.model_usage = _usage_from_result(msg)
                         if getattr(msg, "is_error", False):
                             res.error_kind, res.error_detail = classify_failure(
                                 msg, parts, "agent_error")
@@ -837,7 +880,7 @@ async def _run_judge_turn(
                 if sid and not captured_sid:
                     captured_sid = sid
                 res.session_id = captured_sid
-                res.tokens, res.reported_cost = _usage_from_result(msg)
+                res.tokens, res.reported_cost, res.model_usage = _usage_from_result(msg)
                 if getattr(msg, "is_error", False):
                     res.error_kind, res.error_detail = classify_failure(
                         msg, parts, "agent_error")

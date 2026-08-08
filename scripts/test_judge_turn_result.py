@@ -157,19 +157,22 @@ class _R:
         self.__dict__.update(kw)
 
 
-tok, cost = J._usage_from_result(
+tok, cost, per_model = J._usage_from_result(
     _R(model_usage={"m": {"input_tokens": 10, "output_tokens": 2}}, total_cost_usd=0.5)
 )
+check("the per-model split is preserved", per_model,
+      {"m": {"input_tokens": 10, "output_tokens": 2}})
 check("model_usage is folded into the token schema", tok, {"input_tokens": 10, "output_tokens": 2})
 check("a reported cost is carried", cost, 0.5)
 
-tok2, cost2 = J._usage_from_result(
+tok2, cost2, _pm2 = J._usage_from_result(
     _R(usage={"input_tokens": 7, "output_tokens": 1}, total_cost_usd=None)
 )
+check("a usage-only Result has no per-model split", _pm2, {})
 check("usage is the fallback when model_usage is absent", tok2, {"input_tokens": 7, "output_tokens": 1})
 check("a missing cost stays None, not 0.0", cost2, None)
 
-tok3, cost3 = J._usage_from_result(_R())
+tok3, cost3, _pm3 = J._usage_from_result(_R())
 check("neither present -> empty, not a crash", (tok3, cost3), ({}, None))
 
 # ---------------------------------------------------------------------------
@@ -216,6 +219,83 @@ last = UL.read_usage(jid)[-1]
 check("a failed turn is recorded, not dropped", last["stage"], "postjudge")
 check("with its error kind", last.get("error_kind"), "policy_refusal")
 check("and no invented dollars", last["cost_usd"], None)
+
+# ---------------------------------------------------------------------------
+# 4b. turn 0024 D4: a judge turn is not necessarily single-model. The Claude
+#     judge registers a recon subagent and the preset can pin recon to a
+#     different model, so `model_usage` can carry two. Folding them into one
+#     row lost the ledger's `model` axis and priced the cheaper model's tokens
+#     at the expensive one's rate.
+# ---------------------------------------------------------------------------
+from modules._common import estimate_cost_from_tokens as _est  # noqa: E402
+
+MULTI = {
+    "claude-opus-4-8": {"input_tokens": 1000, "output_tokens": 100},
+    "claude-sonnet-4-6": {"input_tokens": 2000, "output_tokens": 200},
+}
+jmm = "jt-multi"
+make_job(jmm, agent_provider="claude")
+J._record_judge_usage(
+    jmm, "prejudge",
+    J.JudgeTurnResult(
+        provider="claude", model="claude-opus-4-8",
+        tokens={"input_tokens": 3000, "output_tokens": 300},
+        model_usage=MULTI,
+    ),
+)
+mrows = UL.read_usage(jmm)
+check("D4 one row PER MODEL, not one per turn", len(mrows), 2)
+check("D4 both models are named", sorted(r["model"] for r in mrows),
+      ["claude-opus-4-8", "claude-sonnet-4-6"])
+check(
+    "D4 each row carries only ITS model's tokens",
+    {r["model"]: r["tokens"] for r in mrows},
+    MULTI,
+)
+check(
+    "D4 the primary model comes first",
+    mrows[0]["model"],
+    "claude-opus-4-8",
+)
+_want = round(sum(_est(v, m) for m, v in MULTI.items()), 6)
+_got = round(sum(r["cost_usd"] or 0 for r in mrows), 6)
+check("D4 the dollars are the PER-MODEL sum", _got, _want)
+check(
+    "D4 ...which is NOT the flattened single-rate figure",
+    _got == round(_est({"input_tokens": 3000, "output_tokens": 300}, "claude-opus-4-8"), 6),
+    False,
+)
+
+# A REPORTED session cost cannot be split, so it stays whole on the primary
+# row and the others carry tokens with no dollars — the bucket then sums to
+# the reported total instead of a fabricated one.
+jmr = "jt-multi-reported"
+make_job(jmr, agent_provider="claude")
+J._record_judge_usage(
+    jmr, "postjudge",
+    J.JudgeTurnResult(provider="claude", model="claude-opus-4-8",
+                      reported_cost=0.42, model_usage=MULTI),
+)
+rrows = UL.read_usage(jmr)
+check("D4 reported: still one row per model", len(rrows), 2)
+check("D4 reported: the session figure is whole on the primary row",
+      rrows[0]["cost_usd"], 0.42)
+check("D4 reported: it is not duplicated onto the other", rrows[1]["cost_usd"], None)
+check("D4 reported: the bucket sums to the reported total",
+      UL.aggregate_usage(jmr)["providers"]["claude"]["usd"], 0.42)
+check("D4 reported: and says not every row could be priced",
+      UL.aggregate_usage(jmr)["providers"]["claude"]["usd_complete"], False)
+
+# Single-model turns are unchanged.
+jsm = "jt-single"
+make_job(jsm, agent_provider="claude")
+J._record_judge_usage(
+    jsm, "prejudge",
+    J.JudgeTurnResult(provider="claude", model="claude-opus-4-8",
+                      tokens={"input_tokens": 100},
+                      model_usage={"claude-opus-4-8": {"input_tokens": 100}}),
+)
+check("a single-model turn still writes exactly one row", len(UL.read_usage(jsm)), 1)
 
 # ---------------------------------------------------------------------------
 # 5. Codex judge — the cost contract applies here exactly as it does to main.
