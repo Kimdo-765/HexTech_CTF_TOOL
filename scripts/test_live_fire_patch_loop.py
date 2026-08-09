@@ -210,8 +210,8 @@ def runtime_factory(*, defeat_candidate=False):
     )
 
 
-def valid_finding(line=6):
-    return patch_loop.VulnerabilityFinding(
+def valid_finding(line=6, **overrides):
+    values = dict(
         bug_class="path traversal",
         severity="high",
         path="app.py",
@@ -223,6 +223,8 @@ def valid_finding(line=6):
         mitigation_class="root-cause-fix",
         evidence_tier="B",
     )
+    values.update(overrides)
+    return patch_loop.VulnerabilityFinding(**values)
 
 
 class ScriptedProvider:
@@ -438,6 +440,73 @@ check(
     "artifact directory has exactly three downloads",
     sorted(path.name for path in positive.artifacts.report.parent.iterdir()),
     ["patched.zip", "report.md", "verification.json"],
+)
+
+
+# Structured finding values fail closed, while the valid fixture remains accepted.
+positive_finding = valid_finding()
+positive_diffs = patch_loop.candidate_diff(workspace)
+check(
+    "valid structured finding passes",
+    patch_loop._finding_errors((positive_finding,), positive_diffs),
+    [],
+)
+for label, overrides, expected_error in (
+    ("blank bug_class", {"bug_class": " "}, "lacks bug_class"),
+    ("invalid severity", {"severity": "urgent"}, "invalid severity"),
+    (
+        "invalid mitigation_class",
+        {"mitigation_class": "waf-rule"},
+        "invalid mitigation_class",
+    ),
+    ("invalid evidence_tier", {"evidence_tier": "C"}, "invalid evidence_tier"),
+    (
+        "blank root cause and impact",
+        {"root_cause": " ", "attack_impact": ""},
+        "lacks root cause or attack impact",
+    ),
+    (
+        "blank patch description and reason",
+        {"patch_description": "", "patch_reason": " "},
+        "lacks patch description or reason",
+    ),
+):
+    errors = patch_loop._finding_errors((valid_finding(**overrides),), positive_diffs)
+    check(
+        f"{label} is rejected",
+        any(expected_error in item for item in errors),
+        True,
+    )
+
+check(
+    "valid finding evidence links pass",
+    patch_loop._finding_evidence_errors((positive_finding,), doc),
+    [],
+)
+mismatched_class = dict(doc)
+mismatched_class["mitigation_class"] = "input-filter"
+check(
+    "verification mitigation_class mismatch is rejected",
+    any(
+        "mitigation_class does not match" in item
+        for item in patch_loop._finding_evidence_errors(
+            (positive_finding,), mismatched_class
+        )
+    ),
+    True,
+)
+missing_tier = dict(doc)
+missing_tier["security_gate"] = dict(doc["security_gate"])
+missing_tier["security_gate"]["evidence_tiers"] = []
+check(
+    "finding evidence_tier without attack evidence is rejected",
+    any(
+        "lacks attack evidence" in item
+        for item in patch_loop._finding_evidence_errors(
+            (positive_finding,), missing_tier
+        )
+    ),
+    True,
 )
 
 
