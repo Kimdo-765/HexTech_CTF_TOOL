@@ -471,6 +471,38 @@ if _supervise_args == [False]:
     check("...they name the hard timeout instead",
           "hard timeout" in _hint_blob, True)
 
+    # ------------------------------------------------------------------
+    # One decision — "supervise does not run" — turned out to be written
+    # down in six places: the runner, the Settings control, the shadow
+    # module, the settings schema, the judge's system prompt, main's retry
+    # hints, and the README. Each was found separately, one review round
+    # each. Enumerating files here would just start that again for the
+    # next surface, so this sweeps the whole tree for the VOCABULARY the
+    # old contract used. It cannot prove a rewording is honest; it does
+    # stop the old wording coming back, and catches a new file adopting it.
+    # ------------------------------------------------------------------
+    _FORBIDDEN = ("3-stage", "three stages", "stall-supervise",
+                  "supervise watchdog", "stall supervisor",
+                  "supervise fires under")
+    # The plan doc is the record of the decision itself and argues about
+    # supervise by name; the suites quote the old strings to test for them.
+    _ALLOW = ("docs/hybrid-agent-plan.md", "scripts/test_")
+    _offenders = []
+    for _f in sorted(ROOT.rglob("*")):
+        if not _f.is_file() or _f.suffix not in (".md", ".py", ".html", ".js", ".sh"):
+            continue
+        _rel = str(_f.relative_to(ROOT))
+        if _rel.startswith(".git") or any(a in _rel for a in _ALLOW):
+            continue
+        try:
+            _txt = _f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for _bad in _FORBIDDEN:
+            if _bad in _txt:
+                _offenders.append(f"{_rel}: {_bad!r}")
+    check("no surface still speaks the pre-stage-8 lifecycle", _offenders, [])
+
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
       + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
 _TMP.cleanup()

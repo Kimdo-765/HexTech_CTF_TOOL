@@ -97,7 +97,7 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # (saves ~2 Claude turns per auto_run job at the cost of losing
     # parse-error detection).
     #
-    # The stall supervisor used to be listed here as a third stage. It is
+    # A stall-detection stage used to be listed here as a third one. It is
     # excluded from v1 enforce and gated behind `enable_supervise`
     # (default False), so hang detection is NOT among the things this
     # setting buys — the hard timeout still covers it.

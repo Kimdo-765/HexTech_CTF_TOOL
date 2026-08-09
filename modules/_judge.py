@@ -797,8 +797,9 @@ def _attempt(
     The exception boundary belongs HERE, at the attempt, not around the public
     stage function — for three reasons that only show up at this level:
 
-      * All three stages go through it, so supervise and postjudge stop
-        propagating and stop leaving zero ledger rows.
+      * Every stage function goes through it, so none of them propagates
+        or leaves zero ledger rows. (That includes `supervise`, which is
+        implemented but not driven — see the module header.)
       * The provider is already known. A catch further out has to re-guess it,
         and in a failover it guesses WRONG: an exception from the alternate
         was attributed to the provider the primary ran on.
