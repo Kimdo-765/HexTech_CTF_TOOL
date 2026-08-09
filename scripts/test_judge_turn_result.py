@@ -194,6 +194,25 @@ check(
         "summary": "decoy flag, not a real capture",
     },
 )
+_schema_template_then_decision = """I will use this shape:
+{"verdict":"","summary":"","next_action":"","retry_hint":"",
+ "stop_reason":"","failure_code":null,"what_worked":[],"what_failed":[],
+ "specific_diagnosis":"","alternative_paths":[],"retry_worthwhile":false}
+After checking the artifacts, my answer:
+{"verdict":"success","next_action":"stop"}
+"""
+check(
+    "a verbose empty schema template cannot override the later real decision",
+    J._parse_json(
+        _schema_template_then_decision,
+        expected_keys=(
+            "verdict", "next_action", "summary", "retry_hint", "stop_reason",
+            "failure_code", "what_worked", "what_failed", "specific_diagnosis",
+            "alternative_paths", "retry_worthwhile",
+        ),
+    ),
+    {"verdict": "success", "next_action": "stop"},
+)
 check(
     "plain JSON parsing is unchanged",
     J._parse_json('{"ok": true, "severity": "low"}'),

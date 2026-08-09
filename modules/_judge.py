@@ -1203,10 +1203,11 @@ def _parse_json(text: str, *, expected_keys: tuple[str, ...] = ()) -> dict:
       * a JSON object on the first non-empty line,
       * a JSON object inside a ```json fenced block.
       * a complete JSON object surrounded by prose.
-    When ``expected_keys`` is provided, embedded objects are ranked by how
-    many stage-specific keys they contain. This prevents an earlier artifact
-    snippet (for example ``{"status": "finished"}``) from being mistaken for
-    the judge's later decision object.
+    When ``expected_keys`` is provided, embedded objects without any
+    stage-specific key are ignored and the last matching object in a boundary
+    tier wins. Judge replies normally put schema examples and planning prose
+    before the operative answer, so key-count scoring would let a verbose
+    empty template beat a shorter real decision.
     Returns {} on failure.
     """
     s = (text or "").strip()
@@ -1236,7 +1237,6 @@ def _parse_json(text: str, *, expected_keys: tuple[str, ...] = ()) -> dict:
 
     def _best_at(starts) -> dict:
         best: dict = {}
-        best_score = 0
         for start in starts:
             try:
                 d, _end = decoder.raw_decode(s, start)
@@ -1246,16 +1246,15 @@ def _parse_json(text: str, *, expected_keys: tuple[str, ...] = ()) -> dict:
                 continue
             if not expected_keys:
                 return d
-            score = sum(key in d for key in expected_keys)
-            if score > best_score:
+            if any(key in d for key in expected_keys):
                 best = d
-                best_score = score
         return best
 
     # Preserve the original high-confidence boundary: a decision beginning at
     # the start of a line is more likely to be the requested answer than an
     # inline schema example. Rank *all* such objects, though — returning the
-    # first one lets a short line-boundary example beat a fuller verdict below.
+    # first one lets a line-boundary schema example beat the operative verdict
+    # below. Within a tier, the last stage-shaped object is the final answer.
     line_starts = (
         match.end() - 1 for match in re.finditer(r"(?m)^[ \t]*\{", s)
     )
@@ -1264,8 +1263,9 @@ def _parse_json(text: str, *, expected_keys: tuple[str, ...] = ()) -> dict:
         return line_object
 
     # A tool-using judge can also put a multiline object in the middle of prose.
-    # Decode every possible boundary and use the stage schema to reject or
-    # outrank unrelated artifact objects.
+    # Decode every possible boundary and use the stage schema to reject
+    # unrelated artifact objects. The last matching object wins for the same
+    # schema-before-answer ordering used by the line-boundary tier.
     return _best_at(i for i, char in enumerate(s) if char == "{")
 
 
