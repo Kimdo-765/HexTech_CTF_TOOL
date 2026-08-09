@@ -103,6 +103,111 @@ def make_job(job_id: str, **meta) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# 0. Judge JSON extraction — tool-using models may wrap a valid object in
+#    analysis prose.  The parser must preserve the structured decision even
+#    when the object spans lines or more prose follows it.
+# ---------------------------------------------------------------------------
+_wrapped = """I checked the fresh artifact first. It contains {not JSON}.
+{
+  "verdict": "success",
+  "summary": "real remote flag captured",
+  "next_action": "stop"
+}
+The run should now stop.
+"""
+check(
+    "prose-wrapped multiline JSON keeps the judge decision",
+    J._parse_json(_wrapped),
+    {
+        "verdict": "success",
+        "summary": "real remote flag captured",
+        "next_action": "stop",
+    },
+)
+_wrapped_verdict = J._normalize_verdict(J._parse_json(_wrapped))
+check(
+    "the wrapped decision reaches the postjudge state machine",
+    (_wrapped_verdict["verdict"], _wrapped_verdict["next_action"]),
+    ("success", "stop"),
+)
+_artifact_then_decision = (
+    'I inspected meta {"status":"finished"}. Final decision: '
+    '{"verdict":"success","summary":"real flag","next_action":"stop"}'
+)
+check(
+    "an earlier artifact object is not mistaken for the postjudge decision",
+    J._parse_json(
+        _artifact_then_decision,
+        expected_keys=("verdict", "next_action", "summary"),
+    ),
+    {"verdict": "success", "summary": "real flag", "next_action": "stop"},
+)
+check(
+    "a stage schema fails closed when only an unrelated object exists",
+    J._parse_json(
+        'I inspected meta {"status":"finished"}.',
+        expected_keys=("verdict", "next_action"),
+    ),
+    {},
+)
+_inline_example_then_decoy = (
+    'I will answer in the form {"verdict": "success"} once I finish checking.\n'
+    'Checked. Here is my actual answer:\n'
+    '{"verdict": "fail", "next_action": "stop", '
+    '"summary": "decoy flag, not a real capture"}'
+)
+_decoy_verdict = J._parse_json(
+    _inline_example_then_decoy,
+    expected_keys=("verdict", "next_action", "summary"),
+)
+check(
+    "an inline example cannot override a line-boundary decoy verdict",
+    _decoy_verdict,
+    {
+        "verdict": "fail",
+        "next_action": "stop",
+        "summary": "decoy flag, not a real capture",
+    },
+)
+_normalized_decoy = J._normalize_verdict(_decoy_verdict)
+check(
+    "the invalid fail verdict stays non-success and keeps the explicit stop",
+    (_normalized_decoy["verdict"], _normalized_decoy["next_action"]),
+    ("unknown", "stop"),
+)
+_line_example_then_decoy = (
+    "Example schema:\n"
+    '{"verdict":"success"}\n'
+    "Actual decision:\n"
+    '{"verdict":"fail","next_action":"stop",'
+    '"summary":"decoy flag, not a real capture"}'
+)
+check(
+    "a line-boundary example cannot override a fuller decision below it",
+    J._parse_json(
+        _line_example_then_decoy,
+        expected_keys=("verdict", "next_action", "summary"),
+    ),
+    {
+        "verdict": "fail",
+        "next_action": "stop",
+        "summary": "decoy flag, not a real capture",
+    },
+)
+check(
+    "plain JSON parsing is unchanged",
+    J._parse_json('{"ok": true, "severity": "low"}'),
+    {"ok": True, "severity": "low"},
+)
+check(
+    "fenced JSON parsing is unchanged",
+    J._parse_json('```json\n{"ok": true}\n```'),
+    {"ok": True},
+)
+check("prose without a complete object still fails closed", J._parse_json("note {oops"), {})
+
+
+# ---------------------------------------------------------------------------
 # 1. "ran and said nothing" is a DIFFERENT fact from "never ran".
 # ---------------------------------------------------------------------------
 check("empty text with no error is not ok", J.JudgeTurnResult().ok, False)

@@ -1195,13 +1195,18 @@ def _run_async(coro):
 # ---------------------------------------------------------------------------
 
 
-def _parse_json(text: str) -> dict:
+def _parse_json(text: str, *, expected_keys: tuple[str, ...] = ()) -> dict:
     """Best-effort JSON extraction from a judge reply.
 
     Tolerates:
       * a plain JSON object as the entire reply,
       * a JSON object on the first non-empty line,
       * a JSON object inside a ```json fenced block.
+      * a complete JSON object surrounded by prose.
+    When ``expected_keys`` is provided, embedded objects are ranked by how
+    many stage-specific keys they contain. This prevents an earlier artifact
+    snippet (for example ``{"status": "finished"}``) from being mistaken for
+    the judge's later decision object.
     Returns {} on failure.
     """
     s = (text or "").strip()
@@ -1209,7 +1214,9 @@ def _parse_json(text: str) -> dict:
         return {}
     try:
         d = json.loads(s)
-        if isinstance(d, dict):
+        if isinstance(d, dict) and (
+            not expected_keys or any(key in d for key in expected_keys)
+        ):
             return d
     except json.JSONDecodeError:
         pass
@@ -1219,21 +1226,47 @@ def _parse_json(text: str) -> dict:
             body = body[:-3]
         try:
             d = json.loads(body.strip())
-            if isinstance(d, dict):
+            if isinstance(d, dict) and (
+                not expected_keys or any(key in d for key in expected_keys)
+            ):
                 return d
         except json.JSONDecodeError:
             pass
-    for line in s.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            d = json.loads(line)
-            if isinstance(d, dict):
+    decoder = json.JSONDecoder()
+
+    def _best_at(starts) -> dict:
+        best: dict = {}
+        best_score = 0
+        for start in starts:
+            try:
+                d, _end = decoder.raw_decode(s, start)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if not expected_keys:
                 return d
-        except json.JSONDecodeError:
-            continue
-    return {}
+            score = sum(key in d for key in expected_keys)
+            if score > best_score:
+                best = d
+                best_score = score
+        return best
+
+    # Preserve the original high-confidence boundary: a decision beginning at
+    # the start of a line is more likely to be the requested answer than an
+    # inline schema example. Rank *all* such objects, though — returning the
+    # first one lets a short line-boundary example beat a fuller verdict below.
+    line_starts = (
+        match.end() - 1 for match in re.finditer(r"(?m)^[ \t]*\{", s)
+    )
+    line_object = _best_at(line_starts)
+    if line_object:
+        return line_object
+
+    # A tool-using judge can also put a multiline object in the middle of prose.
+    # Decode every possible boundary and use the stage schema to reject or
+    # outrank unrelated artifact objects.
+    return _best_at(i for i, char in enumerate(s) if char == "{")
 
 
 def _truncate_tail(text: str, *, max_bytes: int) -> str:
@@ -1636,7 +1669,10 @@ def prejudge_script(
         }
     raw, sid = turn.text, turn.session_id
 
-    parsed = _parse_json(raw)
+    parsed = _parse_json(
+        raw,
+        expected_keys=("ok", "severity", "flag_likelihood", "issues"),
+    )
 
     if not parsed:
         log_fn(
@@ -1753,7 +1789,7 @@ def supervise_run_once(
         resume=True, model=resolve_judge_model(job_id),
     )
     raw, sid = turn.text, turn.session_id
-    parsed = _parse_json(raw)
+    parsed = _parse_json(raw, expected_keys=("action", "reason"))
 
     action = str(parsed.get("action") or "continue").lower()
     if action not in ("kill", "continue"):
@@ -1944,7 +1980,14 @@ def postjudge_run(
         resume=True, model=resolve_judge_model(job_id),
     )
     raw, sid = turn.text, turn.session_id
-    parsed = _parse_json(raw)
+    parsed = _parse_json(
+        raw,
+        expected_keys=(
+            "verdict", "next_action", "summary", "retry_hint", "stop_reason",
+            "failure_code", "what_worked", "what_failed", "specific_diagnosis",
+            "alternative_paths", "retry_worthwhile",
+        ),
+    )
 
     # All verdict/next_action/stop_reason/failure_code + success-collapse
     # invariants live in one place now. See docs/judge_state_machine.md.
