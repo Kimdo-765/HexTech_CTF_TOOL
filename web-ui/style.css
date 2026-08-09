@@ -553,6 +553,36 @@ textarea, select {
   background: var(--bg-sunken); color: var(--fg-dim); border-color: var(--line);
 }
 
+/* Live-fire's lifecycle status (finished) and deployability verdict are two
+   different facts. The banner keeps READY visually distinct from the
+   diagnostic-only UNVERIFIED state and always carries evidence provenance. */
+.live-fire-outcome {
+  border: 1px solid var(--line-hi);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.7rem 0.85rem;
+  margin: 0.5rem 0;
+}
+.live-fire-outcome > div:first-child {
+  display: flex; align-items: center; gap: 0.65rem;
+}
+.live-fire-outcome strong { letter-spacing: 0.06em; }
+.live-fire-outcome span { color: var(--fg-muted); font-size: 0.78rem; }
+.live-fire-outcome small { display: block; color: var(--fg-muted); margin-top: 0.25rem; }
+.live-fire-outcome.ready { border-left-color: var(--green-bright); }
+.live-fire-outcome.ready strong { color: var(--green-bright); }
+.live-fire-outcome.unverified { border-left-color: var(--yellow-bright); }
+.live-fire-outcome.unverified strong { color: var(--yellow-bright); }
+.live-fire-outcome.pending { border-left-color: var(--blue-bright); }
+.live-fire-outcome.pending strong { color: var(--blue-bright); }
+.live-fire-downloads { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
+.live-fire-downloads a {
+  border: 1px solid var(--line-hi); border-radius: 5px;
+  background: var(--surface-2); padding: 0.3rem 0.55rem;
+  text-decoration: none;
+}
+
 /* Job description block (above the retry/run buttons) */
 .description-block {
   background: var(--surface);

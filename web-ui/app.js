@@ -1064,6 +1064,9 @@ document.getElementById("rev-form").addEventListener("submit", (e) => {
 document.getElementById("web3-form").addEventListener("submit", (e) => {
   e.preventDefault(); submitJob(e.target, "/modules/web3/analyze");
 });
+document.getElementById("live-fire-form").addEventListener("submit", (e) => {
+  e.preventDefault(); submitJob(e.target, "/modules/live-fire/analyze");
+});
 
 function _setModelField(f, name, customName, catalog, value) {
   const modelSel = f.querySelector(`[name=${name}]`);
@@ -3142,12 +3145,43 @@ async function renderJob(id, opts = {}) {
     `<a href="${url}" target="_blank" class="file-preview-link"
         data-url="${url}" data-name="${escapeHtml(name)}">${escapeHtml(label)}</a>`;
 
-  let resultBlock = "";
+  function liveFireOutcomeHtml(job, jobId) {
+    if (job.module !== "live-fire") return "";
+    const tiers = Array.isArray(job.evidence_tiers)
+      ? job.evidence_tiers.filter((tier) => tier === "A" || tier === "B") : [];
+    let state = "PENDING";
+    let stateClass = "pending";
+    if (job.ready_to_deploy === true) {
+      state = "READY";
+      stateClass = "ready";
+    } else if (job.ready_to_deploy === false) {
+      state = "UNVERIFIED";
+      stateClass = "unverified";
+    }
+    const tierText = tiers.length ? tiers.map((tier) => `tier ${tier}`).join(" · ") : "tier unavailable";
+    const downloads = job.status === "finished" ? `
+      <div class="live-fire-downloads">
+        <a href="${API}/jobs/${encodeURIComponent(jobId)}/file/patched.zip" download>⬇ patched.zip</a>
+        <a href="${API}/jobs/${encodeURIComponent(jobId)}/file/report.md" download>⬇ report.md</a>
+        <a href="${API}/jobs/${encodeURIComponent(jobId)}/file/verification.json" download>⬇ verification.json</a>
+      </div>` : "";
+    return `<div class="live-fire-outcome ${stateClass}">
+      <div><strong>${state}</strong><span>${escapeHtml(tierText)}</span></div>
+      <small>${state === "READY"
+        ? "Machine gates passed; review before manual upload."
+        : state === "UNVERIFIED"
+          ? "Diagnostic ZIP only — do not treat as deployable."
+          : "Patch and machine verification are still running."}</small>
+      ${downloads}
+    </div>`;
+  }
+
+  let resultBlock = liveFireOutcomeHtml(job, id);
   if (["finished", "running", "no_flag"].includes(job.status)) {
-    const links = [
-      fileLink("result.json", `${API}/jobs/${id}/result`, "result.json"),
-      fileLink("report.md", `${API}/jobs/${id}/file/report.md`, "report.md"),
-    ];
+    const links = [fileLink("result.json", `${API}/jobs/${id}/result`, "result.json")];
+    if (job.module !== "live-fire") {
+      links.push(fileLink("report.md", `${API}/jobs/${id}/file/report.md`, "report.md"));
+    }
     // WHY_STOPPED.md only exists on abnormal stops — gate on the API's
     // presence flag so a clean flag-capture run doesn't show a dead link.
     if (job.has_why_stopped) {
@@ -3173,7 +3207,7 @@ async function renderJob(id, opts = {}) {
       links.push(fileLink("analyze.log", `${API}/jobs/${id}/file/analyze.log`, "analyze.log"));
     }
     links.push(`<a href="/terminal?job_id=${encodeURIComponent(id)}" target="_blank">⌨ open terminal</a>`);
-    resultBlock = `<div class="file-links">${links.join(" ")}</div>`;
+    resultBlock += `<div class="file-links">${links.join(" ")}</div>`;
   }
 
   // Job facts as labelled chips rather than one `·`-joined sentence. Same

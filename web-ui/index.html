@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HexTech_CTF_TOOL</title>
-  <link rel="stylesheet" href="/static/style.css?v=aaceab0e5" />
+  <link rel="stylesheet" href="/static/style.css?v=a34d03349" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -34,6 +34,7 @@
       <button class="tab" data-tab="crypto">Crypto</button>
       <button class="tab" data-tab="rev">Rev</button>
       <button class="tab" data-tab="web3">Web3</button>
+      <button class="tab" data-tab="live-fire">🔥 Live-fire</button>
       <button class="tab" data-tab="exploits" style="margin-left:auto">📚 Exploits</button>
       <button class="tab" data-tab="dashboard">📊 Dashboard</button>
       <button class="tab" data-tab="containers">🐳 Containers</button>
@@ -449,6 +450,50 @@
           <button type="reset" title="Clear file and all other inputs">Reset</button>
         </div>
         <small style="color:var(--fg-muted)">Reuses decompiler image. Solver runs with crypto libs (pycryptodome, gmpy2, sympy, z3, pwntools).</small>
+      </form>
+    </section>
+
+    <section id="panel-live-fire" class="panel">
+      <h2>🔥 Live-fire — Patch and Differential Verification</h2>
+      <p style="color:var(--fg-muted);font-size:0.85rem">
+        Upload one source ZIP. The service is rebuilt from the immutable original and
+        patched candidate, then the benign and fixed-attack probes below are compared.
+        The result is always manual-download only; this tool never deploys it.
+      </p>
+      <form id="live-fire-form">
+        <label>
+          Service source ZIP
+          <input type="file" name="file" accept=".zip,application/zip" required />
+        </label>
+        <label>
+          Verification contract (JSON)
+          <textarea name="verification" rows="14" required
+            placeholder='{"mitigation_class":"root-cause-fix","verification_reserve_s":&lt;seconds&gt;,"packaging_reserve_s":&lt;seconds&gt;,"probes":[{"name":"normal request","corpus":"benign","command":["..." ]},{"name":"fixed attack","corpus":"attack","command":["..."],"evidence_tier":"A","attack_expectation":{"exit_code":0}}]}'></textarea>
+          <small style="color:var(--fg-muted)">
+            Commands are argv arrays executed inside isolated original/candidate containers.
+            Include both benign and attack probes; attack evidence tier must be A or B.
+          </small>
+        </label>
+        <label>
+          Description / operator notes (optional)
+          <textarea name="description" rows="3" placeholder="service context, known vulnerable flow, constraints"></textarea>
+        </label>
+        <label>
+          Main patch model (blank = current provider preset)
+          <select name="model" data-role="model-select"></select>
+        </label>
+        <label>
+          Effort (blank = SDK default)
+          <select name="effort" data-role="effort-select"></select>
+        </label>
+        <label>
+          Job timeout (seconds, blank = global setting; shown on the result)
+          <input type="number" name="job_timeout" min="60" />
+        </label>
+        <div class="form-actions">
+          <button type="submit">Patch + Verify</button>
+          <button type="reset">Reset</button>
+        </div>
       </form>
     </section>
 
@@ -922,6 +967,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=aaceab0e5"></script>
+  <script src="/static/app.js?v=a34d03349"></script>
 </body>
 </html>

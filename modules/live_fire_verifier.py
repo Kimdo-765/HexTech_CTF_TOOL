@@ -296,6 +296,28 @@ class DockerRuntime:
         return self.runner.run((*self.docker_argv, *args), timeout_s)
 
     @staticmethod
+    def _guard_no_bind_mount_args(args: Sequence[str]) -> None:
+        """Keep worker-visible paths out of daemon-side bind mount options.
+
+        Build context is read by the worker's Docker CLI and sent as a tar
+        stream.  A bind source, in contrast, is resolved by the host daemon;
+        passing ``/data/jobs/...`` there silently crosses namespaces.
+        """
+
+        for part in args:
+            if (
+                part == "-v"
+                or (part.startswith("-v") and not part.startswith("--"))
+                or part == "--volume"
+                or part.startswith("--volume=")
+                or part == "--mount"
+                or part.startswith("--mount=")
+            ):
+                raise VerificationError(
+                    "live-fire verifier forbids Docker bind mount arguments"
+                )
+
+    @staticmethod
     def _require(phase: str, result: CommandResult) -> CommandResult:
         if result.exit_code != 0 or result.timed_out:
             raise DockerCommandError(phase, result)
@@ -332,6 +354,7 @@ class DockerRuntime:
         for key, value in sorted(labels.items()):
             args.extend(("--label", f"{key}={value}"))
         args.append(str(context))
+        self._guard_no_bind_mount_args(args)
         return self._run(args, limits.build_timeout_s)
 
     def create_internal_network(
@@ -374,6 +397,7 @@ class DockerRuntime:
         ]
         for key, value in sorted(labels.items()):
             args.extend(("--label", f"{key}={value}"))
+        self._guard_no_bind_mount_args(args)
         args.append(image)
         args.extend(command)
         self._require("container-create", self._run(args, limits.start_timeout_s))
