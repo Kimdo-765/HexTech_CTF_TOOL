@@ -401,7 +401,74 @@ def test_deploy_stamp_gate() -> None:
 
 
 # --------------------------------------------------------------------------
-# 7. prompts must not claim /tmp is shared between CONCURRENT jobs
+# 7. deploy.sh — a failed restart must never advance .last_deploy
+# --------------------------------------------------------------------------
+def test_deploy_restart_failure() -> None:
+    section("deploy.sh — restart failure is fail-closed")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+
+        fakes = {
+            "docker": """#!/bin/sh
+case "$*" in
+  "ps --format {{.Names}}") echo hextech_ctf_tool-api-1; exit 0 ;;
+  "compose -p hextech_ctf_tool restart api") exit "${FAKE_RESTART_RC:-0}" ;;
+  *) exit 18 ;;
+esac
+""",
+            "curl": "#!/bin/sh\nprintf '503'\n",
+            "git": """#!/bin/sh
+if [ "$1 $2" = "rev-parse HEAD" ]; then
+  echo 0123456789abcdef0123456789abcdef01234567
+  exit 0
+fi
+exit 19
+""",
+            "sleep": "#!/bin/sh\nexit 0\n",
+        }
+        for name, body in fakes.items():
+            path = fake_bin / name
+            path.write_text(body)
+            path.chmod(0o755)
+
+        env = dict(os.environ)
+        env["PATH"] = f"{fake_bin}:{env['PATH']}"
+        env["PROJECT_DIR"] = str(root)
+        env["FAKE_RESTART_RC"] = "17"
+        proc = subprocess.run(
+            [str(ROOT / "deploy.sh"), "--api"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        chk("restart exit 17 propagates as deploy exit 5", proc.returncode == 5,
+            (proc.returncode, proc.stdout, proc.stderr))
+        chk("failed restart does not create .last_deploy",
+            not (root / ".last_deploy").exists(),
+            (root / ".last_deploy").read_text() if (root / ".last_deploy").exists() else "")
+        chk("operator sees the fail-closed reason",
+            ".last_deploy NOT advanced" in proc.stdout, proc.stdout)
+
+        env["FAKE_RESTART_RC"] = "0"
+        proc = subprocess.run(
+            [str(ROOT / "deploy.sh"), "--api"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        chk("restart success with api 503 propagates as deploy exit 6",
+            proc.returncode == 6, (proc.returncode, proc.stdout, proc.stderr))
+        chk("unhealthy restarted api does not create .last_deploy",
+            not (root / ".last_deploy").exists(),
+            (root / ".last_deploy").read_text() if (root / ".last_deploy").exists() else "")
+        chk("operator sees the api health failure",
+            "restarted api is not 200" in proc.stdout, proc.stdout)
+
+
+# --------------------------------------------------------------------------
+# 8. prompts must not claim /tmp is shared between CONCURRENT jobs
 # --------------------------------------------------------------------------
 def test_prompt_tmp_claims() -> None:
     """One job per slot container means concurrent jobs no longer share /tmp.
@@ -825,6 +892,7 @@ def main() -> int:
     test_settings_key_rename()
     test_lifecycle_stamping()
     test_deploy_stamp_gate()
+    test_deploy_restart_failure()
     test_prompt_tmp_claims()
     test_mem_budget_block()
     test_carry_limits_note()

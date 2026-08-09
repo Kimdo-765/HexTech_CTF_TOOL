@@ -39,7 +39,8 @@
 #     light restart can't reach the daemon — deploy.sh detects this and prints
 #     the one-time fix instead of silently failing.
 #
-# EXIT: 0 ok · 2 bad args · 3 cli-shadowed (needs the one-time fix) · 4 stack down
+# EXIT: 0 ok · 2 bad args · 3 cli-shadowed · 4 stack down · 5 restart failed
+#       6 restarted API did not become healthy
 # =============================================================================
 set -uo pipefail
 
@@ -371,11 +372,22 @@ fi
 svcs="${RESTART_SVCS[*]}"
 log "restarting: $svcs (bind-mounted code — no rebuild)"
 # shellcheck disable=SC2086
-DC restart $svcs 2>&1 | sed 's/^/  /'
+if ! DC restart $svcs 2>&1 | sed 's/^/  /'; then
+  err "container restart failed — .last_deploy NOT advanced."
+  exit 5
+fi
 
 # --- verify ------------------------------------------------------------------
 for i in $(seq 1 25); do api_up && break; sleep 1; done
-if api_up; then ok "api $API_URL -> 200"; else warn "api not 200 yet — check 'docker compose -p $PROJECT logs api'"; fi
+if api_up; then
+  ok "api $API_URL -> 200"
+elif [ -n "${WANT[api]:-}" ]; then
+  err "restarted api is not 200 — .last_deploy NOT advanced."
+  err "check 'docker compose -p $PROJECT logs api'"
+  exit 6
+else
+  warn "api not 200 — worker restart succeeded, but check 'docker compose -p $PROJECT logs api'"
+fi
 
 # --- stamp the deploy so --changed can no-op next time -----------------------
 # ONLY when every slot that needed the new code actually got it.
