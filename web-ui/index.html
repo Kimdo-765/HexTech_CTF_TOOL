@@ -771,7 +771,7 @@
           <small style="color:var(--fg-muted)">forwarded to exploits as <code>CALLBACK_URL</code> env. Run <code>./tunnel.sh</code> (cloudflared) to auto-fill this with a tunnel that has no ngrok interstitial — or use requestbin / your own VPS for remote bots that can't reach private IPs.</small>
         </label>
         <label>
-          Judge mode (pre-flight script review · stall watchdog · post-mortem verdict)
+          Judge mode (pre-flight script review · post-mortem verdict)
           <select name="judge_mode">
             <option value="off">off — plain runner, no judge at all</option>
             <option value="shadow">shadow — record what the judge WOULD say, gate nothing</option>
@@ -788,9 +788,13 @@
             container starts. <b>shadow</b> costs nothing during the run — it appends the judge's
             INPUTS to <code>judge_shadow.jsonl</code> and the verdicts are produced afterwards,
             out of band; the run itself behaves exactly as with <b>off</b>, down to a
-            byte-identical <code>run.log</code>. Shadow observes prejudge and postjudge only —
-            supervise fires under the enforce gate, so zero supervise rows means shadow never
-            looked, not that nothing stalled.
+            byte-identical <code>run.log</code>.<br />
+            <b>The stall watchdog (supervise) does not run in any mode.</b> It is the one judge
+            stage nothing has been able to evaluate — its evidence is a live container's stalled
+            output, which no after-the-fact replay can reconstruct — and it is the only one that
+            kills a container. It is excluded from this release and sits behind its own flag,
+            off by default. Zero supervise rows therefore means it never fired, not that nothing
+            stalled. A stalled container is still killed by the hard timeout, as always.
           </small>
         </label>
         <label class="checkbox">

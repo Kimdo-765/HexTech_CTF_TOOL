@@ -72,7 +72,8 @@ CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
 # slow brute-force against a rate-limited endpoint. Give the whole web path
 # a 3000s (50-min) ceiling. Like the crypto-sage ceiling it's a CEILING, not
 # a fixed wait — a fast web solve exits the instant it finishes and pays
-# nothing; the stall watchdog + hard timeout still bound a genuinely stuck run.
+# nothing; the hard timeout still bounds a genuinely stuck run. (The stall
+# watchdog used to be named here too — it is off in v1, see `enable_supervise`.)
 WEB_TIMEOUT_S = 3000
 DEFAULT_MEM = "2g"
 

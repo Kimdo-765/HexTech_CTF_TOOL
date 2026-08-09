@@ -91,11 +91,16 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # aggregate cost against this ceiling.
     ("budget_usd", "BUDGET_USD", float, 0.0),
     # Quality-gate judge that wraps auto_run exploit/solver execution
-    # (pre-flight script review → stall supervisor → post-mortem
-    # verdict). Each stage is one short no-tools Claude call against
-    # LATEST_JUDGE_MODEL. Disable to skip all judge calls and run the
-    # script with the plain runner (saves ~3 Claude turns per auto_run
-    # job at the cost of losing hang/parse-error detection).
+    # (pre-flight script review → post-mortem verdict). Each stage is one
+    # short no-tools Claude call against LATEST_JUDGE_MODEL. Disable to
+    # skip all judge calls and run the script with the plain runner
+    # (saves ~2 Claude turns per auto_run job at the cost of losing
+    # parse-error detection).
+    #
+    # The stall supervisor used to be listed here as a third stage. It is
+    # excluded from v1 enforce and gated behind `enable_supervise`
+    # (default False), so hang detection is NOT among the things this
+    # setting buys — the hard timeout still covers it.
     ("enable_judge", "ENABLE_JUDGE", bool, True),
     # Tri-state successor to `enable_judge`. Empty means "derive from the
     # boolean", so existing settings keep meaning exactly what they meant:

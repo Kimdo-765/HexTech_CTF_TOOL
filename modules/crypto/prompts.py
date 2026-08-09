@@ -63,13 +63,12 @@ WORKFLOW
    - Print the recovered flag (or full plaintext if format unclear).
    - EMIT PROGRESS, flushed: print a one-line marker before AND after
      each heavy/slow step (`print("[*] stage k/N: solving ...",
-     flush=True)`, then `[*] stage k done`). The runner's stall watchdog
-     treats a long SILENCE as "possibly stuck" and asks the judge whether
-     to kill; a solver that stays silent through a multi-minute Sage
-     Gröbner/variety/resultant looks indistinguishable from a hang and
-     can be killed (or burn the whole budget) — steady progress lines
-     reset that clock and prove the run is advancing. A per-stage line
-     also pins WHICH stage stalled if it does time out.
+     flush=True)`, then `[*] stage k done`). A solver that stays silent
+     through a multi-minute Sage Gröbner/variety/resultant is
+     indistinguishable from a hang, and the run has a hard timeout that
+     will cut it — progress lines are what let anyone tell "still
+     working" from "wedged", and they pin WHICH stage stalled when the
+     timeout does fire.
 5. Write `./report.md`: cryptosystem (what / parameters / where) /
    weakness (file:line) / attack math step-by-step / one-line run.
 6. Pre-finalize: invoke the JUDGE GATE (see mission_block above).

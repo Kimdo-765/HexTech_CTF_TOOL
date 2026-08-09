@@ -402,6 +402,36 @@ check("...and nothing is attributed to supervise",
 check("...while the hard timeout still kills, judge or no judge",
       (_off_kills, _off_res.get("timeout")), ([1], True))
 
+# ---------------------------------------------------------------------------
+# 5. What the OPERATOR is told has to match what the code does.
+#
+#    The runtime boundary was fixed while the Settings control still promised
+#    "supervise fires under the enforce gate" and titled the mode with a stall
+#    watchdog. Every runtime check above passed against that build: the code
+#    was right and the contract shown to the person flipping the switch was
+#    backwards. A gate the operator believes is live and is not is the exact
+#    failure `get_judge_mode`'s docstring exists to prevent — it just happened
+#    in prose instead of in code.
+# ---------------------------------------------------------------------------
+_html = (ROOT / "web-ui" / "index.html").read_text()
+_i = _html.index('<select name="judge_mode">')
+_block = _html[_html.rindex("<label>", 0, _i):_html.index("</label>", _i)]
+
+check("the mode control does not advertise supervise as one of its stages",
+      ("stall watchdog" in _block.split("<select")[0]), False)
+check("...and does not promise that supervise fires under enforce",
+      "supervise fires under" in _block, False)
+check("...it states the opposite, where the operator will read it",
+      "does not run in any mode" in _block, True)
+
+# The same contract, in the two internal places that also stated it wrongly.
+check("judge_shadow no longer ties supervise to the pre/post gate",
+      "under the same `enable_judge` gate" in
+      (ROOT / "modules" / "judge_shadow.py").read_text(), False)
+_settings_src = (ROOT / "modules" / "settings_io.py").read_text()
+check("the settings schema no longer sells hang detection as part of the judge",
+      "stall supervisor →" in _settings_src, False)
+
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
       + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
 _TMP.cleanup()
