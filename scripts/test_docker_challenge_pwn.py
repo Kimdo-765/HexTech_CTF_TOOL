@@ -109,6 +109,14 @@ check("...and the build context is that directory, not the job root",
 j2 = make_job("j-scratch", dockerfile_at="work/.scratch/Dockerfile", docker_challenge=True)
 check("a Dockerfile in agent scratch under work/ is still ignored",
       "found NO Dockerfile" in docker_challenge_block(j2), True)
+# `.scratch` is in the noise set, so the check above passes even for an
+# implementation that scans ALL of work/ — a mutation to `_extra_roots =
+# [work]` slipped through it. This one does not: `work/carved/` is an ordinary
+# directory name, exactly what a forensic collector writing into the job root
+# produces, and only `work/chal` may be exempt from the pruning.
+j2b = make_job("j-carved", dockerfile_at="work/carved/Dockerfile", docker_challenge=True)
+check("...and so is any other work/ subdir — only work/chal is exempt",
+      "found NO Dockerfile" in docker_challenge_block(j2b), True)
 
 for where in ("bin/Dockerfile", "src/Dockerfile", "Dockerfile"):
     jn = make_job(f"j-{where.replace('/', '-')}", dockerfile_at=where,
