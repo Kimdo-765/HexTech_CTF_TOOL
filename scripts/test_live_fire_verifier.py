@@ -57,7 +57,10 @@ elif args.mutate == "build-resource-limits":
     verifier.DockerRuntime.build_image = build_without_resource_limits
 
 
-TMP = tempfile.TemporaryDirectory(prefix="live-fire-verifier-")
+TMP = tempfile.TemporaryDirectory(
+    prefix="live-fire-verifier-",
+    dir=os.environ.get("LIVE_FIRE_TEST_TMPDIR") or None,
+)
 BASE = Path(TMP.name)
 P = F = 0
 
