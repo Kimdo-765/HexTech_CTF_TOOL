@@ -227,6 +227,37 @@ def _judge_enabled() -> bool:
     return _judge_gates(_judge_mode())
 
 
+def _judge_mode_for_job(job_id: str) -> str:
+    """The effective mode for THIS job — `enforce` is scoped by module.
+
+    Stage 8 (operator decision, 2026-08-09) enforces on pwn and web only; see
+    `settings_io.JUDGE_ENFORCE_MODULES` for why those two and nobody else. An
+    out-of-scope module under a global `enforce` runs as `shadow`: it still
+    records, it just does not gate.
+
+    The module is read HERE, with the mode, and once. `meta` is the same place
+    `agent_role_providers` is snapshotted at create time and for the same
+    reason — a per-stage re-read lets the answer drift inside a single attempt,
+    and half of this branch's defects have been two reads of one fact.
+
+    Every failure path returns `shadow`, never `enforce`. `_judge_mode()`'s own
+    `except` returns `"enforce"`, which was a defensible fail-open while the
+    mode was global; with a scope it is not, because it would hand gating to a
+    module the operator excluded. Not knowing the module has to mean not
+    gating.
+    """
+    mode = _judge_mode()
+    if mode != "enforce":
+        return mode
+    try:
+        from modules._common import read_meta
+        from modules.settings_io import effective_judge_mode
+
+        return effective_judge_mode(mode, (read_meta(job_id) or {}).get("module") or "")
+    except Exception:
+        return "shadow"
+
+
 def _wait_with_supervise(
     container,
     *,
@@ -704,7 +735,14 @@ def attempt_sandbox_run(
     # ONE read, both answers derived from it. Two reads let a settings change
     # land between them, and the pair that comes out never existed as a
     # configuration: enforce's gating with shadow's recording, same attempt.
-    judge_mode = _judge_mode()
+    # Scoped, not global: `enforce` gates only the modules stage 8 could
+    # actually measure. Everything downstream — the gate, the cycle id, both
+    # shadow recording sites — reads THIS value, never the raw setting. A
+    # comparison left against the global would give an out-of-scope job
+    # `cycle_id=""`, which `_cycle_state` folds into the legacy job-wide
+    # bucket, and attempt 1's refusal would silence attempt 2's healthy
+    # postjudge all over again (turn 0073, D21).
+    judge_mode = _judge_mode_for_job(job_id)
     enable_judge = _judge_gates(judge_mode)
     # One id per ATTEMPT. prejudge -> supervise -> postjudge share a judge
     # session within a cycle, so "this stage's prerequisite" is a question
