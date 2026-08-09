@@ -201,6 +201,45 @@ finally:
 check("...and the resolver recovers once meta is readable again",
       R._judge_mode_for_job(pwn_job), "enforce")
 
+# The OTHER failure, and the one that actually shipped broken: a settings read
+# that blows up. `_judge_mode()` swallows it and answers "enforce", so the
+# resolver used to receive a value it could not tell apart from an operator's
+# explicit choice — and with a readable pwn meta it opened a real gate out of a
+# filesystem error. Mutating `read_meta` alone never touched this path, which
+# is why the suite was 38/0 while it was broken.
+_orig_mode = S.get_judge_mode
+try:
+    def _mode_boom():
+        raise OSError("settings unreadable")
+
+    S.get_judge_mode = _mode_boom
+    check("a settings failure does not become an operator's enforce",
+          R._judge_mode_for_job(pwn_job), "shadow")
+    check("...and the gate stays shut for an in-scope module",
+          R._judge_gates(R._judge_mode_for_job(pwn_job)), False)
+    check("...for an out-of-scope module too", R._judge_mode_for_job(rev_job), "shadow")
+finally:
+    S.get_judge_mode = _orig_mode
+
+check("...and enforce returns once settings are readable again",
+      R._judge_mode_for_job(pwn_job), "enforce")
+
+# The wrapper's fail-open must not be on the path at all. Reading it and THEN
+# guarding is not enough: the information needed to tell a failure from a
+# choice is already gone by then.
+_runner_src = (ROOT / "modules" / "_runner.py").read_text()
+_resolver_fn = next(n for n in ast.walk(ast.parse(_runner_src))
+                    if isinstance(n, ast.FunctionDef) and n.name == "_judge_mode_for_job")
+# Asked of the CALLS, not of the text. The docstring necessarily names
+# `_judge_mode()` to explain why it is avoided, and a substring check on the
+# source segment therefore reports the very thing it is meant to forbid — the
+# first version of this check did exactly that and failed on its own prose.
+_resolver_calls = {c.func.id for c in ast.walk(_resolver_fn)
+                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+check("the resolver reads settings directly, not through the fail-open wrapper",
+      ("get_judge_mode" in _resolver_calls, "_judge_mode" in _resolver_calls),
+      (True, False))
+
 # ---------------------------------------------------------------------------
 # 3. The run path must read the EFFECTIVE mode, not the global one.
 #

@@ -240,21 +240,36 @@ def _judge_mode_for_job(job_id: str) -> str:
     reason — a per-stage re-read lets the answer drift inside a single attempt,
     and half of this branch's defects have been two reads of one fact.
 
-    Every failure path returns `shadow`, never `enforce`. `_judge_mode()`'s own
-    `except` returns `"enforce"`, which was a defensible fail-open while the
-    mode was global; with a scope it is not, because it would hand gating to a
-    module the operator excluded. Not knowing the module has to mean not
-    gating.
+    Every failure path returns `shadow`, never `enforce` — and "every" has to
+    include the settings read, which is the part that was got wrong first.
+    `_judge_mode()`'s own `except` returns `"enforce"`: a defensible fail-open
+    while the mode was global, and not defensible with a scope, because a
+    filesystem error arriving as the string "enforce" is indistinguishable from
+    an operator who chose it. Paired with a readable pwn meta that turned a
+    broken settings file into a live gate. Not knowing the mode, or the module,
+    has to mean not gating.
     """
-    mode = _judge_mode()
-    if mode != "enforce":
-        return mode
     try:
         from modules._common import read_meta
-        from modules.settings_io import effective_judge_mode
+        from modules.settings_io import effective_judge_mode, get_judge_mode
 
+        # `get_judge_mode()` directly, NOT `_judge_mode()`. That wrapper
+        # swallows a settings failure and answers "enforce", so by the time the
+        # value arrives here a broken read is indistinguishable from an
+        # operator who typed enforce — and combined with a perfectly readable
+        # pwn meta it produced a real gate out of a filesystem error. Reading
+        # inside this try is what lets the failure stay a failure.
+        mode = get_judge_mode()
+        if mode != "enforce":
+            return mode
         return effective_judge_mode(mode, (read_meta(job_id) or {}).get("module") or "")
     except Exception:
+        # Anything at all — settings, meta, import — resolves here, and it
+        # resolves to shadow. Note this deliberately differs from
+        # `_judge_mode()`'s legacy fallback: on a failure we do not know the
+        # operator's mode OR the job's module, and neither unknown may widen
+        # the gate. Shadow is the only answer that gates nothing while still
+        # recording.
         return "shadow"
 
 
