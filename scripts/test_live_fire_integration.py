@@ -791,15 +791,49 @@ check("SLA case still blocks the attack", sla_result["verification"]["security_g
 deployment_bytes = stack_archive(BASE / "deployment-source.zip", PYTHON)
 deployment_job, deployment_archive = submit("lf6-deployment", deployment_bytes)
 deployment_invoker = FixtureInvoker(PYTHON, deployment_change=True)
-deployment_result = run_submitted(
-    deployment_job, deployment_archive, deployment_invoker
+try:
+    deployment_result = run_submitted(
+        deployment_job, deployment_archive, deployment_invoker
+    )
+except patch_loop.PatchLoopError:
+    deployment_result = None
+check(
+    "policy rollback still produces a terminal report",
+    deployment_result is not None,
+    True,
 )
-check("deployment edit cannot be READY", deployment_result["ready_to_deploy"], False)
+check(
+    "deployment edit cannot be READY",
+    deployment_result is None or not deployment_result["ready_to_deploy"],
+    True,
+)
+deployment_policy_errors = (
+    []
+    if deployment_result is None
+    else deployment_result["verification"]["policy_gate"]["errors"]
+)
 check(
     "deployment policy names Dockerfile",
-    any(
-        "Dockerfile" in error
-        for error in deployment_result["verification"]["policy_gate"]["errors"]
+    deployment_result is None
+    or any("Dockerfile" in error for error in deployment_policy_errors),
+    True,
+)
+deployment_report = BASE / deployment_job / "report.md"
+deployment_report_text = (
+    deployment_report.read_text(encoding="utf-8")
+    if deployment_report.is_file()
+    else None
+)
+check(
+    "policy rollback leaves no stale finding in the report",
+    deployment_result is None
+    or not deployment_policy_errors
+    or (
+        deployment_report_text is not None
+        and not any(
+            line.startswith("- Source:")
+            for line in deployment_report_text.splitlines()
+        )
     ),
     True,
 )
