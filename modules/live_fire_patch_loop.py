@@ -222,6 +222,25 @@ class PatchReviewer(Protocol):
 
 
 @dataclass(frozen=True)
+class ReportContext:
+    """Machine evidence supplied to the terminal report role.
+
+    The report provider may turn this evidence into prose, but it cannot change
+    the verification document, findings, or candidate diff.  Its output is
+    validated below and a malformed report can never leave the job READY.
+    """
+
+    document: dict[str, Any]
+    findings: tuple[VulnerabilityFinding, ...]
+    diffs: tuple[DiffRecord, ...]
+
+
+class PatchReporter(Protocol):
+    def report(self, context: ReportContext) -> str:
+        """Render the terminal report from immutable machine evidence."""
+
+
+@dataclass(frozen=True)
 class SourcePolicy:
     """Allowed application source/dependency surface for an immutable archive."""
 
@@ -1021,6 +1040,7 @@ def run_patch_loop(
     provider: PatchProvider,
     reviewer: PatchReviewer,
     *,
+    reporter: PatchReporter | None = None,
     runtime_factory: RuntimeFactory | None = None,
     clock: Clock | None = None,
 ) -> PatchRunResult:
@@ -1233,18 +1253,72 @@ def run_patch_loop(
         }
     )
 
-    provisional_report = _render_report(document, last_findings, final_diffs)
-    report_errors = validate_report(
-        provisional_report, document, last_findings, final_diffs
-    )
-    document["report_gate"] = {"passed": not report_errors, "errors": report_errors}
-    document["ready_to_deploy"] = terminal_ready and not report_errors
-    report = _render_report(document, last_findings, final_diffs)
-    final_report_errors = validate_report(report, document, last_findings, final_diffs)
-    if final_report_errors:
-        document["report_gate"] = {"passed": False, "errors": final_report_errors}
-        document["ready_to_deploy"] = False
+    if reporter is None:
+        # LF-3 compatibility path: the deterministic renderer remains the
+        # complete implementation when no routed report role was supplied.
+        provisional_report = _render_report(document, last_findings, final_diffs)
+        report_errors = validate_report(
+            provisional_report, document, last_findings, final_diffs
+        )
+        document["report_gate"] = {
+            "passed": not report_errors,
+            "errors": report_errors,
+        }
+        document["ready_to_deploy"] = terminal_ready and not report_errors
         report = _render_report(document, last_findings, final_diffs)
+        final_report_errors = validate_report(
+            report, document, last_findings, final_diffs
+        )
+        if final_report_errors:
+            document["report_gate"] = {
+                "passed": False,
+                "errors": final_report_errors,
+            }
+            document["ready_to_deploy"] = False
+            report = _render_report(document, last_findings, final_diffs)
+    else:
+        # LF-4 path: invoke the snapshotted report role exactly once.  Report
+        # prose is untrusted just like provider prose, so schema/location/
+        # evidence validation remains authoritative.  On any failure we keep a
+        # complete deterministic diagnostic report but preserve report_gate
+        # failure and force READY false.
+        try:
+            report = reporter.report(
+                ReportContext(
+                    document=dict(document),
+                    findings=last_findings,
+                    diffs=final_diffs,
+                )
+            )
+            if not isinstance(report, str):
+                raise PatchLoopError("terminal report provider returned non-text")
+            report_errors = validate_report(
+                report, document, last_findings, final_diffs
+            )
+        except Exception as exc:
+            report_errors = [f"terminal report provider failed: {exc}"]
+            report = ""
+        document["report_gate"] = {
+            "passed": not report_errors,
+            "errors": sorted(set(report_errors)),
+        }
+        document["ready_to_deploy"] = terminal_ready and not report_errors
+        if report_errors:
+            document["residual_risks"] = sorted(
+                set(
+                    list(document.get("residual_risks") or [])
+                    + ["terminal report provider output failed validation"]
+                )
+            )
+            report = _render_report(document, last_findings, final_diffs)
+            fallback_errors = validate_report(
+                report, document, last_findings, final_diffs
+            )
+            if fallback_errors:
+                raise PatchLoopError(
+                    "invalid deterministic report fallback: "
+                    + "; ".join(fallback_errors)
+                )
 
     verification_errors = validate_patch_verification(document)
     if verification_errors:
@@ -1263,9 +1337,11 @@ __all__ = [
     "PatchLoopError",
     "PatchLoopSpec",
     "PatchProvider",
+    "PatchReporter",
     "PatchReviewer",
     "PatchRunResult",
     "ProviderResult",
+    "ReportContext",
     "ReviewContext",
     "ReviewResult",
     "SourcePolicy",
