@@ -130,7 +130,7 @@ def main(argv: list[str]) -> int:
             args=solver_args,
             use_sage=True,
             timeout_s=timeout_s,
-            enable_judge=False,
+            enable_supervise=False,
             log_fn=lambda m: print(f"[sage_smoke:runner] {m}", flush=True),
         )
     except Exception as e:

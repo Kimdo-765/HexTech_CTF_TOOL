@@ -278,6 +278,130 @@ check("the runner does not restate the enforce set",
           "settings_io.JUDGE_ENFORCE_MODULES", ""), False)
 check("the scope is a documented constant", S.JUDGE_ENFORCE_MODULES, ("pwn", "web"))
 
+# ---------------------------------------------------------------------------
+# 4. supervise is excluded from v1 enforce, and turning the gate on must not
+#    turn it on. Two grounds, both still true: its evidence is a LIVE
+#    container's stalled output, which no post-hoc shadow can reconstruct — so
+#    it is the one stage stage-7 never measured — and it is the only gate that
+#    KILLS. Hardest to verify, largest blast radius.
+#
+#    It used to ride the same `enable_judge` flag as prejudge/postjudge, so
+#    flipping Settings to enforce handed container lifetime to an unevaluated
+#    gate. Driven here rather than read, because the wiring is what broke.
+# ---------------------------------------------------------------------------
+set_settings(judge_mode="enforce")
+_sandbox_kw: list[dict] = []
+
+
+def _spy_sandbox(*a, **kw):
+    _sandbox_kw.append(kw)
+    return {"exit_code": 0, "stdout": "", "stderr": "", "timeout": False,
+            "killed_by_supervise": False}
+
+
+_pre_calls, _post_calls = [], []
+from modules import _judge as _J  # noqa: E402
+
+_saved = (R.run_in_sandbox, R.Path, _J.prejudge_script, _J.postjudge_run)
+_jd = DATA / "jobs" / "j-pwn"
+(_jd / "work").mkdir(parents=True, exist_ok=True)
+(_jd / "work" / "exploit.py").write_text("print('x')\n")
+
+
+class _P(type(Path())):  # a Path that maps /data/jobs/<id> onto the fixture
+    pass
+
+
+def _tmp_path(p="", *a):
+    p = str(p)
+    return Path(str(DATA / "jobs") + p[len("/data/jobs"):]) if p.startswith("/data/jobs") else Path(p, *a)
+
+
+try:
+    R.run_in_sandbox = _spy_sandbox
+    R.Path = _tmp_path
+    _J.prejudge_script = lambda *a, **k: (_pre_calls.append(1),
+                                          {"ok": True, "severity": "low"})[1]
+    _J.postjudge_run = lambda *a, **k: (_post_calls.append(1),
+                                        {"verdict": "success",
+                                         "next_action": "stop"})[1]
+    R.attempt_sandbox_run("j-pwn", "exploit.py", None, lambda *_: None)
+finally:
+    R.run_in_sandbox, R.Path, _J.prejudge_script, _J.postjudge_run = _saved
+
+check("an in-scope job under enforce still runs prejudge and postjudge",
+      (bool(_pre_calls), bool(_post_calls)), (True, True))
+check("...and hands the sandbox the supervise flag OFF",
+      [kw.get("enable_supervise") for kw in _sandbox_kw], [False])
+check("...never passing the pre/post gate through as the supervise flag",
+      any("enable_judge" in kw for kw in _sandbox_kw), False)
+
+# The wait loop itself must honour it: a stalled container with the flag off
+# gets no supervise call and no kill, no matter how long it sits.
+class _StalledContainer:
+    """Alive, never exits, never changes its output — a permanent stall."""
+
+    status = "running"
+    id = "deadbeef"
+
+    def __init__(self, kills):
+        self._kills = kills
+
+    def reload(self):
+        pass
+
+    def logs(self, **kw):
+        return b"stuck"
+
+    def wait(self, **kw):
+        return {"StatusCode": -1}
+
+    def kill(self, *a, **k):
+        self._kills.append(1)
+
+
+def _drive_wait(enable: bool):
+    calls, kills = [], []
+    saved = (_J.supervise_run_once, R.SUPERVISE_STALL_S, R._POLL_INTERVAL_S)
+    try:
+        _J.supervise_run_once = lambda *a, **k: (
+            calls.append(1), {"action": "kill", "reason": "hung"})[1]
+        R.SUPERVISE_STALL_S = -1      # every poll counts as a stall
+        # The real interval is 2s and the first poll only records the log size
+        # — the stall branch cannot be reached until the second. At the default
+        # interval a short `timeout_s` times out first, which is how the
+        # positive control below caught this driver being unable to trigger the
+        # path it was asserting about.
+        R._POLL_INTERVAL_S = 0.01
+        res = R._wait_with_supervise(
+            _StalledContainer(kills), timeout_s=1, job_dir_path=_jd,
+            script_rel="exploit.py", log_fn=lambda *_: None,
+            enable_supervise=enable)
+    finally:
+        _J.supervise_run_once, R.SUPERVISE_STALL_S, R._POLL_INTERVAL_S = saved
+    return calls, kills, res
+
+
+# POSITIVE CONTROL FIRST. "supervise was called 0 times" is worth nothing if
+# this fixture could never have triggered it — the flag would look honoured by
+# a container that simply never stalls.
+_on_calls, _on_kills, _on_res = _drive_wait(True)
+check("control: with supervise ON this fixture does reach the judge",
+      (bool(_on_calls), bool(_on_kills)), (True, True))
+check("...and reports the kill as supervise's",
+      _on_res.get("killed_by_supervise"), True)
+
+_off_calls, _off_kills, _off_res = _drive_wait(False)
+check("a stalled container is not judged when supervise is off", _off_calls, [])
+check("...and nothing is attributed to supervise",
+      (_off_res.get("killed_by_supervise"), _off_res.get("supervise")), (None, None))
+# The container IS killed here — by the hard timeout, which is not a judge
+# decision and must keep working. Asserting "no kill at all" would have pinned
+# the wrong thing; the first draft of this check did exactly that and failed on
+# the timeout path.
+check("...while the hard timeout still kills, judge or no judge",
+      (_off_kills, _off_res.get("timeout")), ([1], True))
+
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
       + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
 _TMP.cleanup()
