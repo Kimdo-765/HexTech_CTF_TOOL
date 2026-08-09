@@ -514,7 +514,9 @@ check("...anywhere in _runner.py, guarded or not",
 # The mode snapshot must be taken ONCE. Two reads let a settings change land
 # between them and yield a pair that never existed as a configuration.
 check("the mode is read once per attempt",
-      _runner_src.count("judge_mode = _judge_mode()"), 1)
+      _runner_src.count("judge_mode = _judge_mode_for_job(job_id)"), 1)
+check("...through the job-scoped resolver, never the raw global setting",
+      _runner_src.count("judge_mode = _judge_mode()"), 0)
 check("...and the gate is derived from that snapshot, not re-read",
       _runner_src.count("enable_judge = _judge_gates(judge_mode)"), 1)
 check("...with no second _judge_enabled() read in the run path",
@@ -641,12 +643,21 @@ for _m, _at, _orig in _seam_saved:
 _HINTS = ["reuse the same failed idea", "and again"]
 
 
-def _drive_ctx(job_id: str, *, mode: str, timeout: bool):
-    """Drive the runner and capture the extra_context each mode produces."""
+def _drive_ctx(job_id: str, *, mode: str, timeout: bool, module: str = "pwn"):
+    """Drive the runner and capture the extra_context each mode produces.
+
+    `module` defaults to an in-scope one on purpose. Since stage 8 the gate is
+    scoped (`settings_io.JUDGE_ENFORCE_MODULES`), so a fixture with no module
+    resolves to shadow no matter what `judge_mode` says — which silently turns
+    every "enforce does X" check below into a check of the shadow path. It did
+    exactly that when the scope landed; the enforce assertions failed loudly
+    rather than passing vacuously, which is the only reason this is a fixture
+    change and not a regression.
+    """
     jd = DATA / "jobs" / job_id
     (jd / "work").mkdir(parents=True, exist_ok=True)
     (jd / "work" / "exploit.py").write_text("print('x')\n")
-    (jd / "meta.json").write_text(json.dumps({"id": job_id}))
+    (jd / "meta.json").write_text(json.dumps({"id": job_id, "module": module}))
     set_settings(enable_judge=(mode == "enforce"), judge_mode=mode)
     seen_ctx: list[str] = []
 
@@ -702,6 +713,30 @@ finally:
     _judge_mod.postjudge_run = _saved_post
 check("the evaluator forwards the recorded context to postjudge",
       _fwd, [_enf_ctx[0] if _enf_ctx else "<no enforce run>"])
+
+# ---------------------------------------------------------------------------
+# 8c. The stage-8 scope, proven by DRIVING the runner rather than by reading
+#     it. `test_judge_enforce_scope.py` pins the rule and the call sites; this
+#     pins the consequence — a global `enforce` on an out-of-scope module must
+#     come out of `attempt_sandbox_run` behaving like shadow: no judge call,
+#     and a recorded input carrying a real cycle id.
+#
+#     The cycle id is the half a gate assertion cannot see. It is set only when
+#     the resolved mode is "shadow", so a runner that resolved against the raw
+#     setting would record with cycle_id="" — which `_cycle_state` folds into
+#     the legacy job-wide bucket, where one attempt's refusal silences the
+#     next attempt's healthy postjudge (D21).
+# ---------------------------------------------------------------------------
+_oos_ctx = _drive_ctx("ctxrev", mode="enforce", timeout=True, module="rev")
+check("a global enforce does not judge an out-of-scope module", _oos_ctx, [])
+_oos_rec = [r for r in SH.read_shadow("ctxrev")
+            if r.get("kind") == "input" and r.get("stage") == "postjudge"]
+check("...it records instead", len(_oos_rec), 1)
+check("...with a real cycle id, not the legacy empty bucket",
+      bool((_oos_rec[0]["inputs"].get("cycle_id") if _oos_rec else "")), True)
+check("...and the recorded context still matches what enforce would have judged",
+      _oos_rec[0]["inputs"].get("extra_context") if _oos_rec else None,
+      _enf_ctx[0] if _enf_ctx else "<no enforce run>")
 
 # ---------------------------------------------------------------------------
 # 9. The default evaluator must not write judge prose into the run's log.
