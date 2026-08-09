@@ -6401,8 +6401,8 @@ HEAP_FIX_HINTS: dict[str, str] = {
     ),
     "heap.interactive_in_sandbox": (
         "FIX: `p.interactive()` blocks on stdin and the runner "
-        "sandbox has no TTY → the supervise watchdog kills it "
-        "before flag exfil. Replace with explicit "
+        "sandbox has no TTY → the run hangs until the hard "
+        "timeout ends it, with no flag. Replace with explicit "
         "`p.sendline(b'cat /flag*'); print(p.recvrepeat(2.0)"
         ".decode(errors='replace'))`. Use the `if sys.stdin.isatty(): "
         "p.interactive()` guard if you want local-debug ergonomics."
@@ -6410,7 +6410,7 @@ HEAP_FIX_HINTS: dict[str, str] = {
     "heap.unbounded_recv": (
         "FIX: Every `recvuntil` / `recv` / `recvline` / `readuntil` "
         "MUST have an explicit `timeout=` argument. Mismatched "
-        "prompts otherwise hang the supervise watchdog into a kill. "
+        "prompts otherwise hang the run until the hard timeout. "
         "Add `context.timeout = 10` at the top of the script and "
         "`timeout=context.timeout` on EVERY recv-family call."
     ),

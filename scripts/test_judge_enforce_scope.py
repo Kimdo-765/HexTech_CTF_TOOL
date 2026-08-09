@@ -432,6 +432,45 @@ _settings_src = (ROOT / "modules" / "settings_io.py").read_text()
 check("the settings schema no longer sells hang detection as part of the judge",
       "stall supervisor →" in _settings_src, False)
 
+# ---------------------------------------------------------------------------
+# 6. Bind the runtime boundary to what the MODELS are told, in one check.
+#
+#    Section 5 pinned the operator-facing copy and still missed this: the judge
+#    system prompt taught the judge that the orchestrator drives it through a
+#    supervise stage, and the deterministic heap hints injected into main
+#    asserted that a watchdog kills a hung run. Those go to a model, not to a
+#    reader — a judge reasoning about a post-mortem under a false lifecycle,
+#    and a retry hint steering main around a mechanism that does not exist.
+#
+#    Written as an implication rather than as two independent assertions: the
+#    claims are only wrong BECAUSE the boundary is False. If supervise is ever
+#    driven again, this check should stop demanding their absence rather than
+#    silently keep failing.
+# ---------------------------------------------------------------------------
+_attempt = next(n for n in ast.walk(ast.parse(_runner_src))
+                if isinstance(n, ast.FunctionDef) and n.name == "attempt_sandbox_run")
+_supervise_args = [kw.value.value
+                   for c in ast.walk(_attempt) if isinstance(c, ast.Call)
+                   for kw in c.keywords
+                   if kw.arg == "enable_supervise" and isinstance(kw.value, ast.Constant)]
+check("the production attempt drives supervise nowhere", _supervise_args, [False])
+
+if _supervise_args == [False]:
+    from modules._prompts import JUDGE_AGENT_PROMPT  # noqa: E402
+    from modules._common import HEAP_FIX_HINTS  # noqa: E402
+
+    check("...so the judge's own prompt does not teach it a supervise stage",
+          ("three stages" in JUDGE_AGENT_PROMPT,
+           "supervise watchdog" in JUDGE_AGENT_PROMPT),
+          (False, False))
+    check("...and does say what actually ends a hung run",
+          "hard timeout" in JUDGE_AGENT_PROMPT, True)
+    _hint_blob = " ".join(str(v) for v in HEAP_FIX_HINTS.values())
+    check("...and no retry hint sends main around a watchdog that never runs",
+          "supervise watchdog" in _hint_blob, False)
+    check("...they name the hard timeout instead",
+          "hard timeout" in _hint_blob, True)
+
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
       + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
 _TMP.cleanup()
