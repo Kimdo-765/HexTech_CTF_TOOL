@@ -5362,10 +5362,18 @@ def docker_challenge_block(job_id: str) -> str:
       - Returns "" when the box is unticked, so the caller's ``if block:``
         guard drops it cleanly and pre-existing / non-docker jobs are wholly
         unaffected.
-      - Wired ONLY into the modules that had NO docker guidance before
-        (rev/crypto/misc/forensic). web and pwn already build+run challenge
-        Dockerfiles unconditionally in their own prompts — this does NOT touch
-        them (no double-inject / no regression).
+      - Wired into rev/crypto/misc/forensic/web3 — and, since 2026-08-09, pwn.
+        The original note here claimed "web and pwn already build+run challenge
+        Dockerfiles unconditionally in their own prompts". That was true of web
+        (see `modules/web/prompts.py`, "RUN THE CHALLENGE LOCALLY") and FALSE of
+        pwn, whose prompts overwhelmingly say to READ a Dockerfile for deploy
+        context (sysctl knobs, xinetd) with a single parenthetical about
+        building one. Acting on that false premise is what kept pwn out of the
+        opt-in, and job b914889c1f9c paid for it: the agent verified a 2 MiB
+        libc-alignment premise against the STAGED libc, assumed the remote
+        matched "from identical deployment image", and burned 10,000 remote
+        attempts on a chain whose premise a local `docker build` falsifies in
+        seconds. web is still excluded — its own prompt already covers this.
       - DETECTION is deterministic (scan the OPERATOR-SUPPLIED upload roots);
         RUNNING is agent-driven — a CTF ENTRYPOINT almost always needs the right
         input (e.g. ``main flag.png``), so the flag comes from the agent using
@@ -5392,6 +5400,16 @@ def docker_challenge_block(job_id: str) -> str:
     # bin/ and src/ recursively with scratch/noise dirs PRUNED at every level.
     _noise = {"work", "__pycache__", ".git", ".ghidra_proj", "decomp",
               "node_modules", ".venv", "tmp", ".scratch"}
+    # ...with ONE carve-out. pwn's autoboot unpacks the operator's upload into
+    # `work/chal/` and flattens only the binaries into `bin/`, so for a pwn
+    # bundle the Dockerfile lives inside the very directory `work` prunes. The
+    # result was worse than silence: with the box ticked this reported "found
+    # NOTHING" about a bundle that shipped one (job b914889c1f9c). `work/chal`
+    # is the deterministic unpack target of the OPERATOR's own archive, not
+    # agent scratch, so it is safe in a way the rest of `work/` is not — the
+    # forensic hazard this pruning exists for is carved EVIDENCE output, which
+    # never lands there.
+    _extra_roots = [job_root / "work" / "chal"]
     _compose = {
         "docker-compose.yml", "docker-compose.yaml",
         "compose.yml", "compose.yaml",
@@ -5430,8 +5448,7 @@ def docker_challenge_block(job_id: str) -> str:
                 _add(p)
     except OSError:
         pass
-    for top in ("bin", "src"):
-        base = job_root / top
+    for base in [job_root / t for t in ("bin", "src")] + _extra_roots:
         if not base.is_dir():
             continue
         try:
@@ -5452,8 +5469,9 @@ def docker_challenge_block(job_id: str) -> str:
             header
             + "You ticked 'Docker challenge' but I found NO Dockerfile / compose "
             "file in the operator-supplied bundle (searched /data/jobs/$JOB_ID "
-            "top level plus ./bin/ and ./src/ recursively). Run `ls -R "
-            "/data/jobs/$JOB_ID/bin /data/jobs/$JOB_ID/src 2>/dev/null; ls "
+            "top level plus ./bin/, ./src/ and ./work/chal/ recursively). Run "
+            "`ls -R /data/jobs/$JOB_ID/bin /data/jobs/$JOB_ID/src "
+            "/data/jobs/$JOB_ID/work/chal 2>/dev/null; ls "
             "/data/jobs/$JOB_ID` to confirm. If the challenge genuinely needs a "
             "container, locate its build file yourself and proceed; otherwise "
             "just do normal static/dynamic analysis — this note is not a "
