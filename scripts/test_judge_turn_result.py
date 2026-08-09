@@ -213,6 +213,62 @@ check(
     ),
     {"verdict": "success", "next_action": "stop"},
 )
+_inline_nested_diagnostic = (
+    'My answer: {"verdict":"success","next_action":"stop",'
+    '"what_failed":[{"summary":"segfault"}]}'
+)
+_inline_nested_verdict = J._parse_json(
+    _inline_nested_diagnostic,
+    expected_keys=("verdict", "next_action", "summary"),
+)
+check(
+    "an inline nested diagnostic object cannot replace its parent verdict",
+    _inline_nested_verdict,
+    {
+        "verdict": "success",
+        "next_action": "stop",
+        "what_failed": [{"summary": "segfault"}],
+    },
+)
+check(
+    "the inline parent verdict reaches the postjudge state machine",
+    tuple(
+        J._normalize_verdict(_inline_nested_verdict)[key]
+        for key in ("verdict", "next_action")
+    ),
+    ("success", "stop"),
+)
+_multiline_nested_diagnostic = """My answer:
+{
+  "verdict": "success", "next_action": "stop",
+  "alternative_paths": [
+    {"summary": "could also have used ROP", "retry_worthwhile": false}
+  ]
+}
+"""
+_multiline_nested_verdict = J._parse_json(
+    _multiline_nested_diagnostic,
+    expected_keys=("verdict", "next_action", "summary", "retry_worthwhile"),
+)
+check(
+    "a line-boundary nested alternative cannot replace its parent verdict",
+    _multiline_nested_verdict,
+    {
+        "verdict": "success",
+        "next_action": "stop",
+        "alternative_paths": [
+            {"summary": "could also have used ROP", "retry_worthwhile": False}
+        ],
+    },
+)
+check(
+    "the multiline parent verdict reaches the postjudge state machine",
+    tuple(
+        J._normalize_verdict(_multiline_nested_verdict)[key]
+        for key in ("verdict", "next_action")
+    ),
+    ("success", "stop"),
+)
 check(
     "plain JSON parsing is unchanged",
     J._parse_json('{"ok": true, "severity": "low"}'),
