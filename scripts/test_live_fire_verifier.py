@@ -29,7 +29,12 @@ from modules import live_fire_workspace as workspace_module  # noqa: E402
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--mutate",
-    choices=("corpus-separation", "negative-control", "evidence-tier"),
+    choices=(
+        "corpus-separation",
+        "negative-control",
+        "evidence-tier",
+        "build-resource-limits",
+    ),
 )
 parser.add_argument("--docker-smoke", action="store_true")
 args = parser.parse_args()
@@ -40,6 +45,16 @@ elif args.mutate == "negative-control":
     verifier._original_attack_reproduced = lambda probe, original: True
 elif args.mutate == "evidence-tier":
     verifier._attack_result_tier = lambda probe: None
+elif args.mutate == "build-resource-limits":
+
+    def build_without_resource_limits(self, context, image, labels, limits):
+        docker_args = ["build", "--network", verifier.BUILD_NETWORK, "--tag", image]
+        for key, value in sorted(labels.items()):
+            docker_args.extend(("--label", f"{key}={value}"))
+        docker_args.append(str(context))
+        return self._run(docker_args, limits.build_timeout_s)
+
+    verifier.DockerRuntime.build_image = build_without_resource_limits
 
 
 TMP = tempfile.TemporaryDirectory(prefix="live-fire-verifier-")
