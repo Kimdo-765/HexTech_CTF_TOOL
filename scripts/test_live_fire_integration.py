@@ -78,6 +78,7 @@ elif args.mutate == "sla-gate":
     def _ignore_sla(probes, original, candidate):
         sla, security = _real_evaluate_probes(probes, original, candidate)
         sla = dict(sla)
+        sla["probes"] = [dict(row, passed=True, equal=True) for row in sla["probes"]]
         sla["passed"] = True
         return sla, security
 
