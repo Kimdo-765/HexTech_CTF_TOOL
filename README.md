@@ -506,13 +506,18 @@ Judge replies with structured findings (see `JUDGE_AGENT_PROMPT`).
 | **proceed** | Findings are LOW/MED, or main judges a HIGH to be a false positive. End the turn; orchestrator runs the script. |
 | **abort** | `Bash(rm -f ./exploit.py)` to delete the deliverable, write report.md explaining the block. Orchestrator detects the missing file and skips the runner. |
 
-The orchestrator does **not** override main's decision. Two
-backstops still run around the runner:
+Two backstops run around the runner when this job's effective mode
+gates it — i.e. `judge_mode=enforce` **and** a module in the enforce
+scope (pwn, web). In every other case they record and decide nothing:
 
-- **prejudge (advisory)** — runs *before* the container. Findings
-  are recorded into `result.json` so the retry reviewer can
-  reference them. **Never blocks** the run — main already
-  owned the gate.
+- **prejudge** — runs *before* the container. Findings are recorded
+  into `result.json` so the retry reviewer can reference them. It
+  **blocks at `severity=high` only**: the run is abandoned before the
+  container starts and the attempt returns
+  `{error: "prejudge_blocked", judge_aborted: True}`. Anything below
+  high is advisory and the run proceeds. So the orchestrator does
+  override main's decision, but only on the one severity, and only
+  where the gate is in scope.
 - **supervise — implemented, NOT driven.** It would ask judge whether
   to kill when output stalls 60 s while still alive. It is excluded
   from the enforce scope and `attempt_sandbox_run` passes

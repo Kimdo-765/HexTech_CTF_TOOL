@@ -519,6 +519,24 @@ if _supervise_args == [False]:
                 _offenders.append(f"{_rel}: {_bad!r}")
     check("no surface still speaks the pre-stage-8 lifecycle", _offenders, [])
 
+    # The same binding for the OTHER thing the docs got backwards. prejudge is
+    # not advisory: `prejudge_blocks_ship` is consulted and a severity=high
+    # finding abandons the run before the container starts. The README called
+    # it "advisory" and said it "Never blocks", which is the reverse of the
+    # deployed behaviour — and the vocabulary sweep above cannot catch a false
+    # claim that uses no forbidden word. Bound to the code, like section 6:
+    # required only BECAUSE the runner still blocks.
+    _runner_blocks = "prejudge_blocks_ship" in _runner_src and \
+        "prejudge_blocked" in _runner_src
+    check("the runner does block on a high-severity prejudge", _runner_blocks, True)
+    if _runner_blocks:
+        _readme = (ROOT / "README.md").read_text()
+        check("...so the README does not call prejudge advisory-never-blocks",
+              ("**Never blocks**" in _readme, "prejudge (advisory)" in _readme),
+              (False, False))
+        check("...and names the severity that actually blocks",
+              "severity=high" in _readme, True)
+
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
       + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
 _TMP.cleanup()
