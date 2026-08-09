@@ -481,9 +481,14 @@ if _supervise_args == [False]:
     # old contract used. It cannot prove a rewording is honest; it does
     # stop the old wording coming back, and catches a new file adopting it.
     # ------------------------------------------------------------------
-    _FORBIDDEN = ("3-stage", "three stages", "stall-supervise",
+    # Hyphen and slash variants belong here too: the first version forbade
+    # "three stages" and "3-stage" and sailed past "three-stage judge
+    # lifecycle" and "pre/super/post", both of which were still in the README
+    # (D14). A vocabulary sweep is only as good as its list of spellings.
+    _FORBIDDEN = ("3-stage", "three stages", "three-stage", "stall-supervise",
                   "supervise watchdog", "stall supervisor",
-                  "supervise fires under")
+                  "supervise fires under", "pre/super/post",
+                  "pre/supervise/post")
     # The plan doc is the record of the decision itself and argues about
     # supervise by name; the suites quote the old strings to test for them.
     _ALLOW = ("docs/hybrid-agent-plan.md", "scripts/test_")

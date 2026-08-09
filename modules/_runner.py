@@ -862,7 +862,9 @@ def attempt_sandbox_run(
                     f"fix will help."
                 )
 
-    # The judge stages share one Claude session via session_id resume.
+    # The judge stages share one session via session_id resume, and it is
+    # PROVIDER-LOCAL: after a failover the next stage resumes the other
+    # backend's sid, not a Claude one.
     # `prejudge_script` writes a sid into _judge._session_ids; postjudge
     # clears it on its happy path. If anything between the two raises
     # before postjudge fires, the sid would otherwise leak into the

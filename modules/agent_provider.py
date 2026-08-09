@@ -593,11 +593,16 @@ def provider_for_role(job_id: str | None, role: str) -> str:
         return base
 
     if job_id:
-        # A job's routing was decided at create time. Live Settings are NOT
-        # consulted for an existing job under ANY condition — not even when
-        # the key is absent. An absent key means "this job has no role
-        # routing", never "look it up now": a job created while the map was
-        # empty omits the key entirely (to keep meta byte-identical), and
+        # A job's routing was decided at create time. The live ROLE MAP is
+        # not consulted for an existing job — not even when the key is
+        # absent. Scope that claim carefully: it is about the role map, not
+        # about Settings as a whole. `base` above is `provider_for_job`,
+        # which falls through to the live global provider when meta carries
+        # no `agent_provider` stamp or cannot be read — so an unstamped job
+        # DOES follow a live Settings change, through the base rather than
+        # through role routing. An absent role key means "this job has no
+        # role routing", never "look it up now": a job created while the map
+        # was empty omits the key entirely (to keep meta byte-identical), and
         # falling through would let a later Settings edit re-route a job that
         # is already running. Same reason a read failure returns `base`
         # instead of guessing — the job's own provider is the safe direction.

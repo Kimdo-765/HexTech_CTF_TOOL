@@ -581,7 +581,7 @@ flaky judge call. All output prefixed `[judge]` in `run.log`.
 Controlled by **Settings → Judge mode** (`off | shadow | enforce`, see
 above); `off` reverts to plain blocking wait + bare `exit_code`. The
 `judge` subagent stays registered for main — the setting only gates the
-orchestrator's pre/super/post lifecycle wrapping.
+orchestrator's pre/post lifecycle wrapping (supervise does not run).
 
 ### Auto-retry triangle
 
@@ -997,8 +997,9 @@ values from its status endpoint or copies them into prompts. If
 are stored in an OS keyring, set `cli_auth_credentials_store = "file"` in
 `~/.codex/config.toml` and sign in again. It also removes inherited
 `OPENAI_API_KEY` / `CODEX_API_KEY` from Codex child processes so OAuth cannot
-silently become API-key billing. Main, pre-recon, judge, retry reviewer,
-report, monitor, forensic, and misc phases all follow the selected provider.
+silently become API-key billing. Main, pre-recon, forensic and misc phases follow the
+selected provider. judge, reviewer, report and monitor follow it too **unless
+routed away per role** — see [Per-role routing](#per-role-routing-hybrid).
 When Compose is invoked directly without the launch scripts or an explicit
 `HOST_CODEX_HOME`, its safe fallback is project-local `./data/codex-home`—it
 never falls back to the live TUI directory.
@@ -1059,7 +1060,7 @@ exploitation needs differ from defensive code review:
 
 Cookbook patterns the project adds on top (not in the reference):
 pre-recon cache + autoboot skip across retries, investigation budget
-(SOFT/EJECT/FINAL_DRAFT), three-stage judge lifecycle around the
+(SOFT/EJECT/FINAL_DRAFT), the judge lifecycle around the
 sandbox, scaffold templates keyed by glibc version + how2heap corpus
 matrix, custom chal-author library auto-detection.
 
