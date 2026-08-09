@@ -102,6 +102,14 @@ blk = docker_challenge_block(j)
 check("a Dockerfile under work/chal/ is found", "work/chal/Dockerfile" in blk, True)
 check("...and the build context is that directory, not the job root",
       '"/data/jobs/$JOB_ID/work/chal"' in blk, True)
+# Telling the agent to RUN a container without telling it how to REACH one is
+# most of the value thrown away: the worker is not the host, so 127.0.0.1, the
+# container's bridge IP and `docker top`'s host pids all fail in different ways.
+# Job 1ede2b4d8ac3 spent several turns rediscovering that.
+check("...and says how to reach it from the worker",
+      ("REACHING IT" in blk and "/proc/net/route" in blk), True)
+check("...naming the routes that do NOT work, not just the one that does",
+      all(k in blk for k in ("127.0.0.1", "bridge IP", "docker top")), True)
 
 # The pruning that hid it exists for a reason and must still hold: the rest of
 # `work/` is agent scratch, and on a forensic job it holds carved evidence.
