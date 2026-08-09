@@ -31,9 +31,10 @@ Seven Claude-driven roles split by responsibility:
   dup_of}], summary:{...}}` — main parses with `json.loads`.
 - **judge** — read-only quality-gate peer subagent. Two roles: (1) main
   invokes it before finalizing for hang/parse review (free-form text
-  reply); (2) the orchestrator wraps every `auto_run` execution in a
-  3-stage pre/supervise/post lifecycle that emits a retry hint on
-  failure.
+  reply); (2) the orchestrator wraps an `auto_run` execution in a
+  pre/post lifecycle that emits a retry hint on failure — for the
+  modules `judge_mode=enforce` covers, and only those. The third
+  stage (`supervise`) is implemented but not driven; see below.
 - **debugger** — dynamic-analysis peer subagent. Patchelfs the binary
   against the chal's bundled libc (auto-extracted from the Dockerfile's
   base image when needed), then runs gdb / strace / ltrace / qemu-user
@@ -124,7 +125,7 @@ Eight Claude-driven roles, each with its own context window:
 | **main worker** | `worker` container, one RQ process per concurrency slot | `Read` `Write` `Edit` `Bash` `Glob` `Grep` `mcp__team__spawn_subagent` | Runs the module pipeline; writes `exploit.py` / `solver.py` / `report.md` in a single `ClaudeSDKClient` session that auto-retries on postjudge feedback. Built-in `Agent` / `Task` tools are disallowed; delegation goes through the MCP tool only |
 | **recon** (peer subagent) | **own `claude` CLI subprocess** spawned via MCP, dies on return | `Read` `Bash` `Glob` `Grep` `WebSearch` `WebFetch` (read-only) | Static investigation: disasm walks, decomp triage, libc symbol lookup, ROPgadget / one_gadget filter, source-tree grep, web research. Returns ≤2 KB free-form summary |
 | **triage** (peer subagent) | own `claude` CLI subprocess spawned via MCP | `Read` `Bash` `Glob` `Grep` (read-only, verdict-only) | Independent re-verification of recon's candidate list. Re-reads each cited file:line; emits **strict JSON** `{verdicts:[{verdict, cite, severity, dup_of}], summary:{}}`. Severity is RE-DERIVED, never inherited |
-| **judge** (peer subagent + lifecycle gate) | own subprocess when invoked by main · separate orchestrator-owned session around every `auto_run` execution | `Read` `Bash` `Glob` `Grep` (no Write) | Pre-finalize hang/parse review when invoked by main · pre/supervise/post lifecycle around the runner sandbox · pinned to latest model |
+| **judge** (peer subagent + lifecycle gate) | own subprocess when invoked by main · separate orchestrator-owned session around every `auto_run` execution | `Read` `Bash` `Glob` `Grep` (no Write) | Pre-finalize hang/parse review when invoked by main · pre/post lifecycle around the runner sandbox (supervise not driven) · pinned to latest model |
 | **debugger** (peer subagent) | own `claude` CLI subprocess spawned via MCP | `Read` `Write` `Edit` `Bash` `Glob` `Grep` | Dynamic analysis under gdb (GEF) / strace / ltrace / qemu-user. Auto-extracts the chal's libc + ld + NEEDED libs from the Dockerfile's base image via `chal-libc-fix`. Returns **strict JSON** `{observed, trace, conclusion, caveats}` |
 | **report phase** | terminal stateless `query()` after main finishes (no MCP, no tools, no system_prompt bloat) | `allowed_tools=[]` (pure transformation) | Converts main's `report.md` + `exploit.py`/`solver.py` prose into module-specific `findings.json` (pwn / web / crypto / rev each have their own schema). Defaulted to sonnet for cost — rote pattern-matching doesn't need opus |
 | **monitor** | `api` container, always-on supervisor (one background task per running job) | `allowed_tools=[]` (narration only) | Filters `run.log` to meaningful SIGNAL events and narrates "what just happened" in one line per configured language. Pinned to a cheap model (`MONITOR_MODEL`, default sonnet — NEVER the job's opus). Output → `<job>/monitor.jsonl` + Redis `job:<id>:monitor` for the live UI panel. See [MONITOR](#monitor-modules_monitorpy) |
@@ -512,24 +513,25 @@ backstops still run around the runner:
   are recorded into `result.json` so the retry reviewer can
   reference them. **Never blocks** the run — main already
   owned the gate.
-- **supervise** — asks judge whether to kill when output stalls 60 s
-  while still alive. Single one-shot for short runs; for long sandbox
-  runs (`timeout_s > 1800`, e.g. crypto-sage offline) it re-asks
-  **periodically** so a genuinely-stuck long solve is killed early
-  instead of burning the full ceiling in silence. Same Claude session
-  as prejudge (resumed via `session_id`), so judge sees its earlier
-  findings while making the kill/continue call.
+- **supervise — implemented, NOT driven.** It would ask judge whether
+  to kill when output stalls 60 s while still alive. It is excluded
+  from the enforce scope and `attempt_sandbox_run` passes
+  `enable_supervise=False` unconditionally, so **it does not run in any
+  mode**. Two reasons, both structural: its evidence is a *live*
+  container's stalled output, which no after-the-fact replay can
+  reconstruct — so it is the one stage that has never been evaluated —
+  and it is the only stage that kills a container. A genuinely stuck
+  run is ended by the hard timeout, as it always was.
 - **postjudge** — categorize the finished run as one of `success` /
   `partial` / `hung` / `parse_error` / `network_error` / `crash` /
   `timeout` / `unknown` and emit a retry-ready hint.
 
-Three orchestrator stages share **one Claude session** (prejudge
-captures `session_id`; supervise + postjudge resume via
+The orchestrator stages share **one Claude session** (prejudge
+captures `session_id`; the later stage resumes via
 `fork_session=False`).
 
 Each judge stage is best-effort: a judge auth/rate/empty failure
-degrades to permissive defaults (prejudge ok, supervise continue,
-postjudge unknown) so the runner is never harder to use because of a
+degrades to permissive defaults (prejudge ok, postjudge unknown) so the runner is never harder to use because of a
 flaky judge call. All output prefixed `[judge]` in `run.log`.
 
 Toggle in **Settings → Enable judge for auto-run** (default on); off
@@ -796,7 +798,7 @@ finishes:
      prompt="<q>",                judge (quality gate, Node #4)
    )                              ─────────────────────────────────
               │                   • pre-finalize hang/parse review
-              ▼                   • orchestrator pre/supervise/post
+              ▼                   • orchestrator pre/post (scoped)
         compact reply               around the runner sandbox
         (cached by                • emits retry_hint that loops back
          sub_type+prompt           into main's session
@@ -1044,7 +1046,7 @@ All knobs live in two places:
    | `HOST_CLAUDE_HOME` | `${HOME}/.claude` | host path of Claude Code config |
    | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `999999` | per-turn SDK output cap (the model's own ceiling, ~64k for Sonnet/Opus, becomes the effective limit) |
    | `INVESTIGATION_BUDGET` | `150` | tool-call budget for the main agent. At 80% (`SOFT_EJECT`) the orchestrator injects a "finalize now" user-turn; at 100% it triggers `FINAL_DRAFT` last-chance, then falls back to a probe-only skeleton via `write_fallback_artifacts` so sandbox + postjudge still runs. `0` disables. |
-   | `ENABLE_JUDGE` | `1` | wrap every `auto_run` runner execution with the 3-stage judge (pre / stall-supervise / post). Set to `0` to skip judge calls entirely. See [judge](#judge-modules_judgepy). |
+   | `ENABLE_JUDGE` | `1` | legacy boolean behind `judge_mode`. When the effective mode gates, wraps an `auto_run` execution with **two** judge stages (pre / post) — the stall-detection stage is excluded and never runs. Gating is per module: `enforce` covers pwn and web; everything else records instead. Set to `0` to skip judge calls entirely. See [judge](#judge-modules_judgepy). |
    | `AUTO_RETRY_MAX` | `-1` | postjudge-driven inline retries within a single job. `0` disables the loop (legacy fire-and-forget). Positive int caps at exactly N retries on top of the initial run. `-1` / `inf` / `unlimited` lets the loop run until natural exit (success, no actionable hint, error, user Stop, timeout). See [auto-retry triangle](#auto-retry-triangle). |
    | `USE_ISOLATED_SUBAGENTS` | `1` | when `1` (default), main delegates via the MCP tool `mcp__team__spawn_subagent` — each subagent runs in its own `claude` CLI subprocess and only the final-text reply lands in main's history. Set to `0` for the legacy in-process `agents={}` path (kept as a fast rollback). See [Subagent isolation](#subagent-isolation-default-on). |
    | `SUBAGENT_SPAWN_CAP` | `0` | runaway cost guard. `0` = unlimited (recommended — aggressive delegation is encouraged for context efficiency, and the orchestrator already auto-spawns a recon subagent before main's first turn). Set to a positive int to bound how many delegations one run can make. |
@@ -1078,7 +1080,7 @@ nested structure. Configurable slots, in UI order:
 | Slot | Drives | Blank = inherit |
 |---|---|---|
 | `main` | the CTF agent itself | per-job pick → provider global model (`claude_model` / `grok_model` / `gpt_model`) → provider default |
-| `judge` | prejudge / stall-supervise / postjudge, **and** the `judge` peer subagent | orchestrator stages follow main; the subagent falls back to `LATEST_JUDGE_MODEL` |
+| `judge` | prejudge / postjudge, **and** the `judge` peer subagent | orchestrator stages follow main; the subagent falls back to `LATEST_JUDGE_MODEL` |
 | `reviewer` | the `/retry` + `/resume` hint writer ONLY | the `judge` slot, then main |
 | `recon` / `debugger` / `triage` | peer subagents | the spawner's model (main) |
 | `report` | terminal `findings.json` transform | main |

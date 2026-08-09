@@ -8,20 +8,28 @@ the worker that holds the docker socket and the API key.
 The runner image must be built once via:
     docker compose --profile tools build runner
 
-When the `enable_judge` setting is on (default), each call to
-attempt_sandbox_run() is wrapped by three short Claude judge calls
-defined in modules._judge:
+When the judge GATES a run, attempt_sandbox_run() is wrapped by two
+short Claude judge calls defined in modules._judge:
 
   pre   — review the script BEFORE the container starts. Severity=high
           aborts the run with a `prejudge_blocked` reason.
-  during— ONE stall-detection call when the container has emitted no
-          new output for 60s while still alive. Judge can decide to
-          kill (parse-error / hung) or wait (legitimate slow work).
   post  — categorize the result (success / partial / hung /
           parse_error / network_error / crash / timeout / unknown)
           and produce a retry-ready hint.
 
-Disabling `enable_judge` reverts to plain blocking wait + return.
+A third stage exists and is NOT wired to that gate:
+
+  during— ONE stall-detection call when the container has emitted no
+          new output for 60s while still alive; it can KILL the
+          container. Excluded from v1 enforce by the agreed scope, and
+          it has its own flag (`enable_supervise`, default False) so
+          that exclusion cannot be undone by accident. Its evidence is
+          the live container's stalled output, which no post-hoc shadow
+          can reconstruct — so it is the one stage never measured, and
+          the only one that kills.
+
+Whether pre/post gate at all is per JOB, not global: see
+`_judge_mode_for_job`. Off or shadow reverts to plain blocking wait.
 """
 from __future__ import annotations
 
@@ -64,7 +72,8 @@ CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
 # slow brute-force against a rate-limited endpoint. Give the whole web path
 # a 3000s (50-min) ceiling. Like the crypto-sage ceiling it's a CEILING, not
 # a fixed wait — a fast web solve exits the instant it finishes and pays
-# nothing; the stall watchdog + hard timeout still bound a genuinely stuck run.
+# nothing; the hard timeout still bounds a genuinely stuck run. (The stall
+# watchdog used to be named here too — it is off in v1, see `enable_supervise`.)
 WEB_TIMEOUT_S = 3000
 DEFAULT_MEM = "2g"
 
@@ -227,6 +236,52 @@ def _judge_enabled() -> bool:
     return _judge_gates(_judge_mode())
 
 
+def _judge_mode_for_job(job_id: str) -> str:
+    """The effective mode for THIS job — `enforce` is scoped by module.
+
+    Stage 8 (operator decision, 2026-08-09) enforces on pwn and web only; see
+    `settings_io.JUDGE_ENFORCE_MODULES` for why those two and nobody else. An
+    out-of-scope module under a global `enforce` runs as `shadow`: it still
+    records, it just does not gate.
+
+    The module is read HERE, with the mode, and once. `meta` is the same place
+    `agent_role_providers` is snapshotted at create time and for the same
+    reason — a per-stage re-read lets the answer drift inside a single attempt,
+    and half of this branch's defects have been two reads of one fact.
+
+    Every failure path returns `shadow`, never `enforce` — and "every" has to
+    include the settings read, which is the part that was got wrong first.
+    `_judge_mode()`'s own `except` returns `"enforce"`: a defensible fail-open
+    while the mode was global, and not defensible with a scope, because a
+    filesystem error arriving as the string "enforce" is indistinguishable from
+    an operator who chose it. Paired with a readable pwn meta that turned a
+    broken settings file into a live gate. Not knowing the mode, or the module,
+    has to mean not gating.
+    """
+    try:
+        from modules._common import read_meta
+        from modules.settings_io import effective_judge_mode, get_judge_mode
+
+        # `get_judge_mode()` directly, NOT `_judge_mode()`. That wrapper
+        # swallows a settings failure and answers "enforce", so by the time the
+        # value arrives here a broken read is indistinguishable from an
+        # operator who typed enforce — and combined with a perfectly readable
+        # pwn meta it produced a real gate out of a filesystem error. Reading
+        # inside this try is what lets the failure stay a failure.
+        mode = get_judge_mode()
+        if mode != "enforce":
+            return mode
+        return effective_judge_mode(mode, (read_meta(job_id) or {}).get("module") or "")
+    except Exception:
+        # Anything at all — settings, meta, import — resolves here, and it
+        # resolves to shadow. Note this deliberately differs from
+        # `_judge_mode()`'s legacy fallback: on a failure we do not know the
+        # operator's mode OR the job's module, and neither unknown may widen
+        # the gate. Shadow is the only answer that gates nothing while still
+        # recording.
+        return "shadow"
+
+
 def _wait_with_supervise(
     container,
     *,
@@ -234,7 +289,7 @@ def _wait_with_supervise(
     job_dir_path: Path,
     script_rel: str,
     log_fn,
-    enable_judge: bool,
+    enable_supervise: bool,
 ) -> dict:
     """Block until the container exits, the timeout fires, or the
     supervise judge votes kill.
@@ -304,7 +359,7 @@ def _wait_with_supervise(
             last_size = len(buf)
             last_change = time.time()
         elif (
-            enable_judge
+            enable_supervise
             and (time.time() - last_change) > SUPERVISE_STALL_S
             and (
                 last_supervise is None  # first ask (always) — one-shot for short runs
@@ -368,7 +423,7 @@ def run_in_sandbox(
     use_sage: bool = False,
     *,
     log_fn=None,
-    enable_judge: bool = False,
+    enable_supervise: bool = False,
 ) -> dict:
     """Execute the agent's script inside the runner container against the
     SAME absolute paths the worker used.
@@ -388,11 +443,12 @@ def run_in_sandbox(
     kernel can't find the interpreter and spawning the patched binary
     fails with the classic misleading `No such file or directory`.
 
-    When `enable_judge` is True the wait loop calls
+    When `enable_supervise` is True the wait loop calls
     `modules._judge.supervise_run_once` after SUPERVISE_STALL_S of
     silence. Pre/post judge calls happen in attempt_sandbox_run, not
-    here, so callers that want only "during" supervision can set this
-    flag while still calling run_in_sandbox directly.
+    here, so this flag is ONLY about the during-run gate — it used to be
+    named `enable_judge`, which read as "the judge is on" and let the
+    pre/post decision switch on a container kill by accident.
 
     Returns: {exit_code, stdout, stderr, stdout_truncated_to,
               timeout?, killed_by_supervise?, supervise?}.
@@ -530,7 +586,7 @@ def run_in_sandbox(
             job_dir_path=job_dir_path,
             script_rel=script_rel,
             log_fn=_log,
-            enable_judge=enable_judge,
+            enable_supervise=enable_supervise,
         )
         exit_code = int(result.get("StatusCode", -1))
         timeout_hit = bool(result.get("timeout", False))
@@ -657,16 +713,18 @@ def attempt_sandbox_run(
     """Helper for orchestrators that always copy the produced script to the
     job root. Runs <jobdir>/<script_filename> with target as argv if given.
 
-    When `enable_judge` is on (default), wraps the run with three judge
-    stages:
+    When this job's effective mode gates (`_judge_mode_for_job`), wraps
+    the run with two judge stages:
 
       pre  — abort BEFORE the container starts if the judge flags a
              severity=high issue. Returned dict has keys
              {error, prejudge, judge_aborted=True} so the orchestrator
              can record a structured failure.
-      during— stall watchdog inside run_in_sandbox.
       post — verdict + retry hint merged into the returned dict under
              the `judge` key.
+
+    The stall watchdog inside run_in_sandbox is deliberately NOT one of
+    them — `enable_supervise=False` is passed explicitly below.
     """
     work_dir = Path(f"/data/jobs/{job_id}")
     # Script lives in the agent's work tree (jobroot/work/<script>) so
@@ -704,7 +762,14 @@ def attempt_sandbox_run(
     # ONE read, both answers derived from it. Two reads let a settings change
     # land between them, and the pair that comes out never existed as a
     # configuration: enforce's gating with shadow's recording, same attempt.
-    judge_mode = _judge_mode()
+    # Scoped, not global: `enforce` gates only the modules stage 8 could
+    # actually measure. Everything downstream — the gate, the cycle id, both
+    # shadow recording sites — reads THIS value, never the raw setting. A
+    # comparison left against the global would give an out-of-scope job
+    # `cycle_id=""`, which `_cycle_state` folds into the legacy job-wide
+    # bucket, and attempt 1's refusal would silence attempt 2's healthy
+    # postjudge all over again (turn 0073, D21).
+    judge_mode = _judge_mode_for_job(job_id)
     enable_judge = _judge_gates(judge_mode)
     # One id per ATTEMPT. prejudge -> supervise -> postjudge share a judge
     # session within a cycle, so "this stage's prerequisite" is a question
@@ -915,7 +980,16 @@ def attempt_sandbox_run(
         try:
             res = run_in_sandbox(
                 job_id, script_filename, args=args, use_sage=use_sage,
-                log_fn=log_fn, enable_judge=enable_judge,
+                log_fn=log_fn,
+                # NOT `enable_judge`. supervise is excluded from v1 enforce by
+                # the agreed scope, on two grounds that both still hold: its
+                # evidence is the stalled output of a LIVE container, which no
+                # post-hoc shadow can reconstruct, so it is the one gate stage
+                # 7 could not measure at all — and it is the only one that
+                # KILLS. Hardest to verify, largest blast radius. Wiring it to
+                # the same flag as prejudge/postjudge meant flipping Settings
+                # to enforce handed container lifetime to an unevaluated gate.
+                enable_supervise=False,
                 timeout_s=per_job_timeout,
             )
         except Exception as e:

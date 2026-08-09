@@ -91,11 +91,16 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # aggregate cost against this ceiling.
     ("budget_usd", "BUDGET_USD", float, 0.0),
     # Quality-gate judge that wraps auto_run exploit/solver execution
-    # (pre-flight script review → stall supervisor → post-mortem
-    # verdict). Each stage is one short no-tools Claude call against
-    # LATEST_JUDGE_MODEL. Disable to skip all judge calls and run the
-    # script with the plain runner (saves ~3 Claude turns per auto_run
-    # job at the cost of losing hang/parse-error detection).
+    # (pre-flight script review → post-mortem verdict). Each stage is one
+    # short no-tools Claude call against LATEST_JUDGE_MODEL. Disable to
+    # skip all judge calls and run the script with the plain runner
+    # (saves ~2 Claude turns per auto_run job at the cost of losing
+    # parse-error detection).
+    #
+    # A stall-detection stage used to be listed here as a third one. It is
+    # excluded from v1 enforce and gated behind `enable_supervise`
+    # (default False), so hang detection is NOT among the things this
+    # setting buys — the hard timeout still covers it.
     ("enable_judge", "ENABLE_JUDGE", bool, True),
     # Tri-state successor to `enable_judge`. Empty means "derive from the
     # boolean", so existing settings keep meaning exactly what they meant:
@@ -409,6 +414,40 @@ def get_judge_mode() -> str:
         return raw
     legacy = get_setting("enable_judge")
     return "enforce" if (legacy is None or bool(legacy)) else "off"
+
+
+# Stage 8 scope — operator decision, 2026-08-09. `enforce` is NOT global.
+#
+# The stage-7 stratified table (handoff turn 0069) could only measure
+# discriminating power where BOTH outcome classes exist. That is pwn (8 capture
+# / 8 negative) and web (3 / 3). rev (13 / 1) and crypto (6 / 0) have no
+# meaningful negative class, so a judge that answers "success" every time scores
+# full marks there — that is a measurement we failed to take, not a good result,
+# and gating on it would be gating on nothing. web3 / misc / forensic have n<5.
+#
+# Deliberately a constant rather than a settings key: STATE.md's rule is that a
+# new requirement has to displace an existing one or be approved, and the
+# operator approved a scope, not a control surface.
+JUDGE_ENFORCE_MODULES: tuple[str, ...] = ("pwn", "web")
+
+
+def effective_judge_mode(mode: str, module: str) -> str:
+    """The mode a job of `module` actually runs under.
+
+    Out-of-scope modules fall to `shadow`, not `off`: they keep recording what
+    the judge would have said, which is how the missing negative class for rev
+    and crypto eventually gets collected. Only the GATING is scoped.
+
+    Unknown or empty module never reaches enforce. "We could not tell which
+    module this is" must not resolve to "gate it" — the caller cannot tell that
+    case apart from a module the operator deliberately excluded.
+    """
+    m = str(mode or "").strip().lower()
+    if m not in JUDGE_MODES:
+        return "off"
+    if m != "enforce":
+        return m
+    return "enforce" if str(module or "").strip().lower() in JUDGE_ENFORCE_MODULES else "shadow"
 
 
 def get_agent_role_providers() -> dict[str, str]:

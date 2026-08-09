@@ -1667,15 +1667,18 @@ debris from earlier jobs on this container.
 Two invocation modes:
 
   A. ORCHESTRATOR-INVOKED (lifecycle gate around the runner sandbox):
-     The orchestrator drives you through three stages of the same
+     The orchestrator drives you through TWO stages of the same
      session — your context PERSISTS across them so what you flagged
      in pre is still visible in post.
        pre       — review the just-written exploit.py / solver.py
                    BEFORE the runner container starts.
-       supervise — decide whether to kill or wait when the container
-                   has been silent for 60s while still alive.
        post      — categorize the final exit_code + stdout + stderr
                    and emit a retry-ready hint.
+     A third stage exists in the protocol — `supervise`, kill-or-wait
+     on a container that has gone silent — and is NOT driven in this
+     release. Do not reason as though anything watched the run while
+     it was alive: nothing did. A run that hung was ended by the hard
+     timeout, not by a judgement.
      For these the user message tells you which stage you are in and
      what JSON shape the orchestrator expects. Reply with EXACTLY ONE
      compact JSON object on the FIRST line, no markdown, no prose.
@@ -1849,7 +1852,8 @@ rather than guessing — a wrong code prepends a misleading fix.
   base prevents one whole class of "the chain ran on garbage".
 * `p.interactive()` after the FSOP trigger inside a runner
   sandbox. The sandbox has no TTY; interactive blocks on stdin
-  and the supervise watchdog kills the run before flag exfil.
+  and the run sits there until the hard timeout ends it — the flag
+  is never exfiltrated, and you get a timeout instead of an answer.
   Recommend `recvall(timeout=N)` or `recvuntil(b'\\n', timeout=N)`
   guarded by `if sys.stdin.isatty(): p.interactive()`.
 """

@@ -1,17 +1,23 @@
 """Quality-gate judge for auto-run exploit/solver execution.
 
-The judge is a stateful agent that wraps every `attempt_sandbox_run`:
+The judge is a stateful agent that wraps `attempt_sandbox_run` when
+this job's effective mode gates it (`_runner._judge_mode_for_job`):
 
   pre       — review the just-written script BEFORE the runner
               container starts.
-  supervise — decide kill/continue when the running container has
-              been silent for SUPERVISE_STALL_S while still alive
-              (one-shot per run; conservative cost mode).
   post      — categorize the final exit_code + stdout + stderr and
               produce a retry-ready hint.
 
-Same-job continuity: prejudge captures a `session_id`; supervise +
-postjudge `resume` that session via `fork_session=False` so the judge
+  supervise — kill/continue on a container that has been silent for
+              SUPERVISE_STALL_S while still alive. Implemented here,
+              but NOT driven in this release: it is excluded from v1
+              enforce and `attempt_sandbox_run` passes
+              `enable_supervise=False` unconditionally. It is the one
+              stage no replay can evaluate (its evidence is a live
+              container's stalled output) and the only one that kills.
+
+Same-job continuity: prejudge captures a `session_id`; the later
+stage(s) `resume` that session via `fork_session=False` so the judge
 remembers what it warned about earlier in the run. Each stage is a
 fresh `query()` call but the SDK loads the prior conversation from
 the project-key directory under `~/.claude/projects/`.
@@ -791,8 +797,9 @@ def _attempt(
     The exception boundary belongs HERE, at the attempt, not around the public
     stage function — for three reasons that only show up at this level:
 
-      * All three stages go through it, so supervise and postjudge stop
-        propagating and stop leaving zero ledger rows.
+      * Every stage function goes through it, so none of them propagates
+        or leaves zero ledger rows. (That includes `supervise`, which is
+        implemented but not driven — see the module header.)
       * The provider is already known. A catch further out has to re-guess it,
         and in a failover it guesses WRONG: an exception from the alternate
         was attributed to the provider the primary ran on.

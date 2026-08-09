@@ -5,12 +5,11 @@ jobs before letting it gate anything, and the measurement is worthless if
 turning it on changes the thing being measured. Two ways that happens, and
 both are handled here rather than left to discipline:
 
-  * **Latency.** prejudge / supervise / postjudge sit inside the auto_run
-    cycle. A judge call added there lengthens every run, so a shadow job and
-    a control job are no longer comparable, and supervise's stall watchdog is
-    timing something different from what it times today. Shadow therefore
-    records the INPUTS during the run — a file append, no model call — and
-    the verdicts are produced afterwards, out of band.
+  * **Latency.** The judge stages sit inside the auto_run cycle. A judge call
+    added there lengthens every run, so a shadow job and a control job are no
+    longer comparable. Shadow therefore records the INPUTS during the run —
+    a file append, no model call — and the verdicts are produced afterwards,
+    out of band.
 
     "Out of band" is literal: `attempt_sandbox_run()` does not call
     `evaluate()` at all. Calling it there — even after the container exits —
@@ -25,13 +24,19 @@ both are handled here rather than left to discipline:
     so a NEW file is safe by construction — but only as long as nobody adds
     it. `scripts/test_shadow_judge.py` pins that.
 
-WHAT SHADOW DOES NOT SEE: supervise. That stage fires from inside
-`_wait_with_supervise` under the same `enable_judge` gate, which shadow leaves
-False, so a shadow job records prejudge and postjudge only. Reaching it would
-mean splitting the branch that also holds `container.kill()`, and a shadow
-mode that can kill is the one failure this design must not have. Read a replay
-with zero supervise rows as "shadow never looked", NOT as "supervise never
-fired".
+WHAT SHADOW DOES NOT SEE: supervise — and since stage 8 nothing else sees it
+either. That stage fires from inside `_wait_with_supervise`, which now has its
+own flag (`enable_supervise`, default False); the production attempt path
+passes False unconditionally, so supervise does not run in ANY mode. It is
+excluded from v1 enforce because its evidence is a LIVE container's stalled
+output, which no post-hoc replay can reconstruct, and because it is the only
+stage that calls `container.kill()` — the least verifiable gate with the
+largest blast radius.
+
+So read zero supervise rows as "supervise never fired", full stop. That is
+weaker than it sounds: it was previously "shadow never looked, and enforce
+might have", and the ambiguity is gone only because the stage is off
+everywhere. If it is ever switched on, this paragraph is wrong again.
 
 Shadow gates NOTHING. Not the sandbox ship-block, not the supervise kill, not
 the postjudge retry. A run in shadow mode must produce byte-identical
