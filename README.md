@@ -527,11 +527,14 @@ should never be entered by inference.
 Three bounds on reading a shadow ledger, because it looks like a measurement
 facility and is a narrower one than it appears:
 
-1. **It can only ever measure a job's LAST attempt.** Each recorded input is
-   fingerprinted against the artifacts it describes, and a retry overwrites
-   `exploit.py.stdout` under the same name — so every earlier attempt's
-   postjudge correctly refuses to replay. That refusal is the contract working,
-   not a bug, but it means the sample is one attempt per job.
+1. **The rule is hash identity, not recency.** Each recorded input is
+   fingerprinted against the artifacts it describes, and evaluation refuses
+   unless every one of them still matches. In practice a retry rewrites
+   `exploit.py` and `exploit.py.stdout` under the same names, so earlier
+   cycles usually cannot be replayed and the sample collapses to one attempt
+   per job — but that is a consequence, not the rule: a retry whose artifacts
+   come out byte-identical leaves BOTH cycles evaluable. Read a refusal as
+   "these bytes moved", never as "this was not the last attempt".
 2. **Zero `supervise` rows means the stage never fired**, not that shadow did
    not look. supervise is off in every mode (below). Before stage 8 the same
    emptiness was ambiguous.
@@ -565,17 +568,19 @@ scope (pwn, web). In every other case they record and decide nothing:
   `partial` / `hung` / `parse_error` / `network_error` / `crash` /
   `timeout` / `unknown` and emit a retry-ready hint.
 
-The orchestrator stages share **one Claude session** (prejudge
-captures `session_id`; the later stage resumes via
-`fork_session=False`).
+The orchestrator stages share **one judge session, and it is
+provider-local** (prejudge captures a `session_id`; the later stage
+resumes it with `fork_session=False`). It is not necessarily a Claude
+session: if prejudge failed over to the other backend, the stage after
+it resumes THAT backend's session, not a Claude one.
 
 Each judge stage is best-effort: a judge auth/rate/empty failure
 degrades to permissive defaults (prejudge ok, postjudge unknown) so the runner is never harder to use because of a
 flaky judge call. All output prefixed `[judge]` in `run.log`.
 
-Toggle in **Settings → Enable judge for auto-run** (default on); off
-reverts to plain blocking wait + bare `exit_code`. The `judge`
-subagent stays registered for main — the toggle only gates the
+Controlled by **Settings → Judge mode** (`off | shadow | enforce`, see
+above); `off` reverts to plain blocking wait + bare `exit_code`. The
+`judge` subagent stays registered for main — the setting only gates the
 orchestrator's pre/super/post lifecycle wrapping.
 
 ### Auto-retry triangle
@@ -959,20 +964,27 @@ on gpt while judge and reviewer stay on claude.
    (a pre-create decision);
 3. the job's own `provider_for_job(job_id)`.
 
-For an existing job, live Settings are never consulted **under any condition**,
-including when the key is simply absent. An absent key means "this job has no
-role routing", never "look it up now" — otherwise a Settings edit could
-re-route a job that is already running, or half-route it mid-`/retry`. A meta
-read failure returns the job's own provider for the same reason. With no
-override anywhere, every role resolves to exactly `provider_for_job(job_id)`,
-which is the pre-hybrid behaviour a characterization gate pins over stored jobs.
+For an existing job, the live **role map** is never consulted — not even when
+the role key is absent. An absent key means "this job has no role routing",
+never "look it up now"; otherwise a Settings edit could re-route a job that is
+already running, or half-route it mid-`/retry`.
+
+That guarantee is about the role map only, and the distinction matters. Step 3
+is `provider_for_job(job_id)`, which prefers `meta.agent_provider` but falls
+through to the live global `agent_provider` when meta has no stamp or cannot be
+read. So a job created before that field was stamped, or whose meta is
+unreadable, still picks up a live Settings change — through the BASE, not
+through role routing. With an override nowhere and a stamped base, every role
+resolves to exactly `provider_for_job(job_id)`, which is the pre-hybrid
+behaviour a characterization gate pins over stored jobs.
 
 Two related pieces of that work are Codex's and are described here only in
 outline — see `modules/_judge.py` and `modules/usage_ledger.py` for the
 authoritative behaviour: a judge/reviewer turn that comes back as a provider
 **policy refusal** can fail over to the other backend rather than dying, and the
-usage ledger records one row per model with the provider, role and stage on it,
-so a routed job's spend is attributable per backend rather than pooled.
+usage ledger records one row per model, keyed on provider / role / stage /
+**attempt**, so a routed job's spend is attributable per backend and per retry
+rather than pooled.
 
 The default GPT runtime is Codex CLI with ChatGPT subscription OAuth. Run
 `codex login` on the host, choose **Sign in with ChatGPT**, and make sure
