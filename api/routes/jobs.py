@@ -239,7 +239,7 @@ def get_usage():
         cli-chat-proxy `/v1/billing?format=credits` (needs `grok login`
         OAuth mounted). Includes `remaining_pct` when available.
       * `codex_rate_limit` is the mounted ChatGPT OAuth account's usage,
-        queried through Codex CLI app-server and cached for 60 seconds.
+        queried through Codex CLI app-server and cached for 15 seconds.
     """
     from modules.settings_io import get_setting
     from modules._common import read_rate_limit, read_grok_rate_limit

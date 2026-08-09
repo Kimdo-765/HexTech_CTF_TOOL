@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Dict  # noqa: F401
@@ -404,16 +405,28 @@ def record_rate_limit_event(msg) -> None:
         info = getattr(msg, "rate_limit_info", None)
         if info is None:
             return
+        utilization = getattr(info, "utilization", None)
+        try:
+            used_pct = round(float(utilization) * 100.0, 1)
+            remaining_pct = max(0.0, round(100.0 - used_pct, 1))
+        except (TypeError, ValueError):
+            used_pct = None
+            remaining_pct = None
         payload = {
             "status": getattr(info, "status", None),
             "resets_at": getattr(info, "resets_at", None),
             "rate_limit_type": getattr(info, "rate_limit_type", None),
-            "utilization": getattr(info, "utilization", None),
+            "utilization": utilization,
+            "used_pct": used_pct,
+            "remaining_pct": remaining_pct,
             "overage_status": getattr(info, "overage_status", None),
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source": "sdk_rate_limit_event",
         }
         RATE_LIMIT_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = RATE_LIMIT_CACHE.with_name(RATE_LIMIT_CACHE.name + ".tmp")
+        tmp = RATE_LIMIT_CACHE.with_name(
+            f"{RATE_LIMIT_CACHE.name}.event.{os.getpid()}.tmp"
+        )
         tmp.write_text(json.dumps(payload))
         tmp.replace(RATE_LIMIT_CACHE)  # atomic swap
     except Exception:
@@ -421,12 +434,19 @@ def record_rate_limit_event(msg) -> None:
 
 
 def read_rate_limit() -> dict | None:
-    """Latest account-global rate-limit status (or None). Best-effort."""
+    """Current Claude OAuth quota, falling back to the latest SDK event."""
     try:
-        if RATE_LIMIT_CACHE.is_file():
-            return json.loads(RATE_LIMIT_CACHE.read_text())
+        # Imported lazily to keep this very large shared module's import graph
+        # unchanged for worker processes that never render the web UI.
+        from modules.claude_rate_limit import read_claude_rate_limit
+
+        return read_claude_rate_limit()
     except Exception:
-        pass
+        try:
+            if RATE_LIMIT_CACHE.is_file():
+                return json.loads(RATE_LIMIT_CACHE.read_text())
+        except Exception:
+            pass
     return None
 
 
@@ -447,6 +467,7 @@ GROK_RATE_LIMIT_CACHE = DATA_DIR / "grok_rate_limit.json"
 GROK_RATE_LIMIT_TTL_S = 60
 _GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 _GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
+_GROK_AUTH_REFRESH_LOCK = threading.Lock()
 
 
 def _grok_auth_paths() -> list[Path]:
@@ -504,60 +525,98 @@ def _grok_token_expired(entry: dict, skew_s: int = 120) -> bool:
 
 
 def _refresh_grok_token(auth_path: Path, entry_key: str, entry: dict) -> str | None:
-    """OIDC refresh_token grant. Updates auth.json in place. Returns new access token."""
+    """OIDC refresh_token grant. Updates auth.json and preserves host ownership."""
     import urllib.parse
     import urllib.request
 
-    refresh = entry.get("refresh_token")
-    client_id = entry.get("oidc_client_id")
-    if not refresh or not client_id:
-        return None
-    token_url = _GROK_TOKEN_URL
-    # Some installs may store a non-default issuer; prefer its token endpoint
-    # only when the issuer is auth.x.ai (the only one we know works).
-    body = urllib.parse.urlencode({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh,
-        "client_id": client_id,
-    }).encode()
-    req = urllib.request.Request(
-        token_url,
-        data=body,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        payload = json.loads(resp.read())
-    access = payload.get("access_token")
-    if not access:
-        return None
-    entry["key"] = access
-    if payload.get("refresh_token"):
-        entry["refresh_token"] = payload["refresh_token"]
-    expires_in = payload.get("expires_in")
-    if isinstance(expires_in, (int, float)) and expires_in > 0:
-        entry["expires_at"] = (
-            datetime.now(timezone.utc).timestamp() + float(expires_in)
-        )
-        # Store ISO like the CLI does
-        entry["expires_at"] = datetime.fromtimestamp(
-            entry["expires_at"], tz=timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-    # Write back full file (preserve sibling entries)
-    try:
-        raw = json.loads(auth_path.read_text())
+    failed_access = entry.get("key")
+    with _GROK_AUTH_REFRESH_LOCK:
+        # Another API request or the Grok CLI may have refreshed while this
+        # caller was waiting.  Always reload before rotating a refresh token.
+        try:
+            raw = json.loads(auth_path.read_text())
+        except Exception:
+            raw = {}
         if not isinstance(raw, dict):
             raw = {}
+        current = raw.get(entry_key)
+        if isinstance(current, dict):
+            current_access = current.get("key")
+            if current_access and current_access != failed_access:
+                return str(current_access)
+            entry = dict(current)
+
+        refresh = entry.get("refresh_token")
+        client_id = entry.get("oidc_client_id")
+        if not refresh or not client_id:
+            return None
+        body = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client_id,
+        }).encode()
+        req = urllib.request.Request(
+            _GROK_TOKEN_URL,
+            data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            payload = json.loads(resp.read())
+        access = payload.get("access_token")
+        if not access:
+            return None
+        entry["key"] = access
+        if payload.get("refresh_token"):
+            entry["refresh_token"] = payload["refresh_token"]
+        expires_in = payload.get("expires_in")
+        if isinstance(expires_in, (int, float)) and expires_in > 0:
+            expires_at = datetime.now(timezone.utc).timestamp() + float(expires_in)
+            entry["expires_at"] = datetime.fromtimestamp(
+                expires_at, tz=timezone.utc
+            ).isoformat().replace("+00:00", "Z")
         raw[entry_key] = entry
-        tmp = auth_path.with_name(auth_path.name + ".tmp")
-        tmp.write_text(json.dumps(raw, indent=2))
+        try:
+            _replace_auth_json(auth_path, raw)
+        except Exception:
+            pass  # token still usable even if disk write fails
+        return str(access)
+
+
+def _replace_auth_json(auth_path: Path, payload: dict) -> None:
+    """Atomically replace auth JSON without turning a host bind file root-owned.
+
+    The API runs as container root while ``~/.grok`` belongs to the host user.
+    A plain ``tmp.replace(auth_path)`` therefore changed ``auth.json`` to an
+    unmapped/nobody owner after the first token refresh.  Use the directory's
+    owner (the account that owns the auth store) and retain the file mode.
+    """
+    original = auth_path.stat()
+    directory = auth_path.parent.stat()
+    tmp = auth_path.with_name(f"{auth_path.name}.hextech.{os.getpid()}.tmp")
+    fd = -1
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.fchmod(fd, original.st_mode & 0o777)
+        try:
+            os.fchown(fd, directory.st_uid, directory.st_gid)
+        except (AttributeError, PermissionError, OSError):
+            pass
+        with os.fdopen(fd, "w") as out:
+            fd = -1
+            json.dump(payload, out, indent=2)
         tmp.replace(auth_path)
-    except Exception:
-        pass  # token still usable even if disk write fails
-    return access
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def _fetch_grok_billing_credits(token: str) -> dict:
@@ -752,6 +811,17 @@ def _read_stale_grok_cache() -> dict | None:
         if GROK_RATE_LIMIT_CACHE.is_file():
             cached = json.loads(GROK_RATE_LIMIT_CACHE.read_text())
             if isinstance(cached, dict) and cached.get("status"):
+                cached["stale"] = True
+                try:
+                    cached["stale_age_seconds"] = max(
+                        0,
+                        int(
+                            datetime.now(timezone.utc).timestamp()
+                            - GROK_RATE_LIMIT_CACHE.stat().st_mtime
+                        ),
+                    )
+                except OSError:
+                    pass
                 return cached
     except Exception:
         pass
