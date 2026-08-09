@@ -487,12 +487,28 @@ if _supervise_args == [False]:
     # The plan doc is the record of the decision itself and argues about
     # supervise by name; the suites quote the old strings to test for them.
     _ALLOW = ("docs/hybrid-agent-plan.md", "scripts/test_")
+    # SOURCE surfaces only. The first version walked the whole tree and, in the
+    # deployment checkout where `data/` exists, flagged agent-written solvers
+    # and subagent logs from finished jobs. Those are records of what an agent
+    # once said, not contracts anyone can fix, and a check that demands they be
+    # edited is a check that gets disabled. It passed in the worktree purely
+    # because no `data/` is there — the merge is what exposed it.
+    _SURFACES = ("modules", "web-ui", "api", "worker", "docs", "scripts")
+    _roots = [ROOT / d for d in _SURFACES] + [ROOT]
+    _seen: set = set()
     _offenders = []
-    for _f in sorted(ROOT.rglob("*")):
-        if not _f.is_file() or _f.suffix not in (".md", ".py", ".html", ".js", ".sh"):
+    _files = [f for f in sorted(ROOT.glob("*.md")) if f.is_file()]
+    for _d in (ROOT / d for d in _SURFACES):
+        if _d.is_dir():
+            _files += sorted(f for f in _d.rglob("*") if f.is_file())
+    for _f in _files:
+        if _f.suffix not in (".md", ".py", ".html", ".js", ".sh"):
             continue
         _rel = str(_f.relative_to(ROOT))
-        if _rel.startswith(".git") or any(a in _rel for a in _ALLOW):
+        if _rel in _seen:
+            continue
+        _seen.add(_rel)
+        if any(a in _rel for a in _ALLOW):
             continue
         try:
             _txt = _f.read_text(encoding="utf-8", errors="ignore")
