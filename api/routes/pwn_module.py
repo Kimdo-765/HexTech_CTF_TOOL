@@ -20,6 +20,7 @@ async def analyze_pwn(
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
+    docker_challenge: bool = Form(False),
 ):
     targets = parse_targets(target)
     target = targets[0] if targets else None
@@ -60,6 +61,11 @@ async def analyze_pwn(
         "model": chosen_model,
         "effort": chosen_effort,
         "flag_format": (flag_format or "").strip() or None,
+        # 🐳 opt-in. The form posted this before the route accepted it, and
+        # FastAPI drops form fields a signature does not declare — so the box
+        # set nothing, `docker_challenge_block` stayed a no-op, and the feature
+        # was decorative. Job 6b4a07a32cee is where that showed up.
+        "docker_challenge": docker_challenge,
         "remote_only": not has_file,
     }
     enrich_job_meta(meta)

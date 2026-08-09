@@ -186,6 +186,37 @@ check("pwn is told that reading a Dockerfile is not running it",
 check("...with the measurement behind it, not just an assertion",
       bool(re.search(r"2 MiB-aligned 5/5", pwn_prompt)), True)
 
+# ---------------------------------------------------------------------------
+# 5. Form ↔ route parity, for EVERY module — not just pwn.
+#
+#    The box was added to the pwn form while `api/routes/pwn_module.py` had no
+#    `docker_challenge` parameter. FastAPI silently drops form fields a
+#    signature does not declare, so ticking it set nothing and the block stayed
+#    a no-op: a checkbox that does nothing, which is exactly the "the UI says
+#    one thing and the code does another" defect this whole change was about.
+#    Checked across all modules so the next one to grow a box cannot repeat it.
+# ---------------------------------------------------------------------------
+import re as _re2
+
+_html = (ROOT / "web-ui" / "index.html").read_text()
+_with_box = set()
+for _m in _re2.finditer(r'<section id="panel-(\w+)"', _html):
+    _n = _m.group(1)
+    _i = _m.start()
+    _j = _html.find('<section id="panel-', _i + 1)
+    if "docker_challenge" in _html[_i:_j if _j > 0 else len(_html)]:
+        _with_box.add(_n)
+
+_accepts = set()
+for _p in sorted((ROOT / "api" / "routes").glob("*_module.py")):
+    _src = _p.read_text()
+    if "docker_challenge: bool = Form(" in _src and '"docker_challenge": docker_challenge' in _src:
+        _accepts.add(_p.stem.replace("_module", ""))
+
+check("every form offering the box has a route that accepts AND persists it",
+      sorted(_with_box - _accepts), [])
+check("...and pwn is one of them", "pwn" in _with_box and "pwn" in _accepts, True)
+
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
       + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
 _TMP.cleanup()
