@@ -63,6 +63,7 @@ def run_job(
     *,
     invoker=None,
     runtime_factory=None,
+    clock=None,
 ) -> dict[str, Any]:
     """Run ingest → routed patch loop → three root-level artifacts."""
 
@@ -90,6 +91,7 @@ def run_job(
             invoker or DiagnosticInvoker(),
             requested_models={"main": meta.get("model")},
             runtime_factory=runtime_factory,
+            clock=clock,
         )
         document = result.verification
         tiers = _evidence_tiers(document)

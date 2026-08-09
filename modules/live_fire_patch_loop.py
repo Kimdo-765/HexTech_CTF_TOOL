@@ -1154,7 +1154,11 @@ def run_patch_loop(
 
             last_provider = provider_result
             last_verification = verification
-            last_findings = provider_result.findings
+            # A source-policy failure restores the pre-attempt candidate.  Its
+            # findings therefore describe a diff which no longer exists and
+            # must not be handed to the terminal report role as current
+            # file:line evidence.
+            last_findings = () if policy_errors else provider_result.findings
             last_policy_errors = policy_errors
             terminal_ready = (
                 provider_result.status == "success"
