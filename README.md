@@ -506,6 +506,40 @@ Judge replies with structured findings (see `JUDGE_AGENT_PROMPT`).
 | **proceed** | Findings are LOW/MED, or main judges a HIGH to be a false positive. End the turn; orchestrator runs the script. |
 | **abort** | `Bash(rm -f ./exploit.py)` to delete the deliverable, write report.md explaining the block. Orchestrator detects the missing file and skips the runner. |
 
+#### `judge_mode` — three states, and only two of them are reachable by accident
+
+Settings exposes `judge_mode` as `off | shadow | enforce`. The legacy
+`ENABLE_JUDGE` boolean still derives `off`/`enforce`; **`shadow` is deliberately
+NOT derivable** — a mode that changes what the operator believes is running
+should never be entered by inference.
+
+- **off** — plain runner, no judge calls.
+- **enforce** — the gate below, scoped to pwn and web (see
+  `settings_io.JUDGE_ENFORCE_MODULES`). A module outside that scope runs as
+  **shadow**, not off: only the GATING is scoped, so the modules with no
+  measurable negative class keep accumulating one.
+- **shadow** — during the run the orchestrator only APPENDS the judge's
+  *inputs* to `judge_shadow.jsonl`. No model call, no gating; a shadow run is
+  byte-identical to the same run with the judge off, down to `run.log`.
+  Verdicts are produced afterwards by an out-of-band sweep
+  (`judge_shadow.evaluate`), never on the run path.
+
+Three bounds on reading a shadow ledger, because it looks like a measurement
+facility and is a narrower one than it appears:
+
+1. **It can only ever measure a job's LAST attempt.** Each recorded input is
+   fingerprinted against the artifacts it describes, and a retry overwrites
+   `exploit.py.stdout` under the same name — so every earlier attempt's
+   postjudge correctly refuses to replay. That refusal is the contract working,
+   not a bug, but it means the sample is one attempt per job.
+2. **Zero `supervise` rows means the stage never fired**, not that shadow did
+   not look. supervise is off in every mode (below). Before stage 8 the same
+   emptiness was ambiguous.
+3. **"Faithful replay" holds at the prompt level only.** The out-of-band judge
+   has Read/Bash and can observe that it is replaying — stale artifact mtimes,
+   a challenge instance that has since expired. enforce's postjudge sees
+   neither.
+
 Two backstops run around the runner when this job's effective mode
 gates it — i.e. `judge_mode=enforce` **and** a module in the enforce
 scope (pwn, web). In every other case they record and decide nothing:
@@ -909,6 +943,37 @@ The loop above is provider-agnostic. `agent_provider` (Settings, or
 | Credentials | `~/.claude` bind-mount, or `ANTHROPIC_API_KEY` | `~/.grok` from `grok login`, or `XAI_API_KEY` | OAuth bootstrapped from `~/.codex/auth.json` into isolated `~/.codex-hextech` (default), or `OPENAI_API_KEY` in Responses mode |
 | Default model | `claude-opus-4-7` | `grok-build` | `gpt-5.6-sol` |
 
+#### Per-role routing (hybrid)
+
+`agent_provider` picks the backend for the whole job. Four roles can be routed
+away from it independently — **judge, reviewer, report, monitor**
+(`agent_provider.ROLE_OVERRIDABLE`) — and only onto **claude or gpt**
+(`ROLE_TARGET_PROVIDERS`; grok is not a routing target). Settings exposes this
+as *Per-role override*, and the **hybrid** preset is the common shape: run main
+on gpt while judge and reviewer stay on claude.
+
+`provider_for_role(job_id, role)` resolves in this order:
+
+1. `meta.agent_role_providers[role]`, **snapshotted at job create**;
+2. live Settings routes — reachable ONLY when there is no `job_id` yet
+   (a pre-create decision);
+3. the job's own `provider_for_job(job_id)`.
+
+For an existing job, live Settings are never consulted **under any condition**,
+including when the key is simply absent. An absent key means "this job has no
+role routing", never "look it up now" — otherwise a Settings edit could
+re-route a job that is already running, or half-route it mid-`/retry`. A meta
+read failure returns the job's own provider for the same reason. With no
+override anywhere, every role resolves to exactly `provider_for_job(job_id)`,
+which is the pre-hybrid behaviour a characterization gate pins over stored jobs.
+
+Two related pieces of that work are Codex's and are described here only in
+outline — see `modules/_judge.py` and `modules/usage_ledger.py` for the
+authoritative behaviour: a judge/reviewer turn that comes back as a provider
+**policy refusal** can fail over to the other backend rather than dying, and the
+usage ledger records one row per model with the provider, role and stage on it,
+so a routed job's spend is attributable per backend rather than pooled.
+
 The default GPT runtime is Codex CLI with ChatGPT subscription OAuth. Run
 `codex login` on the host, choose **Sign in with ChatGPT**, and make sure
 `~/.codex/auth.json` exists. `start.sh` copies only that credential into
@@ -1310,7 +1375,7 @@ HexTech_CTF_TOOL/
 
 ## Module-specific notes
 
-### 🐳 Docker challenge (opt-in: rev / crypto / misc / forensic)
+### 🐳 Docker challenge (opt-in: pwn / rev / crypto / misc / web3 / forensic)
 
 Some challenges ship their own `Dockerfile` and only behave correctly inside
 it. Job `d8c717ba5b03` shipped one plus a README saying *"This binary must be
@@ -1319,25 +1384,47 @@ static-only reconstruction, called it *provably correct* from PNG chunk CRCs,
 and conceded. Running the challenge's own container shows the binary REJECTS
 that reconstruction.
 
-Ticking **🐳 Docker challenge** on the rev / crypto / misc / forensic form
-sets `meta.docker_challenge`, which:
+Ticking **🐳 Docker challenge** on any module form that offers it sets
+`meta.docker_challenge`, which:
 
 1. **deterministically detects** a bundled `Dockerfile` / compose file —
-   scanning the job-dir top level plus `bin/` and `src/`, with scratch dirs
-   pruned. The scope is deliberate: misc/forensic run their collector with
-   `--out /job` BEFORE the prompt is built, so a recursive scan would happily
-   present a Dockerfile **carved out of the evidence image** as the challenge
-   bundle;
+   scanning the job-dir top level plus `bin/`, `src/` and `work/chal/`, with
+   scratch dirs pruned. The scope is deliberate: misc/forensic run their
+   collector with `--out /job` BEFORE the prompt is built, so a recursive scan
+   would happily present a Dockerfile **carved out of the evidence image** as
+   the challenge bundle. `work/chal/` is the one exemption from that pruning —
+   it is where pwn's autoboot unpacks the operator's own archive, so without it
+   a ticked box answered *"found NOTHING"* about a bundle that shipped one
+   (job `b914889c1f9c`). The rest of `work/` stays pruned;
 2. injects build/run mechanics with the correct build context, an *"ENTRYPOINT
    usually needs the RIGHT input"* note (running is agent-driven — a blind run
    rarely yields a flag), and a **VERIFY, DON'T ASSUME** rule: a static
    derivation is not a confirmation until the container accepts it;
-3. gates `reap_chal_containers` on the same flag at job start **and** in a
+3. tells the agent **how to reach the container from the worker**, which is
+   not obvious and cost job `1ede2b4d8ac3` several turns: you run inside the
+   worker while the docker daemon is the HOST's, so `-p 127.0.0.1::8080`
+   publishes on a loopback that is not yours, the container's own bridge IP is
+   on a different network, and `docker top`'s host pids do not exist in your
+   PID namespace. The working recipe — publish with `-p 8080`, read it back
+   with `docker port`, connect to the default-route gateway from
+   `/proc/net/route`, inspect with `docker exec` — is in the stanza, together
+   with the three dead ends, because an agent told only the working route still
+   tries `127.0.0.1` first;
+4. gates `reap_chal_containers` on the same flag at job start **and** in a
    `finally`, so a container the agent spins up cannot orphan.
 
-Unticked, the helper returns `""` and nothing changes. `web` and `pwn` are
-untouched — their prompts already build and run challenge Dockerfiles
-unconditionally.
+Unticked, the helper returns `""` and nothing changes.
+
+`web` is excluded because its own prompt already has a RUN THE CHALLENGE
+LOCALLY section with real commands. **pwn used to be excluded on the same
+belief, and that belief was false** — pwn's Dockerfile guidance was almost
+entirely about READING one for sysctl / deploy context. It joined the opt-in on
+2026-08-09, and the reason is specific to pwn: `chal-libc-fix` stages the
+challenge's glibc so the binary runs against the right libc VERSION, but it
+does not reproduce how that libc is MAPPED. Measured on the same binary and
+host kernel, libc came out 2 MiB-aligned 5/5 under the staged libs and NOT
+aligned 5/5 inside the challenge's own image — and an exploit's whole
+probability model can rest on exactly that.
 
 ### Web
 - Accepts a zip of source code or a single file.
