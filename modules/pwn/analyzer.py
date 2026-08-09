@@ -16,6 +16,7 @@ import anyio
 from modules._common import (
     cleanup_job_processes,
     collect_outputs,
+    docker_challenge_block,
     extract_cost,
     prior_session_cost,
     job_dir,
@@ -26,6 +27,7 @@ from modules._common import (
     js_engine_block,
     prior_work_dirs,
     read_meta,
+    reap_chal_containers,
     resolve_effort,
     resolve_main_model,
     run_main_agent_session,
@@ -418,6 +420,21 @@ def _build_pre_recon_prompt(
             "Job 7ad50a878e91 made exactly this mistake: pre-recon "
             "scanned only the Dockerfile, concluded 'no overcommit "
             "knobs', and downstream int-edge × R5 was abandoned.\n"
+            "  READING the Dockerfile is not the same as RUNNING it. "
+            "The staged-libc setup pins the challenge's glibc VERSION "
+            "but does NOT reproduce how that libc gets MAPPED. Measured "
+            "on job b914889c1f9c, same binary and same host kernel: "
+            "libc came out 2 MiB-aligned 5/5 under the staged libs and "
+            "NOT aligned 5/5 inside the challenge's own image. Any "
+            "premise about mapping alignment, ASLR granularity, address "
+            "layout or fork-per-connection behaviour is therefore "
+            "UNVERIFIED until you observe it in the challenge image "
+            "itself. That job assumed the remote matched its staged "
+            "measurement 'from identical deployment image' and spent "
+            "10,000 remote attempts on a chain whose probability model "
+            "a local `docker build` falsifies in seconds. If a "
+            "Dockerfile ships, build and run it before you let such a "
+            "premise into an exploit.\n"
             "  For each knob mentioned, name explicitly which "
             "alloc/free branches it reopens vs default kernel — "
             "e.g. 'overcommit=1 → malloc(>1GB) succeeds via "
@@ -2333,6 +2350,14 @@ async def _run_agent(
     _js_block = js_engine_block(job_id)
     if _js_block:
         user_prompt = user_prompt + "\n\n" + _js_block
+    # 'Docker challenge' opt-in. pwn was left out of this originally on the
+    # belief that its own prompts already mandate building a bundled
+    # Dockerfile; they do not — they mandate READING one for deploy context.
+    # Detection covers ./work/chal/, where pwn's autoboot unpacks the operator
+    # archive. Returns "" (no-op) when the box is unticked.
+    _docker_block = docker_challenge_block(job_id)
+    if _docker_block:
+        user_prompt = user_prompt + "\n\n" + _docker_block
 
     if recon_reply:
         user_prompt = (
@@ -2472,6 +2497,16 @@ def run_job(
     binary_name = Path(binary_rel).name if binary_rel else None
 
     apply_to_env()
+    # 'Docker challenge' opt-in → the agent may `docker build`/`docker run` the
+    # bundled Dockerfile. Sweep containers a prior crashed run of this id left
+    # behind (a SIGKILL/OOM skips the finally), then reap in finally so nothing
+    # orphans — an orphan here holds the port the NEXT job needs, which is the
+    # WSL2 orphan-shadows-port class.
+    _dc = bool((read_meta(job_id) or {}).get("docker_challenge"))
+    if _dc:
+        reap_chal_containers(
+            job_id, lambda s: log_line(job_id, s), reason="startup sweep",
+        )
     write_meta(job_id, status="running", stage="analyze")
     try:
         agent_summary = anyio.run(
@@ -2519,3 +2554,14 @@ def run_job(
         write_meta(job_id, status="failed", error=str(e))
         emit_event(job_id, "terminal", "status", status="failed", error=str(e))
         raise
+    finally:
+        # Reap any challenge containers the docker-challenge opt-in let the
+        # agent spin up (label hextech_job=<id>). Here rather than in
+        # `_run_agent`: `_dc` is bound in THIS function, and a reap placed in
+        # the inner finally raises NameError on every docker-challenge job —
+        # in the one path that only runs when something already went wrong.
+        # Best-effort, and after the except so it cannot mask a failure.
+        if _dc:
+            reap_chal_containers(
+                job_id, lambda s: log_line(job_id, s), reason="job complete",
+            )

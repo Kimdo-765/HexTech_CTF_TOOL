@@ -124,6 +124,10 @@
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit (requires remote target)
         </label>
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file in the operator bundle (./bin/, ./src/, ./work/chal/) and instructs the agent to build &amp; run it as the real runtime. For pwn this is how you check environment-dependent facts — libc mapping alignment, ASLR granularity, socat fork behaviour — that the staged-libc setup does NOT reproduce even though it pins the right glibc version.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile as the real runtime</span>
+        </label>
         <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when exploit.py captures the REAL flag from the remote target. Local-only / banner-only validation will NOT pass.">
           <input type="checkbox" class="capture-remote-flag-cb" />
           🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working exploit</span>
@@ -191,7 +195,7 @@
           <input type="checkbox" name="skip_claude" />
           Skip AI summary (collection only)
         </label>
-        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain disk/memory-image triage pass. Web & Pwn already do this by default.">
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain disk/memory-image triage pass. Web already does this from its own prompt; Pwn has this same box.">
           <input type="checkbox" name="docker_challenge" />
           🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
@@ -240,7 +244,7 @@
           <input type="checkbox" name="skip_claude" />
           Skip AI summary (raw findings only)
         </label>
-        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain file-triage pass. Web & Pwn already do this by default.">
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle. Leave off for a plain file-triage pass. Web already does this from its own prompt; Pwn has this same box.">
           <input type="checkbox" name="docker_challenge" />
           🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
@@ -296,7 +300,7 @@
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
         </label>
-        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (stand up the challenge service/binary in its intended container). Leave off for a plain static/dynamic solve. Web & Pwn already do this by default.">
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (stand up the challenge service/binary in its intended container). Leave off for a plain static/dynamic solve. Web already does this from its own prompt; Pwn has this same box.">
           <input type="checkbox" name="docker_challenge" />
           🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
@@ -355,7 +359,7 @@
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit
         </label>
-        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (stand up the challenge service/binary in its intended container). Leave off for a plain static/dynamic solve. Web & Pwn already do this by default.">
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (stand up the challenge service/binary in its intended container). Leave off for a plain static/dynamic solve. Web already does this from its own prompt; Pwn has this same box.">
           <input type="checkbox" name="docker_challenge" />
           🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
@@ -415,7 +419,7 @@
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
         </label>
-        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (e.g. run the crackme in its intended container instead of a static-only solve). Leave off for a plain static/dynamic solve. Web & Pwn already do this by default.">
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file bundled under ./bin/ and instructs the agent to build & run it as the real runtime + dynamic oracle (e.g. run the crackme in its intended container instead of a static-only solve). Leave off for a plain static/dynamic solve. Web already does this from its own prompt; Pwn has this same box.">
           <input type="checkbox" name="docker_challenge" />
           🐳 Docker challenge <span class="capture-flag-note">— build &amp; run the bundled Dockerfile</span>
         </label>
