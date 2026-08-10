@@ -4705,11 +4705,19 @@ function _procPanel(id, d) {
     ? `${cg} · ${sum} <span class="c-dim">— these differ on purpose: RSS counts a shared page once per process, the cgroup counts it once</span>`
     : (cg || sum);
 
+  // The list around this panel refreshes on its own; this panel does not. Say
+  // how old it is, and say it louder once it is older than one list tick.
+  const ageS = d.fetched_at ? Math.round((Date.now() - d.fetched_at) / 1000) : null;
+  const age = ageS == null ? ""
+    : `<span class="${ageS >= 15 ? "c-warn" : "c-dim"}" title="this panel is one-shot — the list refreshes without it">` +
+      `${ageS < 2 ? "just now" : ageS + "s ago"}</span>`;
+
   return `
     <div class="proc-head">
       <span class="proc-src ${srcCls}" title="${escapeHtml(d.source_note || "")}">${srcLabel}</span>
       ${d.source_fallback ? `<span class="c-warn" title="${escapeHtml(d.source_fallback)}">⚠ fell back</span>` : ""}
       <span class="c-dim">${ps.length} process${ps.length === 1 ? "" : "es"}</span>
+      ${age}
       <span class="proc-mem">${memLine}</span>
       <button class="btn btn-sm proc-refresh" data-id="${escapeHtml(id)}">Refresh</button>
     </div>
@@ -4728,6 +4736,10 @@ async function loadProcesses(id) {
     const res = await fetch(`/api/containers/${encodeURIComponent(id)}/processes`);
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    // Stamped because the panel does NOT ride the list's auto-refresh. With
+    // that refresh on by default, a stale panel would otherwise sit next to a
+    // row whose CPU and memory updated 15 s ago and read as the same instant.
+    body.fetched_at = Date.now();
     _procData.set(id, body);
   } catch (e) {
     _procData.set(id, { error: `Could not read processes: ${e}` });
@@ -4863,17 +4875,44 @@ function _stopContainersPoll() {
   if (_containersPoll) { clearInterval(_containersPoll); _containersPoll = null; }
 }
 
-document.getElementById("containers-refresh")?.addEventListener("click", loadContainers);
-document.getElementById("containers-auto")?.addEventListener("change", (e) => {
+/** (Re)arm the poll from the checkbox's CURRENT state.
+ *
+ *  This is a function rather than the body of the `change` handler for two
+ *  reasons, both of which only bite once the box defaults to checked:
+ *
+ *   - A checkbox that starts checked fires no `change` event, so wiring the
+ *     poll to that event alone would ship a box that says it is polling and
+ *     is not.
+ *   - The tick below STOPS the poll when the panel is not active, which is
+ *     what keeps a background tab from spending ~2 s of docker stats every
+ *     15 s. Nothing restarted it on the way back in, so the box stayed
+ *     checked while auto-refresh was quietly dead. Re-arming on tab entry is
+ *     what makes leaving and returning work.
+ */
+function _startContainersPoll() {
   _stopContainersPoll();
+  if (!document.getElementById("containers-auto")?.checked) return;
   // 15s, not the usual few seconds: each refresh costs ~2s of docker stats
   // calls on the daemon (one sample per running container, in parallel).
-  if (e.target.checked) _containersPoll = setInterval(() => {
-    if (document.getElementById("panel-containers").classList.contains("active")) loadContainers();
+  _containersPoll = setInterval(() => {
+    if (document.getElementById("panel-containers")?.classList.contains("active")) loadContainers();
     else _stopContainersPoll();
   }, 15000);
+}
+
+document.getElementById("containers-refresh")?.addEventListener("click", loadContainers);
+document.getElementById("containers-auto")?.addEventListener("change", _startContainersPoll);
+document.querySelector('.tab[data-tab="containers"]')?.addEventListener("click", () => {
+  loadContainers();
+  _startContainersPoll();
 });
-document.querySelector('.tab[data-tab="containers"]')?.addEventListener("click", loadContainers);
+// Belt and braces for the default-on box: if the panel is somehow already the
+// active one at load (a restored tab, a future deep link), nothing would have
+// clicked the tab and the poll would never arm.
+if (document.getElementById("panel-containers")?.classList.contains("active")) {
+  loadContainers();
+  _startContainersPoll();
+}
 
 /* ------------------------------------------------------------------ Dashboard
    One place to watch a run: live job rows plus memory rings. The jobs list is

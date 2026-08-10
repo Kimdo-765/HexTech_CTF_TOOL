@@ -89,6 +89,9 @@ parser.add_argument("--mutate", choices=(
     "no-fallback",         # exec failure propagates instead of degrading to ps
     "rss-sum-silent",      # per-process RSS sum no longer surfaced
     "always-clickable",    # UI offers a process panel on stopped containers
+    "autorefresh-off",     # the containers poll stops defaulting to on
+    "poll-change-only",    # poll armed only by `change`, so default-on is dead
+    "stale-panel-silent",  # open panel no longer says how old it is
 ), default="none")
 args = parser.parse_args()
 
@@ -365,6 +368,18 @@ HTML = (ROOT / "web-ui" / "index.html").read_text(encoding="utf-8")
 
 if args.mutate == "always-clickable":
     APP = APP.replace("const expandable = running;", "const expandable = true;")
+elif args.mutate == "autorefresh-off":
+    HTML = HTML.replace('id="containers-auto" checked', 'id="containers-auto"')
+elif args.mutate == "poll-change-only":
+    # The shape this used to have: the poll is armed ONLY by the change event,
+    # so a box that starts checked never actually polls and returning to the
+    # tab never re-arms it.
+    APP = APP.replace(
+        'document.querySelector(\'.tab[data-tab="containers"]\')?.addEventListener("click", () => {\n'
+        "  loadContainers();\n  _startContainersPoll();\n});",
+        'document.querySelector(\'.tab[data-tab="containers"]\')?.addEventListener("click", loadContainers);')
+elif args.mutate == "stale-panel-silent":
+    APP = APP.replace("body.fetched_at = Date.now();", "")
 
 check("the row is clickable only when the container is running",
       "const expandable = running;" in APP, True)
@@ -385,6 +400,33 @@ check("open panels survive a list re-render from cache",
 check("CSS.escape is guarded like the other four call sites",
       APP.count("(window.CSS && CSS.escape)") >= 5, True)
 check("the source badge is rendered", "proc-src--live" in APP and "proc-src--avg" in APP, True)
+
+# ------------------------------------------------ auto-refresh defaults to on
+check("the containers auto-refresh box starts checked",
+      'id="containers-auto" checked' in HTML, True)
+# A box that starts checked fires no `change`, so arming the poll only from
+# that event would ship a control that claims to poll and does not.
+check("the poll is armed from the checkbox state, not only from `change`",
+      "function _startContainersPoll()" in APP
+      and "containers-auto\")?.checked" in APP, True)
+check("...and re-armed on tab entry, so leaving and returning still polls",
+      re.search(r'data-tab="containers"[\s\S]{0,200}_startContainersPoll\(\)', APP) is not None, True)
+check("the tick still stops itself when the panel is not active",
+      re.search(r'panel-containers[\s\S]{0,120}_stopContainersPoll\(\)', APP) is not None, True)
+check("the interval is still 15s, not tightened", "}, 15000);" in APP, True)
+# The tab-click path is the only thing that arms the poll on a normal visit, and
+# it cannot be exercised here: jsdom 19 drops listeners registered through
+# `window.eval`, reproduced on a three-line DOM with no app code at all. So the
+# load-time arm is pinned instead — it is the path that does not depend on a
+# click happening.
+check("the poll also arms at load if the panel is already active",
+      re.search(r'panel-containers"\)\?\.classList\.contains\("active"\)[\s\S]{0,120}_startContainersPoll\(\)', APP) is not None, True)
+# With the list refreshing on its own, a one-shot panel beside it must not read
+# as the same instant.
+check("an open panel stamps when it was fetched",
+      "body.fetched_at = Date.now();" in APP, True)
+check("...and shows that age", "just now" in APP and "s ago" in APP, True)
+check("...louder once it is older than one list tick", "ageS >= 15" in APP, True)
 check("a lifetime-average source is styled as a caveat, not as normal",
       ".proc-src--avg" in CSS, True)
 check("a long argv cannot push the numeric columns off screen",
