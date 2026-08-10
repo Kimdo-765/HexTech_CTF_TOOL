@@ -176,7 +176,7 @@ def tunnel_start():
             st["note"] = "tunnel already running" if state == "running" else "tunnel already starting"
             return st
         try:
-            existing.remove(force=True)
+            existing.remove(force=True, v=True)
         except Exception:
             pass
 
@@ -245,7 +245,7 @@ def tunnel_stop():
     prior = (getattr(c, "labels", None) or {}).get(_PRIOR_LABEL, "")
     our_url = _extract_url(c)  # the URL THIS tunnel published, before we remove it
     try:
-        c.remove(force=True)
+        c.remove(force=True, v=True)
     except Exception as e:
         return {"ok": False, "error": f"stop failed: {e}", **_status_payload(client)}
     # Only undo OUR OWN publish: touch callback_url only when it still equals the

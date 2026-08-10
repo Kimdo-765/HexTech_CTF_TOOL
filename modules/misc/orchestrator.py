@@ -114,7 +114,7 @@ def _spawn_misc(job_id: str, filename: str, passphrase: Optional[str]) -> str:
             raise RuntimeError(f"misc analyzer exited with code {sc}\n{logs[-4000:]}")
     finally:
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
     return logs

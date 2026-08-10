@@ -654,7 +654,7 @@ def _delete_sync(cid: str, force: bool) -> dict:
     name, svc, cat = c.name, _svc(c), _category(c)
     was_running = getattr(c, "status", "") == "running"
     try:
-        c.remove(force=True)
+        c.remove(force=True, v=True)
     except Exception as e:
         raise HTTPException(status_code=500,
                             detail=f"{type(e).__name__}: {e}")

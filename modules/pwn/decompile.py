@@ -60,7 +60,7 @@ def run_decompiler(job_id: str, binary_rel: str) -> tuple[Path, str]:
             )
     finally:
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
 
@@ -122,7 +122,7 @@ def run_decompiler_xrefs(
             )
     finally:
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
 

@@ -100,7 +100,7 @@ async def terminal_ws(ws: WebSocket, job_id: str):
         container.start()
     except Exception as e:
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
         await ws.send_text(f"\033[31m[err] container start failed: {e}\033[0m\r\n")
@@ -192,7 +192,7 @@ async def terminal_ws(ws: WebSocket, job_id: str):
         except Exception:
             pass
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
         try:

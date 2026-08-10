@@ -72,9 +72,20 @@ def _hard_stop_job(job_id: str) -> dict:
     1. Send STOP_JOB command to whichever worker is running it (RQ pub-sub).
     2. Find sibling docker containers labelled hextech_ctf_tool_job_id=<id> and
        force-remove them (decompiler / forensic / misc / runner).
-    Errors are swallowed — best-effort.
+
+    Still best-effort — a cleanup that raises would break the delete it is part
+    of — but no longer SILENT. It used to swallow every failure including
+    "docker unreachable", so a sweep that removed nothing was indistinguishable
+    from one that had nothing to remove. Measured 2026-08-10: container
+    609f3504b4d2 (runner, labelled job 9b8168b0ee29) outlived the deletion of
+    its own job and its job directory, with nothing anywhere recording that the
+    reap had not happened. `containers_failed` / `docker_error` are what make
+    that case visible to the caller, which returns this dict in the DELETE
+    response.
     """
     info: dict = {"sent_stop": False, "containers_killed": 0,
+                  "containers_found": 0, "containers_failed": [],
+                  "docker_error": None,
                   "rq_cancelled": False, "rq_ids": []}
     conn = get_redis()
     # 1) Tell RQ to interrupt the running job. send_stop_job_command works only
@@ -110,18 +121,27 @@ def _hard_stop_job(job_id: str) -> dict:
             all=True,
             filters={"label": f"hextech_ctf_tool_job_id={job_id}"},
         )
+        info["containers_found"] = len(containers)
         for c in containers:
+            name = getattr(c, "name", None) or (getattr(c, "id", "") or "")[:12]
             try:
                 c.kill()
             except Exception:
+                # An already-exited container cannot be killed; that is the
+                # normal case here, not a failure. Only the remove matters.
                 pass
             try:
-                c.remove(force=True)
+                # v=True: the anonymous volumes this container created are its
+                # own and leak otherwise — 383 of them accumulated on
+                # 2026-08-10 alone.
+                c.remove(force=True, v=True)
                 info["containers_killed"] += 1
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                info["containers_failed"].append(f"{name}: {type(e).__name__}")
+    except Exception as e:
+        # The whole block failing means the daemon was unreachable, which is
+        # exactly when siblings survive. Recorded rather than swallowed.
+        info["docker_error"] = f"{type(e).__name__}: {e}"
 
     return info
 

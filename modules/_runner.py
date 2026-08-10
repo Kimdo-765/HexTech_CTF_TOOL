@@ -596,7 +596,7 @@ def run_in_sandbox(
         err = container.logs(stdout=False, stderr=True)
     finally:
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
 

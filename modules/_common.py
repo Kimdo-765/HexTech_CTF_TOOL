@@ -981,7 +981,7 @@ def reap_job_siblings(job_id: str) -> dict:
         for c in client.containers.list(all=True, filters=flt):
             name = getattr(c, "name", "?")
             try:
-                c.remove(force=True)
+                c.remove(force=True, v=True)
                 out["containers"].append(name)
             except Exception as e:
                 out["errors"].append(f"{name}: {type(e).__name__}")

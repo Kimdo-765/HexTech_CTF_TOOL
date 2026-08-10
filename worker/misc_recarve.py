@@ -113,7 +113,7 @@ def main(argv: list[str]) -> int:
         return sc
     finally:
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception:
             pass
 
