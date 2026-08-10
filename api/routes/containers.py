@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -402,6 +403,233 @@ async def list_containers(sizes: bool = Query(True)):
     and every SSE stream for the duration.
     """
     return await run_in_threadpool(_list_sync, sizes)
+
+
+# --------------------------------------------------------------- per-process
+#
+# TWO SOURCES, PICKED BY TRUST — not by capability.
+#
+# `docker top` asks the DAEMON to run ps on the host and filter to the
+# container's pids. Nothing inside the container participates, so it is safe
+# against any image. Its cost is precision: ps `%CPU` is cputime/elapsed over
+# the process's WHOLE LIFE. Measured 2026-08-10 against a process pinned at one
+# full core: ps said 34.4% while the process was using 99%. Sampling ps twice
+# does not fix it either — ps exposes cumulative cpu time only in whole seconds
+# (`times`), so a 1 s window quantises every process to 0% or ~99%; measured
+# against a steady 30% load the two-sample figures were 0.0 / 49.8 / 33.2 /
+# 0.0 / 49.8. Reconstructing finer cpu time from `%CPU * etimes` looks accurate
+# on a young process (29.7-32.2% on that same 30% load) and then falls apart on
+# an old one, because %CPU is rounded to 0.1%: for a 2394 s process the implied
+# error bound over a 2 s window is +-119%. Workers run for hours. So: for a
+# container we do not trust, CPU is reported as a LIFETIME AVERAGE and labelled
+# as one, because that is the only honest number this source can produce.
+#
+# Reading /proc inside the container gives cpu time in clock ticks (10 ms), so
+# a 1 s window is accurate regardless of process age — measured 31.1% against
+# that same 30% load, and 0.0% for an idle 40-minute-old worker. But it needs
+# `exec`, which RUNS A PROCESS INSIDE THE CONTAINER, and the container then
+# supplies every byte we parse into the operator's dashboard.
+#
+# That is only acceptable where we own the image AND nothing untrusted runs in
+# it, which is `core` (api / redis / worker-N) and nothing else. `challenge` is
+# an arbitrary agent-started image — the whole reason this tab exists. And
+# `sandbox` is NOT safe either despite being our image: the agent has root
+# there and runs challenge binaries, so `/bin/sh` itself can have been replaced
+# by the time we call it.
+_PROC_SH = r"""getconf CLK_TCK 2>/dev/null || echo 100
+getconf PAGESIZE 2>/dev/null || echo 4096
+for p in /proc/[0-9]*; do
+  [ -r "$p/stat" ] || continue
+  printf '%s\t' "${p#/proc/}"
+  tr '\0' ' ' < "$p/cmdline" 2>/dev/null
+  printf '\t'
+  cat "$p/stat" 2>/dev/null || echo
+done"""
+
+# /proc/<pid>/stat, counting from the field AFTER the ")" that closes comm.
+# comm can contain spaces and parentheses, so the split is on the LAST ")".
+_ST_STATE, _ST_PPID = 0, 1
+_ST_UTIME, _ST_STIME = 11, 12
+_ST_THREADS, _ST_RSS_PAGES = 17, 21
+
+
+def _parse_proc_dump(out: str) -> tuple[int, int, dict]:
+    lines = out.splitlines()
+    try:
+        hz = int(lines[0].strip()) or 100
+        page = int(lines[1].strip()) or 4096
+    except (IndexError, ValueError):
+        return 100, 4096, {}
+    procs: dict[str, dict] = {}
+    for line in lines[2:]:
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        pid, cmdline, stat = parts[0], parts[1], parts[2]
+        try:
+            comm = stat.split("(", 1)[1].rsplit(")", 1)[0]
+            f = stat.rsplit(")", 1)[1].split()
+            procs[pid] = {
+                "pid": int(pid),
+                "ppid": int(f[_ST_PPID]),
+                "state": f[_ST_STATE],
+                "threads": int(f[_ST_THREADS]),
+                "rss": int(f[_ST_RSS_PAGES]) * page,
+                "ticks": int(f[_ST_UTIME]) + int(f[_ST_STIME]),
+                # A kernel thread has an empty cmdline; its comm is the only
+                # name it has, and [brackets] is how ps renders that.
+                "cmd": cmdline.strip() or "[%s]" % comm,
+            }
+        except (IndexError, ValueError):
+            continue
+    return hz, page, procs
+
+
+def _procs_via_exec(c, window: float) -> dict:
+    """Two /proc samples `window` apart. Raises on any exec trouble."""
+    def sample():
+        res = c.exec_run(["sh", "-c", _PROC_SH])
+        if res.exit_code != 0:
+            raise RuntimeError("exec exit %s" % res.exit_code)
+        return _parse_proc_dump(res.output.decode("utf-8", "replace")), time.time()
+
+    (hz, page, first), t0 = sample()
+    time.sleep(window)
+    (hz, page, second), t1 = sample()
+    dt = max(t1 - t0, 1e-6)
+
+    rows = []
+    for pid, p in second.items():
+        prev = first.get(pid)
+        # A process that appeared DURING the window has no baseline. Reporting
+        # its lifetime ticks over our short window would read as a huge spike,
+        # so its cpu is unknown rather than wrong.
+        cpu = None
+        if prev is not None:
+            cpu = round(100.0 * ((p["ticks"] - prev["ticks"]) / hz) / dt, 1)
+            if cpu < 0:            # pid reused inside the window
+                cpu = None
+        rows.append({k: p[k] for k in
+                     ("pid", "ppid", "state", "threads", "rss", "cmd")}
+                    | {"cpu_pct": cpu, "new": prev is None})
+    return {"source": "proc", "cpu_is_lifetime_avg": False,
+            "window_s": round(dt, 2), "clk_tck": hz, "page_size": page,
+            "processes": rows}
+
+
+# Asking ps for `pid` first keeps the daemon's own pid-filtering happy, and
+# `args` last keeps the command (the only field with spaces) unambiguous to
+# split on.
+_TOP_ARGS = "-eo pid,ppid,user,pcpu,pmem,rss,etime,args"
+
+
+def _procs_via_top(c) -> dict:
+    t = c.top(ps_args=_TOP_ARGS)
+    titles = t.get("Titles") or []
+    ix = {n: i for i, n in enumerate(titles)}
+
+    def cell(row, name, cast=None, default=None):
+        i = ix.get(name)
+        if i is None or i >= len(row):
+            return default
+        try:
+            return cast(row[i]) if cast else row[i]
+        except (TypeError, ValueError):
+            return default
+
+    rows = []
+    for r in t.get("Processes") or []:
+        rss_kib = cell(r, "RSS", int)
+        rows.append({
+            "pid": cell(r, "PID", int),
+            "ppid": cell(r, "PPID", int),
+            "user": cell(r, "USER"),
+            "state": None,
+            "threads": None,
+            "rss": rss_kib * 1024 if rss_kib is not None else None,
+            "cpu_pct": cell(r, "%CPU", float),
+            "etime": cell(r, "ELAPSED"),
+            "cmd": cell(r, "COMMAND", default=""),
+            "new": False,
+        })
+    return {"source": "ps", "cpu_is_lifetime_avg": True,
+            "window_s": None, "processes": rows}
+
+
+def _processes_sync(cid: str, window: float) -> dict:
+    try:
+        c = _client().containers.get(cid)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"no such container: {e}")
+
+    cat = _category(c)
+    out: dict = {"id": (c.id or "")[:12], "name": c.name, "category": cat,
+                 "state": getattr(c, "status", ""),
+                 "running": getattr(c, "status", "") == "running"}
+    if not out["running"]:
+        # `top` on a stopped container is a 409 from the daemon, not an empty
+        # list, so this is an answer rather than an error path.
+        out.update({"processes": [], "source": None,
+                    "note": "container is not running — it has no processes."})
+        return out
+
+    stats = _stats_of(c)
+    out.update({k: stats.get(k) for k in
+                ("mem_usage", "mem_limit", "mem_unreclaimable", "cpu_pct")})
+
+    if cat == "core":
+        try:
+            out.update(_procs_via_exec(c, window))
+        except Exception as e:
+            out.update(_procs_via_top(c))
+            out["source_fallback"] = f"{type(e).__name__}: {e}"
+    else:
+        out.update(_procs_via_top(c))
+
+    if out["source"] == "ps":
+        out["source_note"] = (
+            "read from the host with `docker top` — nothing runs inside the "
+            "container. CPU is each process's average over its WHOLE LIFE, not "
+            "its usage right now."
+            + ("" if cat == "core" else
+               " %s containers are not exec'd into: their image is not ours to "
+               "trust." % cat))
+    else:
+        out["source_note"] = (
+            "sampled from /proc inside the container over %.2fs — CPU is usage "
+            "during that window." % out["window_s"])
+
+    rss = [p["rss"] for p in out["processes"] if p.get("rss")]
+    out["rss_sum"] = sum(rss) if rss else None
+    # The two figures disagree in BOTH directions and neither is wrong. Measured
+    # 2026-08-10: worker-1 cgroup 67.7 MB vs RSS sum 109.3 MB — five python
+    # processes mapping one interpreter, and a shared page is counted once per
+    # process that maps it while the cgroup counts it once. A busy probe went
+    # the other way, cgroup 14.6 MB vs RSS sum 11.0 MB, because the cgroup also
+    # holds page cache that no process has resident. Surfaced side by side WITH
+    # the reason, because a reader who meets only one of them later will treat
+    # the other as a bug.
+    out["rss_sum_note"] = (
+        "sum of per-process RSS. It can exceed the cgroup figure because a "
+        "shared page is counted once per process that maps it, and it can fall "
+        "below it because the cgroup also holds page cache.")
+    return out
+
+
+@router.get("/{cid}/processes")
+async def container_processes(
+    cid: str,
+    window: float = Query(1.0, ge=0.2, le=5.0,
+                          description="seconds between the two /proc samples"),
+):
+    """Processes inside ONE container, with per-process CPU and memory.
+
+    One shot, deliberately: this costs a `stats` call plus either two execs and
+    a `window`-long sleep, or a `top`. The containers list already refreshes at
+    15 s because its own stats calls cost ~2 s; folding this into that poll
+    would make an open detail row dominate every tick.
+    """
+    return await run_in_threadpool(_processes_sync, cid, window)
 
 
 def _delete_sync(cid: str, force: bool) -> dict:

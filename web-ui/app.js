@@ -4645,9 +4645,124 @@ function _jobCell(c) {
          `~${escapeHtml(c.job_id)}</code>`;
 }
 
+/* ---------------------------------------------------------- process detail
+   Clicking a container opens its process list. Two things this deliberately
+   does NOT do:
+
+   - It does not join the 15 s auto-refresh. One detail fetch costs a stats
+     call plus either two execs and a ~1 s sampling window, or a `docker top`;
+     folding that into a poll that already spends ~2 s on stats would make an
+     open row dominate every tick. It is one-shot, with its own Refresh.
+   - It does not re-fetch when the list re-renders. The rows are rebuilt every
+     poll, so the open panel is restored from the LAST payload instead — the
+     same lesson the reviewer panel learned when it vanished on re-render
+     (73d78c). Stale-but-labelled beats disappearing. */
+const _procOpen = new Set();      // container ids currently expanded
+const _procData = new Map();      // id -> last payload, or {error} / {loading}
+
+function _procRow(p, memBase) {
+  // memBase is the container's cgroup limit. A process' share of THAT is the
+  // number that means something; ps' own %MEM is a share of host RAM, which
+  // reads as ~0 for anything inside a 4 GiB-capped worker.
+  const share = (memBase && p.rss) ? (100 * p.rss / memBase) : null;
+  const cpu = p.cpu_pct == null
+    ? '<span class="c-dim" title="appeared during the sampling window — no baseline to measure against">new</span>'
+    : `<span class="${p.cpu_pct >= 80 ? "c-hot" : p.cpu_pct >= 20 ? "c-warn" : ""}">${_fmtPct(p.cpu_pct)}</span>`;
+  return `<tr>
+    <td><code>${p.pid == null ? "?" : p.pid}</code></td>
+    <td class="c-dim">${p.ppid == null ? "" : p.ppid}</td>
+    <td>${cpu}</td>
+    <td>${p.rss == null ? '<span class="c-dim">—</span>' : fmtBytes(p.rss)}` +
+      (share == null ? "" : ` <span class="c-dim">(${share.toFixed(1)}%)</span>`) + `</td>
+    <td class="c-dim">${p.threads == null ? "" : p.threads}</td>
+    <td class="c-dim">${escapeHtml(p.state || p.user || "")}</td>
+    <td><code class="proc-cmd" title="${escapeHtml(p.cmd || "")}">${escapeHtml(p.cmd || "")}</code></td>
+  </tr>`;
+}
+
+function _procPanel(id, d) {
+  if (!d) return '<span class="c-dim">Loading…</span>';
+  if (d.loading) return '<span class="c-dim">Reading processes…</span>';
+  if (d.error) return `<span style="color:var(--red)">${escapeHtml(d.error)}</span>`;
+  if (!d.running) return `<span class="c-dim">${escapeHtml(d.note || "not running")}</span>`;
+
+  const ps = (d.processes || []).slice().sort((a, b) =>
+    ((b.cpu_pct || 0) - (a.cpu_pct || 0)) || ((b.rss || 0) - (a.rss || 0)));
+
+  const srcCls = d.source === "proc" ? "proc-src--live" : "proc-src--avg";
+  const srcLabel = d.source === "proc"
+    ? `live /proc · ${d.window_s}s window`
+    : "docker top · lifetime average";
+
+  // The per-process sum and the cgroup figure disagree by design. Showing them
+  // side by side with the reason is the point: a reader who sees only one of
+  // them will treat the other as a bug when they meet it later.
+  const sum = d.rss_sum
+    ? `<span title="${escapeHtml(d.rss_sum_note || "")}">Σ RSS ${fmtBytes(d.rss_sum)}</span>`
+    : "";
+  const cg = d.mem_usage ? `cgroup ${fmtBytes(d.mem_usage)}` : "";
+  const memLine = (cg && sum)
+    ? `${cg} · ${sum} <span class="c-dim">— these differ on purpose: RSS counts a shared page once per process, the cgroup counts it once</span>`
+    : (cg || sum);
+
+  return `
+    <div class="proc-head">
+      <span class="proc-src ${srcCls}" title="${escapeHtml(d.source_note || "")}">${srcLabel}</span>
+      ${d.source_fallback ? `<span class="c-warn" title="${escapeHtml(d.source_fallback)}">⚠ fell back</span>` : ""}
+      <span class="c-dim">${ps.length} process${ps.length === 1 ? "" : "es"}</span>
+      <span class="proc-mem">${memLine}</span>
+      <button class="btn btn-sm proc-refresh" data-id="${escapeHtml(id)}">Refresh</button>
+    </div>
+    <p class="proc-note c-dim">${escapeHtml(d.source_note || "")}</p>
+    ${ps.length ? `<table class="proc-table">
+      <thead><tr><th>PID</th><th>PPID</th><th>CPU</th><th>RSS (of cap)</th>
+      <th>Thr</th><th>${d.source === "proc" ? "State" : "User"}</th><th>Command</th></tr></thead>
+      <tbody>${ps.map((p) => _procRow(p, d.mem_limit)).join("")}</tbody>
+    </table>` : '<span class="c-dim">No processes reported.</span>'}`;
+}
+
+async function loadProcesses(id) {
+  _procData.set(id, { loading: true });
+  _paintProcPanel(id);
+  try {
+    const res = await fetch(`/api/containers/${encodeURIComponent(id)}/processes`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    _procData.set(id, body);
+  } catch (e) {
+    _procData.set(id, { error: `Could not read processes: ${e}` });
+  }
+  _paintProcPanel(id);
+}
+
+/** Repaint one open panel in place, so a Refresh does not rebuild the table. */
+function _paintProcPanel(id) {
+  // Same guard the other four call sites use: jsdom (which the UI suites run
+  // app.js under) does not always provide CSS.escape.
+  const esc = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
+  const cell = document.querySelector(`.proc-detail[data-id="${esc}"] td`);
+  if (!cell) return;
+  cell.innerHTML = _procPanel(id, _procData.get(id));
+  cell.querySelector(".proc-refresh")?.addEventListener("click", () => loadProcesses(id));
+}
+
+function toggleProcesses(id) {
+  if (_procOpen.has(id)) {
+    _procOpen.delete(id);
+    _procData.delete(id);
+  } else {
+    _procOpen.add(id);
+    loadProcesses(id);
+  }
+  renderContainers(_lastContainers);
+}
+
+let _lastContainers = null;
+
 function renderContainers(data) {
   const el = document.getElementById("containers-list");
   if (!el) return;
+  if (data) _lastContainers = data; else data = _lastContainers || {};
   const cs = data.containers || [];
   const sum = document.getElementById("containers-summary");
   if (sum) {
@@ -4669,8 +4784,18 @@ function renderContainers(data) {
         ` data-job="${escapeHtml(c.job_id ? (c.job_source === "label" ? c.job_id : "~" + c.job_id) : "")}">delete</button>`;
     const age = c.age_days == null ? "" :
       `<br><span class="${c.age_days >= 7 ? "c-warn" : "c-dim"}">${c.age_days}d old</span>`;
-    return `<tr class="${c.warn ? "c-row--warn" : ""}">
-      <td><code>${escapeHtml(c.name)}</code><br><span class="c-dim">${escapeHtml(c.id)}</span></td>
+    // Only a running container has processes to show, so only it is clickable
+    // — an affordance that leads to "not running" is a worse answer than no
+    // affordance.
+    const open = _procOpen.has(c.id);
+    const expandable = running;
+    const caret = expandable
+      ? `<span class="proc-caret${open ? " proc-caret--open" : ""}">▶</span>`
+      : "";
+    return `<tr class="${c.warn ? "c-row--warn" : ""}${expandable ? " c-row--click" : ""}"` +
+      `${expandable ? ` data-proc-id="${escapeHtml(c.id)}"` : ""}` +
+      `${expandable ? ' title="show processes in this container"' : ""}>
+      <td>${caret}<code>${escapeHtml(c.name)}</code><br><span class="c-dim">${escapeHtml(c.id)}</span></td>
       <td>${_jobCell(c)}${age}</td>
       <td>${_catBadge(c.category)}${c.compose_service ? `<br><span class="c-dim">${escapeHtml(c.compose_service)}</span>` : ""}</td>
       <td><span class="c-state c-state--${running ? "up" : "down"}">${escapeHtml(c.state)}</span></td>
@@ -4679,7 +4804,8 @@ function renderContainers(data) {
       <td>${disk}</td>
       <td><span class="c-dim">${escapeHtml(c.image || "")}</span><br><span class="c-dim">${escapeHtml(c.created || "")}</span></td>
       <td>${btn}</td>
-    </tr>` + (c.warn ? `<tr class="c-warnrow"><td colspan="9">⚠ ${escapeHtml(c.warn)}</td></tr>` : "");
+    </tr>` + (c.warn ? `<tr class="c-warnrow"><td colspan="9">⚠ ${escapeHtml(c.warn)}</td></tr>` : "")
+      + (open ? `<tr class="proc-detail" data-id="${escapeHtml(c.id)}"><td colspan="9"></td></tr>` : "");
   }).join("");
 
   el.innerHTML = `<table class="containers-table">
@@ -4690,6 +4816,17 @@ function renderContainers(data) {
   el.querySelectorAll(".c-del").forEach((b) => {
     b.addEventListener("click", () => deleteContainer(b.dataset.id, b.dataset.name, b.dataset.warn, b.dataset.job));
   });
+  el.querySelectorAll("tr[data-proc-id]").forEach((tr) => {
+    tr.addEventListener("click", (ev) => {
+      // The delete button lives inside the clickable row; a click on it must
+      // not also toggle the panel underneath.
+      if (ev.target.closest("button")) return;
+      toggleProcesses(tr.dataset.procId);
+    });
+  });
+  // Re-render rebuilt every row, so every open panel needs repainting from
+  // cache. Without this the detail row is an empty <td> after each poll.
+  _procOpen.forEach((id) => _paintProcPanel(id));
 }
 
 async function loadContainers() {

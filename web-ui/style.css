@@ -2053,6 +2053,68 @@ body.modal-open { overflow: hidden; }
    about to delete something on the strength of it. */
 .c-guess { color: var(--yellow-bright); opacity: 0.9; }
 
+/* ------------------------------------------------ container process detail */
+.c-row--click { cursor: pointer; }
+.proc-caret {
+  display: inline-block;
+  width: 0.9rem;
+  color: var(--fg-dim);
+  font-size: 0.7rem;
+  transition: transform 0.12s ease;
+}
+.proc-caret--open { transform: rotate(90deg); color: var(--fg-bright); }
+.proc-detail > td {
+  padding: 0.5rem 0.6rem 0.75rem 1.5rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+.proc-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+.proc-mem { font-size: 0.78rem; color: var(--fg-muted); }
+.proc-note { margin: 0 0 0.4rem; font-size: 0.75rem; }
+/* The badge carries the caveat, so it must not read as decoration: a lifetime
+   average and a live sample are different claims about the same column. */
+.proc-src {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 3px;
+  border: 1px solid var(--line-hi);
+}
+.proc-src--live { color: var(--green-bright); border-color: var(--green-bright); }
+.proc-src--avg  { color: var(--yellow-bright); border-color: var(--yellow-bright); }
+.proc-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.proc-table th {
+  text-align: left;
+  padding: 0.2rem 0.5rem;
+  color: var(--fg-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+.proc-table td {
+  padding: 0.18rem 0.5rem;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+.proc-table tbody tr:hover { background: var(--surface); }
+/* A long argv must not push the numeric columns off screen — the whole point
+   of the panel is comparing CPU and RSS across rows. */
+.proc-cmd {
+  display: inline-block;
+  max-width: 46vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font-size: 0.78rem;
+  color: var(--fg-bright);
+}
+
 /* Per-role provider overrides: four short selects, one row on a wide screen
    and wrapping on a narrow one rather than a fixed column count. */
 .role-provider-grid {
