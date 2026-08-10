@@ -34,6 +34,7 @@ Whether pre/post gate at all is per JOB, not global: see
 from __future__ import annotations
 
 import os
+import re
 import socket
 import time
 import uuid
@@ -155,6 +156,18 @@ SUPERVISE_PERIODIC_THRESHOLD_S = 1800
 SUPERVISE_REASK_INTERVAL_S = 300
 # Polling cadence inside _wait_with_supervise. Cheap on docker-py.
 _POLL_INTERVAL_S = 2.0
+# A solver normally writes newline-terminated progress, but a flushed progress
+# indicator is allowed to omit the newline. Keep ordinary lines intact and only
+# split a genuinely long partial line so live logging cannot retain an
+# unbounded second copy of container output in the worker process.
+_LIVE_LOG_PARTIAL_CHUNK_BYTES = 4096
+# ``Container.logs(timestamps=True)`` prefixes each record with the daemon's
+# UTC RFC3339Nano timestamp. Docker pads the fractional part to nine digits, so
+# the captured bytes are directly sortable without losing nanosecond precision.
+_DOCKER_LOG_TIMESTAMP_RE = re.compile(
+    rb"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z) "
+    rb"(?P<payload>.*)$"
+)
 
 
 def _host_path(job_id: str) -> str:
@@ -282,6 +295,146 @@ def _judge_mode_for_job(job_id: str) -> str:
         return "shadow"
 
 
+def _decode_live_sandbox_record(
+    raw: bytes,
+) -> tuple[bytes | None, bytes, bytes]:
+    """Return ``(timestamp, payload, prefix)`` for one Docker log record.
+
+    The fallback accepts an unprefixed record defensively. Normal Docker reads
+    always match because the caller requests ``timestamps=True``; retaining a
+    fallback keeps an unexpected daemon response visible instead of dropping
+    solver output.
+    """
+    match = _DOCKER_LOG_TIMESTAMP_RE.match(raw)
+    if match is None:
+        return None, raw, b""
+    return (
+        match.group("timestamp"),
+        match.group("payload"),
+        raw[:match.start("payload")],
+    )
+
+
+def _collect_live_sandbox_delta(
+    stream: str,
+    snapshot: bytes,
+    state: dict,
+    *,
+    flush: bool = False,
+) -> list[tuple[bytes | None, str, bytes]]:
+    """Collect unseen timestamped records from one Docker log stream.
+
+    ``container.logs()`` returns the whole stream on every poll. ``state``
+    therefore carries a byte cursor and an unterminated-line buffer per stream,
+    making repeated snapshots idempotent. The caller merges the returned
+    ``(timestamp, stream, payload)`` events before exposing them to ``run.log``.
+    """
+    offset_key = f"{stream}_offset"
+    pending_key = f"{stream}_pending"
+    previous = int(state.get(offset_key, 0))
+
+    # A Docker log rotation can make the visible snapshot shorter. Do not
+    # replay its surviving tail (which would duplicate raw-log lines); adopt the
+    # new end as the cursor and resume with subsequent bytes.
+    if len(snapshot) < previous:
+        state[offset_key] = len(snapshot)
+        state[pending_key] = b""
+        return []
+
+    delta = snapshot[previous:]
+    state[offset_key] = len(snapshot)
+    pending = state.get(pending_key, b"") + delta
+    events: list[tuple[bytes | None, str, bytes]] = []
+
+    complete = pending.split(b"\n")
+    pending = complete.pop()
+    for raw in complete:
+        timestamp, payload, _prefix = _decode_live_sandbox_record(raw)
+        if payload.endswith(b"\r"):
+            payload = payload[:-1]
+        events.append((timestamp, stream, payload))
+
+    # A script can flush without a newline. Preserve prompt visibility without
+    # letting one binary/no-newline stream grow this buffer indefinitely.
+    while pending:
+        timestamp, payload, prefix = _decode_live_sandbox_record(pending)
+        if len(payload) < _LIVE_LOG_PARTIAL_CHUNK_BYTES:
+            break
+        events.append((timestamp, stream, payload[:_LIVE_LOG_PARTIAL_CHUNK_BYTES]))
+        # Keep the timestamp on the retained fragment so its eventual event
+        # remains sortable and the prefix never leaks into user-visible text.
+        pending = prefix + payload[_LIVE_LOG_PARTIAL_CHUNK_BYTES:]
+
+    if flush and pending:
+        timestamp, payload, _prefix = _decode_live_sandbox_record(pending)
+        events.append((timestamp, stream, payload))
+        pending = b""
+    state[pending_key] = pending
+    return events
+
+
+def _order_live_sandbox_events(
+    events: list[tuple[bytes | None, str, bytes]],
+) -> list[tuple[bytes | None, str, bytes]]:
+    """Merge stdout/stderr events by Docker's nanosecond timestamp.
+
+    A malformed/unprefixed response has no trustworthy cross-stream ordering;
+    in that defensive fallback, retain fetch order rather than inventing one.
+    Python's stable sort preserves fetch order for the vanishingly unlikely
+    case of equal daemon timestamps.
+    """
+    if any(timestamp is None for timestamp, _stream, _payload in events):
+        return events
+    return sorted(events, key=lambda event: event[0])
+
+
+def _forward_live_sandbox_logs(
+    container,
+    state: dict,
+    log_fn,
+    *,
+    flush: bool = False,
+) -> tuple[bool, int]:
+    """Fetch and forward new stdout/stderr bytes from a runner container.
+
+    Returns ``(all_fetches_ok, combined_size)`` so the existing stall detector
+    can use the same two snapshots instead of issuing a third Docker log read.
+    A failed fetch never advances that stream's cursor.
+    """
+    all_ok = True
+    combined_size = 0
+    snapshots: dict[str, bytes] = {}
+    for stream in ("stdout", "stderr"):
+        try:
+            snapshot = container.logs(
+                stdout=(stream == "stdout"),
+                stderr=(stream == "stderr"),
+                timestamps=True,
+            )
+            if isinstance(snapshot, str):
+                snapshot = snapshot.encode("utf-8", errors="replace")
+        except Exception:
+            all_ok = False
+            continue
+        combined_size += len(snapshot)
+        snapshots[stream] = snapshot
+
+    # If one stream failed, advancing or emitting the other would make it
+    # impossible to place the missing stream's older records correctly on the
+    # next successful poll. Retry both from their existing cursors instead.
+    if not all_ok:
+        return False, combined_size
+
+    events: list[tuple[bytes | None, str, bytes]] = []
+    for stream in ("stdout", "stderr"):
+        events.extend(_collect_live_sandbox_delta(
+            stream, snapshots[stream], state, flush=flush,
+        ))
+    for _timestamp, stream, payload in _order_live_sandbox_events(events):
+        log_fn(f"[runner:{stream}] {payload.decode('utf-8', errors='replace')}")
+    return all_ok, combined_size
+
+
 def _wait_with_supervise(
     container,
     *,
@@ -309,6 +462,7 @@ def _wait_with_supervise(
     last_supervise: float | None = None
     periodic = timeout_s > SUPERVISE_PERIODIC_THRESHOLD_S
     supervise_result: dict | None = None
+    live_log_state: dict = {}
 
     while True:
         # Has the container exited?
@@ -317,6 +471,16 @@ def _wait_with_supervise(
             status = container.status
         except Exception:
             status = "unknown"
+
+        # Forward output before examining terminal state. A short-lived solver
+        # can print and exit between two polls; fetching only while it is alive
+        # loses exactly that final output from the live raw log.
+        log_fetch_ok, current_size = _forward_live_sandbox_logs(
+            container,
+            live_log_state,
+            log_fn,
+            flush=(status == "exited"),
+        )
 
         if status == "exited":
             try:
@@ -335,6 +499,9 @@ def _wait_with_supervise(
                 container.kill()
             except Exception:
                 pass
+            _forward_live_sandbox_logs(
+                container, live_log_state, log_fn, flush=True,
+            )
             return {
                 "StatusCode": -1,
                 "timeout": True,
@@ -347,16 +514,10 @@ def _wait_with_supervise(
         # `last_change`. Otherwise a string of fetch failures would
         # falsely register as a 60s stall and burn one supervise judge
         # call against an empty buffer.
-        log_fetch_ok = True
-        try:
-            buf = container.logs(stdout=True, stderr=True)
-        except Exception:
-            buf = b""
-            log_fetch_ok = False
         if not log_fetch_ok:
             last_change = time.time()
-        elif len(buf) != last_size:
-            last_size = len(buf)
+        elif current_size != last_size:
+            last_size = current_size
             last_change = time.time()
         elif (
             enable_supervise
@@ -403,6 +564,9 @@ def _wait_with_supervise(
                     container.kill()
                 except Exception:
                     pass
+                _forward_live_sandbox_logs(
+                    container, live_log_state, log_fn, flush=True,
+                )
                 return {
                     "StatusCode": -1,
                     "killed_by_supervise": True,
