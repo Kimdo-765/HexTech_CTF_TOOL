@@ -3192,7 +3192,7 @@ async function renderJob(id, opts = {}) {
           <a href="/terminal?job_id=${encodeURIComponent(id)}" target="_blank"
              class="job-files-terminal">⌨ open terminal</a>
         </div>
-        <div class="job-files-list"><span class="c-dim">Loading…</span></div>
+        <div class="job-files-list"></div>
       </div>`;
   }
 
@@ -3579,6 +3579,14 @@ async function renderJob(id, opts = {}) {
     ? ` <span class="target-more" title="${escapeHtml(_tgts.join("\n"))}">+${_tgts.length - 1} more</span>`
     : "";
 
+  // The detail HTML is rebuilt on every poll. Re-creating the file browser with
+  // it made a healthy job flash `Loading…` every couple of seconds and threw
+  // away the list's scroll position mid-read. Keep the LIVE node and move it
+  // into the rebuilt tree instead. Guarded on `data-job`: there is a separate
+  // `detail.innerHTML = ""` for job switches, and an unguarded adoption would
+  // drop job A's directory into job B's panel.
+  const _keptFiles = detail.querySelector(`.job-files[data-job="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
+
   detail.innerHTML = `
     <h3>Job <span class="jobid-text">${job.id}</span><button class="copy-jobid-btn" data-jobid="${job.id}" title="Copy job ID">⧉</button>
       <span class="status ${job.status}">${job.status}</span>
@@ -3668,9 +3676,17 @@ async function renderJob(id, opts = {}) {
   // Spin up the per-second live timer when a running pill is on screen.
   if (job.status === "running") _ensureLivePillTimer();
 
-  // The detail HTML is rebuilt on every poll, so the file browser has to be
-  // re-mounted — and re-mounted at the directory the operator had navigated
-  // to, not at the job root. Same lesson the SDK panel above learned.
+  // Put the live browser back before anything measures the document. This runs
+  // ahead of the scroll restores below on purpose: an adopted list is taller
+  // than the empty placeholder it replaces, and restoring `detail.scrollTop`
+  // against the shorter document would clamp it — the same trap the SDK panel
+  // comment records.
+  if (_keptFiles) {
+    const _fresh = detail.querySelector(`.job-files[data-job="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
+    if (_fresh) _fresh.replaceWith(_keptFiles);
+  }
+  // Re-mounted at the directory the operator had navigated to, not at the job
+  // root. Same lesson the SDK panel above learned.
   mountJobFiles(id);
 
   // Restore the live SDK panel FIRST — visibility before scroll. The
@@ -4414,14 +4430,158 @@ function _jobFilesCrumbs(id, path) {
   return out.join('<span class="job-files-sep">/</span>');
 }
 
+/** The inner markup of one row. Split out so the reconciler can rebuild a row
+ *  without a second copy of the template drifting away from this one. */
+function _jfRowInner(id, e) {
+  // A symlink is shown but never followed by the API (it refuses anything
+  // resolving outside the job dir). Marking it keeps "this is empty" and
+  // "this points somewhere we will not go" from looking alike.
+  const link = e.is_link ? ' <span class="jf-link" title="symlink">↗</span>' : "";
+  if (e.is_dir) {
+    return `<a href="#" class="jf-dir" data-path="${escapeHtml(e.path)}"
+      >📁 ${escapeHtml(e.name)}</a>${link}`;
+  }
+  const url = `${API}/jobs/${encodeURIComponent(id)}/blob?path=${encodeURIComponent(e.path)}`;
+  return `<a href="${url}" target="_blank" class="file-preview-link jf-file"
+       data-url="${url}" data-name="${escapeHtml(e.path)}">📄 ${escapeHtml(e.name)}</a>${link}
+    <span class="jf-size">${_fmtFileSize(e.size)}</span>`;
+}
+
+/** `is_dir`/`is_link` folded into one token. A row whose shape changed cannot
+ *  be patched — a file replaced by a directory of the same name would keep
+ *  rendering as 📄 with a size column forever. */
+function _jfShape(e) { return `${e.is_dir ? "d" : "f"}${e.is_link ? "l" : ""}`; }
+
+function _jfMakeRow(id, e) {
+  const row = document.createElement("div");
+  row.className = "jf-row";
+  row.dataset.key = e.path;
+  row.dataset.shape = _jfShape(e);
+  row.innerHTML = _jfRowInner(id, e);
+  return row;
+}
+
+/** Patch the rendered list towards `entries` rather than rewriting it.
+ *
+ *  Rewriting is what made the polling VISIBLE: every couple of seconds the
+ *  listing was thrown away and rebuilt, which dropped the scroll position of a
+ *  directory being read, cancelled hover, and made an unchanged directory
+ *  flicker. Here a poll that changes nothing touches no DOM at all, and a file
+ *  that genuinely appears mid-run fades in on its own. */
+function _jfReconcile(list, id, entries, opts) {
+  // Reconcile over `.jf-row` ONLY. The `(empty)` placeholder and the truncation
+  // notice are siblings with no key; folding them into the keyed set would
+  // remove and re-insert them on every poll — exactly the churn being removed.
+  const have = new Map();
+  list.querySelectorAll(":scope > .jf-row").forEach((r) => have.set(r.dataset.key, r));
+  const want = new Set(entries.map((e) => e.path));
+  have.forEach((row, key) => { if (!want.has(key)) row.remove(); });
+
+  // Walk the desired order and place each node in sequence. Appending new rows
+  // at the end is the tempting shortcut and it breaks the ordering the API
+  // guarantees (directories before files) the moment a directory appears
+  // mid-run. Sequencing also repairs a reorder for free.
+  let cursor = null;
+  for (const e of entries) {
+    let row = have.get(e.path);
+    if (row && row.dataset.shape !== _jfShape(e)) {
+      const fresh = _jfMakeRow(id, e);
+      row.replaceWith(fresh);
+      row = fresh;
+    } else if (row) {
+      // During a run the only thing that moves is the size — a growing
+      // `solver.sage.stdout`. Patch that text node and leave the row alone.
+      const sz = row.querySelector(".jf-size");
+      const txt = _fmtFileSize(e.size);
+      if (sz && sz.textContent !== txt) sz.textContent = txt;
+    } else {
+      row = _jfMakeRow(id, e);
+      // Only ARRIVALS animate. Animating a first paint would make every open of
+      // the panel shimmer through its whole directory, which is the same noise
+      // in a different costume.
+      if (!opts.firstPaint) {
+        row.classList.add("jf-new");
+        // Drop the class once it has played, so a later reorder of the same row
+        // does not replay the animation.
+        setTimeout(() => row.classList.remove("jf-new"), 700);
+      }
+    }
+    const next = cursor ? cursor.nextElementSibling : list.firstElementChild;
+    if (next !== row) list.insertBefore(row, next);
+    cursor = row;
+  }
+
+  // The two unkeyed siblings, managed explicitly.
+  const empty = list.querySelector(":scope > .jf-empty");
+  if (!entries.length && !empty) {
+    const span = document.createElement("span");
+    span.className = "c-dim jf-empty";
+    span.textContent = "(empty)";
+    list.appendChild(span);
+  } else if (entries.length && empty) {
+    empty.remove();
+  }
+
+  let trunc = list.querySelector(":scope > .jf-trunc");
+  if (opts.truncated) {
+    if (!trunc) {
+      trunc = document.createElement("div");
+      trunc.className = "jf-trunc";
+      list.appendChild(trunc);
+    }
+    const t = `⚠ first ${opts.cap} entries only — this directory is larger`;
+    if (trunc.textContent !== t) trunc.textContent = t;
+    if (trunc !== list.lastElementChild) list.appendChild(trunc);
+  } else if (trunc) {
+    trunc.remove();
+  }
+}
+
+/** Delegated, once per box. The old code re-attached a handler to every row
+ *  after each rewrite, and used `{ once: true }` on Refresh — which only ever
+ *  worked because the button was thrown away and rebuilt on the next poll. Now
+ *  that the node survives, a one-shot handler would fire once and die. */
+function _jfWire(box, id) {
+  if (box.dataset.wired === "1") return;
+  box.dataset.wired = "1";
+  box.addEventListener("click", (ev) => {
+    const nav = ev.target.closest(".jf-dir, .job-files-crumb");
+    if (nav) {
+      ev.preventDefault();
+      loadJobFiles(id, nav.dataset.path || "");
+      return;
+    }
+    if (ev.target.closest(".job-files-refresh")) {
+      ev.preventDefault();
+      loadJobFiles(id, _jobFilesPath.get(id) || "");
+    }
+    // `.jf-file` is deliberately not handled here — it carries
+    // `file-preview-link`, whose existing delegated handler opens the modal and
+    // leaves middle-click / "open in new tab" working.
+  });
+}
+
 async function loadJobFiles(id, path = "") {
   const box = document.querySelector(`.job-files[data-job="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
   if (!box) return;
   const list = box.querySelector(".job-files-list");
   const crumbs = box.querySelector(".job-files-crumbs");
+  // A navigation shows the rows of the directory being LEFT until the new ones
+  // arrive; clearing makes the click feel answered and stops the reconciler
+  // from animating a whole directory as if it had streamed in.
+  const navigating = _jobFilesPath.get(id) !== path;
   _jobFilesPath.set(id, path);
-  crumbs.innerHTML = _jobFilesCrumbs(id, path);
-  list.innerHTML = '<span class="c-dim">Loading…</span>';
+  if (navigating) list.innerHTML = "";
+
+  const crumbHtml = _jobFilesCrumbs(id, path);
+  if (crumbs.innerHTML !== crumbHtml) crumbs.innerHTML = crumbHtml;
+  _jfWire(box, id);
+
+  // `Loading…` belongs to a paint with nothing to show, never to a poll. The
+  // browser is re-mounted on every job poll, so writing it unconditionally is
+  // what made an idle directory blink every couple of seconds.
+  const firstPaint = !list.querySelector(".jf-row, .jf-empty");
+  if (firstPaint) list.innerHTML = '<span class="c-dim jf-loading">Loading…</span>';
 
   let data;
   try {
@@ -4430,40 +4590,31 @@ async function loadJobFiles(id, path = "") {
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
     data = body;
   } catch (e) {
-    list.innerHTML = `<span style="color:var(--red)">${escapeHtml(String(e))}</span>`;
+    // A dropped BACKGROUND poll must not erase a good listing — the operator
+    // would watch the directory they are reading vanish and come back. Only a
+    // paint that has nothing to preserve is allowed to report the error.
+    if (firstPaint) {
+      list.innerHTML = `<span style="color:var(--red)">${escapeHtml(String(e))}</span>`;
+    }
     return;
   }
 
-  const rows = (data.entries || []).map((e) => {
-    // A symlink is shown but never followed by the API (it refuses anything
-    // resolving outside the job dir). Marking it keeps "this is empty" and
-    // "this points somewhere we will not go" from looking alike.
-    const link = e.is_link ? ' <span class="jf-link" title="symlink">↗</span>' : "";
-    if (e.is_dir) {
-      return `<div class="jf-row"><a href="#" class="jf-dir" data-path="${escapeHtml(e.path)}"
-        >📁 ${escapeHtml(e.name)}</a>${link}</div>`;
-    }
-    const url = `${API}/jobs/${encodeURIComponent(id)}/blob?path=${encodeURIComponent(e.path)}`;
-    return `<div class="jf-row">
-      <a href="${url}" target="_blank" class="file-preview-link jf-file"
-         data-url="${url}" data-name="${escapeHtml(e.path)}">📄 ${escapeHtml(e.name)}</a>${link}
-      <span class="jf-size">${_fmtFileSize(e.size)}</span>
-    </div>`;
-  }).join("");
+  // A poll for the old directory can land after the operator has clicked into a
+  // new one. Rewriting the list made that self-correcting — the next poll
+  // overwrote it — but a RECONCILER would merge the two directories into one
+  // listing under the wrong crumb trail. Drop a response that is no longer for
+  // the directory on screen.
+  if (_jobFilesPath.get(id) !== path) return;
 
-  list.innerHTML = (rows || '<span class="c-dim">(empty)</span>')
-    + (data.truncated
-      ? `<div class="jf-trunc">⚠ first ${data.cap} entries only — this directory is larger</div>`
-      : "");
+  // Written out rather than `?.remove()`: the UI test harness runs on Node 12
+  // and strips optional chaining textually, which would turn a null miss into
+  // a throw. Code that cannot be exercised faithfully is code without a test.
+  const spinner = list.querySelector(".jf-loading");
+  if (spinner) spinner.remove();
 
-  list.querySelectorAll(".jf-dir").forEach((a) => {
-    a.addEventListener("click", (ev) => { ev.preventDefault(); loadJobFiles(id, a.dataset.path); });
+  _jfReconcile(list, id, data.entries || [], {
+    firstPaint, truncated: !!data.truncated, cap: data.cap,
   });
-  crumbs.querySelectorAll(".job-files-crumb").forEach((a) => {
-    a.addEventListener("click", (ev) => { ev.preventDefault(); loadJobFiles(id, a.dataset.path); });
-  });
-  box.querySelector(".job-files-refresh")?.addEventListener(
-    "click", () => loadJobFiles(id, _jobFilesPath.get(id) || ""), { once: true });
 }
 
 /** Called after the job detail re-renders. Restores the directory the operator

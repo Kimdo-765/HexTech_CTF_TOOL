@@ -2203,3 +2203,16 @@ body.modal-open { overflow: hidden; }
 .jf-size { margin-left: auto; color: var(--fg-dim); font-size: 0.78rem; white-space: nowrap; }
 .jf-link { color: var(--yellow-bright); font-size: 0.75rem; }
 .jf-trunc { color: var(--yellow-bright); font-size: 0.78rem; padding-top: 0.3rem; }
+/* Only rows that ARRIVE after the first paint animate. The listing is patched
+   in place rather than rewritten, so a poll that changes nothing is invisible;
+   this is what makes a file appearing mid-run readable as an event instead of
+   the whole directory blinking. A first paint is deliberately not animated —
+   shimmering through an entire directory on open is the same noise. */
+@keyframes jf-fade-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: none; }
+}
+.jf-row.jf-new { animation: jf-fade-in 0.45s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .jf-row.jf-new { animation: none; }
+}

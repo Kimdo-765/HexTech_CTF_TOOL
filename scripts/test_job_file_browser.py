@@ -39,6 +39,9 @@ parser.add_argument("--mutate", choices=(
     "no-cap",             # a huge directory is returned whole
     "hardcoded-links",    # the UI goes back to guessing artifact filenames
     "browser-unmounted",  # the browser is not re-mounted after a re-render
+    "no-adoption",        # the live browser node is discarded on every re-render
+    "loading-in-template",  # the placeholder ships in the rebuilt markup again
+    "adopt-any-job",      # the adoption stops checking which job the node is for
 ), default="none")
 args = parser.parse_args()
 
@@ -231,6 +234,16 @@ if args.mutate == "hardcoded-links":
     APP += '\nlinks.push(fileLink("stdout", `${API}/jobs/${id}/file/solver.py.stdout`));\n'
 elif args.mutate == "browser-unmounted":
     APP = APP.replace("  mountJobFiles(id);", "")
+elif args.mutate == "no-adoption":
+    APP = APP.replace("    if (_fresh) _fresh.replaceWith(_keptFiles);", "")
+elif args.mutate == "loading-in-template":
+    APP = APP.replace('<div class="job-files-list"></div>',
+                      '<div class="job-files-list"><span class="c-dim">Loading…</span></div>')
+elif args.mutate == "adopt-any-job":
+    APP = APP.replace(
+        'const _keptFiles = detail.querySelector(`.job-files[data-job="'
+        '${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);',
+        "const _keptFiles = detail.querySelector('.job-files');")
 
 # The regression this feature exists to end: a filename the UI guessed.
 check("the UI no longer guesses artifact filenames",
@@ -253,6 +266,73 @@ check("a large directory scrolls inside its own box, not the page",
       ".job-files-list" in CSS and "overflow-y: auto" in CSS, True)
 check("a long filename cannot push the size column away",
       "text-overflow: ellipsis" in CSS, True)
+
+# ------------------------------------------------- ④ the poll must be invisible
+# Reported 2026-08-11: the browser blinked `Loading…` every couple of seconds
+# and lost the scroll position of a directory being read, because the detail
+# panel is rebuilt on every poll and took the browser down with it. The listing
+# was correct and unreadable. Behaviour is pinned in
+# scripts/test_job_files_quiet_poll.js (jsdom, node identity across polls);
+# what is checked HERE is the part that lives outside that slice.
+check("the rebuilt markup ships an empty list, not a placeholder",
+      '<div class="job-files-list"></div>' in APP, True)
+# Scoped to the browser's own spinner class — `Loading…` appears elsewhere in
+# app.js for unrelated panels, so a bare count would measure the wrong thing.
+check("...so the browser writes its spinner in exactly one place",
+      APP.count('class="c-dim jf-loading"'), 1)
+check("...and that one write is reachable only from a first paint",
+      "if (firstPaint) list.innerHTML = '<span class=\"c-dim jf-loading\">Loading…</span>'"
+      in APP, True)
+check("...with the spinner cleared before the listing is patched",
+      'const spinner = list.querySelector(".jf-loading");' in APP, True)
+
+check("the live browser node is adopted across a re-render",
+      "_fresh.replaceWith(_keptFiles)" in APP, True)
+# There is a separate `detail.innerHTML = ""` for job switches; an unguarded
+# adoption would carry job A's directory into job B's panel.
+check("...only when the node belongs to THIS job",
+      'const _keptFiles = detail.querySelector(`.job-files[data-job='
+      '"${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);' in APP, True)
+# An adopted list is taller than the empty placeholder. Restoring the outer
+# scroll against the shorter document would clamp it — the trap the SDK panel
+# comment already records.
+# `.index` raises when a mutation removes the needle, which would kill the run
+# and hide every check below it. A severed defence has to REPORT, not crash.
+def _before(a: str, b: str) -> bool:
+    ia, ib = APP.find(a), APP.find(b)
+    return ia != -1 and ib != -1 and ia < ib
+
+
+check("...before anything measures the document for a scroll restore",
+      _before("_fresh.replaceWith(_keptFiles)",
+              "detail.scrollTop = prevModalScrollTop"), True)
+
+check("the listing is patched towards the new entries, not rewritten",
+      "function _jfReconcile(" in APP, True)
+check("...keyed so an unchanged row is left alone", 'row.dataset.key' in APP, True)
+check("...and reconciled over rows only, so the unkeyed siblings do not churn",
+      'list.querySelectorAll(":scope > .jf-row")' in APP, True)
+check("...placed in the API's order rather than appended",
+      "list.insertBefore(row, next)" in APP, True)
+check("a row whose dir/link shape changed is rebuilt, not patched",
+      "row.dataset.shape !== _jfShape(e)" in APP, True)
+check("a dropped background poll cannot erase a good listing",
+      "if (firstPaint) {\n      list.innerHTML = `<span style=\"color:var(--red)\">" in APP,
+      True)
+check("handlers are delegated once per box, not re-attached per row",
+      'box.dataset.wired === "1"' in APP, True)
+check("...so Refresh is no longer a one-shot on a node that now survives",
+      "{ once: true }" not in APP.split("function _jfWire")[-1].split("async function loadJobFiles")[0],
+      True)
+
+check("only arriving rows are marked for animation",
+      "row.classList.add(\"jf-new\")" in APP, True)
+check("...and a first paint is exempt, so opening does not shimmer",
+      "if (!opts.firstPaint) {" in APP, True)
+check("the arrival animation exists", "@keyframes jf-fade-in" in CSS, True)
+check("...and is dropped for reduced-motion",
+      "prefers-reduced-motion" in CSS and ".jf-row.jf-new { animation: none; }" in CSS,
+      True)
 
 import hashlib  # noqa: E402
 _h = hashlib.sha256()
