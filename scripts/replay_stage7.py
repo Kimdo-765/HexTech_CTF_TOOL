@@ -109,7 +109,10 @@ def _pin_judge(job_copy: Path, provider: str) -> None:
 def replayable(jobs_root: Path) -> list[Path]:
     out = []
     for d in sorted(jobs_root.iterdir()):
-        if d.is_dir() and any(d.glob("*.stdout")):
+        if not d.is_dir():
+            continue
+        eligible, _reason = judge_replay.replay_eligibility(d)
+        if eligible and any(d.glob("*.stdout")):
             out.append(d)
     return out
 
@@ -137,8 +140,19 @@ def main() -> int:
     if args.limit:
         picked = picked[: args.limit]
 
-    skipped = [d.name for d in sorted(jobs_root.iterdir())
-               if d.is_dir() and not any(d.glob("*.stdout"))]
+    skipped = []
+    skipped_hybrid_parent = []
+    skipped_hybrid_child = []
+    for d in sorted(jobs_root.iterdir()):
+        if not d.is_dir():
+            continue
+        eligible, reason = judge_replay.replay_eligibility(d)
+        if reason == "hybrid_parent":
+            skipped_hybrid_parent.append(d.name)
+        elif reason == "hybrid_child":
+            skipped_hybrid_child.append(d.name)
+        elif eligible and not any(d.glob("*.stdout")):
+            skipped.append(d.name)
 
     before = {d.name: tree_digest(d) for d in picked}
     out_path = Path(args.out)
@@ -188,6 +202,13 @@ def main() -> int:
         "judge_provider_forced": args.judge_provider or None,
         "replayed": written,
         "skipped_unreplayable": skipped,
+        "skipped_hybrid_parent": skipped_hybrid_parent,
+        "skipped_hybrid_child": skipped_hybrid_child,
+        "skipped_by_reason": {
+            "no_sandbox_output": len(skipped),
+            "hybrid_parent": len(skipped_hybrid_parent),
+            "hybrid_child": len(skipped_hybrid_child),
+        },
         "originals_changed": changed,
         "diff_zero": not changed,
         "dry_run": bool(args.dry_run),

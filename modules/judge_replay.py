@@ -81,6 +81,33 @@ def _solver_name(job_dir: Path) -> str | None:
     return outs[0][: -len(_STDOUT_SUFFIX)]
 
 
+def replay_eligibility(job_dir: Path) -> tuple[bool, str | None]:
+    """Keep hybrid chains out of the legacy scalar replay dataset.
+
+    A hybrid parent represents the chain, while each internal child is only a
+    private scalar execution unit.  Replaying either would mix a structurally
+    different sample or duplicate one chain up to three times.
+    """
+    job_dir = Path(job_dir)
+    meta: dict[str, Any] = {}
+    try:
+        value = json.loads((job_dir / "meta.json").read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            meta = value
+    except Exception:
+        pass
+    if meta.get("module") == "hybrid":
+        return False, "hybrid_parent"
+    if (
+        meta.get("internal") is True
+        and isinstance(meta.get("parent_job_id"), str)
+        and bool(meta.get("parent_job_id"))
+        and isinstance(meta.get("hybrid_stage"), int)
+    ):
+        return False, "hybrid_child"
+    return True, None
+
+
 def replay_inputs(job_dir: Path) -> dict[str, Any] | None:
     """The judge's inputs for this job's last attempt, or None if unreplayable.
 
@@ -89,6 +116,9 @@ def replay_inputs(job_dir: Path) -> dict[str, Any] | None:
     quietly shrinking the denominator.
     """
     job_dir = Path(job_dir)
+    eligible, _reason = replay_eligibility(job_dir)
+    if not eligible:
+        return None
     script_rel = _solver_name(job_dir)
     if script_rel is None:
         return None
