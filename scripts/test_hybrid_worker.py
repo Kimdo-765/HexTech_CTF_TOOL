@@ -375,6 +375,7 @@ case_specs = (
     ("a-confirmed-b-skipped", [MARKER_A], "finished", 1),
     ("a-weak-b-no-flag", [WEAK_A, NO_FLAG], "no_flag", 2),
     ("a-weak-b-confirmed", [WEAK_A, MARKER_B], "finished", 2),
+    ("a-no-flag-b-confirmed", [NO_FLAG, MARKER_B], "finished", 2),
     ("a-weak-b-weak", [WEAK_A, WEAK_B], "no_flag", 2),
     ("a-no-flag-b-no-flag", [NO_FLAG, NO_FLAG], "no_flag", 2),
     ("a-failed", [{"status": "failed", "flags": []}], "failed", 1),
@@ -407,6 +408,21 @@ check(
         (label, None, status, status, runs, 1)
         for label, _plan, status, runs in case_specs
     ],
+)
+
+live_shape_index = [spec[0] for spec in case_specs].index("a-no-flag-b-confirmed")
+live_shape_meta = read_meta(completed_parents[live_shape_index])
+check(
+    "test_a_no_flag_b_confirmed_live_shape_is_named_and_finishes_after_two_runs",
+    (
+        observed[live_shape_index][1:5],
+        live_shape_meta["flags"],
+        [
+            record["disposition"]
+            for record in live_shape_meta["hybrid"]["stage_flag_evidence"]
+        ],
+    ),
+    ((None, "finished", "finished", 2), ["DH{stage_b_confirmed}"], ["confirmed"]),
 )
 
 sample_parent = completed_parents[2]

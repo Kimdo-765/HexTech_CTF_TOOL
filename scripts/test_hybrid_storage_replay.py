@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -31,6 +32,7 @@ MUTATIONS = (
     "skip-duplicate-check",
     "curation-selects-child",
     "skip-child-parent-link",
+    "block-direct-hybrid-child-save",
     "allow-hybrid-parent",
     "allow-hybrid-child",
     "drop-child-internal-clause",
@@ -234,6 +236,26 @@ elif args.mutate == "skip-child-parent-link":
         exploit_source,
         '        and child_meta.get("parent_job_id") == source_job_id\n',
         "        and True\n",
+    )
+elif args.mutate == "block-direct-hybrid-child-save":
+    exploit_source = replace_once(
+        exploit_source,
+        """    else:
+        # Direct curation of an internal hybrid child is intentionally allowed.
+""",
+        """    else:
+        if (
+            job_meta.get("internal") is True
+            and isinstance(job_meta.get("parent_job_id"), str)
+            and bool(job_meta.get("parent_job_id"))
+            and isinstance(job_meta.get("hybrid_stage"), int)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="internal hybrid child cannot be saved directly",
+            )
+        # Direct curation of an internal hybrid child is intentionally allowed.
+""",
     )
 elif args.mutate == "allow-hybrid-parent":
     judge_source = replace_once(
@@ -451,6 +473,46 @@ if full is not CASE_FAILED:
         "test_hybrid_parent_remains_meta_only_after_save",
         sorted(path.name for path in (JOBS / parent).iterdir()),
         ["meta.json"],
+    )
+
+direct_child = capture(
+    "test_internal_hybrid_child_direct_save_does_not_raise",
+    lambda: save(child),
+)
+if direct_child is not CASE_FAILED:
+    direct_dest = EXPLOITS / direct_child["id"]
+    check(
+        "test_internal_hybrid_child_direct_save_is_deliberately_allowed_while_replay_excludes_it",
+        (
+            JR.replay_eligibility(JOBS / child),
+            direct_child["source_job_id"],
+            direct_child["module"],
+            direct_child["flags"],
+            direct_child["script_filename"],
+            "source_child_job_id" in direct_child,
+        ),
+        (
+            (False, "hybrid_child"),
+            child,
+            "rev",
+            [real, decoy],
+            "solver.py",
+            False,
+        ),
+    )
+    shutil.rmtree(JOBS / parent)
+    shutil.rmtree(JOBS / child)
+    direct_meta = json.loads((direct_dest / "meta.json").read_text(encoding="utf-8"))
+    check(
+        "test_direct_child_library_copy_remains_self_contained_after_source_cascade",
+        (
+            (JOBS / parent).exists(),
+            (JOBS / child).exists(),
+            direct_meta["source_job_id"],
+            (direct_dest / "solver.py").read_text(encoding="utf-8"),
+            (direct_dest / "report.md").read_text(encoding="utf-8"),
+        ),
+        (False, False, child, "print('child solver')\n", "child report\n"),
     )
 
 parent, child, real, decoy, weak = valid_hybrid(
