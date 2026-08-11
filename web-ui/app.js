@@ -3205,7 +3205,48 @@ async function renderJob(id, opts = {}) {
     </div>`;
   }
 
-  let resultBlock = liveFireOutcomeHtml(job, id);
+  function hybridStageEvidenceHtml(job) {
+    if (job.module !== "hybrid") return "";
+    const hybrid = job.hybrid || {};
+    const stages = Array.isArray(hybrid.stages) ? hybrid.stages : [];
+    const evidence = Array.isArray(hybrid.stage_flag_evidence)
+      ? hybrid.stage_flag_evidence : [];
+    const stageRows = stages.map((stage) => `
+      <tr>
+        <td>${escapeHtml(String(stage.stage))}</td>
+        <td>${escapeHtml(stage.module || "?")}</td>
+        <td><code>${escapeHtml(stage.child_job_id || "not created")}</code></td>
+        <td>${escapeHtml(stage.status || "pending")}</td>
+        <td>${typeof stage.cost_usd === "number" ? "$" + stage.cost_usd.toFixed(4) : "—"}</td>
+      </tr>`).join("");
+    const evidenceRows = evidence.map((record) => {
+      const provenance = record && typeof record.provenance === "object"
+        ? record.provenance : {};
+      const tier = provenance.tier == null ? "unknown" : provenance.tier;
+      const source = provenance.field == null ? "unknown" : provenance.field;
+      return `<tr>
+        <td>${escapeHtml(String(record.stage))}</td>
+        <td>${escapeHtml(record.module || "?")}</td>
+        <td><code>${escapeHtml(record.child_job_id || "?")}</code></td>
+        <td><code>${escapeHtml(record.value || "")}</code></td>
+        <td>${escapeHtml(String(tier))} / ${escapeHtml(String(source))}</td>
+        <td>${escapeHtml(record.disposition || "unknown")}</td>
+      </tr>`;
+    }).join("");
+    return `<details class="hybrid-stage-evidence" open>
+      <summary>Hybrid stage evidence</summary>
+      <table>
+        <thead><tr><th>stage</th><th>module</th><th>child id</th><th>status</th><th>cost</th></tr></thead>
+        <tbody>${stageRows || '<tr><td colspan="5">No stages recorded.</td></tr>'}</tbody>
+      </table>
+      <table>
+        <thead><tr><th>stage</th><th>module</th><th>child id</th><th>value</th><th>provenance tier / source</th><th>disposition</th></tr></thead>
+        <tbody>${evidenceRows || '<tr><td colspan="6">No flag evidence recorded yet.</td></tr>'}</tbody>
+      </table>
+    </details>`;
+  }
+
+  let resultBlock = liveFireOutcomeHtml(job, id) + hybridStageEvidenceHtml(job);
   if (["finished", "running", "no_flag"].includes(job.status)) {
     // The per-artifact link list is gone. It hard-coded one filename per
     // module (`exploit.py.stdout`, `solver.py.stdout`, …) while the runner
@@ -3410,6 +3451,9 @@ async function renderJob(id, opts = {}) {
   // script (exploit.py / solver.py / solver.sage). Don't gate on status —
   // even 'failed' jobs sometimes have a usable partial script.
   let runBlock = "";
+  // A hybrid parent is intentionally absent: until parent retry translates to
+  // the last unfinished/failed scalar stage, exposing these controls would
+  // submit module=hybrid to a scalar-only backend that rejects it.
   const isExploitableModule = ["web", "pwn", "crypto", "rev"].includes(job.module);
   // Retry is offered for every TERMINAL status on an exploitable module
   // — including 'finished' with a flag, so the user can rerun against a

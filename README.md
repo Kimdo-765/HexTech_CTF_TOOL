@@ -1296,6 +1296,25 @@ upload ──► /data/jobs/<id>/         ─► RQ enqueue
        UI polls /api/jobs/<id> every 2s
 ```
 
+### Hybrid parent/child lifecycle
+
+A hybrid chain has one public `module=hybrid` parent and up to two scalar
+children marked by the conjunction `internal=true`, `parent_job_id`, and an
+integer `hybrid_stage`. `GET /api/jobs` and `/stats` hide those internal
+children. Their cost is projected onto the parent once, while the parent detail
+shows each stage's module, child id, live/terminal status, cost, and canonical
+`stage_flag_evidence` provenance.
+
+Stop cascades from a running/queued parent to every active validated child.
+The deletion policy is deliberately stronger: deleting a hybrid parent stops
+active children and then deletes **all** validated linked child directories;
+the parent's separately stored upload is deleted too, and no internal child
+artifact is retained implicitly. A forged stage id is not
+authority to stop or delete another job—the child metadata must point back to
+the same parent, stage, and module. Parent Retry/Continue/Resume controls stay
+hidden until parent retry is translated to a scalar stage; the scalar retry API
+continues to reject `module=hybrid`.
+
 ## API
 
 | Method | Path | Purpose |

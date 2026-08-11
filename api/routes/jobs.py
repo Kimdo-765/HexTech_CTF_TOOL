@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from api.queue import get_queue, get_redis
-from api.storage import JOBS_DIR, parse_targets, read_job_meta, write_job_meta
+from api.storage import JOBS_DIR, UPLOADS_DIR, parse_targets, read_job_meta, write_job_meta
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
@@ -33,6 +33,124 @@ def _validate_job_id(job_id: str) -> str:
     if not _JOB_ID_RE.match(job_id):
         raise HTTPException(status_code=400, detail="invalid job id")
     return job_id
+
+
+def _is_internal_hybrid_child(meta: dict) -> bool:
+    """The exact public-visibility predicate from the hybrid contract."""
+    return (
+        meta.get("internal") is True
+        and isinstance(meta.get("parent_job_id"), str)
+        and bool(meta.get("parent_job_id"))
+        and isinstance(meta.get("hybrid_stage"), int)
+    )
+
+
+def _hybrid_children(parent_job_id: str, parent_meta: dict) -> list[tuple[dict, dict]]:
+    """Return only children whose metadata validates the parent stage link.
+
+    Stage records are not enough authority to stop or delete another job.  A
+    linked directory is a child only when its own scalar metadata agrees on
+    internal=true, parent id, stage index, and module.
+    """
+    if parent_meta.get("module") != "hybrid":
+        return []
+    hybrid = parent_meta.get("hybrid")
+    stages = hybrid.get("stages") if isinstance(hybrid, dict) else None
+    if not isinstance(stages, list):
+        return []
+    children: list[tuple[dict, dict]] = []
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        child_id = stage.get("child_job_id")
+        if not isinstance(child_id, str) or not _JOB_ID_RE.fullmatch(child_id):
+            continue
+        child = read_job_meta(child_id)
+        if not isinstance(child, dict):
+            continue
+        if (
+            child.get("internal") is True
+            and child.get("parent_job_id") == parent_job_id
+            and child.get("hybrid_stage") == stage.get("stage")
+            and child.get("module") == stage.get("module")
+        ):
+            children.append((stage, child))
+    return children
+
+
+def _job_cost(job_id: str, meta: dict) -> float:
+    """Read one scalar job's authoritative cost with the existing fallback."""
+    try:
+        cost = float(meta.get("cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    result_path = JOBS_DIR / job_id / "result.json"
+    if cost == 0.0 and result_path.exists():
+        try:
+            result = json.loads(result_path.read_text())
+            cost = float(result.get("cost_usd") or 0.0)
+        except Exception:
+            pass
+    return cost
+
+
+def _public_job_meta(meta: dict) -> dict:
+    """Project a public parent without exposing or double-counting children."""
+    if meta.get("module") != "hybrid":
+        return meta
+    parent_id = meta.get("id")
+    if not isinstance(parent_id, str):
+        return meta
+
+    # Metadata is JSON-shaped.  Copy before overlaying live child facts so a
+    # GET/list operation never mutates the object a caller may later persist.
+    public = json.loads(json.dumps(meta))
+    linked = _hybrid_children(parent_id, meta)
+    total_cost = 0.0
+    total_estimate = 0.0
+    by_stage = {
+        stage.get("stage"): (stage, child)
+        for stage, child in linked
+        if isinstance(stage.get("stage"), int)
+    }
+    public_stages = ((public.get("hybrid") or {}).get("stages") or [])
+    for public_stage in public_stages:
+        if not isinstance(public_stage, dict):
+            continue
+        linked_stage = by_stage.get(public_stage.get("stage"))
+        if linked_stage is None:
+            continue
+        _, child = linked_stage
+        child_id = child["id"]
+        child_cost = _job_cost(child_id, child)
+        total_cost += child_cost
+        try:
+            total_estimate += float(child.get("cost_usd_estimate") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        public_stage["status"] = child.get("status", public_stage.get("status"))
+        public_stage["cost_usd"] = child_cost
+    # The parent owns the public bill. Stats skip internal children, so every
+    # scalar child dollar appears exactly once under module=hybrid.
+    public["cost_usd"] = round(total_cost, 6)
+    if total_estimate:
+        public["cost_usd_estimate"] = round(total_estimate, 6)
+    return public
+
+
+def _delete_hybrid_children(parent_job_id: str, parent_meta: dict) -> list[dict]:
+    """Stop and delete every validated child owned by a public parent."""
+    results = []
+    for _, child in _hybrid_children(parent_job_id, parent_meta):
+        child_halt = None
+        if child.get("status") in ("queued", "running", "analyze", "analyzing"):
+            child_halt = _hard_stop_job(child["id"])
+        try:
+            shutil.rmtree(JOBS_DIR / child["id"])
+        except FileNotFoundError:
+            pass
+        results.append({"id": child["id"], "halt": child_halt})
+    return results
 
 
 def rq_job_id_for(job_id: str, meta: dict | None = None) -> str:
@@ -154,6 +272,9 @@ def list_jobs():
     for d in sorted(JOBS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         meta = read_job_meta(d.name)
         if meta:
+            if _is_internal_hybrid_child(meta):
+                continue
+            meta = _public_job_meta(meta)
             meta["runnable_script"] = _detect_runnable_script(d)
             out.append(meta)
     return {"jobs": out}
@@ -200,24 +321,20 @@ def get_stats():
         if not d.is_dir():
             continue
         meta_path = d / "meta.json"
-        result_path = d / "result.json"
         if not meta_path.exists():
             continue
         try:
             meta = json.loads(meta_path.read_text())
         except Exception:
             continue
+        if _is_internal_hybrid_child(meta):
+            continue
+        meta = _public_job_meta(meta)
         count += 1
         module = meta.get("module", "unknown")
         bucket = by_module.setdefault(module, {"count": 0, "cost_usd": 0.0})
         bucket["count"] += 1
-        cost = float(meta.get("cost_usd") or 0.0)
-        if cost == 0.0 and result_path.exists():
-            try:
-                result = json.loads(result_path.read_text())
-                cost = float(result.get("cost_usd") or 0.0)
-            except Exception:
-                pass
+        cost = _job_cost(d.name, meta)
         # LIVE jobs: surface the part of THIS session's spend that no
         # ResultMessage has confirmed yet. A CONTINUED session carries the
         # banked prior total in cost_usd from its first moment, so the old
@@ -415,7 +532,7 @@ def get_job(job_id: str):
     )
 
     return {
-        **meta,
+        **_public_job_meta(meta),
         "rq_status": rq_status,
         # kept: scripts/job-status.sh prints it, and it identifies the slot
         "rq_worker_name": rq_worker_name,
@@ -454,6 +571,10 @@ def bulk_delete_jobs(
         meta = read_job_meta(d.name)
         if not meta:
             continue
+        # Internal children have no public lifecycle of their own. They are
+        # removed only by deleting their parent (the explicit policy below).
+        if _is_internal_hybrid_child(meta):
+            continue
         st = meta.get("status")
         mod = meta.get("module")
         # Filter
@@ -464,9 +585,23 @@ def bulk_delete_jobs(
         if not status and not all and st not in safe_default_statuses:
             skipped += 1
             continue
-        # Halt running/queued jobs: stop the worker + kill sibling containers
+        # Halt running/queued jobs: stop the worker + kill sibling containers.
         if st in ("queued", "running"):
             _hard_stop_job(d.name)
+        try:
+            _delete_hybrid_children(d.name, meta)
+        except Exception:
+            # Keep the public owner when any hidden child could not be removed;
+            # otherwise the API would create an unreachable orphan silently.
+            skipped += 1
+            continue
+        upload_dir = UPLOADS_DIR / d.name
+        if upload_dir.exists():
+            try:
+                shutil.rmtree(upload_dir)
+            except Exception:
+                skipped += 1
+                continue
         try:
             shutil.rmtree(d)
             deleted_ids.append(d.name)
@@ -496,8 +631,15 @@ def delete_job(job_id: str):
     halt_info = None
     if meta and meta.get("status") in ("queued", "running"):
         halt_info = _hard_stop_job(safe)
+    # Hybrid deletion policy: a public parent owns its internal children, so
+    # deleting the parent deletes every validated linked child after stopping
+    # any active child. No child artifact is retained implicitly.
+    child_results = _delete_hybrid_children(safe, meta or {})
+    upload_dir = UPLOADS_DIR / safe
+    if upload_dir.exists():
+        shutil.rmtree(upload_dir)
     shutil.rmtree(d)
-    return {"deleted": safe, "halt": halt_info}
+    return {"deleted": safe, "halt": halt_info, "children_deleted": child_results}
 
 
 @router.post("/{job_id}/stop")
@@ -522,13 +664,34 @@ def stop_job(job_id: str):
     halt_info = None
     if was in ("queued", "running"):
         halt_info = _hard_stop_job(safe)
+    stopped_children = []
+    for stage, child in _hybrid_children(safe, meta):
+        if child.get("status") not in ("queued", "running", "analyze", "analyzing"):
+            continue
+        child_halt = _hard_stop_job(child["id"])
+        write_job_meta(
+            child["id"],
+            {
+                **child,
+                "status": "stopped",
+                "stopped_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        stage["status"] = "stopped"
+        stopped_children.append({"id": child["id"], "halt": child_halt})
     stopped_meta = {
         **meta,
         "status": "stopped",
         "stopped_at": datetime.now(timezone.utc).isoformat(),
     }
     write_job_meta(safe, stopped_meta)
-    return {"stopped": safe, "prev_status": was, "status": "stopped", "halt": halt_info}
+    return {
+        "stopped": safe,
+        "prev_status": was,
+        "status": "stopped",
+        "halt": halt_info,
+        "children_stopped": stopped_children,
+    }
 
 
 @router.post("/{job_id}/flags/delete")
