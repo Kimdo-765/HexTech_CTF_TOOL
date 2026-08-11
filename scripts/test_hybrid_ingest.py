@@ -16,7 +16,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import re
 import sys
 import tempfile
@@ -65,6 +64,7 @@ def replace_once(source: str, old: str, new: str) -> str:
 
 # Import both real production functions before installing the route-only stubs.
 from modules import _common as COMMON  # noqa: E402
+from modules.hybrid import coordinator as HYBRID_COORDINATOR  # noqa: E402
 from modules.hybrid.coordinator import HybridCoordinator  # noqa: E402
 
 
@@ -79,6 +79,7 @@ UPLOADS.mkdir()
 # is redirected to the isolated fixture exactly as the S1 harness does.
 COMMON.JOBS_DIR = JOBS
 COMMON.job_dir = lambda job_id: JOBS / Path(job_id).name
+HYBRID_COORDINATOR.JOBS_DIR = JOBS
 
 
 # ---------------------------------------------------------------- route load
@@ -440,8 +441,6 @@ rq_failure_error = ModuleNotFoundError(
 )
 failure_callback = enqueued[0][2].get("on_failure") if enqueued else None
 callback_error = None
-old_data_dir = os.environ.get("DATA_DIR")
-os.environ["DATA_DIR"] = str(DATA)
 try:
     if failure_callback is None:
         callback_error = "missing failure callback"
@@ -455,11 +454,6 @@ try:
         )
 except Exception as exc:
     callback_error = f"{type(exc).__name__}:{exc}"
-finally:
-    if old_data_dir is None:
-        os.environ.pop("DATA_DIR", None)
-    else:
-        os.environ["DATA_DIR"] = old_data_dir
 
 failed_entrypoint_meta = (
     json.loads((JOBS / upload_id / "meta.json").read_text(encoding="utf-8"))

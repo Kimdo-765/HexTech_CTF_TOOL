@@ -71,7 +71,9 @@ runpy.run_module("worker.hybrid_smoke", run_name="__main__")
     )
 
 from api import storage as api_storage  # noqa: E402
+from modules import _common as common_storage  # noqa: E402
 from modules import storage as shared_storage  # noqa: E402
+from modules.hybrid import coordinator as hybrid_coordinator  # noqa: E402
 from modules.hybrid import worker as hybrid_worker  # noqa: E402
 
 shared_names = (
@@ -87,6 +89,15 @@ check(
         and getattr(hybrid_worker, name) is getattr(shared_storage, name)
         for name in shared_names
     ),
+)
+check(
+    "test_api_common_worker_and_hybrid_callback_share_one_data_root",
+    api_storage.DATA_DIR is shared_storage.DATA_DIR
+    and api_storage.JOBS_DIR is shared_storage.JOBS_DIR
+    and common_storage.DATA_DIR is shared_storage.DATA_DIR
+    and common_storage.JOBS_DIR is shared_storage.JOBS_DIR
+    and hybrid_worker.JOBS_DIR is shared_storage.JOBS_DIR
+    and hybrid_coordinator.JOBS_DIR is shared_storage.JOBS_DIR,
 )
 if result.returncode != 0:
     print(result.stdout, end="")

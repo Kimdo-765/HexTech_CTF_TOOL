@@ -32,6 +32,7 @@ from modules._prompts import (  # noqa: E402,F401
     TRIAGE_AGENT_PROMPT,
     DEBUGGER_AGENT_PROMPT,
 )
+from modules.storage import DATA_DIR, JOBS_DIR  # noqa: E402
 
 # Common CTF flag formats. The leading prefix can vary per event; cover the
 # usual suspects + a generic short-prefix fallback.
@@ -378,8 +379,6 @@ def main_session_hooks(add_dirs, work_dir, job_id: str | None = None):
     ]}
 
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-JOBS_DIR = DATA_DIR / "jobs"
 # Operator-curated exploit library; mounted into worker via the
 # existing ./data:/data bind-mount. Agents browse via plain Bash:
 # `ls /data/exploits/`, `cat /data/exploits/<id>/report.md`.

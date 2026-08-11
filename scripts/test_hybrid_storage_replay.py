@@ -360,6 +360,48 @@ def valid_hybrid(label: str, *, curated=None):
     return parent, child, real, decoy, weak
 
 
+def two_stage_confirmed_hybrid(label: str):
+    """Match the live rev->pwn shape: A cannot confirm; B owns two records."""
+
+    global sequence
+    sequence += 1
+    parent = f"{label}-{sequence}-parent"
+    first = f"{label}-{sequence}-rev"
+    second = f"{label}-{sequence}-pwn"
+    first_flag = f"DH{{{label}_{sequence}_first}}"
+    second_flag = f"DH{{{label}_{sequence}_second}}"
+    COORD.create_parent(
+        parent,
+        "rev-pwn",
+        meta={"filename": f"{label}.bin", "target_url": "target:31337"},
+    )
+    COORD.start(parent, first)
+    first_meta = read_meta(first)
+    first_meta.update(status="no_flag", flags=[], flag_candidates=[])
+    write_meta(first, first_meta)
+    COORD.advance(parent, next_child_job_id=second)
+    COORD.verify_handoff(second)
+
+    second_meta = read_meta(second)
+    second_meta.update(
+        status="finished",
+        flags=[first_flag, second_flag],
+        flag_candidates=[],
+        flag_provenance="marker",
+        flag_sweep_suppressed=False,
+    )
+    write_meta(second, second_meta)
+    second_dir = JOBS / second
+    (second_dir / "exploit.py").write_text("print('stage B exploit')\n", encoding="utf-8")
+    (second_dir / "report.md").write_text("stage B report\n", encoding="utf-8")
+    (second_dir / "findings.json").write_text(
+        json.dumps({"solver_strategy": {"approach": "two-stage-pwn"}}),
+        encoding="utf-8",
+    )
+    COORD.advance(parent)
+    return parent, first, second, first_flag, second_flag
+
+
 def save(parent: str):
     return X.save_exploit(X.SaveBody(job_id=parent))
 
@@ -420,6 +462,45 @@ if curated is not CASE_FAILED:
         "test_curation_does_not_change_artifact_child",
         (curated["flags"], curated["source_child_job_id"]),
         ([decoy], child),
+    )
+
+parent, _first, second, first_flag, second_flag = two_stage_confirmed_hybrid(
+    "live-shape"
+)
+two_stage = capture(
+    "test_two_stage_two_confirmed_projection_saves_before_reordering",
+    lambda: save(parent),
+)
+if two_stage is not CASE_FAILED:
+    parent_meta = read_meta(parent)
+    confirmed = [
+        record
+        for record in parent_meta["hybrid"]["stage_flag_evidence"]
+        if record.get("disposition") == "confirmed"
+    ]
+    check(
+        "test_live_shape_has_two_ordered_confirmed_records_from_stage_b",
+        (
+            [(record["stage"], record["module"], record["child_job_id"], record["value"])
+             for record in confirmed],
+            two_stage["source_child_job_id"],
+            two_stage["flags"],
+        ),
+        (
+            [
+                (1, "pwn", second, first_flag),
+                (1, "pwn", second, second_flag),
+            ],
+            second,
+            [first_flag, second_flag],
+        ),
+    )
+    parent_meta["flags"] = [second_flag, first_flag]
+    write_meta(parent, parent_meta)
+    expect_400(
+        "test_live_shape_two_confirmed_reordering_is_rejected",
+        parent,
+        "hybrid parent curated flags do not match canonical confirmed evidence",
     )
 
 parent, _child, _real, _decoy, _weak = valid_hybrid(

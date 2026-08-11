@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
+
+from modules.storage import JOBS_DIR
 
 
 HYBRID_VERSION = 1
@@ -752,8 +753,7 @@ def fail_parent_on_rq_failure(
     else:
         type_name = getattr(_exc_type, "__name__", "RQJobError")
         error = RuntimeError(f"{type_name}: {exc_value}")
-    jobs_dir = Path(os.environ.get("DATA_DIR", "/data")) / "jobs"
-    HybridCoordinator(jobs_dir).fail_parent(parent_job_id, error)
+    HybridCoordinator(JOBS_DIR).fail_parent(parent_job_id, error)
 
 
 __all__ = [
