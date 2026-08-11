@@ -2,9 +2,10 @@
 """S1 hybrid coordinator lifecycle, evidence, and isolated handoff contract.
 
 Every check is named and the mutation modes alter the imported production
-objects in this test process only.  Control-flow-preserving mutations reach the
-summary.  ``predicate-tier`` instead mirrors the equivalent production edit
-exactly, including its failure count and whether the harness reaches summary.
+objects in this test process only.  A mutation that raises from a coordinator
+call is contained by the affected check, so the remaining independent checks
+still reach the summary.  ``predicate-tier`` mirrors the equivalent production
+edit exactly, including its failure count.
 
 Run: python3 scripts/test_hybrid_coordinator.py [--mutate NAME]
 """
@@ -152,6 +153,19 @@ def expect_error(label: str, fn, error=C.HybridCoordinatorError) -> None:
         check(label, False)
 
 
+CASE_FAILED = object()
+
+
+def capture_case(label: str, fn):
+    """Turn an unexpected exception from one check into a named failure."""
+
+    try:
+        return fn()
+    except Exception as exc:  # keep later independent checks running to summary
+        check(label, f"unexpected exception: {type(exc).__name__}: {exc}", True)
+        return CASE_FAILED
+
+
 def meta(job_id: str) -> dict:
     return json.loads((JOBS / job_id / "meta.json").read_text(encoding="utf-8"))
 
@@ -257,38 +271,74 @@ check(
     ("finished", ["DH{a_confirmed}"], ["DH{stream_candidate}"], None),
 )
 
-result, _, _, _ = run_two_stage(
-    "weak-no-flag",
-    {"status": "finished", "flags": ["DH{a_weak}"], "flag_provenance": "narrative"},
-    {"status": "no_flag", "flags": []},
-)
-check(
+terminal_2 = capture_case(
     "test_terminal_2_a_weak_b_no_flag",
-    (result["status"], result["flags"], result["flag_candidates"]),
-    ("no_flag", [], ["DH{a_weak}"]),
+    lambda: run_two_stage(
+        "weak-no-flag",
+        {
+            "status": "finished",
+            "flags": ["DH{a_weak}"],
+            "flag_provenance": "narrative",
+        },
+        {"status": "no_flag", "flags": []},
+    ),
 )
+if terminal_2 is not CASE_FAILED:
+    result, _, _, _ = terminal_2
+    check(
+        "test_terminal_2_a_weak_b_no_flag",
+        (result["status"], result["flags"], result["flag_candidates"]),
+        ("no_flag", [], ["DH{a_weak}"]),
+    )
 
-result, _, _, _ = run_two_stage(
-    "weak-confirmed",
-    {"status": "finished", "flags": ["DH{a_weak_2}"], "flag_provenance": "narrative"},
-    {"status": "finished", "flags": ["DH{b_confirmed}"], "flag_provenance": "marker", "flag_sweep_suppressed": False},
-)
-check(
+terminal_3 = capture_case(
     "test_terminal_3_a_weak_b_confirmed",
-    (result["status"], result["flags"], result["flag_candidates"]),
-    ("finished", ["DH{b_confirmed}"], ["DH{a_weak_2}"]),
+    lambda: run_two_stage(
+        "weak-confirmed",
+        {
+            "status": "finished",
+            "flags": ["DH{a_weak_2}"],
+            "flag_provenance": "narrative",
+        },
+        {
+            "status": "finished",
+            "flags": ["DH{b_confirmed}"],
+            "flag_provenance": "marker",
+            "flag_sweep_suppressed": False,
+        },
+    ),
 )
+if terminal_3 is not CASE_FAILED:
+    result, _, _, _ = terminal_3
+    check(
+        "test_terminal_3_a_weak_b_confirmed",
+        (result["status"], result["flags"], result["flag_candidates"]),
+        ("finished", ["DH{b_confirmed}"], ["DH{a_weak_2}"]),
+    )
 
-result, _, _, _ = run_two_stage(
-    "both-weak",
-    {"status": "finished", "flags": ["DH{a_weak_3}"], "flag_provenance": "narrative"},
-    {"status": "finished", "flags": ["DH{b_weak}"], "flag_provenance": "runner_regex"},
-)
-check(
+terminal_4 = capture_case(
     "test_terminal_4_both_weak_exhausts_as_no_flag",
-    (result["status"], result["flags"], result["flag_candidates"]),
-    ("no_flag", [], ["DH{a_weak_3}", "DH{b_weak}"]),
+    lambda: run_two_stage(
+        "both-weak",
+        {
+            "status": "finished",
+            "flags": ["DH{a_weak_3}"],
+            "flag_provenance": "narrative",
+        },
+        {
+            "status": "finished",
+            "flags": ["DH{b_weak}"],
+            "flag_provenance": "runner_regex",
+        },
+    ),
 )
+if terminal_4 is not CASE_FAILED:
+    result, _, _, _ = terminal_4
+    check(
+        "test_terminal_4_both_weak_exhausts_as_no_flag",
+        (result["status"], result["flags"], result["flag_candidates"]),
+        ("no_flag", [], ["DH{a_weak_3}", "DH{b_weak}"]),
+    )
 
 result, _, _, _ = run_two_stage(
     "both-no-flag",
@@ -337,30 +387,53 @@ check(
 
 # ------------------------------------------------------- canonical evidence
 same = "DH{same_across_stages}"
-result, _, first, second = run_two_stage(
-    "collision",
-    {"status": "finished", "flags": [same], "flag_candidates": [same], "flag_provenance": "narrative"},
-    {"status": "finished", "flags": [same], "flag_provenance": "marker", "flag_sweep_suppressed": False},
-)
-records = result["hybrid"]["stage_flag_evidence"]
-check(
+collision = capture_case(
     "test_cross_stage_same_value_projects_once_but_keeps_two_records",
-    (result["flags"], result["flag_candidates"], len(records)),
-    ([same], [], 2),
+    lambda: run_two_stage(
+        "collision",
+        {
+            "status": "finished",
+            "flags": [same],
+            "flag_candidates": [same],
+            "flag_provenance": "narrative",
+        },
+        {
+            "status": "finished",
+            "flags": [same],
+            "flag_provenance": "marker",
+            "flag_sweep_suppressed": False,
+        },
+    ),
 )
-check(
-    "test_evidence_preserves_stage_module_child_and_disposition",
-    [(r.get("stage"), r.get("module"), r.get("child_job_id"), r.get("disposition")) for r in records],
-    [(0, "rev", first, "unverified"), (1, "pwn", second, "confirmed")],
-)
-check(
-    "test_evidence_preserves_provenance_object",
-    [r.get("provenance") for r in records],
-    [
-        {"field": "flags", "tier": "narrative", "sweep_suppressed": None},
-        {"field": "flags", "tier": "marker", "sweep_suppressed": False},
-    ],
-)
+if collision is not CASE_FAILED:
+    result, _, first, second = collision
+    records = result["hybrid"]["stage_flag_evidence"]
+    check(
+        "test_cross_stage_same_value_projects_once_but_keeps_two_records",
+        (result["flags"], result["flag_candidates"], len(records)),
+        ([same], [], 2),
+    )
+    check(
+        "test_evidence_preserves_stage_module_child_and_disposition",
+        [
+            (
+                r.get("stage"),
+                r.get("module"),
+                r.get("child_job_id"),
+                r.get("disposition"),
+            )
+            for r in records
+        ],
+        [(0, "rev", first, "unverified"), (1, "pwn", second, "confirmed")],
+    )
+    check(
+        "test_evidence_preserves_provenance_object",
+        [r.get("provenance") for r in records],
+        [
+            {"field": "flags", "tier": "narrative", "sweep_suppressed": None},
+            {"field": "flags", "tier": "marker", "sweep_suppressed": False},
+        ],
+    )
 
 p, a, _ = start_chain("candidate-provenance")
 update(a, status="failed", flags=[], flag_candidates=["DH{candidate_only}"])
@@ -379,37 +452,53 @@ update(
     flags=["DH{stage_a_weak_snapshot}"],
     flag_provenance="narrative",
 )
-COORD.advance(snapshot_parent, next_child_job_id=snapshot_b)
-# A terminal analyzer may still flush unrelated bookkeeping.  Even if its
-# evidence fields are corrupted later, the parent-owned completed-stage
-# snapshot must not silently change while B is running.
-update(
-    snapshot_a,
-    status="finished",
-    flags=["DH{rewritten_as_confirmed}"],
-    flag_provenance="marker",
-    flag_sweep_suppressed=False,
-)
-update(snapshot_b, status="no_flag", flags=[])
-snapshot_result = COORD.advance(snapshot_parent)
-check(
+snapshot_started = capture_case(
     "test_completed_stage_evidence_snapshot_is_not_reread_or_promoted",
-    (
-        snapshot_result["status"],
-        snapshot_result["flags"],
-        snapshot_result["flag_candidates"],
-        snapshot_result["hybrid"]["stage_flag_evidence"][0]["value"],
-    ),
-    ("no_flag", [], ["DH{stage_a_weak_snapshot}"], "DH{stage_a_weak_snapshot}"),
+    lambda: COORD.advance(snapshot_parent, next_child_job_id=snapshot_b),
 )
+if snapshot_started is not CASE_FAILED:
+    # A terminal analyzer may still flush unrelated bookkeeping.  Even if its
+    # evidence fields are corrupted later, the parent-owned completed-stage
+    # snapshot must not silently change while B is running.
+    update(
+        snapshot_a,
+        status="finished",
+        flags=["DH{rewritten_as_confirmed}"],
+        flag_provenance="marker",
+        flag_sweep_suppressed=False,
+    )
+    update(snapshot_b, status="no_flag", flags=[])
+    snapshot_result = COORD.advance(snapshot_parent)
+    check(
+        "test_completed_stage_evidence_snapshot_is_not_reread_or_promoted",
+        (
+            snapshot_result["status"],
+            snapshot_result["flags"],
+            snapshot_result["flag_candidates"],
+            snapshot_result["hybrid"]["stage_flag_evidence"][0]["value"],
+        ),
+        (
+            "no_flag",
+            [],
+            ["DH{stage_a_weak_snapshot}"],
+            "DH{stage_a_weak_snapshot}",
+        ),
+    )
 
 
 # ------------------------------------------------ parent meta-only boundary
 p, a, b = start_chain("meta-only")
 update(a, status="finished", flags=["DH{weak_parent_only}"], flag_provenance="narrative")
-COORD.advance(p, next_child_job_id=b)
-update(b, status="no_flag", flags=[])
-COORD.advance(p)
+meta_only_started = capture_case(
+    "test_parent_meta_only_lifecycle_reaches_second_stage",
+    lambda: COORD.advance(p, next_child_job_id=b),
+)
+if meta_only_started is not CASE_FAILED:
+    update(b, status="no_flag", flags=[])
+    capture_case(
+        "test_parent_meta_only_lifecycle_reaches_terminal",
+        lambda: COORD.advance(p),
+    )
 parent_files = sorted(path.name for path in (JOBS / p).iterdir())
 check("test_parent_directory_contains_meta_json_only", parent_files, ["meta.json"])
 
@@ -451,64 +540,79 @@ update(
     flags=["DH{handoff_hypothesis}"],
     flag_provenance="narrative",
 )
-COORD.advance(
-    p,
-    next_child_job_id=b,
-    handoff_paths=("report.md", "findings.json", "solver.py", "decomp", "src"),
-)
-manifest = COORD.verify_handoff(b)
-manifest_paths = [entry["path"] for entry in manifest["files"]]
-check(
+handoff_started = capture_case(
     "test_manifest_copies_only_declared_allowlisted_files",
-    manifest_paths,
-    ["decomp/main.c", "findings.json", "report.md", "solver.py", "src/challenge.bin"],
+    lambda: COORD.advance(
+        p,
+        next_child_job_id=b,
+        handoff_paths=("report.md", "findings.json", "solver.py", "decomp", "src"),
+    ),
 )
-check(
-    "test_manifest_does_not_copy_undeclared_sibling",
-    (JOBS / b / "handoff" / "secret.txt").exists(),
-    False,
-)
-check(
-    "test_manifest_hash_is_bound_into_parent_stage_and_child",
-    (meta(p)["hybrid"]["stages"][0]["handoff_sha256"], meta(b)["hybrid_handoff"]["sha256"]),
-    (manifest["sha256"], manifest["sha256"]),
-)
-check(
-    "test_manifest_carries_weak_value_provenance_and_source_child",
-    manifest["unverified_flag_candidates"],
-    [
-        {
-            "stage": 0,
-            "module": "rev",
-            "child_job_id": a,
-            "value": "DH{handoff_hypothesis}",
-            "provenance": {
-                "field": "flags",
-                "tier": "narrative",
-                "sweep_suppressed": None,
-            },
-            "disposition": "unverified",
-        }
-    ],
-)
-source_report_before = (source / "report.md").read_text(encoding="utf-8")
-target_report = JOBS / b / "handoff" / "report.md"
-check(
-    "test_handoff_uses_distinct_files_not_shared_rw_inode",
-    os.stat(source / "report.md").st_ino == os.stat(target_report).st_ino,
-    False,
-)
-target_report.write_text("report-B", encoding="utf-8")  # same length, hash-only detection
-check(
-    "test_handoff_target_mutation_does_not_change_source_snapshot",
-    (source / "report.md").read_text(encoding="utf-8"),
-    source_report_before,
-)
-expect_error(
-    "test_manifest_detects_same_size_content_tamper_by_hash",
-    lambda: COORD.verify_handoff(b),
-    C.HandoffValidationError,
-)
+if handoff_started is not CASE_FAILED:
+    manifest = COORD.verify_handoff(b)
+    manifest_paths = [entry["path"] for entry in manifest["files"]]
+    check(
+        "test_manifest_copies_only_declared_allowlisted_files",
+        manifest_paths,
+        [
+            "decomp/main.c",
+            "findings.json",
+            "report.md",
+            "solver.py",
+            "src/challenge.bin",
+        ],
+    )
+    check(
+        "test_manifest_does_not_copy_undeclared_sibling",
+        (JOBS / b / "handoff" / "secret.txt").exists(),
+        False,
+    )
+    check(
+        "test_manifest_hash_is_bound_into_parent_stage_and_child",
+        (
+            meta(p)["hybrid"]["stages"][0]["handoff_sha256"],
+            meta(b)["hybrid_handoff"]["sha256"],
+        ),
+        (manifest["sha256"], manifest["sha256"]),
+    )
+    check(
+        "test_manifest_carries_weak_value_provenance_and_source_child",
+        manifest["unverified_flag_candidates"],
+        [
+            {
+                "stage": 0,
+                "module": "rev",
+                "child_job_id": a,
+                "value": "DH{handoff_hypothesis}",
+                "provenance": {
+                    "field": "flags",
+                    "tier": "narrative",
+                    "sweep_suppressed": None,
+                },
+                "disposition": "unverified",
+            }
+        ],
+    )
+    source_report_before = (source / "report.md").read_text(encoding="utf-8")
+    target_report = JOBS / b / "handoff" / "report.md"
+    check(
+        "test_handoff_uses_distinct_files_not_shared_rw_inode",
+        os.stat(source / "report.md").st_ino == os.stat(target_report).st_ino,
+        False,
+    )
+    target_report.write_text(
+        "report-B", encoding="utf-8"
+    )  # same length, hash-only detection
+    check(
+        "test_handoff_target_mutation_does_not_change_source_snapshot",
+        (source / "report.md").read_text(encoding="utf-8"),
+        source_report_before,
+    )
+    expect_error(
+        "test_manifest_detects_same_size_content_tamper_by_hash",
+        lambda: COORD.verify_handoff(b),
+        C.HandoffValidationError,
+    )
 
 
 def make_handoff(label: str) -> tuple[str, str, str]:
