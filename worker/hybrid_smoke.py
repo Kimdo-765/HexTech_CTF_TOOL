@@ -30,8 +30,26 @@ def main() -> int:
         )
         return 1
 
+    try:
+        coordinator = importlib.import_module("modules.hybrid.coordinator")
+        failure_callback = getattr(coordinator, "fail_parent_on_rq_failure", None)
+    except Exception as exc:
+        print(
+            f"[hybrid_smoke] failure callback import failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if not callable(failure_callback):
+        print(
+            "[hybrid_smoke] modules.hybrid.coordinator.fail_parent_on_rq_failure "
+            "is not callable",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
-        "[hybrid_smoke] PASS: modules.hybrid.worker.run_job is importable and callable"
+        "[hybrid_smoke] PASS: hybrid entrypoint and independent failure callback "
+        "are importable and callable"
     )
     return 0
 

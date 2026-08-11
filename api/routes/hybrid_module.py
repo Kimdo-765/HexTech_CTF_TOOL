@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from rq import Callback
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
 from api.storage import JOBS_DIR, UPLOADS_DIR, new_job_id, parse_targets
 from modules.agent_provider import enrich_job_meta
-from modules.hybrid.coordinator import HybridCoordinator, HybridCoordinatorError
+from modules.hybrid.coordinator import (
+    HybridCoordinator,
+    HybridCoordinatorError,
+    fail_parent_on_rq_failure,
+)
 
 
 router = APIRouter()
@@ -165,6 +170,7 @@ async def analyze_hybrid(
         job_id,
         job_id=job_id,
         job_timeout=hard_timeout_for(timeout),
+        on_failure=Callback(fail_parent_on_rq_failure, timeout=10),
     )
 
     return {

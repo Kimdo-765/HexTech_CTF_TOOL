@@ -65,6 +65,10 @@ runpy.run_module("worker.hybrid_smoke", run_name="__main__")
         "test_named_worker_smoke_reaches_callable_entrypoint",
         "[hybrid_smoke] PASS" in result.stdout,
     )
+    check(
+        "test_failure_callback_imports_on_worker_mount_surface",
+        "independent failure callback are importable and callable" in result.stdout,
+    )
 
 from api import storage as api_storage  # noqa: E402
 from modules import storage as shared_storage  # noqa: E402

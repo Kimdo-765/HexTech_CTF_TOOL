@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
 import sys
 import tempfile
@@ -32,6 +33,7 @@ MUTATIONS = (
     "recipe-alias",
     "allow-live-fire",
     "drop-enqueue",
+    "drop-failure-callback",
     "stale-buster",
 )
 parser = argparse.ArgumentParser()
@@ -103,6 +105,20 @@ fastapi.Form = lambda default=None, **_kwargs: default
 fastapi.HTTPException = HTTPException
 fastapi.UploadFile = object
 sys.modules["fastapi"] = fastapi
+
+
+rq = types.ModuleType("rq")
+
+
+class Callback:
+    def __init__(self, func, timeout=60):
+        self.func = func
+        self.timeout = timeout
+        self.name = f"{func.__module__}.{func.__name__}"
+
+
+rq.Callback = Callback
+sys.modules["rq"] = rq
 
 queue_module = types.ModuleType("api.queue")
 queue_module.normalize_effort = lambda raw: (
@@ -181,7 +197,13 @@ elif args.mutate == "allow-live-fire":
 elif args.mutate == "drop-enqueue":
     route_source = replace_once(
         route_source,
-        '''    queue = get_queue()\n    queue.enqueue(\n        "modules.hybrid.worker.run_job",\n        job_id,\n        job_id=job_id,\n        job_timeout=hard_timeout_for(timeout),\n    )\n''',
+        '''    queue = get_queue()\n    queue.enqueue(\n        "modules.hybrid.worker.run_job",\n        job_id,\n        job_id=job_id,\n        job_timeout=hard_timeout_for(timeout),\n        on_failure=Callback(fail_parent_on_rq_failure, timeout=10),\n    )\n''',
+        "",
+    )
+elif args.mutate == "drop-failure-callback":
+    route_source = replace_once(
+        route_source,
+        "        on_failure=Callback(fail_parent_on_rq_failure, timeout=10),\n",
         "",
     )
 
@@ -380,13 +402,84 @@ check("test_route_calls_agent_provider_enrichment", len(enriched), 2)
 check(
     "test_each_created_parent_is_enqueued_once_to_hybrid_worker",
     [
-        (function, positional, keywords.get("job_id"), keywords.get("job_timeout"))
+        (
+            function,
+            positional,
+            keywords.get("job_id"),
+            keywords.get("job_timeout"),
+            getattr(keywords.get("on_failure"), "name", None),
+            getattr(keywords.get("on_failure"), "timeout", None),
+        )
         for function, positional, keywords in enqueued
     ],
     [
-        ("modules.hybrid.worker.run_job", (upload_id,), upload_id, 1284),
-        ("modules.hybrid.worker.run_job", (remote_id,), remote_id, 1284),
+        (
+            "modules.hybrid.worker.run_job",
+            (upload_id,),
+            upload_id,
+            1284,
+            "modules.hybrid.coordinator.fail_parent_on_rq_failure",
+            10,
+        ),
+        (
+            "modules.hybrid.worker.run_job",
+            (remote_id,),
+            remote_id,
+            1284,
+            "modules.hybrid.coordinator.fail_parent_on_rq_failure",
+            10,
+        ),
     ],
+)
+
+# RQ resolves the function before calling it.  Invoke only the separately
+# stored failure callback, as RQ does after a nonexistent entrypoint fails, so
+# this probe cannot accidentally get protection from run_job's own try/except.
+rq_failure_error = ModuleNotFoundError(
+    "No module named 'modules.missing_hybrid_entrypoint'"
+)
+failure_callback = enqueued[0][2].get("on_failure") if enqueued else None
+callback_error = None
+old_data_dir = os.environ.get("DATA_DIR")
+os.environ["DATA_DIR"] = str(DATA)
+try:
+    if failure_callback is None:
+        callback_error = "missing failure callback"
+    else:
+        failure_callback.func(
+            types.SimpleNamespace(id=upload_id),
+            None,
+            ModuleNotFoundError,
+            rq_failure_error,
+            None,
+        )
+except Exception as exc:
+    callback_error = f"{type(exc).__name__}:{exc}"
+finally:
+    if old_data_dir is None:
+        os.environ.pop("DATA_DIR", None)
+    else:
+        os.environ["DATA_DIR"] = old_data_dir
+
+failed_entrypoint_meta = (
+    json.loads((JOBS / upload_id / "meta.json").read_text(encoding="utf-8"))
+    if (JOBS / upload_id / "meta.json").is_file()
+    else {}
+)
+check(
+    "test_nonexistent_rq_entrypoint_callback_terminalizes_queued_hybrid_parent",
+    (
+        callback_error,
+        failed_entrypoint_meta.get("status"),
+        failed_entrypoint_meta.get("error"),
+        isinstance(failed_entrypoint_meta.get("finished_at"), str),
+    ),
+    (
+        None,
+        "failed",
+        "No module named 'modules.missing_hybrid_entrypoint'",
+        True,
+    ),
 )
 
 

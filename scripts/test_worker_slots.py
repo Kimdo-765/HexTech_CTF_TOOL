@@ -144,6 +144,8 @@ def test_slot_scan() -> None:
         scan([{"status": "finished", "worker_slot": "1"}]) == "IDLE")
     chk("stopped jobs hold no slot",
         scan([{"status": "stopped", "worker_slot": "1"}]) == "IDLE")
+    chk("failed jobs hold no slot",
+        scan([{"status": "failed", "worker_slot": "1"}]) == "IDLE")
     # fail-closed cases
     chk("QUEUED job -> defer every slot (it is unplaced)",
         scan([{"status": "queued"}]).startswith("ALL"))

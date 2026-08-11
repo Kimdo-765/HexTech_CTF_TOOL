@@ -726,6 +726,36 @@ class HybridCoordinator:
         return parent
 
 
+def fail_parent_on_rq_failure(
+    job: Any,
+    _connection: Any,
+    _exc_type: Any,
+    exc_value: Any,
+    _traceback: Any,
+    *_args: Any,
+    **_kwargs: Any,
+) -> None:
+    """Terminalize a hybrid parent when RQ fails before ``run_job`` can.
+
+    RQ resolves the job function before entering ``run_job``.  Import and
+    deserialization failures therefore cannot reach the entrypoint's own
+    ``try``/``except`` boundary.  This callback deliberately lives beside the
+    dependency-light coordinator, not in the entrypoint module whose import may
+    be the failure, and writes the same terminal parent transition.
+    """
+
+    parent_job_id = getattr(job, "id", None)
+    if not isinstance(parent_job_id, str) or not parent_job_id:
+        raise HybridStateError("failed hybrid RQ job has no parent job id")
+    if isinstance(exc_value, BaseException):
+        error = exc_value
+    else:
+        type_name = getattr(_exc_type, "__name__", "RQJobError")
+        error = RuntimeError(f"{type_name}: {exc_value}")
+    jobs_dir = Path(os.environ.get("DATA_DIR", "/data")) / "jobs"
+    HybridCoordinator(jobs_dir).fail_parent(parent_job_id, error)
+
+
 __all__ = [
     "HANDOFF_DIRECTORIES",
     "HANDOFF_FILES",
@@ -735,5 +765,6 @@ __all__ = [
     "HybridCoordinator",
     "HybridCoordinatorError",
     "HybridStateError",
+    "fail_parent_on_rq_failure",
     "is_confirmed_capture",
 ]
