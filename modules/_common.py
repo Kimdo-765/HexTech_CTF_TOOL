@@ -1951,10 +1951,13 @@ _PLACEHOLDER_INNERS = {
 # (2) the body is a full-match of placeholder-words+filler only, so an
 # incidental substring (`con-test-_winner`, `winnertest`) fails the body match
 # even though the lookahead sees "test". Real Dreamhack hex flags contain no
-# such word → never matched.
+# such word → never matched. `candidate` is also unambiguous in an inner
+# made entirely from this vocabulary: jobs 5c3974d26ab4, 47de39fd0c01 and
+# 94d105ace230 all promoted the agent-authored `DH{candidate_here}` and ended
+# their retry loops without the solver ever printing that string.
 _PLACEHOLDER_WORD_RE = re.compile(
-    r"^(?=.*(?:test|fake|dummy|example|sample|placeholder|redacted|todo))"
-    r"(?:test|fake|dummy|example|sample|placeholder|redacted|todo|flag|"
+    r"^(?=.*(?:test|fake|dummy|example|sample|placeholder|redacted|todo|candidate))"
+    r"(?:test|fake|dummy|example|sample|placeholder|redacted|todo|candidate|flag|"
     r"local|default|your|here|insert|the|real|change(?:me)?|goes|fill|blank|"
     r"[_\-\s\d])+$"
 )
@@ -6432,6 +6435,19 @@ def auto_retry_max() -> int:
     return max(0, n)
 
 
+def _auto_retry_success(flags_now: list[str], verdict: str | None) -> bool:
+    """Whether the current sandbox attempt may terminate the retry loop.
+
+    ``flags_now`` has already passed ``scan_job_for_flags`` and therefore the
+    placeholder filter. Keep non-placeholder narrative captures terminal: a
+    target may die after the agent captured a genuine flag, leaving prose as
+    its only surviving source (job 07d256325546). A judge success remains an
+    independent terminal signal, including the existing zero-harvest warning
+    path below.
+    """
+    return bool(flags_now) or verdict == "success"
+
+
 # Heap-specific failure code → prescriptive fix snippet. Kept here next
 # to _format_postjudge_user_turn so the model's textual retry_hint is
 # always sharpened by a deterministic "this code → this exact fix"
@@ -9188,7 +9204,7 @@ async def run_main_agent_session(
             _hint_just_now = (judge_out.get("retry_hint") or "").strip()
             if _hint_just_now:
                 summary["judge_hints"].append(_hint_just_now)
-            if flags_now or verdict == "success":
+            if _auto_retry_success(flags_now, verdict):
                 if verdict == "success" and not flags_now:
                     # Silent contradiction: the judge confirmed a capture but
                     # scan_job_for_flags harvested nothing. Almost always a

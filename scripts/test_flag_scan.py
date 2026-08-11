@@ -62,7 +62,8 @@ def _load(jobdir: pathlib.Path, flag_format: str = ""):
     nodes = [n for n in tree.body if isinstance(n, _ast.Assign)]
     nodes += [n for n in tree.body if isinstance(n, _ast.FunctionDef)
               and n.name in {"scan_job_for_flags", "_is_placeholder_flag",
-                             "job_flag_format_re"}]
+                             "job_flag_format_re", "_recorded_artifact_names",
+                             "_auto_retry_success"}]
     ns: dict = {
         "re": re, "json": json, "os": __import__("os"),
         "Path": pathlib.Path,
@@ -93,6 +94,8 @@ BANNER = "target: DH{ + 36 chars of [a-z0-9_] + }"
 DENIAL = "no flag found; tried 3383296 candidates in 1500s"
 REAL = "DH{bb3cd526550f28ebc618d59e4bebcb6ec82d09dd6d8a98d3d13cb0c695c4796d}"
 REAL2 = "DH{Br1ll1ant_bit_dr1bble_<<_>>}"
+CANDIDATE_PLACEHOLDER = "DH{candidate_here}"
+NARRATIVE_CAPTURE = "DH{2996f516cdf17978ee6dda6d02b35b}"
 
 
 def main() -> int:
@@ -209,6 +212,37 @@ def main() -> int:
     chk("...and a digit-led metavariable never reaches meta.flags",
         ns["scan_job_for_flags"]("j", trusted_only=True) == [],
         ns["scan_job_for_flags"]("j", trusted_only=True))
+
+    section("narrative placeholders must not terminate auto-retry")
+    for job_id in ("5c3974d26ab4", "47de39fd0c01", "94d105ace230"):
+        d = _job(**{"report.md": "candidate: " + CANDIDATE_PLACEHOLDER + "\n"})
+        ns = _load(d, flag_format="DH{...}")
+        flags = ns["scan_job_for_flags"](job_id)
+        chk(f"REGRESSION {job_id}: DH{{candidate_here}} is filtered",
+            flags == [], flags)
+        chk(f"REGRESSION {job_id}: filtered prose keeps the retry loop open",
+            not ns["_auto_retry_success"](flags, "failure"), flags)
+
+    source = (ROOT / "modules" / "_common.py").read_text()
+    chk("REGRESSION: the production success branch uses the tested decision",
+        source.count("if _auto_retry_success(flags_now, verdict):") == 1)
+
+    section("non-placeholder narrative captures keep existing behavior")
+    d = _job(**{"report.md": "captured live: " + NARRATIVE_CAPTURE + "\n"})
+    ns = _load(d, flag_format="DH{...}")
+    pv = {}
+    flags = ns["scan_job_for_flags"]("07d256325546", provenance_out=pv)
+    chk("REGRESSION 07d256325546: the narrative capture survives",
+        flags == [NARRATIVE_CAPTURE] and pv.get("tier") == "narrative",
+        (flags, pv))
+    chk("REGRESSION 07d256325546: that capture still terminates auto-retry",
+        ns["_auto_retry_success"](flags, "failure"), flags)
+    chk("judge success remains independently terminal with zero harvested flags",
+        ns["_auto_retry_success"]([], "success"))
+    chk("candidate plus real entropy is not classified as a placeholder",
+        not ns["_is_placeholder_flag"](
+            "DH{candidate_2996f516cdf17978ee6dda6d02b35b}"
+        ))
 
     section("sibling matchers share the character class")
     crypto = (ROOT / "modules" / "crypto" / "pre_analysis.py").read_text()
