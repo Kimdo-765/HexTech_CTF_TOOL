@@ -15,7 +15,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from api.storage import JOBS_DIR, UPLOADS_DIR, extract_if_archive, new_job_id
 from modules.hybrid.coordinator import (
     HANDOFF_DIRECTORIES,
     HANDOFF_FILES,
@@ -24,6 +23,7 @@ from modules.hybrid.coordinator import (
     HybridStateError,
     is_confirmed_capture,
 )
+from modules.storage import JOBS_DIR, UPLOADS_DIR, extract_if_archive, new_job_id
 
 
 _SCALAR_RUNNERS = {

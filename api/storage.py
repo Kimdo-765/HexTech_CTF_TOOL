@@ -1,12 +1,17 @@
 import json
-import os
 import re
 import shutil
-import uuid
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from modules.storage import (
+    DATA_DIR,
+    JOBS_DIR,
+    UPLOADS_DIR,
+    extract_if_archive,
+    new_job_id,
+)
 
 # Split an operator target field into individual targets. Newlines are the
 # documented separator (the UI target box is a textarea — one per line);
@@ -36,9 +41,6 @@ def parse_targets(raw: Optional[str], *, limit: int = 32) -> list[str]:
                 break
     return out
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-JOBS_DIR = DATA_DIR / "jobs"
-UPLOADS_DIR = DATA_DIR / "uploads"
 # Operator-curated library of past exploits/solvers a future job can
 # consult when stuck on technique / leak-vector choice. Filesystem-
 # backed (no SQLite) so `tar -czf - data/exploits/` is a complete
@@ -48,10 +50,6 @@ EXPLOITS_DIR = DATA_DIR / "exploits"
 
 def exploit_dir(exploit_id: str) -> Path:
     return EXPLOITS_DIR / exploit_id
-
-
-def new_job_id() -> str:
-    return uuid.uuid4().hex[:12]
 
 
 def job_dir(job_id: str) -> Path:
@@ -114,19 +112,6 @@ def save_upload(job_id: str, filename: str, content: bytes) -> Path:
     target = src_dir / filename
     target.write_bytes(content)
     return target
-
-
-def extract_if_archive(path: Path) -> Path:
-    """If path is a zip, extract into a sibling dir and return that dir.
-    Otherwise return the parent directory.
-    """
-    if path.suffix.lower() == ".zip":
-        out = path.parent / "extracted"
-        out.mkdir(exist_ok=True)
-        with zipfile.ZipFile(path, "r") as zf:
-            zf.extractall(out)
-        return out
-    return path.parent
 
 
 def cleanup_job(job_id: str) -> None:
