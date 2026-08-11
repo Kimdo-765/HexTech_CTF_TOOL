@@ -31,6 +31,7 @@ MUTATIONS = (
     "upload-parent",
     "recipe-alias",
     "allow-live-fire",
+    "drop-enqueue",
     "stale-buster",
 )
 parser = argparse.ArgumentParser()
@@ -110,6 +111,16 @@ queue_module.normalize_effort = lambda raw: (
     else None
 )
 queue_module.resolve_timeout = lambda value: value if value and value > 0 else 6000
+queue_module.hard_timeout_for = lambda value: value * 4
+enqueued = []
+
+
+class Queue:
+    def enqueue(self, function, *positional, **keywords):
+        enqueued.append((function, positional, keywords))
+
+
+queue_module.get_queue = Queue
 sys.modules["api.queue"] = queue_module
 
 job_ids = iter(("a10000000001", "a10000000002"))
@@ -166,6 +177,12 @@ elif args.mutate == "allow-live-fire":
         route_source,
         '    if "live-fire" in (raw or "").strip().lower() or "live-fire" in value:',
         "    if False:",
+    )
+elif args.mutate == "drop-enqueue":
+    route_source = replace_once(
+        route_source,
+        '''    queue = get_queue()\n    queue.enqueue(\n        "modules.hybrid.worker.run_job",\n        job_id,\n        job_id=job_id,\n        job_timeout=hard_timeout_for(timeout),\n    )\n''',
+        "",
     )
 
 route_ns = {"__name__": "hybrid_ingest_route_under_test"}
@@ -360,6 +377,17 @@ check(
     ("running", "web", ["meta.json"]),
 )
 check("test_route_calls_agent_provider_enrichment", len(enriched), 2)
+check(
+    "test_each_created_parent_is_enqueued_once_to_hybrid_worker",
+    [
+        (function, positional, keywords.get("job_id"), keywords.get("job_timeout"))
+        for function, positional, keywords in enqueued
+    ],
+    [
+        ("modules.hybrid.worker.run_job", (upload_id,), upload_id, 1284),
+        ("modules.hybrid.worker.run_job", (remote_id,), remote_id, 1284),
+    ],
+)
 
 
 # --------------------------------------------------------- API/UI surface

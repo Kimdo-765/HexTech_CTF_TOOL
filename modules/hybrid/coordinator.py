@@ -378,6 +378,45 @@ class HybridCoordinator:
         self._write_parent(parent_job_id, parent)
         return parent
 
+    def fail_parent(
+        self,
+        parent_job_id: str,
+        error: BaseException,
+        *,
+        fallback: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Terminalize a worker failure without replaying transition guards.
+
+        This is deliberately narrower than ``advance``: it records only the
+        public failure boundary and does not validate or project a child.  A
+        failed transition may have been caused by the parent-directory or
+        child-state guards themselves, so rerunning those guards here would
+        leave the parent live and could replace the original exception.
+
+        ``fallback`` is the worker's last successfully read parent snapshot.
+        It is used only when the current metadata cannot be read after a
+        partial transition; a terminal state already written by another path
+        is never overwritten.
+        """
+
+        try:
+            parent = self._read_meta(parent_job_id)
+        except HybridStateError:
+            if fallback is None or fallback.get("id") != parent_job_id:
+                raise
+            parent = json.loads(json.dumps(dict(fallback)))
+        if parent.get("status") in TERMINAL_STATUSES:
+            return parent
+        now = _now_iso()
+        parent["status"] = "failed"
+        parent["error"] = str(error)
+        parent.setdefault("finished_at", now)
+        parent["updated_at"] = now
+        # Do not call _write_parent(): its directory assertion may be the
+        # transition precondition that just failed.
+        _write_object(self._meta_path(parent_job_id), parent)
+        return parent
+
     @staticmethod
     def _validate_child(
         parent_job_id: str, stage: Mapping[str, Any], child: Mapping[str, Any]

@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from api.queue import normalize_effort, resolve_timeout
+from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
 from api.storage import JOBS_DIR, UPLOADS_DIR, new_job_id, parse_targets
 from modules.agent_provider import enrich_job_meta
 from modules.hybrid.coordinator import HybridCoordinator, HybridCoordinatorError
@@ -158,6 +158,14 @@ async def analyze_hybrid(
         if saved is not None:
             shutil.rmtree(upload_dir, ignore_errors=True)
         raise
+
+    queue = get_queue()
+    queue.enqueue(
+        "modules.hybrid.worker.run_job",
+        job_id,
+        job_id=job_id,
+        job_timeout=hard_timeout_for(timeout),
+    )
 
     return {
         "job_id": job_id,
