@@ -3178,36 +3178,22 @@ async function renderJob(id, opts = {}) {
 
   let resultBlock = liveFireOutcomeHtml(job, id);
   if (["finished", "running", "no_flag"].includes(job.status)) {
-    const links = [fileLink("result.json", `${API}/jobs/${id}/result`, "result.json")];
-    if (job.module !== "live-fire") {
-      links.push(fileLink("report.md", `${API}/jobs/${id}/file/report.md`, "report.md"));
-    }
-    // WHY_STOPPED.md only exists on abnormal stops — gate on the API's
-    // presence flag so a clean flag-capture run doesn't show a dead link.
-    if (job.has_why_stopped) {
-      links.push(fileLink("WHY_STOPPED.md", `${API}/jobs/${id}/file/WHY_STOPPED.md`, "WHY_STOPPED.md"));
-    }
-    if (job.module === "web" || job.module === "pwn") {
-      links.push(fileLink("exploit.py", `${API}/jobs/${id}/file/exploit.py`, "exploit.py"));
-      links.push(fileLink("stdout", `${API}/jobs/${id}/file/exploit.py.stdout`, "exploit.py.stdout"));
-      links.push(fileLink("stderr", `${API}/jobs/${id}/file/exploit.py.stderr`, "exploit.py.stderr"));
-    }
-    if (job.module === "crypto" || job.module === "rev") {
-      links.push(fileLink("solver.py", `${API}/jobs/${id}/file/solver.py`, "solver.py"));
-      links.push(fileLink("stdout", `${API}/jobs/${id}/file/solver.py.stdout`, "solver.py.stdout"));
-      links.push(fileLink("stderr", `${API}/jobs/${id}/file/solver.py.stderr`, "solver.py.stderr"));
-    }
-    if (job.module === "forensic") {
-      links.push(fileLink("summary.json", `${API}/jobs/${id}/file/summary.json`, "summary.json"));
-      links.push(fileLink("log_findings.json", `${API}/jobs/${id}/file/log_findings.json`, "log_findings.json"));
-      links.push(fileLink("collector.log", `${API}/jobs/${id}/file/collector.log`, "collector.log"));
-    }
-    if (job.module === "misc") {
-      links.push(fileLink("findings.json", `${API}/jobs/${id}/file/findings.json`, "findings.json"));
-      links.push(fileLink("analyze.log", `${API}/jobs/${id}/file/analyze.log`, "analyze.log"));
-    }
-    links.push(`<a href="/terminal?job_id=${encodeURIComponent(id)}" target="_blank">⌨ open terminal</a>`);
-    resultBlock += `<div class="file-links">${links.join(" ")}</div>`;
+    // The per-artifact link list is gone. It hard-coded one filename per
+    // module (`exploit.py.stdout`, `solver.py.stdout`, …) while the runner
+    // names artifacts after the script it actually ran — so a crypto Sage job
+    // produced `solver.sage.stdout` and every stdout/stderr link 404'd on a
+    // file that was sitting right there. Browsing the directory removes the
+    // guess entirely: whatever the run wrote is what is listed.
+    resultBlock += `
+      <div class="job-files" data-job="${escapeHtml(id)}">
+        <div class="job-files-bar">
+          <span class="job-files-crumbs"></span>
+          <button type="button" class="btn btn-sm job-files-refresh">Refresh</button>
+          <a href="/terminal?job_id=${encodeURIComponent(id)}" target="_blank"
+             class="job-files-terminal">⌨ open terminal</a>
+        </div>
+        <div class="job-files-list"><span class="c-dim">Loading…</span></div>
+      </div>`;
   }
 
   // Job facts as labelled chips rather than one `·`-joined sentence. Same
@@ -3681,6 +3667,11 @@ async function renderJob(id, opts = {}) {
 
   // Spin up the per-second live timer when a running pill is on screen.
   if (job.status === "running") _ensureLivePillTimer();
+
+  // The detail HTML is rebuilt on every poll, so the file browser has to be
+  // re-mounted — and re-mounted at the directory the operator had navigated
+  // to, not at the job root. Same lesson the SDK panel above learned.
+  mountJobFiles(id);
 
   // Restore the live SDK panel FIRST — visibility before scroll. The
   // rebuilt markup starts with `hidden`, so if we touched scroll while
@@ -4391,6 +4382,97 @@ function _isMarkdown(name) {
 function _isJson(name) {
   const ext = (name.split(".").pop() || "").toLowerCase();
   return ext === "json" || name === "result.json";
+}
+
+/* ------------------------------------------------------ job file browser
+   Lists ONE directory at a time. The job tree is not uniformly small —
+   measured 2026-08-11 the median job holds 85 files but the largest holds
+   8,520 at depth 14 — so a recursive render would freeze the modal on exactly
+   the jobs whose output you most want to dig through.
+
+   Files reuse `file-preview-link`, so the existing syntax-highlighting modal
+   opens them and middle-click / "open in new tab" still gets the raw bytes. */
+const _jobFilesPath = new Map();     // job id -> directory currently shown
+
+function _fmtFileSize(n) {
+  if (n == null) return "";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+}
+
+function _jobFilesCrumbs(id, path) {
+  const parts = path ? path.split("/") : [];
+  const crumb = (label, target) =>
+    `<a href="#" class="job-files-crumb" data-path="${escapeHtml(target)}">${escapeHtml(label)}</a>`;
+  let acc = "";
+  const out = [crumb("job", "")];
+  for (const p of parts) {
+    acc = acc ? `${acc}/${p}` : p;
+    out.push(crumb(p, acc));
+  }
+  return out.join('<span class="job-files-sep">/</span>');
+}
+
+async function loadJobFiles(id, path = "") {
+  const box = document.querySelector(`.job-files[data-job="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
+  if (!box) return;
+  const list = box.querySelector(".job-files-list");
+  const crumbs = box.querySelector(".job-files-crumbs");
+  _jobFilesPath.set(id, path);
+  crumbs.innerHTML = _jobFilesCrumbs(id, path);
+  list.innerHTML = '<span class="c-dim">Loading…</span>';
+
+  let data;
+  try {
+    const res = await fetch(`${API}/jobs/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path)}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    data = body;
+  } catch (e) {
+    list.innerHTML = `<span style="color:var(--red)">${escapeHtml(String(e))}</span>`;
+    return;
+  }
+
+  const rows = (data.entries || []).map((e) => {
+    // A symlink is shown but never followed by the API (it refuses anything
+    // resolving outside the job dir). Marking it keeps "this is empty" and
+    // "this points somewhere we will not go" from looking alike.
+    const link = e.is_link ? ' <span class="jf-link" title="symlink">↗</span>' : "";
+    if (e.is_dir) {
+      return `<div class="jf-row"><a href="#" class="jf-dir" data-path="${escapeHtml(e.path)}"
+        >📁 ${escapeHtml(e.name)}</a>${link}</div>`;
+    }
+    const url = `${API}/jobs/${encodeURIComponent(id)}/blob?path=${encodeURIComponent(e.path)}`;
+    return `<div class="jf-row">
+      <a href="${url}" target="_blank" class="file-preview-link jf-file"
+         data-url="${url}" data-name="${escapeHtml(e.path)}">📄 ${escapeHtml(e.name)}</a>${link}
+      <span class="jf-size">${_fmtFileSize(e.size)}</span>
+    </div>`;
+  }).join("");
+
+  list.innerHTML = (rows || '<span class="c-dim">(empty)</span>')
+    + (data.truncated
+      ? `<div class="jf-trunc">⚠ first ${data.cap} entries only — this directory is larger</div>`
+      : "");
+
+  list.querySelectorAll(".jf-dir").forEach((a) => {
+    a.addEventListener("click", (ev) => { ev.preventDefault(); loadJobFiles(id, a.dataset.path); });
+  });
+  crumbs.querySelectorAll(".job-files-crumb").forEach((a) => {
+    a.addEventListener("click", (ev) => { ev.preventDefault(); loadJobFiles(id, a.dataset.path); });
+  });
+  box.querySelector(".job-files-refresh")?.addEventListener(
+    "click", () => loadJobFiles(id, _jobFilesPath.get(id) || ""), { once: true });
+}
+
+/** Called after the job detail re-renders. Restores the directory the operator
+ *  had navigated to — the detail HTML is rebuilt on every poll, so without
+ *  this the browser would snap back to the job root every couple of seconds. */
+function mountJobFiles(id) {
+  const box = document.querySelector(`.job-files[data-job="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
+  if (!box) return;
+  loadJobFiles(id, _jobFilesPath.get(id) || "");
 }
 
 async function openFileModal(name, sourceUrl) {

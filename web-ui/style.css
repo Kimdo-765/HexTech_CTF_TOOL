@@ -2150,3 +2150,56 @@ body.modal-open { overflow: hidden; }
   background: rgba(227, 179, 65, 0.12);
   border: 1px solid rgba(227, 179, 65, 0.4);
 }
+
+/* ---------------------------------------------------- job file browser
+   Replaces the hard-coded per-artifact link row. The runner names its
+   output after the script it ran, so any fixed list eventually points at a
+   name that does not exist (a crypto Sage job writes `solver.sage.stdout`,
+   which no list contained) — listing the directory removes the guess. */
+.job-files {
+  margin: 0.5rem 0 0.25rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+.job-files-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 0.82rem;
+}
+.job-files-crumbs { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; }
+.job-files-crumb { color: var(--fg-bright); text-decoration: none; }
+.job-files-crumb:hover { text-decoration: underline; }
+.job-files-sep { color: var(--fg-dim); margin: 0 0.25rem; }
+.job-files-terminal { font-size: 0.8rem; white-space: nowrap; }
+/* Bounded so a directory of thousands cannot push the rest of the job
+   detail off screen — it scrolls inside its own box instead. */
+.job-files-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: 0.25rem 0.5rem 0.4rem;
+  font-size: 0.85rem;
+}
+.jf-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.1rem 0;
+}
+.jf-dir { color: var(--fg-bright); text-decoration: none; }
+.jf-dir:hover { text-decoration: underline; }
+.jf-file { text-decoration: none; }
+.jf-file:hover { text-decoration: underline; }
+/* A long generated filename must not push the size column off screen. */
+.jf-row > a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46vw;
+}
+.jf-size { margin-left: auto; color: var(--fg-dim); font-size: 0.78rem; white-space: nowrap; }
+.jf-link { color: var(--yellow-bright); font-size: 0.75rem; }
+.jf-trunc { color: var(--yellow-bright); font-size: 0.78rem; padding-top: 0.3rem; }

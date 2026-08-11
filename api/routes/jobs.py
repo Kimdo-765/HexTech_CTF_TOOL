@@ -958,6 +958,113 @@ def get_job_file(job_id: str, name: str):
     raise HTTPException(status_code=404, detail="file not found")
 
 
+# ------------------------------------------------------------ file browser
+#
+# WHY A BROWSER AND NOT MORE LINKS
+# The job panel used to hard-code one link per artifact per module
+# (`exploit.py.stdout`, `solver.py.stdout`, …). The runner names its artifacts
+# after the script it actually ran, so a crypto Sage job produces
+# `solver.sage.stdout` — a name no hard-coded list contained, and its links
+# 404'd while the file sat on disk. Listing the directory removes the guess:
+# whatever the runner wrote is what the operator sees.
+#
+# LAZY, ONE DIRECTORY AT A TIME. Measured 2026-08-11 across 74 job dirs: the
+# median holds 85 files, but the largest holds 8,520 across 1.1 GB at depth 14
+# (a decompiler run). A recursive dump would be that whole tree in one
+# response, so this lists exactly one level and the UI asks again on expand.
+_FILE_LIST_CAP = 2000
+
+
+def _job_subpath(job_id: str, rel: str) -> Path:
+    """Resolve `rel` inside a job directory, or raise 404/403.
+
+    The guard is `realpath` containment, NOT string prefixing, because a job
+    directory holds agent-authored content: `work/` is writable by the agent
+    and by challenge code running as root in the sandbox, so a symlink like
+    `work/x -> /` is something this has to survive rather than assume away.
+    Resolving first and then testing ancestry means a link that escapes is
+    refused even though its literal path looked fine.
+    """
+    safe_id = Path(job_id).name
+    if not safe_id:
+        raise HTTPException(status_code=404, detail="job not found")
+    root = (JOBS_DIR / safe_id).resolve()
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="job not found")
+    target = (root / (rel or "")).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=403, detail="path escapes the job directory")
+    return target
+
+
+@router.get("/{job_id}/files")
+def list_job_files(job_id: str, path: str = ""):
+    """One directory of a job's working tree.
+
+    Entries are ordered directories-first then by name, which is the order an
+    operator scans for "where did the run put things".
+    """
+    target = _job_subpath(job_id, path)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="not a directory")
+
+    root = (JOBS_DIR / Path(job_id).name).resolve()
+    entries = []
+    truncated = False
+    try:
+        with os.scandir(target) as it:
+            for de in it:
+                if len(entries) >= _FILE_LIST_CAP:
+                    truncated = True
+                    break
+                # follow_symlinks=False: a broken or escaping link must still
+                # be listable (so the operator can see it exists) without this
+                # call following it off the tree.
+                try:
+                    st = de.stat(follow_symlinks=False)
+                    is_dir = de.is_dir(follow_symlinks=True)
+                except OSError:
+                    continue
+                entries.append({
+                    "name": de.name,
+                    "path": str(Path(path or "") / de.name).replace("\\", "/"),
+                    "is_dir": is_dir,
+                    "is_link": de.is_symlink(),
+                    "size": None if is_dir else st.st_size,
+                    "mtime": datetime.fromtimestamp(
+                        st.st_mtime, timezone.utc).isoformat(),
+                })
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+    rel = "" if target == root else str(target.relative_to(root)).replace("\\", "/")
+    return {
+        "job_id": Path(job_id).name,
+        "path": rel,
+        "parent": "" if not rel else str(Path(rel).parent).replace("\\", "/").lstrip("."),
+        "entries": entries,
+        "truncated": truncated,
+        "cap": _FILE_LIST_CAP,
+    }
+
+
+@router.get("/{job_id}/blob")
+def get_job_blob(job_id: str, path: str):
+    """Serve one file by its path RELATIVE to the job directory.
+
+    Separate from `/file/{name}`, which takes a bare basename and probes
+    `<job>/` then `<job>/work/`. That route is left exactly as it is: existing
+    links depend on its fallback, and widening it to accept slashes would
+    change what those links resolve to. This one is for the browser, where the
+    path is already known exactly.
+    """
+    target = _job_subpath(job_id, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(str(target), filename=target.name)
+
+
 @router.get("/{job_id}/result")
 def get_job_result(job_id: str):
     f = JOBS_DIR / job_id / "result.json"
