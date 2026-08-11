@@ -19,6 +19,7 @@ from api.routes import containers as containers_routes
 from api.routes import (
     crypto_module,
     forensic_module,
+    hybrid_module,
     live_fire_module,
     misc_module,
     pwn_module,
@@ -76,6 +77,7 @@ app.include_router(misc_module.router, prefix="/api/modules/misc", tags=["misc"]
 app.include_router(crypto_module.router, prefix="/api/modules/crypto", tags=["crypto"])
 app.include_router(rev_module.router, prefix="/api/modules/rev", tags=["rev"])
 app.include_router(web3_module.router, prefix="/api/modules/web3", tags=["web3"])
+app.include_router(hybrid_module.router, prefix="/api/modules/hybrid", tags=["hybrid"])
 app.include_router(
     live_fire_module.router, prefix="/api/modules/live-fire", tags=["live-fire"]
 )
@@ -169,6 +171,7 @@ def list_modules():
             {"id": "crypto", "name": "Crypto", "status": "available"},
             {"id": "rev", "name": "Reversing (ghiant)", "status": "available"},
             {"id": "web3", "name": "Web3 / Smart Contract", "status": "available"},
+            {"id": "hybrid", "name": "Hybrid Chain", "status": "available"},
             {"id": "live-fire", "name": "Live-fire Patch", "status": "available"},
         ]
     }

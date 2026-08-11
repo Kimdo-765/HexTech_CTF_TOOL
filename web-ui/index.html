@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HexTech_CTF_TOOL</title>
-  <link rel="stylesheet" href="/static/style.css?v=a924ae197" />
+  <link rel="stylesheet" href="/static/style.css?v=a47f243fd" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -34,6 +34,7 @@
       <button class="tab" data-tab="crypto">Crypto</button>
       <button class="tab" data-tab="rev">Rev</button>
       <button class="tab" data-tab="web3">Web3</button>
+      <button class="tab" data-tab="hybrid">Hybrid</button>
       <button class="tab" data-tab="live-fire">🔥 Live-fire</button>
       <button class="tab" data-tab="exploits" style="margin-left:auto">📚 Exploits</button>
       <button class="tab" data-tab="dashboard">📊 Dashboard</button>
@@ -450,6 +451,94 @@
           <button type="reset" title="Clear file and all other inputs">Reset</button>
         </div>
         <small style="color:var(--fg-muted)">Reuses decompiler image. Solver runs with crypto libs (pycryptodome, gmpy2, sympy, z3, pwntools).</small>
+      </form>
+    </section>
+
+    <section id="panel-hybrid" class="panel">
+      <h2>Hybrid — Sequential Two-stage Solver</h2>
+      <p style="color:var(--fg-muted);font-size:0.85rem">
+        Choose one validated recipe. The server owns the order and creates only the
+        public parent during ingest; scalar child jobs are created by the coordinator.
+      </p>
+      <form id="hybrid-form">
+        <label>
+          Recipe
+          <select name="recipe" id="hybrid-recipe">
+            <option value="rev-pwn">Reversing → Pwn</option>
+            <option value="web-pwn">Web → Pwn</option>
+          </select>
+        </label>
+        <div id="hybrid-stage-order" class="job-meta-chip" aria-live="polite">
+          <b>Execution order</b> rev → pwn
+        </div>
+        <label>
+          Challenge bundle (shared input; optional for a remote-only first stage)
+          <input type="file" name="file" />
+        </label>
+        <label>
+          Description / hints (shared)
+          <textarea name="description" rows="3" placeholder="context shared by both stages"></textarea>
+        </label>
+        <label>
+          Flag format (shared, optional)
+          <input type="text" name="flag_format" placeholder="e.g. DH{...}" />
+        </label>
+        <label>
+          Agent model (shared; blank = global Settings value)
+          <select name="model" data-role="model-select"></select>
+        </label>
+        <label>
+          Effort (shared; blank = SDK default)
+          <select name="effort" data-role="effort-select"></select>
+        </label>
+        <label>
+          Total chain timeout (seconds, blank = global setting)
+          <input type="number" name="job_timeout" min="60" placeholder="6000" />
+        </label>
+
+        <fieldset class="provider-fieldset" data-hybrid-stage="rev">
+          <legend>inputs.rev.* — stage 1</legend>
+          <label>
+            Rev remote target (optional; host:port or URL, one per line)
+            <textarea name="inputs.rev.target" rows="2" placeholder="ctf.example.com:1337"></textarea>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="inputs.rev.docker_challenge" />
+            🐳 Build the bundled challenge runtime for the rev stage
+          </label>
+        </fieldset>
+
+        <fieldset class="provider-fieldset" data-hybrid-stage="web" hidden disabled>
+          <legend>inputs.web.* — stage 1</legend>
+          <label>
+            Web target URL (optional; one per line)
+            <textarea name="inputs.web.target_url" rows="2" placeholder="http://challenge.example.com:8080"></textarea>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="inputs.web.docker_challenge" />
+            🐳 Build the bundled web challenge runtime
+          </label>
+        </fieldset>
+
+        <fieldset class="provider-fieldset" data-hybrid-stage="pwn">
+          <legend>inputs.pwn.* — stage 2</legend>
+          <label>
+            Pwn remote target (optional; host:port, one per line)
+            <textarea name="inputs.pwn.target" rows="2" placeholder="ctf.example.com:31337"></textarea>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="inputs.pwn.docker_challenge" />
+            🐳 Build the bundled challenge runtime for the pwn stage
+          </label>
+        </fieldset>
+
+        <div class="form-actions">
+          <button type="submit">Create Hybrid Job</button>
+          <button type="reset" title="Clear shared and stage inputs">Reset</button>
+        </div>
+        <small style="color:var(--fg-muted)">
+          Hybrid recipes never include Live-fire; patch verification remains a separate workflow.
+        </small>
       </form>
     </section>
 
@@ -967,6 +1056,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=a924ae197"></script>
+  <script src="/static/app.js?v=a47f243fd"></script>
 </body>
 </html>

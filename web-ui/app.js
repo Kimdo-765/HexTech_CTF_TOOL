@@ -1068,6 +1068,35 @@ document.getElementById("live-fire-form").addEventListener("submit", (e) => {
   e.preventDefault(); submitJob(e.target, "/modules/live-fire/analyze");
 });
 
+const HYBRID_RECIPES = {
+  "rev-pwn": ["rev", "pwn"],
+  "web-pwn": ["web", "pwn"],
+};
+
+function renderHybridRecipe(form) {
+  const recipe = form.querySelector("[name=recipe]")?.value || "rev-pwn";
+  const modules = HYBRID_RECIPES[recipe] || HYBRID_RECIPES["rev-pwn"];
+  form.querySelectorAll("[data-hybrid-stage]").forEach((stage) => {
+    const active = modules.includes(stage.dataset.hybridStage);
+    stage.hidden = !active;
+    stage.disabled = !active;
+  });
+  const order = document.getElementById("hybrid-stage-order");
+  if (order) order.innerHTML = `<b>Execution order</b> ${modules.join(" → ")}`;
+}
+
+const hybridForm = document.getElementById("hybrid-form");
+hybridForm.addEventListener("submit", (e) => {
+  e.preventDefault(); submitJob(e.target, "/modules/hybrid/analyze");
+});
+hybridForm.querySelector("[name=recipe]").addEventListener("change", () => {
+  renderHybridRecipe(hybridForm);
+});
+hybridForm.addEventListener("reset", () => {
+  setTimeout(() => renderHybridRecipe(hybridForm), 0);
+});
+renderHybridRecipe(hybridForm);
+
 function _setModelField(f, name, customName, catalog, value) {
   const modelSel = f.querySelector(`[name=${name}]`);
   const modelCustom = f.querySelector(`[name=${customName}]`);
