@@ -1440,6 +1440,29 @@ def job_flag_format_re(job_id: str) -> "re.Pattern | None":
         return None
 
 
+def _recorded_artifact_names(job_id: str) -> list[str]:
+    """Runner-written artifact filenames for this job, from `meta.artifacts`.
+
+    Empty for jobs that predate the recording, and for any job whose meta is
+    unreadable — callers union this with the legacy name tuple so neither case
+    loses coverage. Only basenames are returned: the trusted tier joins them
+    onto the job directory itself, and a recorded value containing a path
+    would otherwise reach outside it.
+    """
+    try:
+        arts = (read_meta(job_id) or {}).get("artifacts") or {}
+    except Exception:
+        return []
+    out = []
+    for key in ("stdout", "stderr"):
+        name = arts.get(key)
+        if isinstance(name, str) and name:
+            base = Path(name).name
+            if base and base not in out:
+                out.append(base)
+    return out
+
+
 def scan_job_for_flags(
     job_id: str,
     extra_files: list[str] | None = None,
@@ -1598,6 +1621,17 @@ def scan_job_for_flags(
         return out
 
     trusted_set = list(_TRUSTED_FLAG_SOURCES)
+    # The runner records the artifact names it ACTUALLY wrote (meta.artifacts),
+    # because they derive from the script it ran and no fixed list can enumerate
+    # them: a crypto Sage job writes `solver.sage.stdout`, which the tuple above
+    # does not contain. Job 606175dde9d6 (2026-08-11) printed
+    # `FLAG_CANDIDATE: DH{Not_bad!_10.8+_is_ezpz}`, the file sat on disk, and the
+    # job still finished `no_flag` for exactly that reason.
+    #
+    # UNION, not replacement. Jobs that ran before this was recorded have no
+    # `meta.artifacts`, and re-scanning them must keep working — the tuple is
+    # the fallback, not the truth.
+    trusted_set.extend(_recorded_artifact_names(job_id))
     if extra_files:
         trusted_set.extend(extra_files)
 

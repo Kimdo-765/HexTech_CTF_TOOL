@@ -1180,6 +1180,29 @@ def attempt_sandbox_run(
         (work_dir / f"{script_filename}.stdout").write_text(res["stdout"])
         (work_dir / f"{script_filename}.stderr").write_text(res["stderr"])
 
+        # Record WHAT WAS ACTUALLY WRITTEN, so nothing downstream has to guess.
+        # The names derive from the script the runner really ran, so a crypto
+        # Sage job produces `solver.sage.stdout` — a name every consumer-side
+        # hard-coded list omitted. Measured 2026-08-11 on job 606175dde9d6: the
+        # solver printed `FLAG_CANDIDATE: DH{Not_bad!_10.8+_is_ezpz}`, the file
+        # was on disk, and the job still finished `no_flag` because
+        # `_TRUSTED_FLAG_SOURCES` listed only the `.py` spellings. The UI's
+        # artifact links 404'd for the same reason. This is the one place that
+        # knows the answer; everything else should read it rather than infer it.
+        try:
+            from modules._common import read_meta as _rm, write_meta as _wm
+            _arts = dict((_rm(job_id) or {}).get("artifacts") or {})
+            _arts.update({
+                "script": script_filename,
+                "stdout": f"{script_filename}.stdout",
+                "stderr": f"{script_filename}.stderr",
+            })
+            _wm(job_id, artifacts=_arts)
+        except Exception as e:
+            # Never fail a completed run over bookkeeping — consumers keep the
+            # legacy name list as a fallback precisely so this can degrade.
+            log_fn(f"[runner] artifact name record failed: {e}")
+
         # ---------- Stage 3: postjudge ----------
         # Shadow recording sits OUTSIDE the enforce gate. It used to be nested
         # under `if enable_judge:`, which is False in shadow — so the live
