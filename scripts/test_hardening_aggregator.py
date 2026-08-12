@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -19,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION = ROOT / "scripts" / "aggregate_hardening.py"
 JOBS = ROOT / "data" / "jobs"
+BASELINE = ROOT / "docs" / "hardening-s1-baseline.json"
 
 EXPECTED_REPORT = """자동 성공                17 / 43        (marker 16 · 신뢰되지 않은 등급 1; terminal 판정 29 중 13 + legacy 14 중 4)
 실패 모집단              22 attempt / 15 lineage
@@ -254,6 +257,49 @@ EXPECTED_RETRY_ANOMALIES = (
 )
 
 
+def snapshot_manifest(jobs_dir: Path) -> tuple[int, str]:
+    """Hash the exact top-level inputs described by the frozen S1 baseline."""
+    paths = set(jobs_dir.glob("*/meta.json"))
+    paths.update(jobs_dir.glob("*/events.jsonl"))
+    paths.update(jobs_dir.glob("*/run.log"))
+    paths.update(jobs_dir.glob("*/*.stderr"))
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(jobs_dir).as_posix()):
+        content = path.read_bytes()
+        relative = path.relative_to(jobs_dir).as_posix()
+        stderr_mtime = str(path.stat().st_mtime_ns) if path.suffix == ".stderr" else "-"
+        digest.update(
+            f"{relative}\t{len(content)}\t{hashlib.sha256(content).hexdigest()}\t"
+            f"{stderr_mtime}\n".encode()
+        )
+    return len(paths), digest.hexdigest()
+
+
+def warn_if_live_manifest_changed(jobs_dir: Path) -> dict[str, object]:
+    """Report live corpus drift without turning normal corpus growth into a failure."""
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))["data_snapshot"]
+    actual_count, actual_sha256 = snapshot_manifest(jobs_dir)
+    matches = (
+        actual_count == baseline["manifest_file_count"]
+        and actual_sha256 == baseline["manifest_sha256"]
+    )
+    if not matches:
+        warnings.warn(
+            "live data/jobs manifest differs from frozen S1 baseline: "
+            f"expected {baseline['manifest_file_count']} files / "
+            f"{baseline['manifest_sha256']}, got {actual_count} files / {actual_sha256}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return {
+        "matches": matches,
+        "expected_count": baseline["manifest_file_count"],
+        "expected_sha256": baseline["manifest_sha256"],
+        "actual_count": actual_count,
+        "actual_sha256": actual_sha256,
+    }
+
+
 def load_aggregator():
     path = Path(os.environ.get("HARDENING_AGGREGATOR_PATH", PRODUCTION))
     spec = importlib.util.spec_from_file_location("_hardening_aggregator_under_test", path)
@@ -319,6 +365,199 @@ class Fixture:
             stamp = datetime.fromisoformat(f"2026-01-01T{stderr_time}+00:00").timestamp()
             os.utime(stderr_path, (stamp, stamp))
         return A.load_snapshot(self.jobs_dir)[job_id]
+
+
+def sparse_log(line_no: int, record: str) -> str:
+    """Place one meaningful record at its frozen production line number."""
+    return "\n" * (line_no - 1) + record + "\n"
+
+
+FROZEN_SUCCESSES = (
+    ("07d256325546", "terminal", "untrusted-tier", "3d8cca4e26de"),
+    ("0f999f0560b4", "legacy-meta", "marker", None),
+    ("203e786eeda4", "terminal", "marker", "9b8168b0ee29"),
+    ("24d06bf12e80", "terminal", "marker", None),
+    ("384dfebba29e", "terminal", "marker", None),
+    ("5fd738ca59dc", "terminal", "marker", None),
+    ("6f0307529639", "terminal", "marker", "848292223226"),
+    ("88cc58737eab", "terminal", "marker", None),
+    ("89d57ebd96cd", "terminal", "marker", None),
+    ("96da1425bc5d", "terminal", "marker", None),
+    ("a8f2bda1623c", "terminal", "marker", "3f8d67954c6f"),
+    ("bc7be650d2bd", "terminal", "marker", "6f0307529639"),
+    ("c9059cf7a271", "legacy-meta", "marker", None),
+    ("d4d5a9053695", "terminal", "marker", "3a64d16a243b"),
+    ("e7220d997aa7", "terminal", "marker", None),
+    ("8f8e429d4fa5", "legacy-meta", "marker", None),
+    ("f0ec5abbb79e", "legacy-meta", "marker", None),
+)
+
+FROZEN_NONSUCCESS_JOBS = (
+    ("121e8725dbf4", "terminal", "c78269285894", "36.2143", "harvest", 3827),
+    ("1dd41f434203", "terminal", None, "2.5252", "runner", 1281),
+    ("1ede2b4d8ac3", "legacy-meta", None, "0", "operator-stop", None),
+    ("38167617a6a8", "legacy-meta", "d8836b706951", "6.158", "exit-1", None),
+    ("3a64d16a243b", "terminal", "508de0612414", "19.3354", "qemu", 71),
+    ("3d8cca4e26de", "terminal", None, "10.235610000000001", "aup", None),
+    ("3f8d67954c6f", "terminal", None, "93.7565", "network", None),
+    ("407613356329", "legacy-meta", "38167617a6a8", "8.2967", "exit-1", None),
+    ("4971dc03c3a6", "legacy-meta", None, "0", "sdk", None),
+    ("4df962049a35", "terminal", None, "6.0927", "runner", 988),
+    ("508de0612414", "terminal", "c1a764377067", "18.5107", "stderr", None),
+    ("6685e3e65add", "terminal", None, "18.3608", "runner", 541),
+    ("6b4a07a32cee", "legacy-meta", None, "0", "operator-stop", None),
+    ("75dcbd86bfab", "legacy-meta", "d1f462195615", "0", "operator-stop", None),
+    ("848292223226", "terminal", None, "22.307955", "network", None),
+    ("a80ced612af3", "terminal", None, "30.5299", "address", 1352),
+    ("b594d10a6fb3", "terminal", None, "117.9214", "prejudge", None),
+    ("b914889c1f9c", "terminal", None, "2.5509", "stop", None),
+    ("c1a764377067", "terminal", "a80ced612af3", "35.8566", "address", 452),
+    ("c78269285894", "terminal", None, "60.9788", "prejudge", None),
+    ("c9c6dee657b0", "legacy-meta", None, "0", "stream", None),
+    ("d1f462195615", "terminal", None, "32.5856", "exit-0", None),
+    ("d438240b28d6", "legacy-meta", None, "0", "operator-stop", None),
+    ("d8836b706951", "legacy-meta", None, "3.0061", "exit-1", None),
+    ("d8ddf193f523", "legacy-meta", "4971dc03c3a6", "0", "stream", None),
+    ("deb3a308a2aa", "terminal", None, "20.3129", "sdk", None),
+)
+
+
+def build_frozen_snapshot(fixture: Fixture) -> None:
+    """Build a compact, deterministic corpus with the frozen S1 semantics."""
+    for job_id, reasons in EXPECTED_POPULATION_EXCLUSIONS.items():
+        meta: dict[str, object] = {"module": "pwn"}
+        for reason in reasons:
+            if reason.startswith("module="):
+                meta["module"] = reason.split("'", 2)[1]
+            elif reason == "internal":
+                meta["internal"] = True
+            elif reason.startswith("parent_job_id="):
+                meta["parent_job_id"] = reason.split("=", 1)[1]
+        fixture.job(job_id, [], meta=meta)
+
+    for job_id, source, tier, retry_of in FROZEN_SUCCESSES:
+        meta = {
+            "status": "finished",
+            "flags": ["FLAG"],
+            "retry_of": retry_of,
+            "flag_provenance": tier,
+            "flag_trusted_tier": tier == "marker",
+            "cost_usd_estimate": "0",
+        }
+        events = (
+            [event("00:01:00", "terminal", "status", status="finished", flags=1)]
+            if source == "terminal"
+            else []
+        )
+        fixture.job(job_id, events, meta=meta)
+
+    for job_id, source, retry_of, cost, kind, line_no in FROZEN_NONSUCCESS_JOBS:
+        meta = {
+            "retry_of": retry_of,
+            "cost_usd_estimate": cost,
+        }
+        events: list[dict[str, object]] = []
+        run_log = ""
+        stderr = None
+
+        if kind == "operator-stop":
+            meta["status"] = "stopped"
+        elif kind == "aup":
+            meta["error_kind"] = "policy_refusal"
+        elif kind == "sdk":
+            meta["error"] = "SDK ResultMessage is_error"
+        elif kind == "stream":
+            meta["error"] = "Separator is not found"
+        elif kind == "prejudge":
+            events.append(event("00:00:10", "prejudge", "blocked", severity="high"))
+        elif kind == "network":
+            events.extend(
+                [
+                    event("00:00:10", "run", "start", target="dead.example:31337"),
+                    event("00:00:20", "note", "note"),
+                    event("00:00:30", "run", "exit", exit_code=1, timeout=False),
+                    event(
+                        "00:00:40",
+                        "postjudge",
+                        "verdict",
+                        verdict="network_error",
+                        next_action="stop",
+                    ),
+                ]
+            )
+        elif kind == "harvest":
+            events.append(event("00:00:10", "run", "start", target="live.example:31337"))
+            events.extend(
+                event(f"00:00:{second:02d}", "note", "note")
+                for second in range(11, 16)
+            )
+            events.extend(
+                [
+                    event("00:00:30", "run", "exit", exit_code=1, timeout=False),
+                    event(
+                        "00:00:40",
+                        "postjudge",
+                        "verdict",
+                        verdict="success",
+                        next_action="stop",
+                    ),
+                ]
+            )
+            run_log = sparse_log(
+                int(line_no),
+                "[00:00:41] [orchestrator] WARNING turn 2: "
+                "judge verdict=success but 0 flags harvested — frozen fixture",
+            )
+        elif kind == "runner":
+            run_log = sparse_log(
+                int(line_no),
+                "[00:00:25] [runner] target dead.example:31337 "
+                "unreachable before run (connection refused); reloading meta.json",
+            )
+        elif kind == "qemu":
+            run_log = sparse_log(
+                int(line_no),
+                "[00:00:25] [runner:stderr] output: "
+                "remote QEMU gdb port remains occupied",
+            )
+        elif kind == "address":
+            run_log = sparse_log(
+                int(line_no),
+                "[00:00:25] [runner:stderr] output: "
+                "Failed to find an available port: Address already in use",
+            )
+        elif kind == "stderr":
+            stderr = "offline target"
+        elif kind in {"exit-0", "exit-1"}:
+            events.extend(
+                [
+                    event("00:00:20", "run", "start", target="live.example:31337"),
+                    event(
+                        "00:00:30",
+                        "run",
+                        "exit",
+                        exit_code=0 if kind == "exit-0" else 1,
+                        timeout=False,
+                    ),
+                ]
+            )
+        elif kind == "stop":
+            meta["judge_stop_reason"] = "0/10000 hits; premise is false"
+        else:
+            raise AssertionError(f"unknown frozen fixture kind: {kind}")
+
+        if source == "terminal":
+            events.append(
+                event("00:01:00", "terminal", "status", status="no_flag", flags=0)
+            )
+        fixture.job(
+            job_id,
+            events,
+            meta=meta,
+            run_log=run_log,
+            stderr=stderr,
+            stderr_time="00:00:30",
+        )
 
 
 class FixtureTestCase(unittest.TestCase):
@@ -974,9 +1213,13 @@ class AcceptanceTests(FixtureTestCase):
         )
 
 
-class ProductionSnapshotTests(unittest.TestCase):
+class ProductionSnapshotTests(FixtureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        build_frozen_snapshot(self.fixture)
+
     def test_population_boundary_and_retry_anomalies_are_explicit(self) -> None:
-        result = A.aggregate(JOBS)
+        result = A.aggregate(self.fixture.jobs_dir)
         self.assertEqual(
             {row.job_id: row.reasons for row in result.population_exclusions},
             EXPECTED_POPULATION_EXCLUSIONS,
@@ -984,7 +1227,7 @@ class ProductionSnapshotTests(unittest.TestCase):
         self.assertEqual(result.retry_anomalies, EXPECTED_RETRY_ANOMALIES)
 
     def test_D1_only_the_provenance_conflict_leaves_production_P1(self) -> None:
-        result = A.aggregate(JOBS)
+        result = A.aggregate(self.fixture.jobs_dir)
         p1_jobs = {
             row.job_id: row.class_name
             for row in result.classifications
@@ -1001,11 +1244,17 @@ class ProductionSnapshotTests(unittest.TestCase):
         )
 
     def test_success_tier_breakdown_is_structured_and_machine_readable(self) -> None:
-        result = A.aggregate(JOBS)
+        result = A.aggregate(self.fixture.jobs_dir)
         expected = {"marker": 16, "untrusted-tier": 1, "missing-provenance": 0}
         self.assertEqual(result.success_tier_counts, expected)
         completed = subprocess.run(
-            [sys.executable, str(PRODUCTION), "--jobs-dir", str(JOBS), "--json"],
+            [
+                sys.executable,
+                str(PRODUCTION),
+                "--jobs-dir",
+                str(self.fixture.jobs_dir),
+                "--json",
+            ],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1015,7 +1264,7 @@ class ProductionSnapshotTests(unittest.TestCase):
         self.assertEqual(json.loads(completed.stdout)["success_tier_counts"], expected)
 
     def test_D5_authoritative_structure_is_exact(self) -> None:
-        result = A.aggregate(JOBS)
+        result = A.aggregate(self.fixture.jobs_dir)
         encoded_path = os.environ.get("HARDENING_NUMERIC_MUTATION_PATH")
         if encoded_path:
             target = tuple(tuple(component) for component in json.loads(encoded_path))
@@ -1066,10 +1315,10 @@ class ProductionSnapshotTests(unittest.TestCase):
         )
 
     def test_authoritative_table_is_byte_identical(self) -> None:
-        result = A.aggregate(JOBS)
+        result = A.aggregate(self.fixture.jobs_dir)
         self.assertEqual(A.format_report(result), EXPECTED_REPORT)
         completed = subprocess.run(
-            [sys.executable, str(PRODUCTION), "--jobs-dir", str(JOBS)],
+            [sys.executable, str(PRODUCTION), "--jobs-dir", str(self.fixture.jobs_dir)],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1077,6 +1326,61 @@ class ProductionSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
         self.assertEqual(completed.stdout, (EXPECTED_REPORT + "\n").encode())
+
+    def test_exact_snapshot_does_not_consult_a_changed_live_corpus(self) -> None:
+        global JOBS
+        live_fixture = Fixture()
+        self.addCleanup(live_fixture.close)
+        live_fixture.job(
+            "new-live-job",
+            [event("00:01:00", "terminal", "status", status="finished", flags=1)],
+            meta={
+                "status": "finished",
+                "flags": ["FLAG"],
+                "flag_provenance": "marker",
+                "flag_trusted_tier": True,
+            },
+        )
+        original_live_jobs = JOBS
+        try:
+            JOBS = live_fixture.jobs_dir
+            self.assertEqual(
+                numeric_structure(A.aggregate(self.fixture.jobs_dir)),
+                EXPECTED_NUMERIC_STRUCTURE,
+            )
+        finally:
+            JOBS = original_live_jobs
+
+
+class LiveSnapshotTests(FixtureTestCase):
+    def test_manifest_mismatch_is_a_warning_not_a_failure(self) -> None:
+        self.fixture.job("changed-live-job", [], meta={"module": "pwn"})
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            status = warn_if_live_manifest_changed(self.fixture.jobs_dir)
+        self.assertFalse(status["matches"])
+        self.assertEqual(len(caught), 1)
+        self.assertIn("differs from frozen S1 baseline", str(caught[0].message))
+
+    def test_live_report_has_only_internal_consistency_assertions(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            manifest = warn_if_live_manifest_changed(JOBS)
+        self.assertEqual(bool(caught), not manifest["matches"])
+
+        result = A.aggregate(JOBS)
+        self.assertEqual(result.included, result.successes + result.nonsuccesses)
+        self.assertEqual(result.nonsuccesses, result.excluded + result.failures)
+        self.assertEqual(
+            result.lineages, result.capability_lineages + result.noncapability_lineages
+        )
+        self.assertEqual(sum(result.source_counts.values()), result.included)
+        self.assertEqual(sum(result.source_successes.values()), result.successes)
+        self.assertEqual(sum(result.success_tier_counts.values()), result.successes)
+        self.assertEqual(sum(result.attempt_counts.values()), result.failures)
+        self.assertEqual(sum(result.lineage_counts.values()), result.lineages)
+        self.assertEqual(sum(result.rung_counts.values()), result.nonsuccesses)
+        self.assertIn("자동 성공", A.format_report(result))
 
 
 MUTATIONS = {
@@ -1255,7 +1559,10 @@ class MutationCampaignTests(unittest.TestCase):
                     )
 
     def test_D5_each_numeric_result_field_mutation_is_caught(self) -> None:
-        result = A.aggregate(JOBS)
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        build_frozen_snapshot(fixture)
+        result = A.aggregate(fixture.jobs_dir)
         paths = list(numeric_paths(result))
         self.assertGreater(len(paths), 16)
         for path in paths:

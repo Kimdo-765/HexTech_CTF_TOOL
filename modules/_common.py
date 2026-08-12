@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Dict  # noqa: F401
@@ -5942,6 +5943,48 @@ def classify_agent_error(message: str) -> str | None:
     return "unknown"
 
 
+def _safe_agent_exception_details(
+    exc: BaseException,
+) -> tuple[str, str, str]:
+    """Return exception type, message, and traceback without raising.
+
+    This runs after the main SDK transport has already failed.  A hostile or
+    partially-initialized exception can itself raise from ``__str__`` or
+    ``__getattribute__``; losing the recovery path while trying to describe
+    that first failure is worse than recording a placeholder message.  Frame
+    formatting is deliberately separate from exception formatting so a bad
+    ``__str__`` cannot discard an otherwise usable traceback.
+    """
+    exc_type = "Exception"
+    try:
+        candidate = type(exc).__name__
+        if isinstance(candidate, str) and candidate:
+            exc_type = candidate
+    except BaseException:
+        pass
+
+    try:
+        message = str(exc)
+    except BaseException:
+        message = "<exception message unavailable>"
+
+    try:
+        exc_tb = object.__getattribute__(exc, "__traceback__")
+    except BaseException:
+        exc_tb = None
+    try:
+        frames = traceback.format_tb(exc_tb) if exc_tb is not None else []
+    except BaseException:
+        frames = []
+
+    terminal = f"{exc_type}: {message}"
+    if frames:
+        rendered = "Traceback (most recent call last):\n" + "".join(frames) + terminal
+    else:
+        rendered = "Traceback unavailable\n" + terminal
+    return exc_type, message, rendered
+
+
 # Approximate per-million-token prices in USD (Anthropic public pricing,
 # 2026-Q2). Used as a FALLBACK when the SDK's authoritative
 # `ResultMessage.total_cost_usd` never arrives — e.g. the bundled
@@ -8018,7 +8061,8 @@ async def _aup_restart_session(
     # design) and `judge_hints` (they describe the carried ARTIFACT, which the
     # successor inherits, not the dead transcript).
     _SESSION_SCOPED = (
-        "agent_error", "agent_error_kind", "fallback_artifact_used",
+        "agent_error", "agent_error_kind", "agent_error_type",
+        "agent_error_traceback", "fallback_artifact_used",
         "result", "cost_usd_estimate",
         "prejudge_block_redirects", "prejudge_block_sigs",
     )
@@ -8651,10 +8695,15 @@ async def run_main_agent_session(
                                     "zero-artifact run)"
                                 )
             except Exception as e:
-                msg_text = str(e)
-                kind = classify_agent_error(msg_text)
+                exc_type, msg_text, traceback_text = _safe_agent_exception_details(e)
+                error_text = f"{exc_type}: {msg_text}"
+                kind = classify_agent_error(error_text)
+                if kind in (None, "unknown"):
+                    kind = "agent_exception"
                 summary["agent_error"] = msg_text
                 summary["agent_error_kind"] = kind
+                summary["agent_error_type"] = exc_type
+                summary["agent_error_traceback"] = traceback_text
                 # SIGKILL on the bundled `claude` CLI would surface here
                 # as `Command failed with exit code -9`. Historically
                 # every observed exit -9 was a fratricide from the
@@ -8663,11 +8712,14 @@ async def run_main_agent_session(
                 # real cgroup OOM has not been observed. Classify as
                 # "killed" if we get an unknown -9; the sandbox path
                 # below still picks up whatever main managed to write.
-                if kind in (None, "unknown") and (
-                    "exit code -9" in msg_text or "killed" in msg_text.lower()
+                if kind == "agent_exception" and (
+                    "exit code -9" in error_text or "killed" in error_text.lower()
                 ):
                     summary["agent_error_kind"] = "killed"
-                log_fn(f"AGENT_ERROR ({summary['agent_error_kind']}): {msg_text[:400]}")
+                log_fn(
+                    f"AGENT_ERROR ({summary['agent_error_kind']}):\n"
+                    f"{traceback_text}"
+                )
                 _snapshot_cost(summary, "AGENT_ERROR")
                 # SDK transport may have died on this exception. Keep
                 # the run alive: drop a fallback artifact if main never
@@ -9295,7 +9347,10 @@ async def run_main_agent_session(
                     except Exception:
                         _trusted = []
                     if _trusted:
-                        for _k in ("agent_error", "agent_error_kind"):
+                        for _k in (
+                            "agent_error", "agent_error_kind",
+                            "agent_error_type", "agent_error_traceback",
+                        ):
                             if summary.get(_k):
                                 log_fn(
                                     f"[orchestrator] clearing stale {_k} "
