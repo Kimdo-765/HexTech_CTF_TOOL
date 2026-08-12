@@ -26,6 +26,7 @@ The opt-in stays additive: unticked must remain a byte-for-byte no-op.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import importlib.util
 import json
@@ -38,6 +39,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+MUTATIONS = (
+    "none",
+    "drop-hybrid-alias",
+    "drop-hybrid-persistence",
+    "drop-pwn-acceptance",
+    "drop-pwn-persistence",
+)
+parser = argparse.ArgumentParser()
+parser.add_argument("--mutate", choices=MUTATIONS, default="none")
+args = parser.parse_args()
 
 _TMP = tempfile.TemporaryDirectory(prefix="dcpwn-")
 DATA = Path(_TMP.name)
@@ -203,29 +215,154 @@ check("...with the measurement behind it, not just an assertion",
 #    a no-op: a checkbox that does nothing, which is exactly the "the UI says
 #    one thing and the code does another" defect this whole change was about.
 #    Checked across all modules so the next one to grow a box cannot repeat it.
-# ---------------------------------------------------------------------------
-import re as _re2
-
 _html = (ROOT / "web-ui" / "index.html").read_text()
-_with_box = set()
-for _m in _re2.finditer(r'<section id="panel-(\w+)"', _html):
+_box_fields = {}
+for _m in re.finditer(r'<section id="panel-([-\w]+)"', _html):
     _n = _m.group(1)
     _i = _m.start()
     _j = _html.find('<section id="panel-', _i + 1)
-    if "docker_challenge" in _html[_i:_j if _j > 0 else len(_html)]:
-        _with_box.add(_n)
+    _panel = _html[_i:_j if _j > 0 else len(_html)]
+    _fields = {
+        name
+        for name in re.findall(r'<input\b[^>]*\bname="([^"]+)"', _panel)
+        if name == "docker_challenge" or name.endswith(".docker_challenge")
+    }
+    if _fields:
+        _box_fields[_n] = _fields
 
-_accepts = set()
+
+def _replace_once(source: str, old: str, new: str) -> str:
+    count = source.count(old)
+    if count != 1:
+        raise RuntimeError(f"mutation anchor count is {count}, expected 1: {old!r}")
+    return source.replace(old, new, 1)
+
+
+def _mutate_route_source(module: str, source: str) -> str:
+    if module == "hybrid" and args.mutate == "drop-hybrid-alias":
+        return _replace_once(
+            source,
+            'alias="inputs.pwn.docker_challenge"',
+            'alias="inputs.pwn.docker_challenge.removed"',
+        )
+    if module == "hybrid" and args.mutate == "drop-hybrid-persistence":
+        return _replace_once(
+            source,
+            '"docker_challenge": docker,',
+            '"docker_challenge_removed": docker,',
+        )
+    if module == "pwn" and args.mutate == "drop-pwn-acceptance":
+        return _replace_once(
+            source,
+            "docker_challenge: bool = Form(False),",
+            "docker_challenge: bool = False,",
+        )
+    if module == "pwn" and args.mutate == "drop-pwn-persistence":
+        return _replace_once(
+            source,
+            '"docker_challenge": docker_challenge,',
+            '"docker_challenge_removed": docker_challenge,',
+        )
+    return source
+
+
+def _is_form_call(node: ast.expr | None) -> bool:
+    return isinstance(node, ast.Call) and (
+        (isinstance(node.func, ast.Name) and node.func.id == "Form")
+        or (isinstance(node.func, ast.Attribute) and node.func.attr == "Form")
+    )
+
+
+def _form_bindings(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
+    positional = [*fn.args.posonlyargs, *fn.args.args]
+    defaults = [None] * (len(positional) - len(fn.args.defaults)) + list(fn.args.defaults)
+    pairs = [*zip(positional, defaults), *zip(fn.args.kwonlyargs, fn.args.kw_defaults)]
+    bindings = {}
+    for parameter, default in pairs:
+        if not _is_form_call(default):
+            continue
+        alias = parameter.arg
+        for keyword in default.keywords:
+            if (
+                keyword.arg == "alias"
+                and isinstance(keyword.value, ast.Constant)
+                and isinstance(keyword.value.value, str)
+            ):
+                alias = keyword.value.value
+        bindings[alias] = parameter.arg
+    return bindings
+
+
+def _dict_persists(fn: ast.AST, parameter: str) -> bool:
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == "docker_challenge"
+                and isinstance(value, ast.Name)
+                and value.id == parameter
+            ):
+                return True
+    return False
+
+
+def _persists_parameter(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    parameter: str,
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> bool:
+    if _dict_persists(fn, parameter):
+        return True
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        helper = functions.get(node.func.id)
+        if helper is None:
+            continue
+        for keyword in node.keywords:
+            if (
+                keyword.arg is not None
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == parameter
+                and _dict_persists(helper, keyword.arg)
+            ):
+                return True
+    return False
+
+
+_route_contracts = {}
 for _p in sorted((ROOT / "api" / "routes").glob("*_module.py")):
-    _src = _p.read_text()
-    if "docker_challenge: bool = Form(" in _src and '"docker_challenge": docker_challenge' in _src:
-        _accepts.add(_p.stem.replace("_module", ""))
+    _module = _p.stem.removesuffix("_module")
+    _src = _mutate_route_source(_module, _p.read_text())
+    _tree = ast.parse(_src)
+    _functions = {
+        node.name: node
+        for node in _tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    _contracts = set()
+    for _function in _functions.values():
+        for _field, _parameter in _form_bindings(_function).items():
+            if _persists_parameter(_function, _parameter, _functions):
+                _contracts.add(_field)
+    _route_contracts[_module] = _contracts
+
+_gaps = sorted(
+    f"{module}:{field}"
+    for module, fields in _box_fields.items()
+    for field in fields - _route_contracts.get(module, set())
+)
 
 check("every form offering the box has a route that accepts AND persists it",
-      sorted(_with_box - _accepts), [])
-check("...and pwn is one of them", "pwn" in _with_box and "pwn" in _accepts, True)
+      _gaps, [])
+check("...and pwn is one of them",
+      _box_fields.get("pwn") == {"docker_challenge"}
+      and "docker_challenge" in _route_contracts.get("pwn", set()), True)
 
 print(f"== summary: {PASSED} passed, {FAILED} failed =="
-      + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]"))
+      + (f"  [stubbed: {', '.join(STUBBED)}]" if STUBBED else "  [all real deps]")
+      + f"  [mutation: {args.mutate}]")
 _TMP.cleanup()
 raise SystemExit(1 if FAILED else 0)
