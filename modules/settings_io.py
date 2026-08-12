@@ -108,6 +108,11 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # this explicitly — a mode that changes what the operator sees should
     # never be entered by inference.
     ("judge_mode", "JUDGE_MODE", str, ""),
+    # S1-ENV remote-target gate.  Default OFF: a false positive kills a
+    # healthy job, while a false negative preserves the pre-gate behaviour.
+    # When enabled, only pwn/rev job-start probes may stop a job; the runner's
+    # later pre-sandbox reachability note remains warn-only.
+    ("enable_remote_target_gate", "ENABLE_REMOTE_TARGET_GATE", bool, False),
     # When True, every job's user_prompt is prepended with a short
     # paragraph listing same-module entries from the exploit library
     # (`/data/exploits/`, populated via POST /api/exploits/save) so

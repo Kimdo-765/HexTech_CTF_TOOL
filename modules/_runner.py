@@ -33,6 +33,7 @@ Whether pre/post gate at all is per JOB, not global: see
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import socket
@@ -77,6 +78,13 @@ CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
 # watchdog used to be named here too — it is off in v1, see `enable_supervise`.)
 WEB_TIMEOUT_S = 3000
 DEFAULT_MEM = "2g"
+
+# S1-ENV scope is deliberately narrow.  Missing/unknown modules never widen
+# into the gate, and signatures are added only from observed production data.
+REMOTE_TARGET_GATE_MODULES: tuple[str, ...] = ("pwn", "rev")
+_BROKEN_TARGET_BANNER_SIGNATURES: tuple[bytes, ...] = (
+    b"failed to find an available port: address already in use",
+)
 
 # Targeted seccomp profile = the Docker default + one addition: personality()
 # with ADDR_NO_RANDOMIZE (0x40000, and its |base combinations) so gdb /
@@ -829,6 +837,149 @@ def _ping_target(target: str, *, timeout: float = 3.0) -> tuple[bool, str]:
         except OSError:
             pass
     return True, ""
+
+
+def _remote_target_gate_probe(
+    target: str,
+    *,
+    connect_timeout: float = 3.0,
+    banner_timeout: float = 0.25,
+) -> tuple[bool, str, str]:
+    """Return ``(blocked, kind, detail)`` for one registered ``host:port``.
+
+    The blocking surface is intentionally smaller than a general health
+    check: a definite DNS miss, a failed TCP connection, or an observed
+    production failure signature.  A successful connection with no banner,
+    an unknown banner, and banner-read errors all pass.  That bias is
+    deliberate because blocking a healthy job is worse than preserving the
+    old behaviour for a target this probe cannot classify.
+    """
+    host, sep, port_s = str(target or "").strip().rpartition(":")
+    if not sep or not host:
+        return True, "invalid_target", "expected host:port"
+    try:
+        port = int(port_s)
+    except ValueError:
+        return True, "invalid_target", f"invalid port {port_s!r}"
+    if port <= 0 or port > 65535:
+        return True, "invalid_target", f"port out of range: {port}"
+
+    try:
+        sock = socket.create_connection((host, port), timeout=connect_timeout)
+    except socket.gaierror as exc:
+        # EAI_NONAME is the stable NXDOMAIN/invalid-name case.  Temporary
+        # resolver failures (EAI_AGAIN) are probe failures, not evidence that
+        # the registered instance is dead, so they fail open below.
+        if exc.errno == getattr(socket, "EAI_NONAME", -2):
+            return True, "dns_nxdomain", f"DNS: {exc}"
+        return False, "probe_error", f"temporary DNS failure: {exc}"
+    except (socket.timeout, TimeoutError) as exc:
+        return True, "tcp_failure", f"connect timed out: {exc}"
+    except OSError as exc:
+        network_failures = {
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+            errno.EHOSTUNREACH,
+            errno.ENETUNREACH,
+        }
+        if exc.errno in network_failures:
+            return True, "tcp_failure", f"{type(exc).__name__}: {exc}"
+        return False, "probe_error", f"{type(exc).__name__}: {exc}"
+
+    try:
+        sock.settimeout(banner_timeout)
+        try:
+            banner = sock.recv(4096)
+        except (socket.timeout, TimeoutError, OSError):
+            # A silent service is the required healthy positive control; a
+            # banner read is classification evidence only when bytes arrive.
+            return False, "reachable", "TCP connected; no classified banner"
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    lowered = banner.lower()
+    for signature in _BROKEN_TARGET_BANNER_SIGNATURES:
+        if signature in lowered:
+            return True, "known_broken_banner", signature.decode("ascii")
+    return False, "reachable", "TCP connected; banner not classified"
+
+
+def remote_target_start_gate(
+    job_id: str,
+    module: str,
+    target: Optional[str],
+    log_fn,
+    *,
+    manual: bool = False,
+) -> dict | None:
+    """Gate remote pwn/rev jobs before any agent or pre-recon starts.
+
+    ``None`` means proceed.  A dict is an agent-summary-shaped terminal result
+    that the module orchestrator records as ``target_unusable`` without
+    launching an agent.  Probe/configuration failures fail open.  Operator
+    manual runs never apply the gate; when it is enabled they leave an explicit
+    bypass warning and continue to the historical warn-only sandbox preflight.
+    """
+    try:
+        enabled = bool(get_setting("enable_remote_target_gate"))
+    except Exception as exc:
+        log_fn(
+            f"[target-gate] probe unavailable (settings: "
+            f"{type(exc).__name__}: {exc}) — proceeding"
+        )
+        return None
+    if not enabled:
+        return None
+
+    normalized_module = str(module or "").strip().lower()
+    if normalized_module not in REMOTE_TARGET_GATE_MODULES:
+        return None
+    normalized_target = str(target or "").strip()
+    if not normalized_target:
+        return None
+    if manual:
+        log_fn(
+            f"[target-gate] WARNING: operator manual-run bypass for "
+            f"{normalized_target}; automatic start gate not applied"
+        )
+        return None
+
+    try:
+        blocked, kind, detail = _remote_target_gate_probe(normalized_target)
+    except Exception as exc:
+        log_fn(
+            f"[target-gate] probe raised {type(exc).__name__}: {exc} "
+            f"— proceeding"
+        )
+        return None
+    if not blocked:
+        if kind == "probe_error":
+            log_fn(f"[target-gate] probe unavailable ({detail}) — proceeding")
+        return None
+
+    message = (
+        f"remote target {normalized_target!r} is unusable at job start "
+        f"({kind}: {detail}); operator must register a live target and retry"
+    )
+    log_fn(f"[target-gate] BLOCKED before agent start: {message}")
+    return {
+        "messages": 0,
+        "tool_calls": 0,
+        "agent_error": message,
+        "agent_error_kind": "target_unusable",
+        "target_gate": {
+            "status": "blocked",
+            "module": normalized_module,
+            "target": normalized_target,
+            "reason": kind,
+            "detail": detail,
+        },
+        "sandbox": None,
+    }
 
 
 def _refresh_target_from_meta(

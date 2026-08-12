@@ -38,7 +38,7 @@ from modules._common import (
     write_meta,
 )
 from modules._events import emit_event
-from modules._runner import attempt_sandbox_run
+from modules._runner import attempt_sandbox_run, remote_target_start_gate
 from modules.pwn.libc_targets import render_fsop_leak_table, render_rce_table
 from modules.pwn.prompts import SYSTEM_PROMPT, build_user_prompt, looks_heap_advanced
 from modules.settings_io import apply_to_env, get_setting
@@ -2024,6 +2024,12 @@ async def _run_agent(
     auto_run: bool,
     model_override: Optional[str] = None,
 ) -> dict:
+    gate_summary = remote_target_start_gate(
+        job_id, "pwn", target, lambda s: log_line(job_id, s),
+    )
+    if gate_summary is not None:
+        return gate_summary
+
     work_dir = job_dir(job_id) / "work"
     work_dir.mkdir(exist_ok=True)
 

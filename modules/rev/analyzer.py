@@ -31,7 +31,7 @@ from modules._common import (
     store_pre_recon_cache,
     write_meta,
 )
-from modules._runner import attempt_sandbox_run
+from modules._runner import attempt_sandbox_run, remote_target_start_gate
 from modules.rev.prompts import SYSTEM_PROMPT, build_user_prompt
 from modules.settings_io import apply_to_env, get_setting
 
@@ -44,6 +44,13 @@ async def _run_agent(
     auto_run: bool,
     model_override: Optional[str] = None,
 ) -> dict:
+    target = (read_meta(job_id).get("target_url") or "").strip() or None
+    gate_summary = remote_target_start_gate(
+        job_id, "rev", target, lambda s: log_line(job_id, s),
+    )
+    if gate_summary is not None:
+        return gate_summary
+
     work_dir = job_dir(job_id) / "work"
     work_dir.mkdir(exist_ok=True)
 
@@ -79,7 +86,6 @@ async def _run_agent(
         resume_sid=resume_sid,
         effort=resolve_effort(read_meta(job_id).get("effort")),
     )
-    target = (read_meta(job_id).get("target_url") or "").strip() or None
     user_prompt = build_user_prompt(binary_name, description, auto_run, target=target)
     from modules._prompts import build_target_directive
     _tgt_block = build_target_directive(target, read_meta(job_id).get("target_urls"))

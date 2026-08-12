@@ -1295,7 +1295,7 @@ def post_run_script(job_id: str, target: str | None = None):
 
     # Sandbox runner spawn (same path the orchestrators use)
     from modules._common import scan_job_for_flags, write_meta
-    from modules._runner import attempt_sandbox_run
+    from modules._runner import attempt_sandbox_run, remote_target_start_gate
     from modules.settings_io import apply_to_env
 
     # Persist an operator-supplied target override so the proactive
@@ -1315,6 +1315,9 @@ def post_run_script(job_id: str, target: str | None = None):
             fp.write(f"[{ts}] {line}\n")
 
     _log(f"[manual-run] executing {script} (target={target}, sage={use_sage})")
+    remote_target_start_gate(
+        safe, meta.get("module") or "", target, _log, manual=True,
+    )
     try:
         res = attempt_sandbox_run(safe, script, target, _log, use_sage=use_sage)
     except Exception as e:
