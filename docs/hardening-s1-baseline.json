@@ -1,0 +1,149 @@
+{
+  "schema": "hextech-hardening-s1-baseline/v1",
+  "project": "single-module-hardening-pwn-rev",
+  "stage": "S1-aggregator-closed",
+  "measurement_context": {
+    "date": "2026-08-12",
+    "captured_at": "2026-08-12T23:10:15+09:00",
+    "tree_path": "/home/yadohyun/HexTech_CTF_TOOL",
+    "branch": "main",
+    "base_commit": "b172d6d13461beb0d603ca170ae84822ab1371ac",
+    "base_tree": "6f952dfa5cd11f576f0ec0268d787395fc4cb437",
+    "aggregator_files": {
+      "scripts/aggregate_hardening.py": "sha256:59f979038dbc4a67f4625e6203e3ac937e6b56c01ab2cdacd713d5faa71b33f8",
+      "scripts/test_hardening_aggregator.py": "sha256:e52da33a2f8cd33901982baed5274179d25bec38f97c26a259cff8ca00864a04"
+    }
+  },
+  "data_snapshot": {
+    "path": "data/jobs",
+    "scope": "top-level */meta.json, */events.jsonl, */run.log, and */*.stderr",
+    "manifest_file_count": 224,
+    "meta_file_count": 64,
+    "manifest_sha256": "ce8590edf720994c0a899298d163ef173cd7a881a761e096125037873a0fdb01",
+    "manifest_algorithm": "Sort POSIX paths; for each file hash UTF-8 '<relative-path>\\t<size>\\t<content-sha256>\\t<stderr-mtime-ns-or->\\n'; SHA-256 the concatenation. stderr mtime is included because classification uses it.",
+    "stability_check": "The manifest was identical immediately before and after aggregate_hardening.py --json."
+  },
+  "outcome_semantics": {
+    "automatic_success_basis": "terminal/* events, with the documented safe legacy fallback when terminal evidence is absent",
+    "not_the_basis": "current meta.status or meta.flags",
+    "why": "Four jobs were rescued by later manual runs; counting current meta would report 21 successes instead of 17."
+  },
+  "population": {
+    "modules": [
+      "pwn",
+      "rev"
+    ],
+    "included": 43,
+    "excluded_from_population": "internal/parent jobs and the explicit system-validation job 9f9dad521117"
+  },
+  "automatic_success": {
+    "count": 17,
+    "percent_rounded": 40,
+    "tier_counts": {
+      "marker": 16,
+      "untrusted-tier": 1,
+      "missing-provenance": 0
+    },
+    "source_successes": {
+      "terminal": 13,
+      "legacy-meta": 4
+    }
+  },
+  "failure_population": {
+    "attempts": 22,
+    "lineages": 15,
+    "operator_stops_excluded_from_failure_attempts": 4
+  },
+  "lineage_summary": {
+    "capability": 3,
+    "noncapability": 12,
+    "noncapability_percent": 80
+  },
+  "classes": [
+    {
+      "name": "ENV_target_unusable",
+      "attempts": 9,
+      "lineages": 6,
+      "lineage_cost_usd": "247.28"
+    },
+    {
+      "name": "CAP_solver_exhausted",
+      "attempts": 4,
+      "lineages": 2,
+      "lineage_cost_usd": "20.01"
+    },
+    {
+      "name": "POL_prejudge_blocked",
+      "attempts": 2,
+      "lineages": 1,
+      "lineage_cost_usd": "117.92"
+    },
+    {
+      "name": "HARN_stream_overflow",
+      "attempts": 2,
+      "lineages": 2,
+      "lineage_cost_usd": "0.00"
+    },
+    {
+      "name": "HARN_flag_harvest",
+      "attempts": 1,
+      "lineages": 1,
+      "lineage_cost_usd": "97.19"
+    },
+    {
+      "name": "HARN_sdk_transport",
+      "attempts": 2,
+      "lineages": 1,
+      "lineage_cost_usd": "20.31"
+    },
+    {
+      "name": "POL_aup_refusal",
+      "attempts": 1,
+      "lineages": 1,
+      "lineage_cost_usd": "10.24"
+    },
+    {
+      "name": "CAP_ran_no_flag",
+      "attempts": 1,
+      "lineages": 1,
+      "lineage_cost_usd": "32.59"
+    }
+  ],
+  "verification": {
+    "aggregate_command": "python3 scripts/aggregate_hardening.py --json",
+    "test_command": "python3 scripts/test_hardening_aggregator.py -q",
+    "test_result": "39 passed, 0 failed"
+  },
+  "follow_ups": [
+    {
+      "id": "report-format-recognition",
+      "item": "Runner-output recognition still depends on the generated report format; unknown formats miss evidence rather than create ENV false positives, so the current direction is fail-safe."
+    },
+    {
+      "id": "runner-tag-migration",
+      "item": "Only 9 of 48 relevant records have [runner:*] tags; migrate to tag-based evidence after the corpus is replaced."
+    },
+    {
+      "id": "p6c-corpus-depth",
+      "item": "Only one of the three P6c branches has a production-corpus example."
+    },
+    {
+      "id": "s1-env-broken-registration",
+      "item": "Job 4df962049a35 exposed a registered target that was already broken; use this as an S1-ENV design input."
+    },
+    {
+      "id": "untrusted-success-adjudication",
+      "item": "The single untrusted-tier success, job 07d256325546, awaits manual adjudication."
+    }
+  ],
+  "sources": [
+    "/home/yadohyun/hextech-handoff/turns/0571-claude.md:40",
+    "/home/yadohyun/hextech-handoff/turns/0571-claude.md:78",
+    "/home/yadohyun/hextech-handoff/turns/0573-claude.md:37",
+    "scripts/aggregate_hardening.py:194",
+    "scripts/aggregate_hardening.py:214",
+    "scripts/aggregate_hardening.py:261",
+    "scripts/aggregate_hardening.py:584",
+    "scripts/aggregate_hardening.py:942"
+  ]
+}
