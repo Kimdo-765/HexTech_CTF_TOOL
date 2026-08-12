@@ -33,6 +33,7 @@ from modules._prompts import (  # noqa: E402,F401
     DEBUGGER_AGENT_PROMPT,
 )
 from modules.storage import DATA_DIR, JOBS_DIR  # noqa: E402
+from modules._events import emit_event  # noqa: E402
 
 # Common CTF flag formats. The leading prefix can vary per event; cover the
 # usual suspects + a generic short-prefix fallback.
@@ -6417,7 +6418,7 @@ def auto_retry_max() -> int:
       0                    → disabled (initial run only, no auto retry)
       N (positive int)     → exactly N retries on top of the initial run
       -1 / inf / unlimited → unlimited; loop continues until natural exit
-                             (flag captured · verdict==success · empty
+                             (marker capture · verdict==success · empty
                              retry_hint · agent error · BUDGET_ABORT · user
                              Stop · soft/hard timeout).
 
@@ -6434,17 +6435,21 @@ def auto_retry_max() -> int:
     return max(0, n)
 
 
-def _auto_retry_success(flags_now: list[str], verdict: str | None) -> bool:
+def _auto_retry_success(
+    flags_now: list[str], verdict: str | None, provenance_tier: str
+) -> bool:
     """Whether the current sandbox attempt may terminate the retry loop.
 
-    ``flags_now`` has already passed ``scan_job_for_flags`` and therefore the
-    placeholder filter. Keep non-placeholder narrative captures terminal: a
-    target may die after the agent captured a genuine flag, leaving prose as
-    its only surviving source (job 07d256325546). A judge success remains an
-    independent terminal signal, including the existing zero-harvest warning
-    path below.
+    A flag value remains visible regardless of tier, but only an explicit
+    ``FLAG_CANDIDATE`` marker is strong enough to short-circuit retries on its
+    own. Bare runner regex hits and narrative prose are useful evidence, not a
+    capture decision: plausible decoys survive the placeholder filter. A judge
+    success remains an independent terminal signal, including the existing
+    zero-harvest warning path below.
     """
-    return bool(flags_now) or verdict == "success"
+    return verdict == "success" or (
+        bool(flags_now) and provenance_tier == "marker"
+    )
 
 
 # Heap-specific failure code → prescriptive fix snippet. Kept here next
@@ -9194,7 +9199,12 @@ async def run_main_agent_session(
             # loop applies the same NARRATIVE-skip gate as the final
             # analyzer scan (see scan_job_for_flags docstring + job
             # 44dd25365173 incident).
-            flags_now = scan_job_for_flags(job_id, sandbox_result=last_sandbox)
+            flag_provenance: dict = {}
+            flags_now = scan_job_for_flags(
+                job_id,
+                sandbox_result=last_sandbox,
+                provenance_out=flag_provenance,
+            )
             judge_out = ((last_sandbox or {}).get("judge") or {})
             verdict = judge_out.get("verdict")
             # Accumulate the just-emitted retry_hint so the NEXT
@@ -9203,7 +9213,30 @@ async def run_main_agent_session(
             _hint_just_now = (judge_out.get("retry_hint") or "").strip()
             if _hint_just_now:
                 summary["judge_hints"].append(_hint_just_now)
-            if _auto_retry_success(flags_now, verdict):
+            terminal_capture = _auto_retry_success(
+                flags_now, verdict, flag_provenance.get("tier", "")
+            )
+            if verdict == "success":
+                gate_reason = "judge_success"
+            elif flags_now and flag_provenance.get("tier") == "marker":
+                gate_reason = "marker_capture"
+            elif flags_now:
+                gate_reason = "weak_flag_evidence"
+            else:
+                gate_reason = "no_capture_evidence"
+            emit_event(
+                job_id,
+                "run",
+                "flag_gate",
+                flags_count=len(flags_now),
+                tier=flag_provenance.get("tier", ""),
+                suppressed=bool(flag_provenance.get("suppressed")),
+                verdict=verdict,
+                exit_code=(last_sandbox or {}).get("exit_code"),
+                terminal_capture=terminal_capture,
+                reason=gate_reason,
+            )
+            if terminal_capture:
                 if verdict == "success" and not flags_now:
                     # Silent contradiction: the judge confirmed a capture but
                     # scan_job_for_flags harvested nothing. Almost always a
@@ -9482,7 +9515,7 @@ async def run_main_agent_session(
                     return last_sandbox
 
             # Out of retries? Stop. Negative max_retries means unlimited
-            # — only natural exit conditions (flag / verdict==success /
+            # — only natural exit conditions (marker flag / verdict==success /
             # empty retry_hint / agent_error / user Stop / timeout) end
             # the loop in that case.
             if max_retries >= 0 and attempt >= max_retries:

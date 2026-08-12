@@ -34,6 +34,7 @@ Two defects let that through.
 from __future__ import annotations
 
 import ast as _ast
+import argparse
 import json
 import pathlib
 import re
@@ -42,6 +43,60 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+MUTATIONS = (
+    "weak-any-tier-terminal",
+    "drop-marker-clause",
+    "drop-success-clause",
+    "accept-runner-regex",
+    "drop-provenance-passage",
+)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--mutate", choices=MUTATIONS)
+args = parser.parse_args()
+
+
+def _replace_once(source: str, old: str, new: str) -> str:
+    count = source.count(old)
+    if count != 1:
+        raise RuntimeError(f"mutation anchor count is {count}, expected 1: {old!r}")
+    return source.replace(old, new, 1)
+
+
+COMMON_SOURCE = (ROOT / "modules" / "_common.py").read_text()
+_GATE_RETURN = '''    return verdict == "success" or (
+        bool(flags_now) and provenance_tier == "marker"
+    )'''
+if args.mutate == "weak-any-tier-terminal":
+    COMMON_SOURCE = _replace_once(
+        COMMON_SOURCE, _GATE_RETURN,
+        '    return verdict == "success" or bool(flags_now)',
+    )
+elif args.mutate == "drop-marker-clause":
+    COMMON_SOURCE = _replace_once(
+        COMMON_SOURCE, _GATE_RETURN, '    return verdict == "success"',
+    )
+elif args.mutate == "drop-success-clause":
+    COMMON_SOURCE = _replace_once(
+        COMMON_SOURCE, _GATE_RETURN,
+        '    return bool(flags_now) and provenance_tier == "marker"',
+    )
+elif args.mutate == "accept-runner-regex":
+    COMMON_SOURCE = _replace_once(
+        COMMON_SOURCE,
+        'bool(flags_now) and provenance_tier == "marker"',
+        'bool(flags_now) and provenance_tier in ("marker", "runner_regex")',
+    )
+elif args.mutate == "drop-provenance-passage":
+    COMMON_SOURCE = _replace_once(
+        COMMON_SOURCE,
+        '''                sandbox_result=last_sandbox,
+                provenance_out=flag_provenance,
+''',
+        '''                sandbox_result=last_sandbox,
+''',
+    )
 
 _results: list[bool] = []
 
@@ -57,8 +112,7 @@ def section(name: str) -> None:
 
 def _load(jobdir: pathlib.Path, flag_format: str = ""):
     """Load the real scanner with job_dir / read_meta redirected."""
-    src = (ROOT / "modules" / "_common.py").read_text()
-    tree = _ast.parse(src)
+    tree = _ast.parse(COMMON_SOURCE)
     nodes = [n for n in tree.body if isinstance(n, _ast.Assign)]
     nodes += [n for n in tree.body if isinstance(n, _ast.FunctionDef)
               and n.name in {"scan_job_for_flags", "_is_placeholder_flag",
@@ -96,6 +150,7 @@ REAL = "DH{bb3cd526550f28ebc618d59e4bebcb6ec82d09dd6d8a98d3d13cb0c695c4796d}"
 REAL2 = "DH{Br1ll1ant_bit_dr1bble_<<_>>}"
 CANDIDATE_PLACEHOLDER = "DH{candidate_here}"
 NARRATIVE_CAPTURE = "DH{2996f516cdf17978ee6dda6d02b35b}"
+NARRATIVE_DECOY = "DH{real_looking_but_fake_2026}"
 
 
 def main() -> int:
@@ -140,6 +195,13 @@ def main() -> int:
     chk("an explicit marker wins over a stale denial line",
         ns["scan_job_for_flags"]("j", trusted_only=True) == [REAL],
         ns["scan_job_for_flags"]("j", trusted_only=True))
+    marker_pv: dict = {}
+    marker_flags = ns["scan_job_for_flags"](
+        "j", trusted_only=True, provenance_out=marker_pv
+    )
+    chk("REGRESSION: marker capture terminates despite a crash verdict",
+        ns["_auto_retry_success"](marker_flags, "crash", marker_pv.get("tier", "")),
+        (marker_flags, marker_pv))
 
     section("a sweep hit under a denial is dropped — but LOUDLY")
     _logs.clear()
@@ -181,6 +243,8 @@ def main() -> int:
     ns["scan_job_for_flags"]("j", trusted_only=True, provenance_out=pv)
     chk("REGRESSION: a bare sweep hit is NOT reported as a declaration",
         pv.get("tier") == "runner_regex", pv)
+    chk("REGRESSION: bare runner regex does not terminate on a crash verdict",
+        not ns["_auto_retry_success"]([REAL], "crash", pv.get("tier", "")), pv)
 
     d = _job(**{"report.md": "the flag is " + REAL + "\n"})
     ns = _load(d, flag_format="DH{...}")
@@ -221,13 +285,41 @@ def main() -> int:
         chk(f"REGRESSION {job_id}: DH{{candidate_here}} is filtered",
             flags == [], flags)
         chk(f"REGRESSION {job_id}: filtered prose keeps the retry loop open",
-            not ns["_auto_retry_success"](flags, "failure"), flags)
+            not ns["_auto_retry_success"](flags, "crash", ""), flags)
 
-    source = (ROOT / "modules" / "_common.py").read_text()
-    chk("REGRESSION: the production success branch uses the tested decision",
-        source.count("if _auto_retry_success(flags_now, verdict):") == 1)
+    source = COMMON_SOURCE
+    chk("REGRESSION: production scan passes provenance to the retry gate",
+        source.count("provenance_out=flag_provenance,") == 1
+        and source.count(
+            'flags_now, verdict, flag_provenance.get("tier", "")'
+        ) == 1)
+    _event_start = source.find('            emit_event(\n                job_id,\n'
+                               '                "run",\n                "flag_gate",')
+    _event_end = source.find('            if terminal_capture:', _event_start)
+    _event = source[_event_start:_event_end] if _event_start >= 0 else ""
+    chk("REGRESSION: the attempt event joins provenance, verdict, and decision",
+        _event_start >= 0 and all(
+            token in _event for token in (
+                "flags_count=", "tier=", "suppressed=", "verdict=",
+                "exit_code=", "terminal_capture=", "reason=",
+            )
+        ), _event)
 
-    section("non-placeholder narrative captures keep existing behavior")
+    section("non-placeholder narrative stays visible without short-circuiting")
+    # A narrative value is still returned to each module's final analyzer scan,
+    # which writes that same list to meta.flags; only this retry decision changes.
+    d = _job(**{"report.md": "example only: " + NARRATIVE_DECOY + "\n"})
+    ns = _load(d, flag_format="DH{...}")
+    decoy_pv: dict = {}
+    decoy_flags = ns["scan_job_for_flags"]("decoy", provenance_out=decoy_pv)
+    chk("REGRESSION: a plausible narrative decoy stays visible for curation",
+        decoy_flags == [NARRATIVE_DECOY] and decoy_pv.get("tier") == "narrative",
+        (decoy_flags, decoy_pv))
+    chk("REGRESSION: narrative decoy + crash does not terminate auto-retry",
+        not ns["_auto_retry_success"](
+            decoy_flags, "crash", decoy_pv.get("tier", "")
+        ), (decoy_flags, decoy_pv))
+
     d = _job(**{"report.md": "captured live: " + NARRATIVE_CAPTURE + "\n"})
     ns = _load(d, flag_format="DH{...}")
     pv = {}
@@ -235,10 +327,13 @@ def main() -> int:
     chk("REGRESSION 07d256325546: the narrative capture survives",
         flags == [NARRATIVE_CAPTURE] and pv.get("tier") == "narrative",
         (flags, pv))
-    chk("REGRESSION 07d256325546: that capture still terminates auto-retry",
-        ns["_auto_retry_success"](flags, "failure"), flags)
-    chk("judge success remains independently terminal with zero harvested flags",
-        ns["_auto_retry_success"]([], "success"))
+    chk("REGRESSION 07d256325546: crash+narrative keeps retry decision open",
+        not ns["_auto_retry_success"](
+            flags, "crash", pv.get("tier", "")
+        ), (flags, pv))
+    for success_tier in ("", "marker", "runner_regex", "narrative"):
+        chk(f"judge success remains terminal at tier={success_tier or 'empty'}",
+            ns["_auto_retry_success"]([], "success", success_tier), success_tier)
     chk("candidate plus real entropy is not classified as a placeholder",
         not ns["_is_placeholder_flag"](
             "DH{candidate_2996f516cdf17978ee6dda6d02b35b}"
@@ -290,7 +385,10 @@ def main() -> int:
             [f for f in flags if re.search(r"\{[^}]*\s", f)][:2])
 
     failed = [r for r in _results if not r]
-    print(f"\n{len(_results)} checks, {len(failed)} failed")
+    print(
+        f"\n{len(_results)} checks, {len(failed)} failed; "
+        f"mutation={args.mutate or 'none'}"
+    )
     return 1 if failed else 0
 
 
