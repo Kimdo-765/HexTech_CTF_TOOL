@@ -1,0 +1,602 @@
+diff --git a/modules/_common.py b/modules/_common.py
+index 8f433a7..7e39e8e 100644
+--- a/modules/_common.py
++++ b/modules/_common.py
+@@ -57,8 +57,8 @@ _FLAG_MARKER_RE = re.compile(
+     r"FLAG[_-]?CANDIDATE\s*[:=]\s*([^\r\n]+)",
+     re.IGNORECASE | re.MULTILINE,
+ )
+-# Some trusted sources (result.json from api/jobs.py:_manual_run, callbacks.jsonl)
+-# embed the run's stdout as a JSON string, so the marker line's terminating
++# Some trusted sources (for example callbacks.jsonl) embed the run's stdout as
++# a JSON string, so the marker line's terminating
+ # newline becomes a literal `\n` (two chars) and the rest of the JSON (`",`
+ # the next key, ...) rides on the same PHYSICAL line. `[^\r\n]+` then over-
+ # captures `DH{...}\n",` (real job a3d4d4484233). Cut the candidate at the
+@@ -1356,7 +1356,6 @@ _TRUSTED_FLAG_SOURCES = (
+     "solver.py.stderr",
+     "callbacks.jsonl",
+     "summary.json",          # forensic — no exploit.py; flag comes from artifact analysis
+-    "result.json",           # api/jobs.py:_manual_run dumps sandbox stdout into this
+ )
+ 
+ # Narrative artifacts the agent itself authored or that derive from
+@@ -1469,6 +1468,8 @@ def scan_job_for_flags(
+     extra_files: list[str] | None = None,
+     *,
+     sandbox_result: dict | None = None,
++    sandbox_started: bool | None = None,
++    agent_error: bool = False,
+     trusted_only: bool = False,
+     provenance_out: dict | None = None,
+ ) -> list[str]:
+@@ -1508,7 +1509,7 @@ def scan_job_for_flags(
+ 
+       1. TRUSTED tier — files produced by the actual runner / OOB
+          collector (exploit/solver stdout/stderr, callbacks.jsonl,
+-         summary.json, result.json). If ANY non-placeholder flag
++         summary.json). If ANY non-placeholder flag
+          appears here, return ONLY those — they prove the exploit
+          really retrieved the flag from the target.
+       2. NARRATIVE tier — report.md, run.log, findings.json. Consulted
+@@ -1532,6 +1533,16 @@ def scan_job_for_flags(
+     sandbox_result['judge_aborted']=True or
+     sandbox_result['error']='prejudge_blocked', the narrative tier
+     is skipped entirely.
++
++    `sandbox_started` is separate from `sandbox_result`: a runner attempt may
++    legitimately return ``None``.  When the orchestrator explicitly records
++    ``sandbox_started=False`` *and* the agent errored, narrative prose cannot
++    promote the crashed job to a terminal success.  ``None`` remains unknown
++    for older and non-orchestrator callers rather than being treated as no-run.
++
++    ``result.json`` is deliberately not a scan input.  Analyzers write it after
++    their final scan and include the selected flags, so trusting it on a later
++    rescan upgrades the analyzer's own narrative decision to runner evidence.
+     """
+     jd = job_dir(job_id)
+ 
+@@ -1753,7 +1764,8 @@ def scan_job_for_flags(
+             or sandbox_result.get("error") == "prejudge_blocked"
+         )
+     )
+-    if sandbox_skipped or trusted_only:
++    crashed_before_sandbox = sandbox_started is False and bool(agent_error)
++    if sandbox_skipped or crashed_before_sandbox or trusted_only:
+         return []
+ 
+     narrative = {f for f in _scan(_NARRATIVE_FLAG_SOURCES) if not _is_placeholder_flag(f)}
+@@ -8266,6 +8278,10 @@ async def run_main_agent_session(
+         summary["easy_framing"] = False
+ 
+     last_sandbox: dict | None = None
++    # This signal is independent of the runner's return value: a real attempt
++    # may return None.  Final analyzers use it together with agent_error to keep
++    # an agent crash before the runner from promoting narrative prose.
++    summary.setdefault("sandbox_started", False)
+     # Track retry hints across attempts so the next postjudge call can
+     # see "you already said this" — drives next_action=stop more
+     # aggressively. summary["judge_hints"] is what the sandbox_runner
+@@ -9241,6 +9257,7 @@ async def run_main_agent_session(
+             write_meta(job_id, stage=f"sandbox-run-{attempt}" if attempt else "sandbox-run")
+             log_fn(f"[orchestrator] auto-run turn {attempt}: executing {picked}")
+             try:
++                summary["sandbox_started"] = True
+                 last_sandbox = await anyio.to_thread.run_sync(sandbox_runner, picked)
+             except Exception as e:
+                 log_fn(f"[orchestrator] sandbox runner crashed: {e}")
+@@ -9256,6 +9273,8 @@ async def run_main_agent_session(
+                 job_id,
+                 sandbox_result=last_sandbox,
+                 provenance_out=flag_provenance,
++                sandbox_started=summary.get("sandbox_started"),
++                agent_error=bool(summary.get("agent_error")),
+             )
+             judge_out = ((last_sandbox or {}).get("judge") or {})
+             verdict = judge_out.get("verdict")
+diff --git a/modules/codex_cli.py b/modules/codex_cli.py
+index 7560737..19600fc 100644
+--- a/modules/codex_cli.py
++++ b/modules/codex_cli.py
+@@ -37,6 +37,13 @@ from modules.gpt_run_events import context_from_options, emit_gpt_event
+ DEFAULT_TURN_TIMEOUT_S = 3600.0
+ MAX_EVENT_TEXT_CHARS = 48_000
+ MAX_STDERR_CHARS = 64_000
++# Keep the asyncio transport comfortably above the historical 64 KiB default,
++# but do not confuse that implementation limit with our application boundary.
++# A JSONL event may legitimately exceed this transport limit, so
++# `_read_bounded_jsonl_line()` drains it in chunks up to the separate hard cap.
++SUBPROCESS_STREAM_LIMIT_BYTES = 1024 * 1024
++MAX_JSONL_EVENT_BYTES = 8 * 1024 * 1024
++_STREAM_DRAIN_CHUNK_BYTES = 64 * 1024
+ 
+ # Native Codex roles exposed only for GPT/Codex CLI main sessions.  Their
+ # config files are generated per job so the provider-scoped GPT preset can
+@@ -204,6 +211,56 @@ def _json_text(value: Any) -> str:
+         return str(value)
+ 
+ 
++async def _read_bounded_jsonl_line(
++    reader: asyncio.StreamReader,
++    hard_cap: int = MAX_JSONL_EVENT_BYTES,
++) -> tuple[bytes, bool]:
++    """Read one newline-delimited event without losing stream alignment.
++
++    ``StreamReader.readline()`` raises ``ValueError`` when a line exceeds the
++    reader's transport limit.  ``readuntil()`` exposes how much can be consumed,
++    which lets us preserve legitimate multi-limit events and deliberately drain
++    an event that exceeds the application hard cap.  The returned boolean says
++    that the event was dropped; the next call starts at the next JSONL record.
++    """
++    cap = max(1, int(hard_cap))
++    buf = bytearray()
++    dropped = False
++
++    while True:
++        try:
++            chunk = await reader.readuntil(b"\n")
++        except asyncio.LimitOverrunError as exc:
++            # Consume exactly the bytes asyncio says precede the separator (or
++            # the separator-prefix it retained), but never materialize that
++            # potentially large span as one new bytes object.
++            remaining = max(1, int(exc.consumed))
++            while remaining:
++                part = await reader.read(min(remaining, _STREAM_DRAIN_CHUNK_BYTES))
++                if not part:
++                    return (b"", True) if dropped else (bytes(buf), False)
++                remaining -= len(part)
++                if dropped:
++                    continue
++                if len(buf) + len(part) > cap:
++                    buf.clear()
++                    dropped = True
++                else:
++                    buf.extend(part)
++            continue
++        except asyncio.IncompleteReadError as exc:
++            chunk = exc.partial
++            if dropped or len(buf) + len(chunk) > cap:
++                return b"", True
++            buf.extend(chunk)
++            return bytes(buf), False
++
++        if dropped or len(buf) + len(chunk) > cap:
++            return b"", True
++        buf.extend(chunk)
++        return bytes(buf), False
++
++
+ def _usage_from_event(raw: Any) -> dict[str, int]:
+     usage = raw if isinstance(raw, dict) else {}
+     total_input = int(usage.get("input_tokens") or usage.get("inputTokens") or 0)
+@@ -499,6 +556,7 @@ class CodexCLIClient:
+                 stdout=asyncio.subprocess.PIPE,
+                 stderr=asyncio.subprocess.PIPE,
+                 start_new_session=True,
++                limit=SUBPROCESS_STREAM_LIMIT_BYTES,
+             )
+         except Exception as exc:
+             emit_gpt_event(
+@@ -529,7 +587,31 @@ class CodexCLIClient:
+                 remaining = timeout - (time.monotonic() - started)
+                 if remaining <= 0:
+                     raise asyncio.TimeoutError
+-                line = await asyncio.wait_for(self._proc.stdout.readline(), remaining)
++                line, dropped = await asyncio.wait_for(
++                    _read_bounded_jsonl_line(
++                        self._proc.stdout,
++                        hard_cap=MAX_JSONL_EVENT_BYTES,
++                    ),
++                    remaining,
++                )
++                if dropped:
++                    summary = (
++                        "Codex CLI JSONL event exceeded the "
++                        f"{MAX_JSONL_EVENT_BYTES}-byte hard cap; drained through "
++                        "the delimiter and resumed at the next event"
++                    )
++                    emit_gpt_event(
++                        event_job_id,
++                        "stream_event_dropped",
++                        role=event_role,
++                        model=event_model,
++                        turn=self._turn_count,
++                        status="warning",
++                        title="Oversized event dropped",
++                        summary=summary,
++                    )
++                    yield AssistantMessage([TextBlock(f"[Codex CLI warning] {summary}")])
++                    continue
+                 if not line:
+                     break
+                 try:
+@@ -717,6 +799,11 @@ class CodexCLIClient:
+                 [TextBlock(f"[Codex CLI turn timed out after {timeout:.0f}s]")]
+             )
+         finally:
++            # Normal completion is already reaped, so this is a cheap no-op in
++            # the common case.  On cancellation or any other BaseException it is
++            # the only owner-aware cleanup path: terminate the process group
++            # before discarding the handle that close() would otherwise need.
++            await self._stop_process()
+             if not stderr_task.done():
+                 stderr_task.cancel()
+             try:
+diff --git a/modules/pwn/analyzer.py b/modules/pwn/analyzer.py
+index e2c6324..fe2002f 100644
+--- a/modules/pwn/analyzer.py
++++ b/modules/pwn/analyzer.py
+@@ -2527,9 +2527,15 @@ def run_job(
+         # the helper stashed the LAST sandbox_result on the summary.
+         sandbox_result = agent_summary.pop("sandbox", None)
+ 
+-        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
+         agent_err = agent_summary.get("agent_error")
+         agent_err_kind = agent_summary.get("agent_error_kind")
++        sandbox_started = agent_summary.get("sandbox_started")
++        flags = scan_job_for_flags(
++            job_id,
++            sandbox_result=sandbox_result,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         if agent_err and not agent_summary.get("exploit_present"):
+             final_status = "failed"
+         elif not flags:
+diff --git a/modules/rev/analyzer.py b/modules/rev/analyzer.py
+index 04fb61b..3713220 100644
+--- a/modules/rev/analyzer.py
++++ b/modules/rev/analyzer.py
+@@ -304,9 +304,15 @@ def run_job(
+ 
+         sandbox_result = agent_summary.pop("sandbox", None)
+ 
+-        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
+         agent_err = agent_summary.get("agent_error")
+         agent_err_kind = agent_summary.get("agent_error_kind")
++        sandbox_started = agent_summary.get("sandbox_started")
++        flags = scan_job_for_flags(
++            job_id,
++            sandbox_result=sandbox_result,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         if agent_err and not agent_summary.get("solver_present"):
+             final_status = "failed"
+         elif not flags:
+diff --git a/scripts/test_codex_cli.py b/scripts/test_codex_cli.py
+index 4d97cba..22a1e7c 100644
+--- a/scripts/test_codex_cli.py
++++ b/scripts/test_codex_cli.py
+@@ -50,6 +50,19 @@ class FakeReader:
+     async def readline(self) -> bytes:
+         return self.lines.pop(0) if self.lines else b""
+ 
++    async def readuntil(self, _separator: bytes = b"\n") -> bytes:
++        return await self.readline()
++
++    async def readexactly(self, size: int) -> bytes:
++        if not self.lines:
++            raise asyncio.IncompleteReadError(b"", size)
++        head = self.lines[0]
++        if len(head) < size:
++            self.lines.pop(0)
++            raise asyncio.IncompleteReadError(head, size)
++        chunk, self.lines[0] = head[:size], head[size:]
++        return chunk
++
+     async def read(self, _size: int = -1) -> bytes:
+         body, self.body = self.body, b""
+         return body
+@@ -217,6 +230,12 @@ async def test_jsonl_and_resume() -> None:
+         "initial turn uses danger-full-access in worker",
+         "danger-full-access" in first_cmd,
+     )
++    report(
++        "subprocess stream limit is explicit",
++        first_kwargs.get("limit") == __import__(
++            "modules.codex_cli", fromlist=["SUBPROCESS_STREAM_LIMIT_BYTES"]
++        ).SUBPROCESS_STREAM_LIMIT_BYTES,
++    )
+     report(
+         "user config and rules are ignored",
+         "--ignore-user-config" in first_cmd and "--ignore-rules" in first_cmd,
+@@ -428,10 +447,205 @@ async def test_auth_retry_and_incomplete_stream() -> None:
+     )
+ 
+ 
++async def test_oversized_jsonl_boundaries() -> None:
++    print("\n== Codex oversized JSONL boundaries ==")
++    from modules import codex_cli
++    from modules.gpt_responses import AssistantMessage, GptSessionOptions, ResultMessage, TextBlock
++
++    # A1-a: this is the production incident shape — a valid event well above
++    # asyncio's historical 64 KiB line limit. Preserve every byte and leave the
++    # next two records aligned.
++    text = "x" * 100_000
++    first = (json.dumps({
++        "type": "item.completed",
++        "item": {"type": "agent_message", "text": text},
++    }) + "\n").encode()
++    second = b'{"type":"turn.completed"}\n'
++    third = b'{"type":"third"}\n'
++    reader = asyncio.StreamReader(limit=64 * 1024)
++    reader.feed_data(first + second + third)
++    reader.feed_eof()
++    got_first, dropped_first = await codex_cli._read_bounded_jsonl_line(
++        reader, hard_cap=200_000,
++    )
++    got_second, dropped_second = await codex_cli._read_bounded_jsonl_line(
++        reader, hard_cap=200_000,
++    )
++    got_third, dropped_third = await codex_cli._read_bounded_jsonl_line(
++        reader, hard_cap=200_000,
++    )
++    report(
++        "A1-a oversized event is preserved exactly",
++        got_first == first
++        and len(json.loads(got_first)["item"]["text"]) == 100_000
++        and got_second == second
++        and got_third == third
++        and not any((dropped_first, dropped_second, dropped_third)),
++    )
++
++    # A1-b: exercise the full client, not just the reader helper. The first
++    # record exceeds a test-sized hard cap; the following valid response must be
++    # parsed and the drop must be visible in the event ledger and message stream.
++    process = FakeProcess(_events("0199-after-drop", "RECOVERED", tool=False))
++    stream = asyncio.StreamReader(limit=128)
++    oversized = (
++        b'{"type":"noise","blob":"' + (b"z" * 1_000) + b'"}\n'
++    )
++    valid = b"".join(
++        (json.dumps(event) + "\n").encode()
++        for event in _events("0199-after-drop", "RECOVERED", tool=False)
++    )
++    stream.feed_data(oversized + valid)
++    stream.feed_eof()
++    process.stdout = stream
++
++    client = codex_cli.CodexCLIClient(GptSessionOptions(
++        system_prompt="test", model="gpt-5.6-sol",
++        cwd=tempfile.mkdtemp(prefix="codex-cli-oversized-"),
++    ))
++    client._codex_bin = "/usr/local/bin/codex"
++    original_exec = asyncio.create_subprocess_exec
++    original_emit = codex_cli.emit_gpt_event
++    original_cap = codex_cli.MAX_JSONL_EVENT_BYTES
++    emitted: list[str] = []
++
++    async def fake_exec(*_args, **_kwargs):
++        return process
++
++    def fake_emit(_job_id, kind, **_kwargs):
++        emitted.append(kind)
++
++    asyncio.create_subprocess_exec = fake_exec
++    codex_cli.emit_gpt_event = fake_emit
++    codex_cli.MAX_JSONL_EVENT_BYTES = 512
++    try:
++        await client.query("test oversized stream")
++        messages = [message async for message in client.receive_response()]
++    finally:
++        asyncio.create_subprocess_exec = original_exec
++        codex_cli.emit_gpt_event = original_emit
++        codex_cli.MAX_JSONL_EVENT_BYTES = original_cap
++
++    rendered = "".join(
++        block.text
++        for message in messages
++        if isinstance(message, AssistantMessage)
++        for block in message.content
++        if isinstance(block, TextBlock)
++    )
++    result = next(message for message in messages if isinstance(message, ResultMessage))
++    report(
++        "A1-b hard-cap drop is recorded and resumes at the next event",
++        "stream_event_dropped" in emitted
++        and "exceeded the 512-byte hard cap" in rendered
++        and "RECOVERED" in rendered
++        and not result.is_error,
++    )
++
++
++async def _exercise_real_process_reap(mode: str) -> tuple[bool, str]:
++    """Launch a parent+child process group through the real adapter boundary."""
++    from modules import codex_cli
++    from modules.gpt_responses import GptSessionOptions, ResultMessage
++
++    root = Path(tempfile.mkdtemp(prefix=f"codex-cli-reap-{mode}-"))
++    ready = root / "child-ready"
++    stopped = root / "child-stopped"
++    child_code = (
++        "import pathlib,signal,sys,time;"
++        "ready=pathlib.Path(sys.argv[1]);stopped=pathlib.Path(sys.argv[2]);"
++        "signal.signal(signal.SIGTERM,lambda *_:(stopped.write_text('term'),sys.exit(0)));"
++        "ready.write_text('ready');time.sleep(60)"
++    )
++    parent_code = (
++        "import subprocess,sys,time;"
++        "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]]);"
++        "time.sleep(60)"
++    )
++
++    client = codex_cli.CodexCLIClient(GptSessionOptions(
++        system_prompt="test", model="gpt-5.6-sol", cwd=str(root),
++    ))
++    client._codex_bin = sys.executable
++    original_exec = asyncio.create_subprocess_exec
++    spawned: list[asyncio.subprocess.Process] = []
++
++    async def standin_exec(*_args, **kwargs):
++        proc = await original_exec(
++            sys.executable, "-c", parent_code, child_code, str(ready), str(stopped),
++            **kwargs,
++        )
++        spawned.append(proc)
++        return proc
++
++    async def consume(timeout: float):
++        return [message async for message in client.receive_response(
++            turn_timeout_s=timeout,
++        )]
++
++    asyncio.create_subprocess_exec = standin_exec
++    messages = None
++    detail = ""
++    try:
++        await client.query(f"test {mode} cleanup")
++        task = asyncio.create_task(consume(1.0 if mode == "timeout" else 30.0))
++        for _ in range(200):
++            if ready.exists():
++                break
++            await asyncio.sleep(0.01)
++        if mode == "cancel":
++            task.cancel()
++            try:
++                await task
++            except asyncio.CancelledError:
++                pass
++        else:
++            messages = await task
++        for _ in range(200):
++            if stopped.exists():
++                break
++            await asyncio.sleep(0.01)
++        result_reason = ""
++        if messages is not None:
++            result_reason = next(
++                message.stop_reason for message in messages
++                if isinstance(message, ResultMessage)
++            )
++        ok = (
++            ready.exists()
++            and stopped.exists()
++            and bool(spawned)
++            and spawned[0].returncode is not None
++            and client._proc is None
++            and (mode != "timeout" or result_reason == "timeout")
++        )
++        detail = f"ready={ready.exists()} stopped={stopped.exists()} reason={result_reason}"
++        return ok, detail
++    finally:
++        asyncio.create_subprocess_exec = original_exec
++        for proc in spawned:
++            if proc.returncode is None:
++                try:
++                    os.killpg(proc.pid, 9)
++                except ProcessLookupError:
++                    pass
++                await proc.wait()
++
++
++async def test_process_group_reaping() -> None:
++    print("\n== Codex process-group reaping ==")
++    cancel_ok, cancel_detail = await _exercise_real_process_reap("cancel")
++    report("A7-a cancellation reaps the spawned child", cancel_ok, cancel_detail)
++    timeout_ok, timeout_detail = await _exercise_real_process_reap("timeout")
++    report("A7-b timeout still reaps the spawned child", timeout_ok, timeout_detail)
++
++
+ async def main() -> int:
+     test_settings_auth_mode()
+     await test_jsonl_and_resume()
+     await test_auth_retry_and_incomplete_stream()
++    await test_oversized_jsonl_boundaries()
++    await test_process_group_reaping()
+     print(f"\n== summary: {PASS} passed, {FAIL} failed ==")
+     return 1 if FAIL else 0
+ 
+diff --git a/scripts/test_flag_scan.py b/scripts/test_flag_scan.py
+index 8b74f1b..4447826 100644
+--- a/scripts/test_flag_scan.py
++++ b/scripts/test_flag_scan.py
+@@ -50,6 +50,8 @@ MUTATIONS = (
+     "drop-success-clause",
+     "accept-runner-regex",
+     "drop-provenance-passage",
++    "trust-self-result",
++    "drop-crash-no-run-gate",
+ )
+ 
+ parser = argparse.ArgumentParser()
+@@ -97,6 +99,19 @@ elif args.mutate == "drop-provenance-passage":
+         '''                sandbox_result=last_sandbox,
+ ''',
+     )
++elif args.mutate == "trust-self-result":
++    COMMON_SOURCE = _replace_once(
++        COMMON_SOURCE,
++        '    "summary.json",          # forensic — no exploit.py; flag comes from artifact analysis\n)',
++        '    "summary.json",          # forensic — no exploit.py; flag comes from artifact analysis\n'
++        '    "result.json",\n)',
++    )
++elif args.mutate == "drop-crash-no-run-gate":
++    COMMON_SOURCE = _replace_once(
++        COMMON_SOURCE,
++        "    crashed_before_sandbox = sandbox_started is False and bool(agent_error)\n",
++        "    crashed_before_sandbox = False\n",
++    )
+ 
+ _results: list[bool] = []
+ 
+@@ -339,6 +354,59 @@ def main() -> int:
+             "DH{candidate_2996f516cdf17978ee6dda6d02b35b}"
+         ))
+ 
++    section("crash/no-run evidence cannot self-launder through result.json")
++    stale = "DH{stale_narrative_after_agent_crash}"
++    d = _job(**{
++        "report.md": "unverified candidate: " + stale + "\n",
++        "result.json": json.dumps({"sandbox": None, "flags": [stale]}),
++    })
++    ns = _load(d, flag_format="DH{...}")
++    pv = {}
++    got = ns["scan_job_for_flags"](
++        "0d88d50ad167",
++        sandbox_result=None,
++        sandbox_started=False,
++        agent_error=True,
++        provenance_out=pv,
++    )
++    chk(
++        "A0-a agent error + explicit no-run rejects narrative and self result",
++        got == [] and pv.get("tier") == ""
++        and "result.json" not in ns["_TRUSTED_FLAG_SOURCES"],
++        (got, pv, ns["_TRUSTED_FLAG_SOURCES"]),
++    )
++
++    d = _job(**{
++        "solver.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n",
++        "solver.py__stderr": "",
++    })
++    ns = _load(d, flag_format="DH{...}")
++    pv = {}
++    got = ns["scan_job_for_flags"](
++        "2b495752ce97",
++        sandbox_result={"exit_code": 0},
++        sandbox_started=True,
++        agent_error=False,
++        provenance_out=pv,
++    )
++    chk(
++        "A0-b executed exit-0 marker capture still passes",
++        got == [REAL] and pv.get("tier") == "marker",
++        (got, pv),
++    )
++
++    pwn_source = (ROOT / "modules" / "pwn" / "analyzer.py").read_text()
++    rev_source = (ROOT / "modules" / "rev" / "analyzer.py").read_text()
++    chk(
++        "production finalizers pass explicit sandbox-attempt and agent-error evidence",
++        COMMON_SOURCE.count('summary["sandbox_started"] = True') == 1
++        and all(
++            "sandbox_started=sandbox_started" in source
++            and "agent_error=bool(agent_err)" in source
++            for source in (pwn_source, rev_source)
++        ),
++    )
++
+     section("sibling matchers share the character class")
+     crypto = (ROOT / "modules" / "crypto" / "pre_analysis.py").read_text()
+     cline = [l for l in crypto.splitlines() if "re.escape(prefix).encode()" in l]
