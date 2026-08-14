@@ -222,6 +222,166 @@ index 7560737..19600fc 100644
              if not stderr_task.done():
                  stderr_task.cancel()
              try:
+diff --git a/modules/crypto/analyzer.py b/modules/crypto/analyzer.py
+index db4349f..7cd41cc 100644
+--- a/modules/crypto/analyzer.py
++++ b/modules/crypto/analyzer.py
+@@ -329,9 +329,15 @@ def run_job(
+ 
+         sandbox_result = agent_summary.pop("sandbox", None)
+ 
+-        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
+         agent_err = agent_summary.get("agent_error")
+         agent_err_kind = agent_summary.get("agent_error_kind")
++        sandbox_started = agent_summary.get("sandbox_started")
++        flags = scan_job_for_flags(
++            job_id,
++            sandbox_result=sandbox_result,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         if agent_err and not agent_summary.get("solver_present"):
+             final_status = "failed"
+         elif not flags:
+diff --git a/modules/forensic/orchestrator.py b/modules/forensic/orchestrator.py
+index d82f7ce..c153d42 100644
+--- a/modules/forensic/orchestrator.py
++++ b/modules/forensic/orchestrator.py
+@@ -91,6 +91,28 @@ def _host_path(job_id: str) -> str:
+     return f"{host_root.rstrip('/')}/jobs/{job_id}"
+ 
+ 
++def _summary_agent_evidence(
++    agent_summary: object,
++) -> tuple[Optional[bool], Optional[str]]:
++    """Translate this one-shot agent's explicit result into scan evidence.
++
++    Forensic has no separate auto-run sandbox phase.  An explicit provider
++    result therefore proves that such a sandbox did not start, while a missing
++    or malformed result remains unknown for skip-auth and legacy paths.
++    """
++    if not isinstance(agent_summary, dict):
++        return None, None
++    agent_result = agent_summary.get("result")
++    if not isinstance(agent_result, dict):
++        return None, None
++    is_error = agent_result.get("is_error")
++    if is_error is True:
++        return False, "summary agent returned is_error=true"
++    if is_error is False:
++        return False, None
++    return None, None
++
++
+ def _spawn_collector(
+     job_id: str,
+     image_rel: str,
+@@ -359,8 +381,15 @@ def run_job(
+         # + earlier sessions (stop -> continue reuses the job id)
+         cost += prior_session_cost(job_id)
+         result["cost_usd"] = cost
+-        flags = scan_job_for_flags(job_id)
++        sandbox_started, agent_err = _summary_agent_evidence(result.get("claude"))
++        flags = scan_job_for_flags(
++            job_id,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         result["flags"] = flags
++        result["agent_error"] = agent_err
++        result["agent_error_kind"] = "agent_error" if agent_err else None
+ 
+         # Surface log-miner stats so the UI can render counts without
+         # re-reading log_findings.json.
+@@ -386,11 +415,18 @@ def run_job(
+         # web-ui/app.js gates the Save-to-exploit-library button on
+         # `status === "finished"`, so a flagless forensic run offered to save
+         # itself into the library as a solved challenge.
+-        final_status = "finished" if flags else "no_flag"
++        if flags:
++            final_status = "finished"
++        elif agent_err:
++            final_status = "failed"
++        else:
++            final_status = "no_flag"
+         (_job_dir(job_id) / "result.json").write_text(json.dumps(result, indent=2, default=str))
+         _write_meta(
+             job_id, status=final_status, stage="done", cost_usd=cost,
+             flags=flags,
++            error=agent_err,
++            error_kind="agent_error" if agent_err else None,
+             log_findings_counts=log_findings_counts,
+             result={"kind": kind, "had_claude": bool(result.get("claude"))},
+         )
+diff --git a/modules/misc/orchestrator.py b/modules/misc/orchestrator.py
+index 0a1a3ee..efd30ee 100644
+--- a/modules/misc/orchestrator.py
++++ b/modules/misc/orchestrator.py
+@@ -92,6 +92,28 @@ def _host_path(job_id: str) -> str:
+     return f"{host_root.rstrip('/')}/jobs/{job_id}"
+ 
+ 
++def _summary_agent_evidence(
++    agent_summary: object,
++) -> tuple[Optional[bool], Optional[str]]:
++    """Translate this one-shot agent's explicit result into scan evidence.
++
++    Misc has no separate auto-run sandbox phase.  An explicit provider result
++    therefore proves that such a sandbox did not start, while a missing or
++    malformed result remains unknown for skip-auth and legacy paths.
++    """
++    if not isinstance(agent_summary, dict):
++        return None, None
++    agent_result = agent_summary.get("result")
++    if not isinstance(agent_result, dict):
++        return None, None
++    is_error = agent_result.get("is_error")
++    if is_error is True:
++        return False, "summary agent returned is_error=true"
++    if is_error is False:
++        return False, None
++    return None, None
++
++
+ def _spawn_misc(job_id: str, filename: str, passphrase: Optional[str]) -> str:
+     client = docker.from_env()
+     cmd = [f"/job/{filename}", "--out", "/job"]
+@@ -355,19 +377,32 @@ def run_job(
+         # re-running the untrusted heuristic here could drop a real DH{<64hex>}
+         # (see memory real_flag_dropped_as_placeholder).
+         raw = [f for f in candidates + embedded if f and not _is_placeholder_flag(f)]
+-        scanned = scan_job_for_flags(job_id)
++        sandbox_started, agent_err = _summary_agent_evidence(result.get("claude"))
++        scanned = scan_job_for_flags(
++            job_id,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         flags = sorted(set(raw + scanned))
+         result["flags"] = flags
++        result["agent_error"] = agent_err
++        result["agent_error_kind"] = "agent_error" if agent_err else None
+ 
+         cost = extract_cost(result.get("claude"))
+         # + earlier sessions (stop -> continue reuses the job id)
+         cost += prior_session_cost(job_id)
+         result["cost_usd"] = cost
+ 
+-        final_status = "finished" if flags else "no_flag"
++        if flags:
++            final_status = "finished"
++        elif agent_err:
++            final_status = "failed"
++        else:
++            final_status = "no_flag"
+         (_job_dir(job_id) / "result.json").write_text(json.dumps(result, indent=2, default=str))
+         _write_meta(job_id, status=final_status, stage="done", cost_usd=cost,
+-                    flags=flags)
++                    flags=flags, error=agent_err,
++                    error_kind="agent_error" if agent_err else None)
+         return result
+     except Exception as e:
+         _log(job_id, f"ERROR: {e}\n{traceback.format_exc()}")
 diff --git a/modules/pwn/analyzer.py b/modules/pwn/analyzer.py
 index e2c6324..fe2002f 100644
 --- a/modules/pwn/analyzer.py
@@ -262,6 +422,48 @@ index 04fb61b..3713220 100644
 +            agent_error=bool(agent_err),
 +        )
          if agent_err and not agent_summary.get("solver_present"):
+             final_status = "failed"
+         elif not flags:
+diff --git a/modules/web/analyzer.py b/modules/web/analyzer.py
+index 800f503..833a09f 100644
+--- a/modules/web/analyzer.py
++++ b/modules/web/analyzer.py
+@@ -500,9 +500,15 @@ def run_job(
+ 
+         sandbox_result = agent_summary.pop("sandbox", None)
+ 
+-        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
+         agent_err = agent_summary.get("agent_error")
+         agent_err_kind = agent_summary.get("agent_error_kind")
++        sandbox_started = agent_summary.get("sandbox_started")
++        flags = scan_job_for_flags(
++            job_id,
++            sandbox_result=sandbox_result,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         if agent_err and not agent_summary.get("exploit_present"):
+             final_status = "failed"
+         elif not flags:
+diff --git a/modules/web3/analyzer.py b/modules/web3/analyzer.py
+index 7152b30..d2dc589 100644
+--- a/modules/web3/analyzer.py
++++ b/modules/web3/analyzer.py
+@@ -276,9 +276,15 @@ def run_job(
+ 
+         sandbox_result = agent_summary.pop("sandbox", None)
+ 
+-        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
+         agent_err = agent_summary.get("agent_error")
+         agent_err_kind = agent_summary.get("agent_error_kind")
++        sandbox_started = agent_summary.get("sandbox_started")
++        flags = scan_job_for_flags(
++            job_id,
++            sandbox_result=sandbox_result,
++            sandbox_started=sandbox_started,
++            agent_error=bool(agent_err),
++        )
+         if agent_err and not agent_summary.get("exploit_present"):
              final_status = "failed"
          elif not flags:
 diff --git a/scripts/test_codex_cli.py b/scripts/test_codex_cli.py
@@ -508,19 +710,38 @@ index 4d97cba..22a1e7c 100644
      return 1 if FAIL else 0
  
 diff --git a/scripts/test_flag_scan.py b/scripts/test_flag_scan.py
-index 8b74f1b..4447826 100644
+index 8b74f1b..e58b17b 100644
 --- a/scripts/test_flag_scan.py
 +++ b/scripts/test_flag_scan.py
-@@ -50,6 +50,8 @@ MUTATIONS = (
+@@ -50,6 +50,13 @@ MUTATIONS = (
      "drop-success-clause",
      "accept-runner-regex",
      "drop-provenance-passage",
 +    "trust-self-result",
 +    "drop-crash-no-run-gate",
++    "drop-web-evidence",
++    "drop-crypto-evidence",
++    "drop-web3-evidence",
++    "permit-misc-error",
++    "permit-forensic-error",
  )
  
  parser = argparse.ArgumentParser()
-@@ -97,6 +99,19 @@ elif args.mutate == "drop-provenance-passage":
+@@ -65,6 +72,13 @@ def _replace_once(source: str, old: str, new: str) -> str:
+ 
+ 
+ COMMON_SOURCE = (ROOT / "modules" / "_common.py").read_text()
++MODULE_SOURCES = {
++    "web": (ROOT / "modules" / "web" / "analyzer.py").read_text(),
++    "crypto": (ROOT / "modules" / "crypto" / "analyzer.py").read_text(),
++    "web3": (ROOT / "modules" / "web3" / "analyzer.py").read_text(),
++    "misc": (ROOT / "modules" / "misc" / "orchestrator.py").read_text(),
++    "forensic": (ROOT / "modules" / "forensic" / "orchestrator.py").read_text(),
++}
+ _GATE_RETURN = '''    return verdict == "success" or (
+         bool(flags_now) and provenance_tier == "marker"
+     )'''
+@@ -97,6 +111,35 @@ elif args.mutate == "drop-provenance-passage":
          '''                sandbox_result=last_sandbox,
  ''',
      )
@@ -537,10 +758,121 @@ index 8b74f1b..4447826 100644
 +        "    crashed_before_sandbox = sandbox_started is False and bool(agent_error)\n",
 +        "    crashed_before_sandbox = False\n",
 +    )
++
++for _module in ("web", "crypto", "web3"):
++    if args.mutate == f"drop-{_module}-evidence":
++        MODULE_SOURCES[_module] = _replace_once(
++            MODULE_SOURCES[_module],
++            '        sandbox_started = agent_summary.get("sandbox_started")\n',
++            '        sandbox_started = None\n',
++        )
++
++for _module in ("misc", "forensic"):
++    if args.mutate == f"permit-{_module}-error":
++        MODULE_SOURCES[_module] = _replace_once(
++            MODULE_SOURCES[_module],
++            '        return False, "summary agent returned is_error=true"\n',
++            '        return None, "summary agent returned is_error=true"\n',
++        )
  
  _results: list[bool] = []
  
-@@ -339,6 +354,59 @@ def main() -> int:
+@@ -133,6 +176,94 @@ def _load(jobdir: pathlib.Path, flag_format: str = ""):
+     return ns
+ 
+ 
++def _load_function(source: str, name: str):
++    """Load one dependency-free helper from a production module source."""
++    tree = _ast.parse(source)
++    funcs = [
++        node for node in tree.body
++        if isinstance(node, _ast.FunctionDef) and node.name == name
++    ]
++    if len(funcs) != 1:
++        raise RuntimeError(f"expected one {name}, found {len(funcs)}")
++    ns = {"Optional": __import__("typing").Optional}
++    exec(compile(_ast.Module(body=funcs, type_ignores=[]), "<module>", "exec"), ns)
++    return ns[name]
++
++
++def _exercise_finalizer(module: str, agent_summary: dict, scan_flags: list[str]):
++    """Run the production run_job finalizer with all external work stubbed."""
++    source = MODULE_SOURCES[module]
++    tree = _ast.parse(source)
++    funcs = [
++        node for node in tree.body
++        if isinstance(node, _ast.FunctionDef) and node.name == "run_job"
++    ]
++    if len(funcs) != 1:
++        raise RuntimeError(f"expected one {module}.run_job, found {len(funcs)}")
++
++    class _AnyIO:
++        @staticmethod
++        def run(*_args, **_kwargs):
++            # run_job pops the sandbox value; isolate every exercise.
++            return json.loads(json.dumps(agent_summary))
++
++    class _OS:
++        environ: dict[str, str] = {}
++
++    jobdir = pathlib.Path(tempfile.mkdtemp())
++    meta_writes: list[dict] = []
++    scan_calls: list[dict] = []
++
++    def _write(_job_id: str, **updates) -> None:
++        meta_writes.append(updates)
++
++    def _scan(_job_id: str, *args, **kwargs) -> list[str]:
++        scan_calls.append({"args": args, **kwargs})
++        return list(scan_flags)
++
++    ns = {
++        "Optional": __import__("typing").Optional,
++        "anyio": _AnyIO,
++        "os": _OS,
++        "json": json,
++        "traceback": __import__("traceback"),
++        "apply_to_env": lambda: None,
++        "read_meta": lambda _job_id: {},
++        "reap_chal_containers": lambda *_args, **_kwargs: None,
++        "write_meta": _write,
++        "_write_meta": _write,
++        "job_dir": lambda _job_id: jobdir,
++        "_job_dir": lambda _job_id: jobdir,
++        "log_line": lambda *_args, **_kwargs: None,
++        "_log": lambda *_args, **_kwargs: None,
++        "extract_cost": lambda _summary: 0.0,
++        "prior_session_cost": lambda _job_id: 0.0,
++        "scan_job_for_flags": _scan,
++        "_is_placeholder_flag": lambda _flag: False,
++        "has_provider_auth": lambda: True,
++        "active_provider": lambda: "test",
++        "_run_agent": object(),
++        "_claude_summary": object(),
++        "_spawn_collector": lambda *_args, **_kwargs: "collector ok",
++    }
++    if module in {"misc", "forensic"}:
++        ns["_summary_agent_evidence"] = _load_function(
++            source, "_summary_agent_evidence"
++        )
++    exec(compile(_ast.Module(body=funcs, type_ignores=[]), "<module>", "exec"), ns)
++
++    if module in {"web", "crypto", "web3"}:
++        result = ns["run_job"]("j", None, None, None, True, None)
++    elif module == "misc":
++        result = ns["run_job"]("j", None, None, None, False, None)
++    else:
++        result = ns["run_job"](
++            "j", "image.bin", "disk", "linux", None, False, False, None
++        )
++    terminal = [write for write in meta_writes if write.get("stage") == "done"][-1]
++    return result, terminal, scan_calls[-1]
++
++
+ _logs: list[str] = []
+ 
+ 
+@@ -339,6 +470,219 @@ def main() -> int:
              "DH{candidate_2996f516cdf17978ee6dda6d02b35b}"
          ))
  
@@ -585,10 +917,153 @@ index 8b74f1b..4447826 100644
 +        (got, pv),
 +    )
 +
++    section("I1b extends crash evidence to every remaining module")
++    one_shot_evidence = {
++        module: _load_function(source, "_summary_agent_evidence")
++        for module, source in MODULE_SOURCES.items()
++        if module in {"misc", "forensic"}
++    }
++    for module, evidence_fn in one_shot_evidence.items():
++        chk(
++            f"I1b {module}: explicit provider error is known no-sandbox evidence",
++            evidence_fn({"result": {"is_error": True}})
++            == (False, "summary agent returned is_error=true"),
++            evidence_fn({"result": {"is_error": True}}),
++        )
++        chk(
++            f"I1b {module}: successful one-shot result is not an agent error",
++            evidence_fn({"result": {"is_error": False}}) == (False, None),
++            evidence_fn({"result": {"is_error": False}}),
++        )
++        unknowns = [
++            evidence_fn(None),
++            evidence_fn({}),
++            evidence_fn({"result": {"is_error": "unknown"}}),
++        ]
++        chk(
++            f"I1b {module}: absent/malformed result remains unknown",
++            unknowns == [(None, None)] * 3,
++            unknowns,
++        )
++
++    crash_evidence = {
++        "web": (False, "agent crashed"),
++        "crypto": (False, "agent crashed"),
++        "web3": (False, "agent crashed"),
++        **{
++            module: evidence_fn({"result": {"is_error": True}})
++            for module, evidence_fn in one_shot_evidence.items()
++        },
++    }
++    crash_dir = _job(**{
++        "report.md": "unverified candidate: " + stale + "\n",
++        "result.json": json.dumps({"sandbox": None, "flags": [stale]}),
++    })
++    crash_ns = _load(crash_dir, flag_format="DH{...}")
++    for module, (started, error) in crash_evidence.items():
++        pv = {}
++        got = crash_ns["scan_job_for_flags"](
++            "0d88d50ad167",
++            sandbox_started=started,
++            agent_error=bool(error),
++            provenance_out=pv,
++        )
++        chk(
++            f"I1b {module}: crash/no-run rejects the 0d88 narrative",
++            got == [] and pv.get("tier") == "",
++            (got, pv, started, error),
++        )
++        if module in {"web", "crypto", "web3"}:
++            artifact_key = "solver_present" if module == "crypto" else "exploit_present"
++            summary = {
++                "sandbox": None,
++                "sandbox_started": False,
++                "agent_error": "agent crashed",
++                "agent_error_kind": "agent_error",
++                artifact_key: True,
++            }
++            expected_status = "no_flag"
++        else:
++            summary = {"result": {"is_error": True}}
++            expected_status = "failed"
++        result, terminal, scan_call = _exercise_finalizer(module, summary, got)
++        chk(
++            f"I1b {module}: production finalizer turns the crash into 0 flags",
++            result["flags"] == []
++            and terminal.get("status") == expected_status
++            and scan_call.get("sandbox_started") is False
++            and scan_call.get("agent_error") is True,
++            (result, terminal, scan_call),
++        )
++
++    control_files = {
++        "web": {"exploit.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
++        "crypto": {"solver.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
++        "web3": {"exploit.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
++        "misc": {"report.md": "captured normally: " + REAL + "\n"},
++        "forensic": {"summary.json": json.dumps({"flag": REAL})},
++    }
++    expected_tiers = {
++        "web": "marker", "crypto": "marker", "web3": "marker",
++        "misc": "narrative", "forensic": "runner_regex",
++    }
++    for module, files in control_files.items():
++        control_dir = _job(**files)
++        control_ns = _load(control_dir, flag_format="DH{...}")
++        if module in one_shot_evidence:
++            started, error = one_shot_evidence[module](
++                {"result": {"is_error": False}}
++            )
++        else:
++            started, error = True, None
++        pv = {}
++        got = control_ns["scan_job_for_flags"](
++            "2b495752ce97",
++            sandbox_started=started,
++            agent_error=bool(error),
++            provenance_out=pv,
++        )
++        chk(
++            f"I1b {module}: normal execution plus flag remains finished-eligible",
++            got == [REAL] and pv.get("tier") == expected_tiers[module],
++            (got, pv, started, error),
++        )
++        if module in {"web", "crypto", "web3"}:
++            artifact_key = "solver_present" if module == "crypto" else "exploit_present"
++            summary = {
++                "sandbox": {"exit_code": 0},
++                "sandbox_started": True,
++                artifact_key: True,
++            }
++            expected_started = True
++        else:
++            summary = {"result": {"is_error": False}}
++            expected_started = False
++        result, terminal, scan_call = _exercise_finalizer(module, summary, got)
++        chk(
++            f"I1b {module}: production finalizer keeps normal flag as finished",
++            result["flags"] == [REAL]
++            and terminal.get("status") == "finished"
++            and scan_call.get("sandbox_started") is expected_started
++            and scan_call.get("agent_error") is False,
++            (result, terminal, scan_call),
++        )
++
++    unknown_dir = _job(**{"report.md": "candidate: " + stale + "\n"})
++    unknown_ns = _load(unknown_dir, flag_format="DH{...}")
++    unknown_flags = unknown_ns["scan_job_for_flags"](
++        "legacy", sandbox_started=None, agent_error=True,
++    )
++    chk(
++        "I1b unknown(None) remains permissive instead of becoming a no-run claim",
++        unknown_flags == [stale],
++        unknown_flags,
++    )
++
 +    pwn_source = (ROOT / "modules" / "pwn" / "analyzer.py").read_text()
 +    rev_source = (ROOT / "modules" / "rev" / "analyzer.py").read_text()
 +    chk(
-+        "production finalizers pass explicit sandbox-attempt and agent-error evidence",
++        "pwn/rev production finalizers pass explicit sandbox-attempt and agent-error evidence",
 +        COMMON_SOURCE.count('summary["sandbox_started"] = True') == 1
 +        and all(
 +            "sandbox_started=sandbox_started" in source
@@ -596,7 +1071,45 @@ index 8b74f1b..4447826 100644
 +            for source in (pwn_source, rev_source)
 +        ),
 +    )
++    for module in ("web", "crypto", "web3"):
++        source = MODULE_SOURCES[module]
++        chk(
++            f"I1b {module}: production finalizer forwards both real summary signals",
++            'sandbox_started = agent_summary.get("sandbox_started")' in source
++            and "sandbox_started=sandbox_started" in source
++            and "agent_error=bool(agent_err)" in source,
++        )
++    for module in ("misc", "forensic"):
++        source = MODULE_SOURCES[module]
++        chk(
++            f"I1b {module}: one-shot finalizer forwards evidence and surfaces error",
++            "sandbox_started=sandbox_started" in source
++            and "agent_error=bool(agent_err)" in source
++            and 'result["agent_error"] = agent_err' in source
++            and 'error_kind="agent_error" if agent_err else None' in source,
++        )
 +
      section("sibling matchers share the character class")
      crypto = (ROOT / "modules" / "crypto" / "pre_analysis.py").read_text()
      cline = [l for l in crypto.splitlines() if "re.escape(prefix).encode()" in l]
+@@ -349,11 +693,16 @@ def main() -> int:
+         cline)
+ 
+     section("a flagless run is not 'finished' — in EVERY module")
+-    for mod, path in (("forensic", "modules/forensic/orchestrator.py"),
+-                      ("misc", "modules/misc/orchestrator.py")):
+-        text = (ROOT / path).read_text()
++    one_shot_status_block = '''        if flags:
++            final_status = "finished"
++        elif agent_err:
++            final_status = "failed"
++        else:
++            final_status = "no_flag"'''
++    for mod in ("forensic", "misc"):
++        text = MODULE_SOURCES[mod]
+         chk(f"  {mod} gates its terminal status on flags",
+-            'final_status = "finished" if flags else "no_flag"' in text
++            one_shot_status_block in text
+             and 'status="finished", stage="done"' not in text,
+             [l.strip() for l in text.splitlines()
+              if "final_status" in l or 'status="finished"' in l][:3])
