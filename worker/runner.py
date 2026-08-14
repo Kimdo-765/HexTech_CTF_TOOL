@@ -14,6 +14,8 @@ from modules.settings_io import get_setting  # noqa: E402
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 JOBS_DIR = Path("/data/jobs")
+MEASUREMENT_ARCHIVE_DIR = JOBS_DIR.parent / "job-measurements"
+MEASUREMENT_ARTIFACTS = ("events.jsonl", "meta.json", "run.log")
 CLEANUP_INTERVAL_S = 3600
 
 
@@ -67,6 +69,79 @@ def _resolve_concurrency() -> int:
     return max(1, n)
 
 
+def _runs_cleanup() -> bool:
+    """Elect one cleanup owner across split worker containers."""
+    return not SLOT or SLOT == "1"
+
+
+def _promote_measurement_artifacts(job_dir: Path) -> tuple[str, ...]:
+    """Best-effort copy of the durable measurement corpus before TTL removal.
+
+    The archive is deliberately a SIBLING of ``jobs``.  ``cleanup_loop`` only
+    walks ``JOBS_DIR``, so an old archive cannot be selected on the next TTL
+    cycle.  Copy through a same-directory temporary file and replace the final
+    name only after the copy completes; an interrupted copy must not masquerade
+    as a complete measurement artifact.
+
+    Promotion is observability, not a retention lock: every failure is logged,
+    but the caller still removes the expired job as the existing TTL contract
+    requires.
+    """
+    target_dir = MEASUREMENT_ARCHIVE_DIR / job_dir.name
+    promoted: list[str] = []
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(
+            f"[cleanup] measurement promotion failed for {job_dir}: "
+            f"archive directory: {e}",
+            flush=True,
+        )
+        return ()
+
+    for name in MEASUREMENT_ARTIFACTS:
+        source = job_dir / name
+        if not source.is_file():
+            continue
+        temporary = target_dir / f".{name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, target_dir / name)
+            promoted.append(name)
+        except Exception as e:
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
+            print(
+                f"[cleanup] measurement promotion failed for {job_dir}: "
+                f"{name}: {e}",
+                flush=True,
+            )
+    return tuple(promoted)
+
+
+def _cleanup_expired_jobs(ttl: int, *, now: datetime | None = None) -> int:
+    """Run one TTL sweep and return the number of removed job directories."""
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=ttl)
+    removed = 0
+    if not JOBS_DIR.exists():
+        return removed
+    for d in JOBS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc)
+        if mtime >= cutoff:
+            continue
+        _promote_measurement_artifacts(d)
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except Exception as e:
+            print(f"[cleanup] failed to rm {d}: {e}", flush=True)
+    return removed
+
+
 def cleanup_loop() -> None:
     while True:
         try:
@@ -74,19 +149,7 @@ def cleanup_loop() -> None:
             if ttl <= 0:
                 time.sleep(CLEANUP_INTERVAL_S)
                 continue
-            cutoff = datetime.now(timezone.utc) - timedelta(days=ttl)
-            removed = 0
-            if JOBS_DIR.exists():
-                for d in JOBS_DIR.iterdir():
-                    if not d.is_dir():
-                        continue
-                    mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc)
-                    if mtime < cutoff:
-                        try:
-                            shutil.rmtree(d)
-                            removed += 1
-                        except Exception as e:
-                            print(f"[cleanup] failed to rm {d}: {e}", flush=True)
+            removed = _cleanup_expired_jobs(ttl)
             if removed:
                 print(f"[cleanup] removed {removed} jobs older than {ttl}d", flush=True)
         except Exception as e:
@@ -346,8 +409,12 @@ def main() -> int:
     # prefix is already win64-ready.
     _preinit_wine_prefix()
 
-    # Cleanup thread runs in the parent only.
-    threading.Thread(target=cleanup_loop, daemon=True).start()
+    # Cleanup runs in one parent only.  Both split-slot containers mount the
+    # same /data tree; letting both promote and remove the same directory races
+    # archive writes against rmtree.  Slot 1 already owns the single scheduler,
+    # and the legacy one-container shape remains unchanged.
+    if _runs_cleanup():
+        threading.Thread(target=cleanup_loop, daemon=True).start()
 
     # Use spawn (not fork) to avoid copying threading state and any FDs
     # that should not be shared (docker-py http client, redis pool, etc).

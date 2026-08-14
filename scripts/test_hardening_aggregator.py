@@ -569,6 +569,55 @@ class FixtureTestCase(unittest.TestCase):
 
 
 class AcceptanceTests(FixtureTestCase):
+    def test_A4_nonterminal_and_resume_wait_are_excluded_with_reasons(self) -> None:
+        self.fixture.job(
+            "a4running",
+            [],
+            meta={"status": "running", "finished_at": None},
+        )
+        self.fixture.job(
+            "a4resume",
+            [],
+            meta={
+                "status": "stopped",
+                "error": "Stopped by user (resume with extra hint)",
+                "error_kind": "stopped_for_resume",
+            },
+        )
+        result = A.aggregate(self.fixture.jobs_dir)
+        rows = {row.job_id: row for row in result.classifications}
+        self.assertEqual((result.included, result.excluded, result.failures), (2, 2, 0))
+        self.assertEqual(
+            (rows["a4running"].class_name, rows["a4running"].rung, rows["a4running"].evidence),
+            ("EXCLUDED_operator_stop", "P0", "nonterminal-status=running"),
+        )
+        self.assertEqual(
+            (rows["a4resume"].class_name, rows["a4resume"].rung, rows["a4resume"].evidence),
+            ("EXCLUDED_operator_stop", "P0", "error_kind=stopped_for_resume"),
+        )
+
+    def test_A4_other_unclassified_failures_remain_loud(self) -> None:
+        for job_id, meta in (
+            ("a4ordinary", {"status": "no_flag"}),
+            (
+                "a4agenterror",
+                {
+                    "status": "stopped",
+                    "error": "unclassified agent crash",
+                    "error_kind": "agent_exception",
+                },
+            ),
+        ):
+            with self.subTest(job_id=job_id):
+                isolated = Fixture()
+                self.addCleanup(isolated.close)
+                isolated.job(job_id, [], meta=meta)
+                with self.assertRaisesRegex(
+                    A.AggregationError,
+                    rf"unresolved failure classification: {job_id}",
+                ):
+                    A.aggregate(isolated.jobs_dir)
+
     def test_D4_only_allowlisted_execution_sources_are_environment_evidence(self) -> None:
         terminal_events = [
             event("00:00:20", "run", "start", target="live.example:1"),
@@ -1384,6 +1433,16 @@ class LiveSnapshotTests(FixtureTestCase):
 
 
 MUTATIONS = {
+    "A4_nonterminal": (
+        "if outcome.status in NONTERMINAL_STATUSES:",
+        "if False and outcome.status in NONTERMINAL_STATUSES:",
+        "AcceptanceTests.test_A4_nonterminal_and_resume_wait_are_excluded_with_reasons",
+    ),
+    "A4_resume": (
+        'error is None or error_kind == "stopped_for_resume"',
+        "error is None or False",
+        "AcceptanceTests.test_A4_nonterminal_and_resume_wait_are_excluded_with_reasons",
+    ),
     "D1": (
         r'r"Could not connect to (?:host )?[A-Za-z0-9.-]+\b"',
         r'r"Could not connect to host3\.dreamhack\.games\b"',

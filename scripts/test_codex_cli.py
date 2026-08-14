@@ -50,6 +50,19 @@ class FakeReader:
     async def readline(self) -> bytes:
         return self.lines.pop(0) if self.lines else b""
 
+    async def readuntil(self, _separator: bytes = b"\n") -> bytes:
+        return await self.readline()
+
+    async def readexactly(self, size: int) -> bytes:
+        if not self.lines:
+            raise asyncio.IncompleteReadError(b"", size)
+        head = self.lines[0]
+        if len(head) < size:
+            self.lines.pop(0)
+            raise asyncio.IncompleteReadError(head, size)
+        chunk, self.lines[0] = head[:size], head[size:]
+        return chunk
+
     async def read(self, _size: int = -1) -> bytes:
         body, self.body = self.body, b""
         return body
@@ -216,6 +229,12 @@ async def test_jsonl_and_resume() -> None:
     report(
         "initial turn uses danger-full-access in worker",
         "danger-full-access" in first_cmd,
+    )
+    report(
+        "subprocess stream limit is explicit",
+        first_kwargs.get("limit") == __import__(
+            "modules.codex_cli", fromlist=["SUBPROCESS_STREAM_LIMIT_BYTES"]
+        ).SUBPROCESS_STREAM_LIMIT_BYTES,
     )
     report(
         "user config and rules are ignored",
@@ -428,10 +447,205 @@ async def test_auth_retry_and_incomplete_stream() -> None:
     )
 
 
+async def test_oversized_jsonl_boundaries() -> None:
+    print("\n== Codex oversized JSONL boundaries ==")
+    from modules import codex_cli
+    from modules.gpt_responses import AssistantMessage, GptSessionOptions, ResultMessage, TextBlock
+
+    # A1-a: this is the production incident shape — a valid event well above
+    # asyncio's historical 64 KiB line limit. Preserve every byte and leave the
+    # next two records aligned.
+    text = "x" * 100_000
+    first = (json.dumps({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": text},
+    }) + "\n").encode()
+    second = b'{"type":"turn.completed"}\n'
+    third = b'{"type":"third"}\n'
+    reader = asyncio.StreamReader(limit=64 * 1024)
+    reader.feed_data(first + second + third)
+    reader.feed_eof()
+    got_first, dropped_first = await codex_cli._read_bounded_jsonl_line(
+        reader, hard_cap=200_000,
+    )
+    got_second, dropped_second = await codex_cli._read_bounded_jsonl_line(
+        reader, hard_cap=200_000,
+    )
+    got_third, dropped_third = await codex_cli._read_bounded_jsonl_line(
+        reader, hard_cap=200_000,
+    )
+    report(
+        "A1-a oversized event is preserved exactly",
+        got_first == first
+        and len(json.loads(got_first)["item"]["text"]) == 100_000
+        and got_second == second
+        and got_third == third
+        and not any((dropped_first, dropped_second, dropped_third)),
+    )
+
+    # A1-b: exercise the full client, not just the reader helper. The first
+    # record exceeds a test-sized hard cap; the following valid response must be
+    # parsed and the drop must be visible in the event ledger and message stream.
+    process = FakeProcess(_events("0199-after-drop", "RECOVERED", tool=False))
+    stream = asyncio.StreamReader(limit=128)
+    oversized = (
+        b'{"type":"noise","blob":"' + (b"z" * 1_000) + b'"}\n'
+    )
+    valid = b"".join(
+        (json.dumps(event) + "\n").encode()
+        for event in _events("0199-after-drop", "RECOVERED", tool=False)
+    )
+    stream.feed_data(oversized + valid)
+    stream.feed_eof()
+    process.stdout = stream
+
+    client = codex_cli.CodexCLIClient(GptSessionOptions(
+        system_prompt="test", model="gpt-5.6-sol",
+        cwd=tempfile.mkdtemp(prefix="codex-cli-oversized-"),
+    ))
+    client._codex_bin = "/usr/local/bin/codex"
+    original_exec = asyncio.create_subprocess_exec
+    original_emit = codex_cli.emit_gpt_event
+    original_cap = codex_cli.MAX_JSONL_EVENT_BYTES
+    emitted: list[str] = []
+
+    async def fake_exec(*_args, **_kwargs):
+        return process
+
+    def fake_emit(_job_id, kind, **_kwargs):
+        emitted.append(kind)
+
+    asyncio.create_subprocess_exec = fake_exec
+    codex_cli.emit_gpt_event = fake_emit
+    codex_cli.MAX_JSONL_EVENT_BYTES = 512
+    try:
+        await client.query("test oversized stream")
+        messages = [message async for message in client.receive_response()]
+    finally:
+        asyncio.create_subprocess_exec = original_exec
+        codex_cli.emit_gpt_event = original_emit
+        codex_cli.MAX_JSONL_EVENT_BYTES = original_cap
+
+    rendered = "".join(
+        block.text
+        for message in messages
+        if isinstance(message, AssistantMessage)
+        for block in message.content
+        if isinstance(block, TextBlock)
+    )
+    result = next(message for message in messages if isinstance(message, ResultMessage))
+    report(
+        "A1-b hard-cap drop is recorded and resumes at the next event",
+        "stream_event_dropped" in emitted
+        and "exceeded the 512-byte hard cap" in rendered
+        and "RECOVERED" in rendered
+        and not result.is_error,
+    )
+
+
+async def _exercise_real_process_reap(mode: str) -> tuple[bool, str]:
+    """Launch a parent+child process group through the real adapter boundary."""
+    from modules import codex_cli
+    from modules.gpt_responses import GptSessionOptions, ResultMessage
+
+    root = Path(tempfile.mkdtemp(prefix=f"codex-cli-reap-{mode}-"))
+    ready = root / "child-ready"
+    stopped = root / "child-stopped"
+    child_code = (
+        "import pathlib,signal,sys,time;"
+        "ready=pathlib.Path(sys.argv[1]);stopped=pathlib.Path(sys.argv[2]);"
+        "signal.signal(signal.SIGTERM,lambda *_:(stopped.write_text('term'),sys.exit(0)));"
+        "ready.write_text('ready');time.sleep(60)"
+    )
+    parent_code = (
+        "import subprocess,sys,time;"
+        "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]]);"
+        "time.sleep(60)"
+    )
+
+    client = codex_cli.CodexCLIClient(GptSessionOptions(
+        system_prompt="test", model="gpt-5.6-sol", cwd=str(root),
+    ))
+    client._codex_bin = sys.executable
+    original_exec = asyncio.create_subprocess_exec
+    spawned: list[asyncio.subprocess.Process] = []
+
+    async def standin_exec(*_args, **kwargs):
+        proc = await original_exec(
+            sys.executable, "-c", parent_code, child_code, str(ready), str(stopped),
+            **kwargs,
+        )
+        spawned.append(proc)
+        return proc
+
+    async def consume(timeout: float):
+        return [message async for message in client.receive_response(
+            turn_timeout_s=timeout,
+        )]
+
+    asyncio.create_subprocess_exec = standin_exec
+    messages = None
+    detail = ""
+    try:
+        await client.query(f"test {mode} cleanup")
+        task = asyncio.create_task(consume(1.0 if mode == "timeout" else 30.0))
+        for _ in range(200):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.01)
+        if mode == "cancel":
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        else:
+            messages = await task
+        for _ in range(200):
+            if stopped.exists():
+                break
+            await asyncio.sleep(0.01)
+        result_reason = ""
+        if messages is not None:
+            result_reason = next(
+                message.stop_reason for message in messages
+                if isinstance(message, ResultMessage)
+            )
+        ok = (
+            ready.exists()
+            and stopped.exists()
+            and bool(spawned)
+            and spawned[0].returncode is not None
+            and client._proc is None
+            and (mode != "timeout" or result_reason == "timeout")
+        )
+        detail = f"ready={ready.exists()} stopped={stopped.exists()} reason={result_reason}"
+        return ok, detail
+    finally:
+        asyncio.create_subprocess_exec = original_exec
+        for proc in spawned:
+            if proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, 9)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+
+
+async def test_process_group_reaping() -> None:
+    print("\n== Codex process-group reaping ==")
+    cancel_ok, cancel_detail = await _exercise_real_process_reap("cancel")
+    report("A7-a cancellation reaps the spawned child", cancel_ok, cancel_detail)
+    timeout_ok, timeout_detail = await _exercise_real_process_reap("timeout")
+    report("A7-b timeout still reaps the spawned child", timeout_ok, timeout_detail)
+
+
 async def main() -> int:
     test_settings_auth_mode()
     await test_jsonl_and_resume()
     await test_auth_retry_and_incomplete_stream()
+    await test_oversized_jsonl_boundaries()
+    await test_process_group_reaping()
     print(f"\n== summary: {PASS} passed, {FAIL} failed ==")
     return 1 if FAIL else 0
 

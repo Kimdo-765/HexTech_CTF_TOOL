@@ -45,6 +45,14 @@ FLAG_RE = re.compile(
 )
 LIBERAL_FLAG_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{1,16}\{[!-~]{2,200}\}")
 
+# A generic sweep of regex SOURCE such as ``DH{[^}]+}`` sees ``DH{[^}`` as a
+# complete flag because the character-class ``}`` also closes FLAG_RE's match.
+# The candidate alone is indistinguishable from a real flag, so reject it only
+# when the bytes immediately AFTER the match complete that exact source shape:
+# ``]`` + regex quantifier + literal closing ``}``.  Explicit FLAG_CANDIDATE
+# markers are parsed separately and never consult this rule.
+_REGEX_SOURCE_TAIL_RE = re.compile(r"\](?:[+*?]|\{\d+(?:,\d*)?\})\}")
+
 # Explicit flag declaration emitted by the exploit/solver itself.
 # The agent is instructed (CTF_PREAMBLE) to print `FLAG_CANDIDATE: <flag>`
 # on its own line to stdout once it has captured the flag from a genuine
@@ -57,8 +65,8 @@ _FLAG_MARKER_RE = re.compile(
     r"FLAG[_-]?CANDIDATE\s*[:=]\s*([^\r\n]+)",
     re.IGNORECASE | re.MULTILINE,
 )
-# Some trusted sources (result.json from api/jobs.py:_manual_run, callbacks.jsonl)
-# embed the run's stdout as a JSON string, so the marker line's terminating
+# Some trusted sources (for example callbacks.jsonl) embed the run's stdout as
+# a JSON string, so the marker line's terminating
 # newline becomes a literal `\n` (two chars) and the rest of the JSON (`",`
 # the next key, ...) rides on the same PHYSICAL line. `[^\r\n]+` then over-
 # captures `DH{...}\n",` (real job a3d4d4484233). Cut the candidate at the
@@ -1356,7 +1364,6 @@ _TRUSTED_FLAG_SOURCES = (
     "solver.py.stderr",
     "callbacks.jsonl",
     "summary.json",          # forensic — no exploit.py; flag comes from artifact analysis
-    "result.json",           # api/jobs.py:_manual_run dumps sandbox stdout into this
 )
 
 # Narrative artifacts the agent itself authored or that derive from
@@ -1469,6 +1476,8 @@ def scan_job_for_flags(
     extra_files: list[str] | None = None,
     *,
     sandbox_result: dict | None = None,
+    sandbox_started: bool | None = None,
+    agent_error: bool = False,
     trusted_only: bool = False,
     provenance_out: dict | None = None,
 ) -> list[str]:
@@ -1508,7 +1517,7 @@ def scan_job_for_flags(
 
       1. TRUSTED tier — files produced by the actual runner / OOB
          collector (exploit/solver stdout/stderr, callbacks.jsonl,
-         summary.json, result.json). If ANY non-placeholder flag
+         summary.json). If ANY non-placeholder flag
          appears here, return ONLY those — they prove the exploit
          really retrieved the flag from the target.
       2. NARRATIVE tier — report.md, run.log, findings.json. Consulted
@@ -1532,6 +1541,16 @@ def scan_job_for_flags(
     sandbox_result['judge_aborted']=True or
     sandbox_result['error']='prejudge_blocked', the narrative tier
     is skipped entirely.
+
+    `sandbox_started` is separate from `sandbox_result`: a runner attempt may
+    legitimately return ``None``.  When the orchestrator explicitly records
+    ``sandbox_started=False`` *and* the agent errored, narrative prose cannot
+    promote the crashed job to a terminal success.  ``None`` remains unknown
+    for older and non-orchestrator callers rather than being treated as no-run.
+
+    ``result.json`` is deliberately not a scan input.  Analyzers write it after
+    their final scan and include the selected flags, so trusting it on a later
+    rescan upgrades the analyzer's own narrative decision to runner evidence.
     """
     jd = job_dir(job_id)
 
@@ -1563,6 +1582,9 @@ def scan_job_for_flags(
     fmt_re = job_flag_format_re(job_id)
     scan_re = fmt_re or FLAG_RE
 
+    def _is_regex_source_match(text: str, match) -> bool:
+        return bool(_REGEX_SOURCE_TAIL_RE.match(text, match.end()))
+
     def _scan(names) -> set[str]:
         out: set[str] = set()
         for name in names:
@@ -1573,7 +1595,10 @@ def scan_job_for_flags(
                 text = p.read_text(errors="replace")
             except Exception:
                 continue
-            out.update(scan_re.findall(text))
+            for match in scan_re.finditer(text):
+                if _is_regex_source_match(text, match):
+                    continue
+                out.add(match.group(0))
         return out
 
     def _scan_markers(names) -> set[str]:
@@ -1696,6 +1721,8 @@ def scan_job_for_flags(
                 continue
             _tail_from = 0
             for _m in scan_re.finditer(text):
+                if _is_regex_source_match(text, _m):
+                    continue
                 _tail_from = _m.end()
             for line in text[_tail_from:].splitlines():
                 low = line.strip().lower()
@@ -1753,7 +1780,8 @@ def scan_job_for_flags(
             or sandbox_result.get("error") == "prejudge_blocked"
         )
     )
-    if sandbox_skipped or trusted_only:
+    crashed_before_sandbox = sandbox_started is False and bool(agent_error)
+    if sandbox_skipped or crashed_before_sandbox or trusted_only:
         return []
 
     narrative = {f for f in _scan(_NARRATIVE_FLAG_SOURCES) if not _is_placeholder_flag(f)}
@@ -6940,6 +6968,17 @@ _STOP_KIND_HEADERS = {
         "Conceded unsolvable — artifacts self-admit no working chain and "
         "prejudge flag_likelihood≈0 (true-negative, not a fixable near-miss)"
     ),
+    "prejudge_dead_target": (
+        "Prejudge verified the declared remote target is dead — operator "
+        "re-provisioning is required, not another script rewrite"
+    ),
+    "prejudge_blocked_no_run": (
+        "Prejudge blocked twice before any sandbox execution — escalated "
+        "instead of spending a third analysis turn"
+    ),
+    "judge_shadow_no_verdict": (
+        "Judge shadow recorded evidence but supplied no gating verdict"
+    ),
     "policy_refusal": (
         "Main turn blocked by the server-side Usage-Policy classifier "
         "(AUP) — session context poisoned; halted without an in-place retry"
@@ -7170,6 +7209,61 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
     return ""
 
 
+def _prejudge_stop_metrics(job_id: str, summary: dict | None) -> tuple[int, float]:
+    """Best available cumulative main-turn and dollar observations for a stop.
+
+    The heartbeat writes the live values to meta while the in-memory summary
+    receives a ResultMessage only at turn boundaries.  Use both, conservatively
+    taking the largest non-negative observation, so a prejudge escalation does
+    not report zero merely because the last session ended before its final
+    ResultMessage.  Dollars remain explicitly an estimate in the caller's
+    wording; this helper never turns them into authoritative billing.
+    """
+    summary = summary or {}
+    try:
+        meta = read_meta(job_id) or {}
+    except Exception:
+        meta = {}
+
+    turns: list[int] = []
+    for value in (
+        meta.get("agent_turns"),
+        summary.get("agent_turns"),
+        summary.get("messages"),
+        (summary.get("result") or {}).get("num_turns")
+        if isinstance(summary.get("result"), dict) else None,
+    ):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            turns.append(parsed)
+
+    def _money(value) -> float:
+        try:
+            return max(0.0, float(value or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    banked = _money(meta.get("cost_usd_prior_sessions"))
+    subagents = _money(summary.get("cost_usd"))
+    result = summary.get("result") if isinstance(summary.get("result"), dict) else {}
+    main_now = _money((result or {}).get("total_cost_usd"))
+    if main_now <= 0:
+        main_now = _money(summary.get("cost_usd_estimate"))
+    if main_now <= 0:
+        main_now = _money(estimate_cost_from_tokens(
+            summary.get("agent_tokens"), summary.get("model")
+        ))
+    costs = (
+        _money(meta.get("cost_usd")),
+        banked + _money(meta.get("cost_usd_estimate")),
+        banked + main_now + subagents,
+    )
+    return (max(turns, default=0), max(costs, default=0.0))
+
+
 def write_why_stopped(
     work_dir: Path,
     *,
@@ -7386,6 +7480,45 @@ def write_why_stopped(
                 "the runner sandbox sometimes differs from a local "
                 "shell (proxy, DNS, MTU).",
                 "3. **Check the target is alive**: `nc -vz <host> <port>`.",
+            ]
+        elif stop_kind == "prejudge_dead_target":
+            out += [
+                "Prejudge supplied the structured observation "
+                "`target_liveness=dead` after a current direct probe. The "
+                "sandbox therefore never started and rewriting the same script "
+                "cannot repair the endpoint. Options:",
+                "",
+                "1. **Re-provision/restart the challenge instance**, then update "
+                "the job's target URL(s) in the UI.",
+                "2. **Re-probe the new endpoint directly** before `/retry`; do "
+                "not reuse the expired host:port from old artifacts.",
+                "3. **Keep the existing work tree**. Its exploit/report may be "
+                "useful once the operator supplies a live target.",
+            ]
+        elif stop_kind == "prejudge_blocked_no_run":
+            out += [
+                "Two prejudge ship-blocks occurred without one real sandbox "
+                "execution. The first redirect was preserved; the second block "
+                "is escalated so a third full analysis turn is not automatic. "
+                "Options:",
+                "",
+                "1. **Read the two prejudge issue sets** and decide whether a "
+                "manual hint identifies a genuinely different fix.",
+                "2. **Use `/retry` only with that concrete hint**. The two "
+                "historical redirect-saved jobs named above expired from TTL, "
+                "so this threshold deliberately records that unresolved risk.",
+            ]
+        elif stop_kind == "judge_shadow_no_verdict":
+            out += [
+                "Judge mode was `shadow`: it records prejudge/postjudge inputs "
+                "for later evaluation but intentionally returns no verdict to "
+                "the live loop. The `unknown` line above is therefore an absence "
+                "of a gating opinion, not a judge decision to stop. Options:",
+                "",
+                "1. **Inspect the real sandbox stdout/stderr**; those execution "
+                "facts, not the shadow placeholder, explain the failed attempt.",
+                "2. **Use `/retry` with a manual hint** if the output exposes an "
+                "actionable correction. Shadow mode cannot synthesize one live.",
             ]
         elif stop_kind == "unsolvable_by_analysis":
             out += [
@@ -8266,6 +8399,15 @@ async def run_main_agent_session(
         summary["easy_framing"] = False
 
     last_sandbox: dict | None = None
+    # This signal is independent of the runner's return value: a real attempt
+    # may return None.  Final analyzers use it together with agent_error to keep
+    # an agent crash before the runner from promoting narrative prose.
+    summary.setdefault("sandbox_started", False)
+    # Unlike `sandbox_started` above (the historical "we dispatched the runner
+    # wrapper" bit), this counts containers the runner says it ACTUALLY spawned.
+    # A prejudge ship-block returns before spawn and must leave this at zero so
+    # A2 can distinguish two analysis-only blocks from failed real executions.
+    summary.setdefault("sandbox_runs", 0)
     # Track retry hints across attempts so the next postjudge call can
     # see "you already said this" — drives next_action=stop more
     # aggressively. summary["judge_hints"] is what the sandbox_runner
@@ -9241,10 +9383,26 @@ async def run_main_agent_session(
             write_meta(job_id, stage=f"sandbox-run-{attempt}" if attempt else "sandbox-run")
             log_fn(f"[orchestrator] auto-run turn {attempt}: executing {picked}")
             try:
+                summary["sandbox_started"] = True
                 last_sandbox = await anyio.to_thread.run_sync(sandbox_runner, picked)
             except Exception as e:
                 log_fn(f"[orchestrator] sandbox runner crashed: {e}")
                 return last_sandbox
+
+            # New runners state this fact explicitly.  The conservative legacy
+            # fallback counts only a result with an exit_code and excludes both
+            # no-run sentinels, keeping older/custom sandbox callbacks usable
+            # without letting a prejudge block masquerade as an execution.
+            _actual_sandbox_started = (last_sandbox or {}).get("sandbox_started")
+            if _actual_sandbox_started is None:
+                _actual_sandbox_started = bool(
+                    last_sandbox
+                    and "exit_code" in last_sandbox
+                    and last_sandbox.get("error") != "prejudge_blocked"
+                    and not last_sandbox.get("judge_aborted")
+                )
+            if _actual_sandbox_started:
+                summary["sandbox_runs"] = int(summary.get("sandbox_runs") or 0) + 1
 
             # Did we capture a flag this turn? `last_sandbox` is the
             # judge_aborted-aware sentinel; pass it so the orchestrator
@@ -9256,6 +9414,8 @@ async def run_main_agent_session(
                 job_id,
                 sandbox_result=last_sandbox,
                 provenance_out=flag_provenance,
+                sandbox_started=summary.get("sandbox_started"),
+                agent_error=bool(summary.get("agent_error")),
             )
             judge_out = ((last_sandbox or {}).get("judge") or {})
             verdict = judge_out.get("verdict")
@@ -9655,8 +9815,62 @@ async def run_main_agent_session(
                     # Safe fallback: if we can't classify, do NOT concede
                     # (preserve the existing redirect behavior).
                     _untestable = True
-                if (_pj_fl is not None and _pj_fl <= 0.05
-                        and _self_defeat and not _untestable and _n >= 1):
+                _concede_unsolvable = bool(
+                    _pj_fl is not None and _pj_fl <= 0.05
+                    and _self_defeat and not _untestable and _n >= 1
+                )
+                _block_count = int(_n or 0) + 1
+                _sandbox_runs = int(summary.get("sandbox_runs") or 0)
+                _turns, _estimated_cost = _prejudge_stop_metrics(job_id, summary)
+
+                def _write_prejudge_escalation(_kind: str, _reason: str) -> None:
+                    summary["judge_stop_reason"] = _reason
+                    write_meta(
+                        job_id,
+                        judge_next_action="stop",
+                        judge_stop_reason=_reason,
+                    )
+                    _stop_out = dict(judge_out or {})
+                    _stop_out.update({
+                        "verdict": "prejudge_blocked",
+                        "next_action": "stop",
+                        "stop_reason": _reason,
+                    })
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind=_kind,
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out=_stop_out,
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
+
+                # A8 has its own terminal class.  This predicate consumes only
+                # the typed field produced by prejudge; issue prose is evidence
+                # for the human, never a control-flow API.  It precedes the
+                # analytical concede because a dead endpoint is an operator
+                # action regardless of what the exploit artifacts also admit.
+                if _pj.get("target_liveness") == "dead":
+                    summary["prejudge_dead_target"] = True
+                    _reason = (
+                        "prejudge verified target_liveness=dead on BLOCKED "
+                        f"{_block_count}; sandbox runs={_sandbox_runs}; cumulative "
+                        f"main turns={_turns}; estimated cumulative cost="
+                        f"${_estimated_cost:.2f}. Escalated for operator target "
+                        "re-provisioning/update; no script redirect was issued."
+                    )
+                    log_fn(f"[orchestrator] {_reason}")
+                    _write_prejudge_escalation("prejudge_dead_target", _reason)
+                    return last_sandbox
+
+                # ORDER IS LOAD-BEARING (A2 truth table): concede MUST be tested
+                # before the generic second-BLOCK/no-run escalation below.
+                # Otherwise every second qualifying self-defeat is swallowed by
+                # prejudge_blocked_no_run and `unsolvable_by_analysis` becomes
+                # unreachable.  A dead target remains the separate A8 case above.
+                if _concede_unsolvable:
                     summary["conceded_unsolvable"] = True
                     log_fn(
                         "[orchestrator] prejudge BLOCKED + flag_likelihood="
@@ -9673,6 +9887,30 @@ async def run_main_agent_session(
                         sandbox_result=last_sandbox,
                         summary=summary,
                         log_fn=log_fn,
+                    )
+                    return last_sandbox
+
+                # A2: preserve one corrective redirect, but a second ship-block
+                # with zero real sandbox executions is enough evidence that the
+                # analysis loop is not converging.  The stop reason carries the
+                # measured cost/turns AND the known historical uncertainty; the
+                # latter must survive into the operator-facing artifact rather
+                # than living only in this source comment.
+                if _n >= 1 and _sandbox_runs == 0:
+                    summary["prejudge_no_run_escalated"] = True
+                    _reason = (
+                        f"prejudge BLOCKED {_block_count} times with sandbox "
+                        f"runs=0; cumulative main turns={_turns}; estimated "
+                        f"cumulative cost=${_estimated_cost:.2f}. Automatic "
+                        "redirects stop at threshold 2. Unverified regression "
+                        "risk: redirect-saved jobs 6b8b78b702b1 and "
+                        "824412f1ada49 expired from TTL before their successful "
+                        "redirect ordinal could be checked; threshold 2 may have "
+                        "stopped either job early."
+                    )
+                    log_fn(f"[orchestrator] {_reason}")
+                    _write_prejudge_escalation(
+                        "prejudge_blocked_no_run", _reason
                     )
                     return last_sandbox
                 if _pj_issues and _pj_sig and _pj_sig not in _seen and _n < 3:
@@ -9701,7 +9939,10 @@ async def run_main_agent_session(
                     log_fn(
                         f"[orchestrator] prejudge BLOCKED — redirecting its "
                         f"{len(_pj_issues)} issue(s) into a fix-and-retry turn "
-                        f"(redirect {_n + 1}/3) instead of dead-ending"
+                        f"(redirect {_n + 1}; "
+                        + ("the next no-run block escalates"
+                           if _sandbox_runs == 0 else "hard cap 3")
+                        + ") instead of dead-ending"
                     )
                 else:
                     log_fn(
@@ -9849,21 +10090,51 @@ async def run_main_agent_session(
                 )
                 return last_sandbox
             if not retry_hint:
+                _shadow_no_verdict = (
+                    (last_sandbox or {}).get("judge_mode") == "shadow"
+                    and not judge_out
+                )
+                _no_hint_kind = (
+                    "judge_shadow_no_verdict" if _shadow_no_verdict else "no_hint"
+                )
+                _no_hint_out = judge_out
+                if _shadow_no_verdict:
+                    # A3 is presentation, not a new gate.  Shadow deliberately
+                    # supplies no live opinion; name that absence without
+                    # pretending `unknown` voted to stop the run.
+                    _no_hint_out = dict(judge_out or {})
+                    _no_hint_out["stop_reason"] = (
+                        "judge_mode=shadow recorded the run for delayed review "
+                        "but supplied no live gating verdict or retry hint; "
+                        "unknown is an absence of opinion, not a stop vote"
+                    )
                 log_fn(
                     f"[orchestrator] postjudge produced no retry_hint "
                     f"(verdict={verdict}, next_action={next_action}) — "
-                    f"stopping auto-retry"
+                    f"stopping auto-retry (stop_kind={_no_hint_kind})"
                 )
-                write_why_stopped(
-                    work_dir,
-                    stop_kind="no_hint",
+                _no_hint_args = dict(
                     attempt_idx=attempt,
                     max_attempts=max_retries,
-                    judge_out=judge_out,
+                    judge_out=_no_hint_out,
                     sandbox_result=last_sandbox,
                     summary=summary,
                     log_fn=log_fn,
                 )
+                if _shadow_no_verdict:
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="judge_shadow_no_verdict",
+                        **_no_hint_args,
+                    )
+                else:
+                    # Keep the original no-hint class for enforce/off and judge
+                    # failures; A3 only splits the intentional shadow absence.
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="no_hint",
+                        **_no_hint_args,
+                    )
                 return last_sandbox
 
 

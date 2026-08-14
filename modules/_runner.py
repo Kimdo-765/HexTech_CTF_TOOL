@@ -1236,6 +1236,7 @@ def attempt_sandbox_run(
                 job_id, "prejudge", "result",
                 ok=bool(prejudge.get("ok")) if prejudge else None,
                 severity=(prejudge or {}).get("severity"),
+                target_liveness=(prejudge or {}).get("target_liveness"),
                 issues=len((prejudge or {}).get("issues") or []),
             )
             if _judge.prejudge_blocks_ship(prejudge):
@@ -1255,6 +1256,12 @@ def attempt_sandbox_run(
                     "error": "prejudge_blocked",
                     "prejudge": prejudge,
                     "judge_aborted": True,
+                    # Calling attempt_sandbox_run is not the same as spawning
+                    # its container.  The outer loop needs this structured bit
+                    # to distinguish two prejudge blocks / zero real runs from
+                    # a block that followed useful execution evidence.
+                    "sandbox_started": False,
+                    "judge_mode": judge_mode,
                 }
 
         # ---------- Stage 2: actual run ----------
@@ -1309,10 +1316,19 @@ def attempt_sandbox_run(
                 enable_supervise=False,
                 timeout_s=per_job_timeout,
             )
+            # These are attempt facts, not verdicts.  Preserve them even when
+            # no postjudge runs (off/shadow), so the outer retry loop can name
+            # the correct terminal state without reverse-engineering a missing
+            # `judge` dict.
+            res["sandbox_started"] = True
+            res["judge_mode"] = judge_mode
         except Exception as e:
             log_fn(f"[runner] failed to spawn sandbox: {e}")
             emit_event(job_id, "run", "spawn_failed", error=str(e))
-            return {"error": str(e), "prejudge": prejudge}
+            return {
+                "error": str(e), "prejudge": prejudge,
+                "sandbox_started": False, "judge_mode": judge_mode,
+            }
 
         log_fn(
             f"[runner] exit_code={res['exit_code']}; "

@@ -91,6 +91,28 @@ def _host_path(job_id: str) -> str:
     return f"{host_root.rstrip('/')}/jobs/{job_id}"
 
 
+def _summary_agent_evidence(
+    agent_summary: object,
+) -> tuple[Optional[bool], Optional[str]]:
+    """Translate this one-shot agent's explicit result into scan evidence.
+
+    Forensic has no separate auto-run sandbox phase.  An explicit provider
+    result therefore proves that such a sandbox did not start, while a missing
+    or malformed result remains unknown for skip-auth and legacy paths.
+    """
+    if not isinstance(agent_summary, dict):
+        return None, None
+    agent_result = agent_summary.get("result")
+    if not isinstance(agent_result, dict):
+        return None, None
+    is_error = agent_result.get("is_error")
+    if is_error is True:
+        return False, "summary agent returned is_error=true"
+    if is_error is False:
+        return False, None
+    return None, None
+
+
 def _spawn_collector(
     job_id: str,
     image_rel: str,
@@ -359,8 +381,15 @@ def run_job(
         # + earlier sessions (stop -> continue reuses the job id)
         cost += prior_session_cost(job_id)
         result["cost_usd"] = cost
-        flags = scan_job_for_flags(job_id)
+        sandbox_started, agent_err = _summary_agent_evidence(result.get("claude"))
+        flags = scan_job_for_flags(
+            job_id,
+            sandbox_started=sandbox_started,
+            agent_error=bool(agent_err),
+        )
         result["flags"] = flags
+        result["agent_error"] = agent_err
+        result["agent_error_kind"] = "agent_error" if agent_err else None
 
         # Surface log-miner stats so the UI can render counts without
         # re-reading log_findings.json.
@@ -386,11 +415,18 @@ def run_job(
         # web-ui/app.js gates the Save-to-exploit-library button on
         # `status === "finished"`, so a flagless forensic run offered to save
         # itself into the library as a solved challenge.
-        final_status = "finished" if flags else "no_flag"
+        if flags:
+            final_status = "finished"
+        elif agent_err:
+            final_status = "failed"
+        else:
+            final_status = "no_flag"
         (_job_dir(job_id) / "result.json").write_text(json.dumps(result, indent=2, default=str))
         _write_meta(
             job_id, status=final_status, stage="done", cost_usd=cost,
             flags=flags,
+            error=agent_err,
+            error_kind="agent_error" if agent_err else None,
             log_findings_counts=log_findings_counts,
             result={"kind": kind, "had_claude": bool(result.get("claude"))},
         )

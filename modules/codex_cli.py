@@ -37,6 +37,13 @@ from modules.gpt_run_events import context_from_options, emit_gpt_event
 DEFAULT_TURN_TIMEOUT_S = 3600.0
 MAX_EVENT_TEXT_CHARS = 48_000
 MAX_STDERR_CHARS = 64_000
+# Keep the asyncio transport comfortably above the historical 64 KiB default,
+# but do not confuse that implementation limit with our application boundary.
+# A JSONL event may legitimately exceed this transport limit, so
+# `_read_bounded_jsonl_line()` drains it in chunks up to the separate hard cap.
+SUBPROCESS_STREAM_LIMIT_BYTES = 1024 * 1024
+MAX_JSONL_EVENT_BYTES = 8 * 1024 * 1024
+_STREAM_DRAIN_CHUNK_BYTES = 64 * 1024
 
 # Native Codex roles exposed only for GPT/Codex CLI main sessions.  Their
 # config files are generated per job so the provider-scoped GPT preset can
@@ -202,6 +209,56 @@ def _json_text(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
         return str(value)
+
+
+async def _read_bounded_jsonl_line(
+    reader: asyncio.StreamReader,
+    hard_cap: int = MAX_JSONL_EVENT_BYTES,
+) -> tuple[bytes, bool]:
+    """Read one newline-delimited event without losing stream alignment.
+
+    ``StreamReader.readline()`` raises ``ValueError`` when a line exceeds the
+    reader's transport limit.  ``readuntil()`` exposes how much can be consumed,
+    which lets us preserve legitimate multi-limit events and deliberately drain
+    an event that exceeds the application hard cap.  The returned boolean says
+    that the event was dropped; the next call starts at the next JSONL record.
+    """
+    cap = max(1, int(hard_cap))
+    buf = bytearray()
+    dropped = False
+
+    while True:
+        try:
+            chunk = await reader.readuntil(b"\n")
+        except asyncio.LimitOverrunError as exc:
+            # Consume exactly the bytes asyncio says precede the separator (or
+            # the separator-prefix it retained), but never materialize that
+            # potentially large span as one new bytes object.
+            remaining = max(1, int(exc.consumed))
+            while remaining:
+                part = await reader.read(min(remaining, _STREAM_DRAIN_CHUNK_BYTES))
+                if not part:
+                    return (b"", True) if dropped else (bytes(buf), False)
+                remaining -= len(part)
+                if dropped:
+                    continue
+                if len(buf) + len(part) > cap:
+                    buf.clear()
+                    dropped = True
+                else:
+                    buf.extend(part)
+            continue
+        except asyncio.IncompleteReadError as exc:
+            chunk = exc.partial
+            if dropped or len(buf) + len(chunk) > cap:
+                return b"", True
+            buf.extend(chunk)
+            return bytes(buf), False
+
+        if dropped or len(buf) + len(chunk) > cap:
+            return b"", True
+        buf.extend(chunk)
+        return bytes(buf), False
 
 
 def _usage_from_event(raw: Any) -> dict[str, int]:
@@ -499,6 +556,7 @@ class CodexCLIClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                limit=SUBPROCESS_STREAM_LIMIT_BYTES,
             )
         except Exception as exc:
             emit_gpt_event(
@@ -529,7 +587,31 @@ class CodexCLIClient:
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                line = await asyncio.wait_for(self._proc.stdout.readline(), remaining)
+                line, dropped = await asyncio.wait_for(
+                    _read_bounded_jsonl_line(
+                        self._proc.stdout,
+                        hard_cap=MAX_JSONL_EVENT_BYTES,
+                    ),
+                    remaining,
+                )
+                if dropped:
+                    summary = (
+                        "Codex CLI JSONL event exceeded the "
+                        f"{MAX_JSONL_EVENT_BYTES}-byte hard cap; drained through "
+                        "the delimiter and resumed at the next event"
+                    )
+                    emit_gpt_event(
+                        event_job_id,
+                        "stream_event_dropped",
+                        role=event_role,
+                        model=event_model,
+                        turn=self._turn_count,
+                        status="warning",
+                        title="Oversized event dropped",
+                        summary=summary,
+                    )
+                    yield AssistantMessage([TextBlock(f"[Codex CLI warning] {summary}")])
+                    continue
                 if not line:
                     break
                 try:
@@ -717,6 +799,11 @@ class CodexCLIClient:
                 [TextBlock(f"[Codex CLI turn timed out after {timeout:.0f}s]")]
             )
         finally:
+            # Normal completion is already reaped, so this is a cheap no-op in
+            # the common case.  On cancellation or any other BaseException it is
+            # the only owner-aware cleanup path: terminate the process group
+            # before discarding the handle that close() would otherwise need.
+            await self._stop_process()
             if not stderr_task.done():
                 stderr_task.cancel()
             try:

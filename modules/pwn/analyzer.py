@@ -2527,9 +2527,15 @@ def run_job(
         # the helper stashed the LAST sandbox_result on the summary.
         sandbox_result = agent_summary.pop("sandbox", None)
 
-        flags = scan_job_for_flags(job_id, sandbox_result=sandbox_result)
         agent_err = agent_summary.get("agent_error")
         agent_err_kind = agent_summary.get("agent_error_kind")
+        sandbox_started = agent_summary.get("sandbox_started")
+        flags = scan_job_for_flags(
+            job_id,
+            sandbox_result=sandbox_result,
+            sandbox_started=sandbox_started,
+            agent_error=bool(agent_err),
+        )
         if agent_err and not agent_summary.get("exploit_present"):
             final_status = "failed"
         elif not flags:

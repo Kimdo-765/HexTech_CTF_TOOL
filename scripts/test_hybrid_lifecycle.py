@@ -366,6 +366,97 @@ check("test_stats_total_has_no_child_double_count", stats["total_cost_usd"], 7.7
 check("test_stats_attributes_chain_once_to_hybrid", stats["by_module"].get("hybrid"), {"count": 1, "cost_usd": 3.75})
 check("test_stats_has_no_hidden_scalar_child_bucket", stats["by_module"].get("pwn"), {"count": 1, "cost_usd": 4.0})
 
+# ------------------------------------------------------- usage unit separation
+usage_jobs = DATA / "usage-jobs"
+usage_jobs.mkdir()
+
+
+def write_usage_meta(job_id: str, meta: dict) -> None:
+    directory = usage_jobs / job_id
+    directory.mkdir()
+    (directory / "meta.json").write_text(
+        json.dumps({"id": job_id, "module": "rev", **meta}), encoding="utf-8"
+    )
+
+
+# The estimate beside an authoritative cost is an intentionally huge negative
+# control: if the fields are mixed, every assertion below moves visibly.
+write_usage_meta(
+    "f00000000001",
+    {"status": "finished", "cost_usd": 2.5, "cost_usd_estimate": 99.0},
+)
+write_usage_meta(
+    "f00000000002",
+    {"status": "no_flag", "cost_usd": 0, "cost_usd_estimate": 6.25},
+)
+write_usage_meta(
+    "f00000000003",
+    {"status": "running", "cost_usd": 0, "cost_usd_estimate": 3.5},
+)
+
+original_jobs_dir = jobs_module.JOBS_DIR
+jobs_module.JOBS_DIR = usage_jobs
+usage_stats = jobs_module.get_stats()
+check("test_usage_authoritative_cost_stays_in_spent_only", usage_stats["total_cost_usd"], 2.5)
+check(
+    "test_usage_terminal_unpriced_estimate_is_separate",
+    usage_stats["terminal_unpriced_estimate_usd"],
+    6.25,
+)
+check("test_usage_running_estimate_stays_in_flight_only", usage_stats["in_flight_estimate_usd"], 3.5)
+check("test_usage_missing_terminal_price_marks_spend_incomplete", usage_stats["spent_usd_complete"], False)
+
+stub_settings = types.ModuleType("modules.settings_io")
+stub_settings.get_setting = lambda key: 10.0 if key == "budget_usd" else None
+stub_common = types.ModuleType("modules._common")
+stub_common.read_rate_limit = lambda: {"provider": "claude"}
+stub_common.read_grok_rate_limit = lambda: {"provider": "grok"}
+stub_codex_rate = types.ModuleType("modules.codex_rate_limit")
+stub_codex_rate.read_codex_rate_limit = lambda: {"provider": "codex"}
+stub_names = {
+    "modules.settings_io": stub_settings,
+    "modules._common": stub_common,
+    "modules.codex_rate_limit": stub_codex_rate,
+}
+saved_modules = {name: sys.modules.get(name) for name in stub_names}
+sys.modules.update(stub_names)
+try:
+    usage = jobs_module.get_usage()
+finally:
+    for name, previous in saved_modules.items():
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+
+check("test_usage_endpoint_spent_excludes_both_estimate_units", usage["spent_usd"], 2.5)
+check("test_usage_endpoint_exposes_terminal_unpriced_estimate", usage["terminal_unpriced_estimate_usd"], 6.25)
+check("test_usage_endpoint_exposes_completeness", usage["spent_usd_complete"], False)
+check("test_usage_budget_remaining_uses_authoritative_spend", usage["remaining_usd"], 7.5)
+check("test_usage_budget_percent_uses_authoritative_spend", usage["pct_used"], 25.0)
+
+authoritative_only = DATA / "usage-authoritative-only"
+authoritative_only.mkdir()
+only_dir = authoritative_only / "f00000000004"
+only_dir.mkdir()
+(only_dir / "meta.json").write_text(
+    json.dumps(
+        {
+            "id": only_dir.name,
+            "module": "rev",
+            "status": "finished",
+            "cost_usd": 1.75,
+            "cost_usd_estimate": 88.0,
+        }
+    ),
+    encoding="utf-8",
+)
+jobs_module.JOBS_DIR = authoritative_only
+authoritative_stats = jobs_module.get_stats()
+check("test_usage_authoritative_only_is_complete", authoritative_stats["spent_usd_complete"], True)
+check("test_usage_authoritative_job_estimate_is_not_reclassified", authoritative_stats["terminal_unpriced_estimate_usd"], 0.0)
+jobs_module.JOBS_DIR = original_jobs_dir
+
 detail = jobs_module.get_job(PARENT)
 evidence = (detail.get("hybrid") or {}).get("stage_flag_evidence") or []
 check("test_parent_detail_keeps_all_stage_evidence", len(evidence), 2)

@@ -139,6 +139,7 @@ After you finish investigating, reply with EXACTLY ONE compact JSON
 object on the FIRST line, no markdown, no commentary:
 {{"ok": true|false, "severity": "low"|"med"|"high",
  "flag_likelihood": 0.0-1.0,
+ "target_liveness": "live"|"dead"|"unknown",
  "issues": ["...", "..."]}}
 
 * ok=true means the script is safe to run as-is.
@@ -164,6 +165,14 @@ object on the FIRST line, no markdown, no commentary:
   guaranteed-fail sandbox cycle is pure waste. Be honest; the
   operator reads your number to decide /retry strategy.
 * issues is a short list (≤6) of one-line findings.
+* target_liveness is a STRUCTURED observation about the declared remote
+  endpoint, not about the exploit chain. Use "dead" only after a current,
+  direct probe shows a required target service is unreachable while the probe
+  environment itself has working network access; use "live" only after a
+  current direct probe gets a service response; otherwise use "unknown".
+  Statements in script/report/log text and phrases such as "dead chain" do
+  not establish target liveness. If it is dead, describe the probe evidence in
+  issues too, but do not rely on the issue wording to carry this fact.
 
 Inputs:
   target          : {target}
@@ -1626,7 +1635,10 @@ def prejudge_script(
     script = jd / script_rel
     if not script.is_file():
         log_fn(f"[judge] prejudge skipped — {script_rel} missing")
-        return {"ok": True, "severity": "low", "issues": [], "raw": ""}
+        return {
+            "ok": True, "severity": "low", "issues": [], "raw": "",
+            "target_liveness": "unknown",
+        }
 
     user_prompt = _PREJUDGE_USER_TMPL.format(
         target=target or "(none)",
@@ -1674,6 +1686,7 @@ def prejudge_script(
         return {
             **static,
             "issues": _merge_prejudge_issues([], static["issues"]),
+            "target_liveness": "unknown",
             "raw": "",
             # The runner's own error-preservation branch is no longer reached
             # now that this catch exists, so the fields it looked for are
@@ -1685,7 +1698,9 @@ def prejudge_script(
 
     parsed = _parse_json(
         raw,
-        expected_keys=("ok", "severity", "flag_likelihood", "issues"),
+        expected_keys=(
+            "ok", "severity", "flag_likelihood", "target_liveness", "issues",
+        ),
     )
 
     if not parsed:
@@ -1698,6 +1713,7 @@ def prejudge_script(
         return _with_failover(
             {**static,
              "issues": _merge_prejudge_issues([], static["issues"]),
+             "target_liveness": "unknown",
              "raw": raw}, turn)
 
     ok = bool(parsed.get("ok", True))
@@ -1722,6 +1738,15 @@ def prejudge_script(
         flag_likelihood = None
     if flag_likelihood is not None:
         flag_likelihood = max(0.0, min(1.0, flag_likelihood))
+
+    # A8: keep remote liveness as a typed fact from the prejudge that made the
+    # observation.  The orchestrator must never infer it later from prose in an
+    # issue: real issue text also contains phrases such as "terminal links
+    # dead" and "NOT a blocker", which describe the chain rather than the
+    # endpoint and have produced both false positives and false negatives.
+    target_liveness = str(parsed.get("target_liveness") or "unknown").lower()
+    if target_liveness not in ("live", "dead", "unknown"):
+        target_liveness = "unknown"
 
     raw_issues = parsed.get("issues") or []
     if not isinstance(raw_issues, list):
@@ -1768,7 +1793,9 @@ def prejudge_script(
 
     return _with_failover({
         "ok": ok, "severity": sev, "issues": issues,
-        "flag_likelihood": flag_likelihood, "raw": raw,
+        "flag_likelihood": flag_likelihood,
+        "target_liveness": target_liveness,
+        "raw": raw,
     }, turn)
 
 

@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import fnmatch
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import types
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,16 +81,19 @@ def test_runner() -> None:
     chk("slot 1 worker name", m1._worker_name(0) == "htct-s1-w0", m1._worker_name(0))
     chk("slot 1 forces concurrency 1", m1._resolve_concurrency() == 1, m1._resolve_concurrency())
     chk("slot 1 runs the single RQ scheduler", m1._runs_scheduler(0) is True)
+    chk("slot 1 owns the single TTL cleanup", m1._runs_cleanup() is True)
 
     m2 = _load_runner("2")
     chk("slot 2 name prefix", m2._name_prefix() == "htct-s2-w", m2._name_prefix())
     chk("slot 2 forces concurrency 1", m2._resolve_concurrency() == 1)
     chk("slot 2 does NOT run the scheduler", m2._runs_scheduler(0) is False)
+    chk("slot 2 does NOT race the TTL cleanup", m2._runs_cleanup() is False)
 
     ml = _load_runner(None)
     chk("legacy prefix unchanged", ml._name_prefix() == "htct-w", ml._name_prefix())
     chk("legacy honours worker_concurrency", ml._resolve_concurrency() == 3)
     chk("legacy worker 0 runs the scheduler", ml._runs_scheduler(0) is True)
+    chk("legacy one-container mode still runs TTL cleanup", ml._runs_cleanup() is True)
 
     # THE defect: a boot sweep must never match another slot's live key.
     p1, n1 = f"rq:worker:{m1._name_prefix()}*", f"rq:worker:{m1._worker_name(0)}"
@@ -101,6 +107,93 @@ def test_runner() -> None:
     # modules.settings_io (it hard-codes sys.path /app), and leaving that in
     # sys.modules makes every LATER test import the stub instead of the real
     # module — which surfaces as a confusing ImportError inside settings.py.
+    for name in ("modules.settings_io", "modules"):
+        sys.modules.pop(name, None)
+    os.environ.pop("WORKER_SLOT", None)
+
+
+def test_job_measurement_archive() -> None:
+    section("worker/runner.py — TTL measurement promotion")
+    module = _load_runner(None)
+    with tempfile.TemporaryDirectory(prefix="worker-cleanup-") as td:
+        root = Path(td)
+        jobs = root / "jobs"
+        archive = root / "job-measurements"
+        jobs.mkdir()
+        module.JOBS_DIR = jobs
+        module.MEASUREMENT_ARCHIVE_DIR = archive
+        now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        old_stamp = (now - timedelta(days=8)).timestamp()
+
+        first = jobs / "aaaaaaaaaaaa"
+        first.mkdir()
+        expected = {
+            "events.jsonl": '{"phase":"terminal"}\n',
+            "meta.json": '{"status":"finished"}\n',
+            "run.log": "runner evidence\n",
+        }
+        for name, body in expected.items():
+            (first / name).write_text(body)
+        (first / "work.bin").write_bytes(b"do not archive")
+        os.utime(first, (old_stamp, old_stamp))
+
+        removed = module._cleanup_expired_jobs(7, now=now)
+        kept = archive / first.name
+        chk("expired job is removed after promotion", removed == 1 and not first.exists())
+        chk(
+            "only the three measurement artifacts survive with exact bytes",
+            all((kept / name).read_text() == body for name, body in expected.items())
+            and not (kept / "work.bin").exists(),
+            sorted(path.name for path in kept.iterdir()),
+        )
+
+        # Age the archive itself past the cutoff and run another real sweep.  It
+        # must survive because the archive is outside JOBS_DIR, not because its
+        # mtime happened to be fresh.
+        os.utime(kept, (old_stamp, old_stamp))
+        second = jobs / "bbbbbbbbbbbb"
+        second.mkdir()
+        (second / "meta.json").write_text('{"status":"failed"}\n')
+        os.utime(second, (old_stamp, old_stamp))
+        removed = module._cleanup_expired_jobs(7, now=now)
+        chk(
+            "the next TTL cycle preserves the first archive",
+            removed == 1 and kept.is_dir()
+            and (kept / "events.jsonl").read_text() == expected["events.jsonl"],
+        )
+
+        failing = jobs / "cccccccccccc"
+        failing.mkdir()
+        (failing / "events.jsonl").write_text("event\n")
+        (failing / "meta.json").write_text("meta\n")
+        os.utime(failing, (old_stamp, old_stamp))
+        real_copy2 = module.shutil.copy2
+
+        def fail_meta(source, target, *args, **kwargs):
+            if Path(source).name == "meta.json":
+                raise OSError("fixture archive unavailable")
+            return real_copy2(source, target, *args, **kwargs)
+
+        module.shutil.copy2 = fail_meta
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                removed = module._cleanup_expired_jobs(7, now=now)
+        finally:
+            module.shutil.copy2 = real_copy2
+        chk(
+            "promotion failure is fail-open for TTL removal",
+            removed == 1 and not failing.exists(),
+        )
+        chk(
+            "promotion failure is recorded with job and artifact",
+            "measurement promotion failed" in output.getvalue()
+            and failing.name in output.getvalue()
+            and "meta.json" in output.getvalue()
+            and "fixture archive unavailable" in output.getvalue(),
+            output.getvalue(),
+        )
+
     for name in ("modules.settings_io", "modules"):
         sys.modules.pop(name, None)
     os.environ.pop("WORKER_SLOT", None)
@@ -889,6 +982,7 @@ def test_reap() -> None:
 
 def main() -> int:
     test_runner()
+    test_job_measurement_archive()
     test_slot_scan()
     test_settings()
     test_settings_key_rename()

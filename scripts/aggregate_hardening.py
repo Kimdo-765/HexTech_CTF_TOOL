@@ -31,6 +31,7 @@ SUCCESS_TIER_ORDER = (
     SUCCESS_TIER_UNTRUSTED,
     SUCCESS_TIER_MISSING,
 )
+NONTERMINAL_STATUSES = frozenset({"queued", "running", "analyze", "analyzing"})
 
 # Historical top-level jobs whose purpose was to validate the orchestration
 # itself, not to solve an operator-submitted challenge.  The job metadata has
@@ -627,8 +628,22 @@ def classify(job: Job, outcome: Outcome | None = None) -> Classification:
         lines = ",".join(str(line_no) for line_no in job.malformed_event_lines)
         return found("UNRESOLVED", "P6d", f"malformed events.jsonl lines: {lines}")
 
-    if outcome.status == "stopped" and error is None and not stop:
-        return found("EXCLUDED_operator_stop", "P0", "automatic status/error/stop")
+    if outcome.status in NONTERMINAL_STATUSES:
+        return found(
+            "EXCLUDED_operator_stop",
+            "P0",
+            f"nonterminal-status={outcome.status}",
+        )
+
+    if outcome.status == "stopped" and not stop and (
+        error is None or error_kind == "stopped_for_resume"
+    ):
+        reason = (
+            "error_kind=stopped_for_resume"
+            if error_kind == "stopped_for_resume"
+            else "operator-stop-without-error"
+        )
+        return found("EXCLUDED_operator_stop", "P0", reason)
 
     p1_classification: tuple[str, str, str] | None = None
     if error:

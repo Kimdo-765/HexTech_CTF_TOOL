@@ -17,6 +17,8 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
 router = APIRouter()
 
+_USAGE_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped"}
+
 # Job IDs are always 12 hex chars (api.storage.new_job_id =
 # uuid.uuid4().hex[:12]). Anything else — empty string, ".",
 # "..", "%2E", path traversals — must be rejected BEFORE the
@@ -92,6 +94,46 @@ def _job_cost(job_id: str, meta: dict) -> float:
         except Exception:
             pass
     return cost
+
+
+def _scalar_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, bool]:
+    """Return authoritative spend, terminal unpriced estimate, completeness.
+
+    ``meta.cost_usd == 0`` is the legacy representation of both real zero and
+    missing price.  In particular Codex ChatGPT OAuth returns
+    ``total_cost_usd=None`` and the analyzers persist 0.  Treating that as a
+    complete dollar total is the bug this split fixes.  A positive estimate is
+    preserved in a separate unit and never folded into authoritative spend.
+    """
+    cost = _job_cost(job_id, meta)
+    if cost != 0.0:
+        return cost, 0.0, True
+    if str(meta.get("status") or "") not in _USAGE_TERMINAL_STATUSES:
+        return 0.0, 0.0, True
+    try:
+        estimate = max(0.0, float(meta.get("cost_usd_estimate") or 0.0))
+    except (TypeError, ValueError):
+        estimate = 0.0
+    return 0.0, estimate, False
+
+
+def _job_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, bool]:
+    """Public-job cost parts without double-counting internal hybrid children."""
+    if meta.get("module") == "hybrid":
+        linked = _hybrid_children(job_id, meta)
+        if linked:
+            spent = 0.0
+            terminal_unpriced = 0.0
+            complete = True
+            for _, child in linked:
+                child_spent, child_unpriced, child_complete = _scalar_usage_cost_parts(
+                    child["id"], child
+                )
+                spent += child_spent
+                terminal_unpriced += child_unpriced
+                complete = complete and child_complete
+            return spent, terminal_unpriced, complete
+    return _scalar_usage_cost_parts(job_id, meta)
 
 
 def _public_job_meta(meta: dict) -> dict:
@@ -315,6 +357,8 @@ def get_stats():
         return {"total_cost_usd": 0.0, "by_module": {}, "count": 0}
     total = 0.0
     in_flight = 0.0          # token-estimated spend of jobs still running
+    terminal_unpriced = 0.0  # terminal jobs whose provider reported no dollars
+    spent_complete = True
     by_module: dict[str, dict] = {}
     count = 0
     for d in JOBS_DIR.iterdir():
@@ -334,7 +378,9 @@ def get_stats():
         module = meta.get("module", "unknown")
         bucket = by_module.setdefault(module, {"count": 0, "cost_usd": 0.0})
         bucket["count"] += 1
-        cost = _job_cost(d.name, meta)
+        cost, job_unpriced, job_complete = _job_usage_cost_parts(d.name, meta)
+        terminal_unpriced += job_unpriced
+        spent_complete = spent_complete and job_complete
         # LIVE jobs: surface the part of THIS session's spend that no
         # ResultMessage has confirmed yet. A CONTINUED session carries the
         # banked prior total in cost_usd from its first moment, so the old
@@ -346,18 +392,12 @@ def get_stats():
             _est = float(meta.get("cost_usd_estimate") or 0.0)
             _confirmed_this_session = max(0.0, cost - _banked)
             in_flight += max(0.0, _est - _confirmed_this_session)
-        elif cost == 0.0:
-            # A TERMINAL job with no authoritative cost (killed before any
-            # ResultMessage). Its parked estimate is the only record of what it
-            # spent, but it is not "in flight" — counting it there labelled dead
-            # jobs as still running forever. It is simply absent from the
-            # ledger; the session-start banking in _common.prior_session_cost
-            # is what recovers it if the job is ever continued.
-            pass
         bucket["cost_usd"] += cost
         total += cost
     return {"total_cost_usd": round(total, 4), "by_module": by_module,
-            "count": count, "in_flight_estimate_usd": round(in_flight, 4)}
+            "count": count, "in_flight_estimate_usd": round(in_flight, 4),
+            "terminal_unpriced_estimate_usd": round(terminal_unpriced, 4),
+            "spent_usd_complete": spent_complete}
 
 
 @router.get("/usage")
@@ -397,6 +437,14 @@ def get_usage():
         # or to the budget maths: it is an estimate that runs high, and the
         # budget number must stay the authoritative one.
         "in_flight_estimate_usd": stats.get("in_flight_estimate_usd", 0.0),
+        # A separate unit for terminal sessions whose backend reports no dollar
+        # amount (notably Codex ChatGPT OAuth).  Never add this estimate to
+        # spent_usd or budget maths; spent_usd_complete tells callers that the
+        # authoritative dollar sum is partial.
+        "terminal_unpriced_estimate_usd": stats.get(
+            "terminal_unpriced_estimate_usd", 0.0
+        ),
+        "spent_usd_complete": bool(stats.get("spent_usd_complete", True)),
         "budget_usd": round(budget, 4),
         "remaining_usd": remaining,
         "pct_used": pct_used,
