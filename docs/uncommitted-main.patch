@@ -1,8 +1,140 @@
+diff --git a/api/routes/jobs.py b/api/routes/jobs.py
+index 3ed0438..3574982 100644
+--- a/api/routes/jobs.py
++++ b/api/routes/jobs.py
+@@ -17,6 +17,8 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+ 
+ router = APIRouter()
+ 
++_USAGE_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped"}
++
+ # Job IDs are always 12 hex chars (api.storage.new_job_id =
+ # uuid.uuid4().hex[:12]). Anything else — empty string, ".",
+ # "..", "%2E", path traversals — must be rejected BEFORE the
+@@ -94,6 +96,46 @@ def _job_cost(job_id: str, meta: dict) -> float:
+     return cost
+ 
+ 
++def _scalar_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, bool]:
++    """Return authoritative spend, terminal unpriced estimate, completeness.
++
++    ``meta.cost_usd == 0`` is the legacy representation of both real zero and
++    missing price.  In particular Codex ChatGPT OAuth returns
++    ``total_cost_usd=None`` and the analyzers persist 0.  Treating that as a
++    complete dollar total is the bug this split fixes.  A positive estimate is
++    preserved in a separate unit and never folded into authoritative spend.
++    """
++    cost = _job_cost(job_id, meta)
++    if cost != 0.0:
++        return cost, 0.0, True
++    if str(meta.get("status") or "") not in _USAGE_TERMINAL_STATUSES:
++        return 0.0, 0.0, True
++    try:
++        estimate = max(0.0, float(meta.get("cost_usd_estimate") or 0.0))
++    except (TypeError, ValueError):
++        estimate = 0.0
++    return 0.0, estimate, False
++
++
++def _job_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, bool]:
++    """Public-job cost parts without double-counting internal hybrid children."""
++    if meta.get("module") == "hybrid":
++        linked = _hybrid_children(job_id, meta)
++        if linked:
++            spent = 0.0
++            terminal_unpriced = 0.0
++            complete = True
++            for _, child in linked:
++                child_spent, child_unpriced, child_complete = _scalar_usage_cost_parts(
++                    child["id"], child
++                )
++                spent += child_spent
++                terminal_unpriced += child_unpriced
++                complete = complete and child_complete
++            return spent, terminal_unpriced, complete
++    return _scalar_usage_cost_parts(job_id, meta)
++
++
+ def _public_job_meta(meta: dict) -> dict:
+     """Project a public parent without exposing or double-counting children."""
+     if meta.get("module") != "hybrid":
+@@ -315,6 +357,8 @@ def get_stats():
+         return {"total_cost_usd": 0.0, "by_module": {}, "count": 0}
+     total = 0.0
+     in_flight = 0.0          # token-estimated spend of jobs still running
++    terminal_unpriced = 0.0  # terminal jobs whose provider reported no dollars
++    spent_complete = True
+     by_module: dict[str, dict] = {}
+     count = 0
+     for d in JOBS_DIR.iterdir():
+@@ -334,7 +378,9 @@ def get_stats():
+         module = meta.get("module", "unknown")
+         bucket = by_module.setdefault(module, {"count": 0, "cost_usd": 0.0})
+         bucket["count"] += 1
+-        cost = _job_cost(d.name, meta)
++        cost, job_unpriced, job_complete = _job_usage_cost_parts(d.name, meta)
++        terminal_unpriced += job_unpriced
++        spent_complete = spent_complete and job_complete
+         # LIVE jobs: surface the part of THIS session's spend that no
+         # ResultMessage has confirmed yet. A CONTINUED session carries the
+         # banked prior total in cost_usd from its first moment, so the old
+@@ -346,18 +392,12 @@ def get_stats():
+             _est = float(meta.get("cost_usd_estimate") or 0.0)
+             _confirmed_this_session = max(0.0, cost - _banked)
+             in_flight += max(0.0, _est - _confirmed_this_session)
+-        elif cost == 0.0:
+-            # A TERMINAL job with no authoritative cost (killed before any
+-            # ResultMessage). Its parked estimate is the only record of what it
+-            # spent, but it is not "in flight" — counting it there labelled dead
+-            # jobs as still running forever. It is simply absent from the
+-            # ledger; the session-start banking in _common.prior_session_cost
+-            # is what recovers it if the job is ever continued.
+-            pass
+         bucket["cost_usd"] += cost
+         total += cost
+     return {"total_cost_usd": round(total, 4), "by_module": by_module,
+-            "count": count, "in_flight_estimate_usd": round(in_flight, 4)}
++            "count": count, "in_flight_estimate_usd": round(in_flight, 4),
++            "terminal_unpriced_estimate_usd": round(terminal_unpriced, 4),
++            "spent_usd_complete": spent_complete}
+ 
+ 
+ @router.get("/usage")
+@@ -397,6 +437,14 @@ def get_usage():
+         # or to the budget maths: it is an estimate that runs high, and the
+         # budget number must stay the authoritative one.
+         "in_flight_estimate_usd": stats.get("in_flight_estimate_usd", 0.0),
++        # A separate unit for terminal sessions whose backend reports no dollar
++        # amount (notably Codex ChatGPT OAuth).  Never add this estimate to
++        # spent_usd or budget maths; spent_usd_complete tells callers that the
++        # authoritative dollar sum is partial.
++        "terminal_unpriced_estimate_usd": stats.get(
++            "terminal_unpriced_estimate_usd", 0.0
++        ),
++        "spent_usd_complete": bool(stats.get("spent_usd_complete", True)),
+         "budget_usd": round(budget, 4),
+         "remaining_usd": remaining,
+         "pct_used": pct_used,
 diff --git a/modules/_common.py b/modules/_common.py
-index 8f433a7..a6c4971 100644
+index 8f433a7..454832f 100644
 --- a/modules/_common.py
 +++ b/modules/_common.py
-@@ -57,8 +57,8 @@ _FLAG_MARKER_RE = re.compile(
+@@ -45,6 +45,14 @@ FLAG_RE = re.compile(
+ )
+ LIBERAL_FLAG_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{1,16}\{[!-~]{2,200}\}")
+ 
++# A generic sweep of regex SOURCE such as ``DH{[^}]+}`` sees ``DH{[^}`` as a
++# complete flag because the character-class ``}`` also closes FLAG_RE's match.
++# The candidate alone is indistinguishable from a real flag, so reject it only
++# when the bytes immediately AFTER the match complete that exact source shape:
++# ``]`` + regex quantifier + literal closing ``}``.  Explicit FLAG_CANDIDATE
++# markers are parsed separately and never consult this rule.
++_REGEX_SOURCE_TAIL_RE = re.compile(r"\](?:[+*?]|\{\d+(?:,\d*)?\})\}")
++
+ # Explicit flag declaration emitted by the exploit/solver itself.
+ # The agent is instructed (CTF_PREAMBLE) to print `FLAG_CANDIDATE: <flag>`
+ # on its own line to stdout once it has captured the flag from a genuine
+@@ -57,8 +65,8 @@ _FLAG_MARKER_RE = re.compile(
      r"FLAG[_-]?CANDIDATE\s*[:=]\s*([^\r\n]+)",
      re.IGNORECASE | re.MULTILINE,
  )
@@ -13,7 +145,7 @@ index 8f433a7..a6c4971 100644
  # newline becomes a literal `\n` (two chars) and the rest of the JSON (`",`
  # the next key, ...) rides on the same PHYSICAL line. `[^\r\n]+` then over-
  # captures `DH{...}\n",` (real job a3d4d4484233). Cut the candidate at the
-@@ -1356,7 +1356,6 @@ _TRUSTED_FLAG_SOURCES = (
+@@ -1356,7 +1364,6 @@ _TRUSTED_FLAG_SOURCES = (
      "solver.py.stderr",
      "callbacks.jsonl",
      "summary.json",          # forensic — no exploit.py; flag comes from artifact analysis
@@ -21,7 +153,7 @@ index 8f433a7..a6c4971 100644
  )
  
  # Narrative artifacts the agent itself authored or that derive from
-@@ -1469,6 +1468,8 @@ def scan_job_for_flags(
+@@ -1469,6 +1476,8 @@ def scan_job_for_flags(
      extra_files: list[str] | None = None,
      *,
      sandbox_result: dict | None = None,
@@ -30,7 +162,7 @@ index 8f433a7..a6c4971 100644
      trusted_only: bool = False,
      provenance_out: dict | None = None,
  ) -> list[str]:
-@@ -1508,7 +1509,7 @@ def scan_job_for_flags(
+@@ -1508,7 +1517,7 @@ def scan_job_for_flags(
  
        1. TRUSTED tier — files produced by the actual runner / OOB
           collector (exploit/solver stdout/stderr, callbacks.jsonl,
@@ -39,7 +171,7 @@ index 8f433a7..a6c4971 100644
           appears here, return ONLY those — they prove the exploit
           really retrieved the flag from the target.
        2. NARRATIVE tier — report.md, run.log, findings.json. Consulted
-@@ -1532,6 +1533,16 @@ def scan_job_for_flags(
+@@ -1532,6 +1541,16 @@ def scan_job_for_flags(
      sandbox_result['judge_aborted']=True or
      sandbox_result['error']='prejudge_blocked', the narrative tier
      is skipped entirely.
@@ -56,7 +188,38 @@ index 8f433a7..a6c4971 100644
      """
      jd = job_dir(job_id)
  
-@@ -1753,7 +1764,8 @@ def scan_job_for_flags(
+@@ -1563,6 +1582,9 @@ def scan_job_for_flags(
+     fmt_re = job_flag_format_re(job_id)
+     scan_re = fmt_re or FLAG_RE
+ 
++    def _is_regex_source_match(text: str, match) -> bool:
++        return bool(_REGEX_SOURCE_TAIL_RE.match(text, match.end()))
++
+     def _scan(names) -> set[str]:
+         out: set[str] = set()
+         for name in names:
+@@ -1573,7 +1595,10 @@ def scan_job_for_flags(
+                 text = p.read_text(errors="replace")
+             except Exception:
+                 continue
+-            out.update(scan_re.findall(text))
++            for match in scan_re.finditer(text):
++                if _is_regex_source_match(text, match):
++                    continue
++                out.add(match.group(0))
+         return out
+ 
+     def _scan_markers(names) -> set[str]:
+@@ -1696,6 +1721,8 @@ def scan_job_for_flags(
+                 continue
+             _tail_from = 0
+             for _m in scan_re.finditer(text):
++                if _is_regex_source_match(text, _m):
++                    continue
+                 _tail_from = _m.end()
+             for line in text[_tail_from:].splitlines():
+                 low = line.strip().lower()
+@@ -1753,7 +1780,8 @@ def scan_job_for_flags(
              or sandbox_result.get("error") == "prejudge_blocked"
          )
      )
@@ -66,7 +229,7 @@ index 8f433a7..a6c4971 100644
          return []
  
      narrative = {f for f in _scan(_NARRATIVE_FLAG_SOURCES) if not _is_placeholder_flag(f)}
-@@ -6940,6 +6952,17 @@ _STOP_KIND_HEADERS = {
+@@ -6940,6 +6968,17 @@ _STOP_KIND_HEADERS = {
          "Conceded unsolvable — artifacts self-admit no working chain and "
          "prejudge flag_likelihood≈0 (true-negative, not a fixable near-miss)"
      ),
@@ -84,7 +247,7 @@ index 8f433a7..a6c4971 100644
      "policy_refusal": (
          "Main turn blocked by the server-side Usage-Policy classifier "
          "(AUP) — session context poisoned; halted without an in-place retry"
-@@ -7170,6 +7193,61 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
+@@ -7170,6 +7209,61 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
      return ""
  
  
@@ -146,7 +309,7 @@ index 8f433a7..a6c4971 100644
  def write_why_stopped(
      work_dir: Path,
      *,
-@@ -7387,6 +7465,45 @@ def write_why_stopped(
+@@ -7387,6 +7481,45 @@ def write_why_stopped(
                  "shell (proxy, DNS, MTU).",
                  "3. **Check the target is alive**: `nc -vz <host> <port>`.",
              ]
@@ -192,7 +355,7 @@ index 8f433a7..a6c4971 100644
          elif stop_kind == "unsolvable_by_analysis":
              out += [
                  "The script's OWN artifacts (exploit / report.md) admit no "
-@@ -8266,6 +8383,15 @@ async def run_main_agent_session(
+@@ -8266,6 +8399,15 @@ async def run_main_agent_session(
          summary["easy_framing"] = False
  
      last_sandbox: dict | None = None
@@ -208,7 +371,7 @@ index 8f433a7..a6c4971 100644
      # Track retry hints across attempts so the next postjudge call can
      # see "you already said this" — drives next_action=stop more
      # aggressively. summary["judge_hints"] is what the sandbox_runner
-@@ -9241,11 +9367,27 @@ async def run_main_agent_session(
+@@ -9241,11 +9383,27 @@ async def run_main_agent_session(
              write_meta(job_id, stage=f"sandbox-run-{attempt}" if attempt else "sandbox-run")
              log_fn(f"[orchestrator] auto-run turn {attempt}: executing {picked}")
              try:
@@ -236,7 +399,7 @@ index 8f433a7..a6c4971 100644
              # Did we capture a flag this turn? `last_sandbox` is the
              # judge_aborted-aware sentinel; pass it so the orchestrator
              # loop applies the same NARRATIVE-skip gate as the final
-@@ -9256,6 +9398,8 @@ async def run_main_agent_session(
+@@ -9256,6 +9414,8 @@ async def run_main_agent_session(
                  job_id,
                  sandbox_result=last_sandbox,
                  provenance_out=flag_provenance,
@@ -245,7 +408,7 @@ index 8f433a7..a6c4971 100644
              )
              judge_out = ((last_sandbox or {}).get("judge") or {})
              verdict = judge_out.get("verdict")
-@@ -9655,8 +9799,62 @@ async def run_main_agent_session(
+@@ -9655,8 +9815,62 @@ async def run_main_agent_session(
                      # Safe fallback: if we can't classify, do NOT concede
                      # (preserve the existing redirect behavior).
                      _untestable = True
@@ -310,7 +473,7 @@ index 8f433a7..a6c4971 100644
                      summary["conceded_unsolvable"] = True
                      log_fn(
                          "[orchestrator] prejudge BLOCKED + flag_likelihood="
-@@ -9675,6 +9873,30 @@ async def run_main_agent_session(
+@@ -9675,6 +9889,30 @@ async def run_main_agent_session(
                          log_fn=log_fn,
                      )
                      return last_sandbox
@@ -341,7 +504,7 @@ index 8f433a7..a6c4971 100644
                  if _pj_issues and _pj_sig and _pj_sig not in _seen and _n < 3:
                      _seen.append(_pj_sig)
                      summary["prejudge_block_redirects"] = _n + 1
-@@ -9701,7 +9923,10 @@ async def run_main_agent_session(
+@@ -9701,7 +9939,10 @@ async def run_main_agent_session(
                      log_fn(
                          f"[orchestrator] prejudge BLOCKED — redirecting its "
                          f"{len(_pj_issues)} issue(s) into a fix-and-retry turn "
@@ -353,7 +516,7 @@ index 8f433a7..a6c4971 100644
                      )
                  else:
                      log_fn(
-@@ -9849,21 +10074,51 @@ async def run_main_agent_session(
+@@ -9849,21 +10090,51 @@ async def run_main_agent_session(
                  )
                  return last_sandbox
              if not retry_hint:
@@ -921,6 +1084,43 @@ index 7152b30..d2dc589 100644
          if agent_err and not agent_summary.get("exploit_present"):
              final_status = "failed"
          elif not flags:
+diff --git a/scripts/aggregate_hardening.py b/scripts/aggregate_hardening.py
+index a6df4ed..910704a 100644
+--- a/scripts/aggregate_hardening.py
++++ b/scripts/aggregate_hardening.py
+@@ -31,6 +31,7 @@ SUCCESS_TIER_ORDER = (
+     SUCCESS_TIER_UNTRUSTED,
+     SUCCESS_TIER_MISSING,
+ )
++NONTERMINAL_STATUSES = frozenset({"queued", "running", "analyze", "analyzing"})
+ 
+ # Historical top-level jobs whose purpose was to validate the orchestration
+ # itself, not to solve an operator-submitted challenge.  The job metadata has
+@@ -627,8 +628,22 @@ def classify(job: Job, outcome: Outcome | None = None) -> Classification:
+         lines = ",".join(str(line_no) for line_no in job.malformed_event_lines)
+         return found("UNRESOLVED", "P6d", f"malformed events.jsonl lines: {lines}")
+ 
+-    if outcome.status == "stopped" and error is None and not stop:
+-        return found("EXCLUDED_operator_stop", "P0", "automatic status/error/stop")
++    if outcome.status in NONTERMINAL_STATUSES:
++        return found(
++            "EXCLUDED_operator_stop",
++            "P0",
++            f"nonterminal-status={outcome.status}",
++        )
++
++    if outcome.status == "stopped" and not stop and (
++        error is None or error_kind == "stopped_for_resume"
++    ):
++        reason = (
++            "error_kind=stopped_for_resume"
++            if error_kind == "stopped_for_resume"
++            else "operator-stop-without-error"
++        )
++        return found("EXCLUDED_operator_stop", "P0", reason)
+ 
+     p1_classification: tuple[str, str, str] | None = None
+     if error:
 diff --git a/scripts/test_codex_cli.py b/scripts/test_codex_cli.py
 index 4d97cba..22a1e7c 100644
 --- a/scripts/test_codex_cli.py
@@ -1165,10 +1365,10 @@ index 4d97cba..22a1e7c 100644
      return 1 if FAIL else 0
  
 diff --git a/scripts/test_flag_scan.py b/scripts/test_flag_scan.py
-index 8b74f1b..e58b17b 100644
+index 8b74f1b..c1a86b2 100644
 --- a/scripts/test_flag_scan.py
 +++ b/scripts/test_flag_scan.py
-@@ -50,6 +50,13 @@ MUTATIONS = (
+@@ -50,6 +50,14 @@ MUTATIONS = (
      "drop-success-clause",
      "accept-runner-regex",
      "drop-provenance-passage",
@@ -1179,10 +1379,11 @@ index 8b74f1b..e58b17b 100644
 +    "drop-web3-evidence",
 +    "permit-misc-error",
 +    "permit-forensic-error",
++    "keep-regex-source-noise",
  )
  
  parser = argparse.ArgumentParser()
-@@ -65,6 +72,13 @@ def _replace_once(source: str, old: str, new: str) -> str:
+@@ -65,6 +73,13 @@ def _replace_once(source: str, old: str, new: str) -> str:
  
  
  COMMON_SOURCE = (ROOT / "modules" / "_common.py").read_text()
@@ -1196,7 +1397,7 @@ index 8b74f1b..e58b17b 100644
  _GATE_RETURN = '''    return verdict == "success" or (
          bool(flags_now) and provenance_tier == "marker"
      )'''
-@@ -97,6 +111,35 @@ elif args.mutate == "drop-provenance-passage":
+@@ -97,6 +112,41 @@ elif args.mutate == "drop-provenance-passage":
          '''                sandbox_result=last_sandbox,
  ''',
      )
@@ -1212,6 +1413,12 @@ index 8b74f1b..e58b17b 100644
 +        COMMON_SOURCE,
 +        "    crashed_before_sandbox = sandbox_started is False and bool(agent_error)\n",
 +        "    crashed_before_sandbox = False\n",
++    )
++elif args.mutate == "keep-regex-source-noise":
++    COMMON_SOURCE = _replace_once(
++        COMMON_SOURCE,
++        "        return bool(_REGEX_SOURCE_TAIL_RE.match(text, match.end()))\n",
++        "        return False\n",
 +    )
 +
 +for _module in ("web", "crypto", "web3"):
@@ -1232,7 +1439,7 @@ index 8b74f1b..e58b17b 100644
  
  _results: list[bool] = []
  
-@@ -133,6 +176,94 @@ def _load(jobdir: pathlib.Path, flag_format: str = ""):
+@@ -133,6 +183,94 @@ def _load(jobdir: pathlib.Path, flag_format: str = ""):
      return ns
  
  
@@ -1327,7 +1534,85 @@ index 8b74f1b..e58b17b 100644
  _logs: list[str] = []
  
  
-@@ -339,6 +470,219 @@ def main() -> int:
+@@ -188,6 +326,77 @@ def main() -> int:
+         ns["scan_job_for_flags"]("j", trusted_only=True) == [REAL2],
+         ns["scan_job_for_flags"]("j", trusted_only=True))
+ 
++    section("A6 regex-source noise is narrower than real flag syntax")
++    regex_sources = (
++        'rx = r"DH{[^}]+}"\n',
++        'rx = r"DH{[^}]*}"\n',
++        'rx = r"DH{[^}]?}"\n',
++        'rx = r"DH{[^}]{1,64}}"\n',
++    )
++    for index, source_text in enumerate(regex_sources):
++        d = _job(**{"solver.py__stdout": source_text, "solver.py__stderr": ""})
++        ns = _load(d, flag_format="DH{...}")
++        got = ns["scan_job_for_flags"]("j", trusted_only=True)
++        chk(f"A6 regex source variant {index + 1} drops only DH{{[^}}", got == [], got)
++
++    # A filtered source fragment is not a later candidate and therefore must
++    # not reset the existing "denial after the last candidate" boundary.  If it
++    # did, a trailing regex snippet could launder an earlier failed sweep hit.
++    _logs.clear()
++    d = _job(**{
++        "solver.py__stdout": REAL + "\n" + DENIAL + "\n" + regex_sources[0],
++        "solver.py__stderr": "",
++    })
++    ns = _load(d, flag_format="DH{...}")
++    got = ns["scan_job_for_flags"]("j", trusted_only=True)
++    chk(
++        "A6 filtered regex source cannot hide a denial after the real sweep hit",
++        got == [] and any("FLAG SWEEP SUPPRESSED" in line for line in _logs),
++        (got, _logs),
++    )
++
++    real_flags = (
++        "DH{abcdef123456}",
++        "DH{why.so.serious?}",
++        "DH{c0st$+t4x}",
++        "DH{f(x)=y}",
++        "DH{arr[0]_idx}",
++        "DH{a|b*c}",
++        REAL,
++    )
++    for flag in real_flags:
++        d = _job(**{"solver.py__stdout": flag + "\n", "solver.py__stderr": ""})
++        ns = _load(d, flag_format="DH{...}")
++        got = ns["scan_job_for_flags"]("j", trusted_only=True)
++        chk(f"A6 real flag survives: {flag}", got == [flag], got)
++
++    brace_less = "rawflag_7f91a0c2"
++    d = _job(**{
++        "solver.py__stdout": "FLAG_CANDIDATE: " + brace_less + "\n",
++        "solver.py__stderr": "",
++    })
++    ns = _load(d, flag_format="DH{...}")
++    pv = {}
++    got = ns["scan_job_for_flags"]("j", trusted_only=True, provenance_out=pv)
++    chk(
++        "A6 brace-less explicit marker remains authoritative",
++        got == [brace_less] and pv.get("tier") == "marker",
++        (got, pv),
++    )
++
++    d = _job(**{
++        "solver.py__stdout": "FLAG_CANDIDATE: DH{[^}\n",
++        "solver.py__stderr": "",
++    })
++    ns = _load(d, flag_format="DH{...}")
++    pv = {}
++    got = ns["scan_job_for_flags"]("j", trusted_only=True, provenance_out=pv)
++    chk(
++        "A6 explicit marker bypasses generic regex-source filtering",
++        got == ["DH{[^}"] and pv.get("tier") == "marker",
++        (got, pv),
++    )
++
+     section("the MARKER tier is never subject to the denial rule")
+     d = _job(**{"solver.py__stdout": DENIAL + "\nFLAG_CANDIDATE: " + REAL + "\n",
+                 "solver.py__stderr": ""})
+@@ -339,6 +548,219 @@ def main() -> int:
              "DH{candidate_2996f516cdf17978ee6dda6d02b35b}"
          ))
  
@@ -1547,7 +1832,7 @@ index 8b74f1b..e58b17b 100644
      section("sibling matchers share the character class")
      crypto = (ROOT / "modules" / "crypto" / "pre_analysis.py").read_text()
      cline = [l for l in crypto.splitlines() if "re.escape(prefix).encode()" in l]
-@@ -349,11 +693,16 @@ def main() -> int:
+@@ -349,11 +771,16 @@ def main() -> int:
          cline)
  
      section("a flagless run is not 'finished' — in EVERY module")
@@ -1568,3 +1853,453 @@ index 8b74f1b..e58b17b 100644
              and 'status="finished", stage="done"' not in text,
              [l.strip() for l in text.splitlines()
               if "final_status" in l or 'status="finished"' in l][:3])
+diff --git a/scripts/test_hardening_aggregator.py b/scripts/test_hardening_aggregator.py
+index b725ca1..f77c7af 100644
+--- a/scripts/test_hardening_aggregator.py
++++ b/scripts/test_hardening_aggregator.py
+@@ -569,6 +569,55 @@ class FixtureTestCase(unittest.TestCase):
+ 
+ 
+ class AcceptanceTests(FixtureTestCase):
++    def test_A4_nonterminal_and_resume_wait_are_excluded_with_reasons(self) -> None:
++        self.fixture.job(
++            "a4running",
++            [],
++            meta={"status": "running", "finished_at": None},
++        )
++        self.fixture.job(
++            "a4resume",
++            [],
++            meta={
++                "status": "stopped",
++                "error": "Stopped by user (resume with extra hint)",
++                "error_kind": "stopped_for_resume",
++            },
++        )
++        result = A.aggregate(self.fixture.jobs_dir)
++        rows = {row.job_id: row for row in result.classifications}
++        self.assertEqual((result.included, result.excluded, result.failures), (2, 2, 0))
++        self.assertEqual(
++            (rows["a4running"].class_name, rows["a4running"].rung, rows["a4running"].evidence),
++            ("EXCLUDED_operator_stop", "P0", "nonterminal-status=running"),
++        )
++        self.assertEqual(
++            (rows["a4resume"].class_name, rows["a4resume"].rung, rows["a4resume"].evidence),
++            ("EXCLUDED_operator_stop", "P0", "error_kind=stopped_for_resume"),
++        )
++
++    def test_A4_other_unclassified_failures_remain_loud(self) -> None:
++        for job_id, meta in (
++            ("a4ordinary", {"status": "no_flag"}),
++            (
++                "a4agenterror",
++                {
++                    "status": "stopped",
++                    "error": "unclassified agent crash",
++                    "error_kind": "agent_exception",
++                },
++            ),
++        ):
++            with self.subTest(job_id=job_id):
++                isolated = Fixture()
++                self.addCleanup(isolated.close)
++                isolated.job(job_id, [], meta=meta)
++                with self.assertRaisesRegex(
++                    A.AggregationError,
++                    rf"unresolved failure classification: {job_id}",
++                ):
++                    A.aggregate(isolated.jobs_dir)
++
+     def test_D4_only_allowlisted_execution_sources_are_environment_evidence(self) -> None:
+         terminal_events = [
+             event("00:00:20", "run", "start", target="live.example:1"),
+@@ -1384,6 +1433,16 @@ class LiveSnapshotTests(FixtureTestCase):
+ 
+ 
+ MUTATIONS = {
++    "A4_nonterminal": (
++        "if outcome.status in NONTERMINAL_STATUSES:",
++        "if False and outcome.status in NONTERMINAL_STATUSES:",
++        "AcceptanceTests.test_A4_nonterminal_and_resume_wait_are_excluded_with_reasons",
++    ),
++    "A4_resume": (
++        'error is None or error_kind == "stopped_for_resume"',
++        "error is None or False",
++        "AcceptanceTests.test_A4_nonterminal_and_resume_wait_are_excluded_with_reasons",
++    ),
+     "D1": (
+         r'r"Could not connect to (?:host )?[A-Za-z0-9.-]+\b"',
+         r'r"Could not connect to host3\.dreamhack\.games\b"',
+diff --git a/scripts/test_hybrid_lifecycle.py b/scripts/test_hybrid_lifecycle.py
+index 49de2c4..55b4632 100644
+--- a/scripts/test_hybrid_lifecycle.py
++++ b/scripts/test_hybrid_lifecycle.py
+@@ -366,6 +366,97 @@ check("test_stats_total_has_no_child_double_count", stats["total_cost_usd"], 7.7
+ check("test_stats_attributes_chain_once_to_hybrid", stats["by_module"].get("hybrid"), {"count": 1, "cost_usd": 3.75})
+ check("test_stats_has_no_hidden_scalar_child_bucket", stats["by_module"].get("pwn"), {"count": 1, "cost_usd": 4.0})
+ 
++# ------------------------------------------------------- usage unit separation
++usage_jobs = DATA / "usage-jobs"
++usage_jobs.mkdir()
++
++
++def write_usage_meta(job_id: str, meta: dict) -> None:
++    directory = usage_jobs / job_id
++    directory.mkdir()
++    (directory / "meta.json").write_text(
++        json.dumps({"id": job_id, "module": "rev", **meta}), encoding="utf-8"
++    )
++
++
++# The estimate beside an authoritative cost is an intentionally huge negative
++# control: if the fields are mixed, every assertion below moves visibly.
++write_usage_meta(
++    "f00000000001",
++    {"status": "finished", "cost_usd": 2.5, "cost_usd_estimate": 99.0},
++)
++write_usage_meta(
++    "f00000000002",
++    {"status": "no_flag", "cost_usd": 0, "cost_usd_estimate": 6.25},
++)
++write_usage_meta(
++    "f00000000003",
++    {"status": "running", "cost_usd": 0, "cost_usd_estimate": 3.5},
++)
++
++original_jobs_dir = jobs_module.JOBS_DIR
++jobs_module.JOBS_DIR = usage_jobs
++usage_stats = jobs_module.get_stats()
++check("test_usage_authoritative_cost_stays_in_spent_only", usage_stats["total_cost_usd"], 2.5)
++check(
++    "test_usage_terminal_unpriced_estimate_is_separate",
++    usage_stats["terminal_unpriced_estimate_usd"],
++    6.25,
++)
++check("test_usage_running_estimate_stays_in_flight_only", usage_stats["in_flight_estimate_usd"], 3.5)
++check("test_usage_missing_terminal_price_marks_spend_incomplete", usage_stats["spent_usd_complete"], False)
++
++stub_settings = types.ModuleType("modules.settings_io")
++stub_settings.get_setting = lambda key: 10.0 if key == "budget_usd" else None
++stub_common = types.ModuleType("modules._common")
++stub_common.read_rate_limit = lambda: {"provider": "claude"}
++stub_common.read_grok_rate_limit = lambda: {"provider": "grok"}
++stub_codex_rate = types.ModuleType("modules.codex_rate_limit")
++stub_codex_rate.read_codex_rate_limit = lambda: {"provider": "codex"}
++stub_names = {
++    "modules.settings_io": stub_settings,
++    "modules._common": stub_common,
++    "modules.codex_rate_limit": stub_codex_rate,
++}
++saved_modules = {name: sys.modules.get(name) for name in stub_names}
++sys.modules.update(stub_names)
++try:
++    usage = jobs_module.get_usage()
++finally:
++    for name, previous in saved_modules.items():
++        if previous is None:
++            sys.modules.pop(name, None)
++        else:
++            sys.modules[name] = previous
++
++check("test_usage_endpoint_spent_excludes_both_estimate_units", usage["spent_usd"], 2.5)
++check("test_usage_endpoint_exposes_terminal_unpriced_estimate", usage["terminal_unpriced_estimate_usd"], 6.25)
++check("test_usage_endpoint_exposes_completeness", usage["spent_usd_complete"], False)
++check("test_usage_budget_remaining_uses_authoritative_spend", usage["remaining_usd"], 7.5)
++check("test_usage_budget_percent_uses_authoritative_spend", usage["pct_used"], 25.0)
++
++authoritative_only = DATA / "usage-authoritative-only"
++authoritative_only.mkdir()
++only_dir = authoritative_only / "f00000000004"
++only_dir.mkdir()
++(only_dir / "meta.json").write_text(
++    json.dumps(
++        {
++            "id": only_dir.name,
++            "module": "rev",
++            "status": "finished",
++            "cost_usd": 1.75,
++            "cost_usd_estimate": 88.0,
++        }
++    ),
++    encoding="utf-8",
++)
++jobs_module.JOBS_DIR = authoritative_only
++authoritative_stats = jobs_module.get_stats()
++check("test_usage_authoritative_only_is_complete", authoritative_stats["spent_usd_complete"], True)
++check("test_usage_authoritative_job_estimate_is_not_reclassified", authoritative_stats["terminal_unpriced_estimate_usd"], 0.0)
++jobs_module.JOBS_DIR = original_jobs_dir
++
+ detail = jobs_module.get_job(PARENT)
+ evidence = (detail.get("hybrid") or {}).get("stage_flag_evidence") or []
+ check("test_parent_detail_keeps_all_stage_evidence", len(evidence), 2)
+diff --git a/scripts/test_worker_slots.py b/scripts/test_worker_slots.py
+index 8a3b526..00fcfc6 100644
+--- a/scripts/test_worker_slots.py
++++ b/scripts/test_worker_slots.py
+@@ -22,12 +22,15 @@ from __future__ import annotations
+ 
+ import fnmatch
+ import importlib.util
++import io
+ import json
+ import os
+ import subprocess
+ import sys
+ import tempfile
+ import types
++from contextlib import redirect_stdout
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+@@ -78,16 +81,19 @@ def test_runner() -> None:
+     chk("slot 1 worker name", m1._worker_name(0) == "htct-s1-w0", m1._worker_name(0))
+     chk("slot 1 forces concurrency 1", m1._resolve_concurrency() == 1, m1._resolve_concurrency())
+     chk("slot 1 runs the single RQ scheduler", m1._runs_scheduler(0) is True)
++    chk("slot 1 owns the single TTL cleanup", m1._runs_cleanup() is True)
+ 
+     m2 = _load_runner("2")
+     chk("slot 2 name prefix", m2._name_prefix() == "htct-s2-w", m2._name_prefix())
+     chk("slot 2 forces concurrency 1", m2._resolve_concurrency() == 1)
+     chk("slot 2 does NOT run the scheduler", m2._runs_scheduler(0) is False)
++    chk("slot 2 does NOT race the TTL cleanup", m2._runs_cleanup() is False)
+ 
+     ml = _load_runner(None)
+     chk("legacy prefix unchanged", ml._name_prefix() == "htct-w", ml._name_prefix())
+     chk("legacy honours worker_concurrency", ml._resolve_concurrency() == 3)
+     chk("legacy worker 0 runs the scheduler", ml._runs_scheduler(0) is True)
++    chk("legacy one-container mode still runs TTL cleanup", ml._runs_cleanup() is True)
+ 
+     # THE defect: a boot sweep must never match another slot's live key.
+     p1, n1 = f"rq:worker:{m1._name_prefix()}*", f"rq:worker:{m1._worker_name(0)}"
+@@ -106,6 +112,93 @@ def test_runner() -> None:
+     os.environ.pop("WORKER_SLOT", None)
+ 
+ 
++def test_job_measurement_archive() -> None:
++    section("worker/runner.py — TTL measurement promotion")
++    module = _load_runner(None)
++    with tempfile.TemporaryDirectory(prefix="worker-cleanup-") as td:
++        root = Path(td)
++        jobs = root / "jobs"
++        archive = root / "job-measurements"
++        jobs.mkdir()
++        module.JOBS_DIR = jobs
++        module.MEASUREMENT_ARCHIVE_DIR = archive
++        now = datetime(2026, 1, 10, tzinfo=timezone.utc)
++        old_stamp = (now - timedelta(days=8)).timestamp()
++
++        first = jobs / "aaaaaaaaaaaa"
++        first.mkdir()
++        expected = {
++            "events.jsonl": '{"phase":"terminal"}\n',
++            "meta.json": '{"status":"finished"}\n',
++            "run.log": "runner evidence\n",
++        }
++        for name, body in expected.items():
++            (first / name).write_text(body)
++        (first / "work.bin").write_bytes(b"do not archive")
++        os.utime(first, (old_stamp, old_stamp))
++
++        removed = module._cleanup_expired_jobs(7, now=now)
++        kept = archive / first.name
++        chk("expired job is removed after promotion", removed == 1 and not first.exists())
++        chk(
++            "only the three measurement artifacts survive with exact bytes",
++            all((kept / name).read_text() == body for name, body in expected.items())
++            and not (kept / "work.bin").exists(),
++            sorted(path.name for path in kept.iterdir()),
++        )
++
++        # Age the archive itself past the cutoff and run another real sweep.  It
++        # must survive because the archive is outside JOBS_DIR, not because its
++        # mtime happened to be fresh.
++        os.utime(kept, (old_stamp, old_stamp))
++        second = jobs / "bbbbbbbbbbbb"
++        second.mkdir()
++        (second / "meta.json").write_text('{"status":"failed"}\n')
++        os.utime(second, (old_stamp, old_stamp))
++        removed = module._cleanup_expired_jobs(7, now=now)
++        chk(
++            "the next TTL cycle preserves the first archive",
++            removed == 1 and kept.is_dir()
++            and (kept / "events.jsonl").read_text() == expected["events.jsonl"],
++        )
++
++        failing = jobs / "cccccccccccc"
++        failing.mkdir()
++        (failing / "events.jsonl").write_text("event\n")
++        (failing / "meta.json").write_text("meta\n")
++        os.utime(failing, (old_stamp, old_stamp))
++        real_copy2 = module.shutil.copy2
++
++        def fail_meta(source, target, *args, **kwargs):
++            if Path(source).name == "meta.json":
++                raise OSError("fixture archive unavailable")
++            return real_copy2(source, target, *args, **kwargs)
++
++        module.shutil.copy2 = fail_meta
++        output = io.StringIO()
++        try:
++            with redirect_stdout(output):
++                removed = module._cleanup_expired_jobs(7, now=now)
++        finally:
++            module.shutil.copy2 = real_copy2
++        chk(
++            "promotion failure is fail-open for TTL removal",
++            removed == 1 and not failing.exists(),
++        )
++        chk(
++            "promotion failure is recorded with job and artifact",
++            "measurement promotion failed" in output.getvalue()
++            and failing.name in output.getvalue()
++            and "meta.json" in output.getvalue()
++            and "fixture archive unavailable" in output.getvalue(),
++            output.getvalue(),
++        )
++
++    for name in ("modules.settings_io", "modules"):
++        sys.modules.pop(name, None)
++    os.environ.pop("WORKER_SLOT", None)
++
++
+ # --------------------------------------------------------------------------
+ # 2. deploy.sh — slot scan, extracted from the script so they cannot drift
+ # --------------------------------------------------------------------------
+@@ -889,6 +982,7 @@ def test_reap() -> None:
+ 
+ def main() -> int:
+     test_runner()
++    test_job_measurement_archive()
+     test_slot_scan()
+     test_settings()
+     test_settings_key_rename()
+diff --git a/worker/runner.py b/worker/runner.py
+index e2fbfc2..14b576a 100755
+--- a/worker/runner.py
++++ b/worker/runner.py
+@@ -14,6 +14,8 @@ from modules.settings_io import get_setting  # noqa: E402
+ 
+ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+ JOBS_DIR = Path("/data/jobs")
++MEASUREMENT_ARCHIVE_DIR = JOBS_DIR.parent / "job-measurements"
++MEASUREMENT_ARTIFACTS = ("events.jsonl", "meta.json", "run.log")
+ CLEANUP_INTERVAL_S = 3600
+ 
+ 
+@@ -67,6 +69,79 @@ def _resolve_concurrency() -> int:
+     return max(1, n)
+ 
+ 
++def _runs_cleanup() -> bool:
++    """Elect one cleanup owner across split worker containers."""
++    return not SLOT or SLOT == "1"
++
++
++def _promote_measurement_artifacts(job_dir: Path) -> tuple[str, ...]:
++    """Best-effort copy of the durable measurement corpus before TTL removal.
++
++    The archive is deliberately a SIBLING of ``jobs``.  ``cleanup_loop`` only
++    walks ``JOBS_DIR``, so an old archive cannot be selected on the next TTL
++    cycle.  Copy through a same-directory temporary file and replace the final
++    name only after the copy completes; an interrupted copy must not masquerade
++    as a complete measurement artifact.
++
++    Promotion is observability, not a retention lock: every failure is logged,
++    but the caller still removes the expired job as the existing TTL contract
++    requires.
++    """
++    target_dir = MEASUREMENT_ARCHIVE_DIR / job_dir.name
++    promoted: list[str] = []
++    try:
++        target_dir.mkdir(parents=True, exist_ok=True)
++    except Exception as e:
++        print(
++            f"[cleanup] measurement promotion failed for {job_dir}: "
++            f"archive directory: {e}",
++            flush=True,
++        )
++        return ()
++
++    for name in MEASUREMENT_ARTIFACTS:
++        source = job_dir / name
++        if not source.is_file():
++            continue
++        temporary = target_dir / f".{name}.tmp-{os.getpid()}-{threading.get_ident()}"
++        try:
++            shutil.copy2(source, temporary)
++            os.replace(temporary, target_dir / name)
++            promoted.append(name)
++        except Exception as e:
++            try:
++                temporary.unlink(missing_ok=True)
++            except Exception:
++                pass
++            print(
++                f"[cleanup] measurement promotion failed for {job_dir}: "
++                f"{name}: {e}",
++                flush=True,
++            )
++    return tuple(promoted)
++
++
++def _cleanup_expired_jobs(ttl: int, *, now: datetime | None = None) -> int:
++    """Run one TTL sweep and return the number of removed job directories."""
++    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=ttl)
++    removed = 0
++    if not JOBS_DIR.exists():
++        return removed
++    for d in JOBS_DIR.iterdir():
++        if not d.is_dir():
++            continue
++        mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc)
++        if mtime >= cutoff:
++            continue
++        _promote_measurement_artifacts(d)
++        try:
++            shutil.rmtree(d)
++            removed += 1
++        except Exception as e:
++            print(f"[cleanup] failed to rm {d}: {e}", flush=True)
++    return removed
++
++
+ def cleanup_loop() -> None:
+     while True:
+         try:
+@@ -74,19 +149,7 @@ def cleanup_loop() -> None:
+             if ttl <= 0:
+                 time.sleep(CLEANUP_INTERVAL_S)
+                 continue
+-            cutoff = datetime.now(timezone.utc) - timedelta(days=ttl)
+-            removed = 0
+-            if JOBS_DIR.exists():
+-                for d in JOBS_DIR.iterdir():
+-                    if not d.is_dir():
+-                        continue
+-                    mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc)
+-                    if mtime < cutoff:
+-                        try:
+-                            shutil.rmtree(d)
+-                            removed += 1
+-                        except Exception as e:
+-                            print(f"[cleanup] failed to rm {d}: {e}", flush=True)
++            removed = _cleanup_expired_jobs(ttl)
+             if removed:
+                 print(f"[cleanup] removed {removed} jobs older than {ttl}d", flush=True)
+         except Exception as e:
+@@ -346,8 +409,12 @@ def main() -> int:
+     # prefix is already win64-ready.
+     _preinit_wine_prefix()
+ 
+-    # Cleanup thread runs in the parent only.
+-    threading.Thread(target=cleanup_loop, daemon=True).start()
++    # Cleanup runs in one parent only.  Both split-slot containers mount the
++    # same /data tree; letting both promote and remove the same directory races
++    # archive writes against rmtree.  Slot 1 already owns the single scheduler,
++    # and the legacy one-container shape remains unchanged.
++    if _runs_cleanup():
++        threading.Thread(target=cleanup_loop, daemon=True).start()
+ 
+     # Use spawn (not fork) to avoid copying threading state and any FDs
+     # that should not be shared (docker-py http client, redis pool, etc).
