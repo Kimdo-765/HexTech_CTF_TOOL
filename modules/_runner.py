@@ -44,6 +44,12 @@ from typing import Optional
 
 import docker
 
+try:
+    from docker.errors import NotFound as _DockerNotFound
+except ImportError:  # lightweight test doubles need not provide docker.errors
+    class _DockerNotFound(Exception):
+        pass
+
 from modules import _judge
 from modules._events import emit_event
 from modules.settings_io import get_setting
@@ -459,6 +465,7 @@ def _wait_with_supervise(
     fields:
       StatusCode             — container exit code, or -1 if unknown
       timeout (bool)         — True if timeout_s elapsed before exit
+      container_disappeared  — True if Docker reports a 404/NotFound
       killed_by_supervise    — True if the supervise judge killed it
       supervise              — dict from supervise_run_once when called
     """
@@ -477,6 +484,8 @@ def _wait_with_supervise(
         try:
             container.reload()
             status = container.status
+        except _DockerNotFound:
+            status = "disappeared"
         except Exception:
             status = "unknown"
 
@@ -487,8 +496,16 @@ def _wait_with_supervise(
             container,
             live_log_state,
             log_fn,
-            flush=(status == "exited"),
+            flush=(status in {"exited", "disappeared"}),
         )
+
+        if status == "disappeared":
+            log_fn("[runner] container disappeared (Docker 404) — stopping wait")
+            return {
+                "StatusCode": -1,
+                "container_disappeared": True,
+                "supervise": supervise_result,
+            }
 
         if status == "exited":
             try:
@@ -623,7 +640,7 @@ def run_in_sandbox(
     pre/post decision switch on a container kill by accident.
 
     Returns: {exit_code, stdout, stderr, stdout_truncated_to,
-              timeout?, killed_by_supervise?, supervise?}.
+              timeout?, container_disappeared?, killed_by_supervise?, supervise?}.
     """
     args = args or []
     # Mount the host's jobroot at the SAME absolute path the worker uses,
@@ -746,6 +763,7 @@ def run_in_sandbox(
     out = b""
     err = b""
     timeout_hit = False
+    container_disappeared = False
     killed_by_supervise = False
     supervise_payload: dict | None = None
     job_dir_path = Path(f"/data/jobs/{job_id}")
@@ -762,10 +780,15 @@ def run_in_sandbox(
         )
         exit_code = int(result.get("StatusCode", -1))
         timeout_hit = bool(result.get("timeout", False))
+        container_disappeared = bool(result.get("container_disappeared", False))
         killed_by_supervise = bool(result.get("killed_by_supervise", False))
         supervise_payload = result.get("supervise")
-        out = container.logs(stdout=True, stderr=False)
-        err = container.logs(stdout=False, stderr=True)
+        # A vanished container has no logs endpoint to query.  The wait loop
+        # already attempted its final live-log flush; asking again here would
+        # merely re-raise the same NotFound and erase the useful return marker.
+        if not container_disappeared:
+            out = container.logs(stdout=True, stderr=False)
+            err = container.logs(stdout=False, stderr=True)
     finally:
         try:
             container.remove(force=True, v=True)
@@ -784,6 +807,8 @@ def run_in_sandbox(
     }
     if timeout_hit:
         payload["timeout"] = True
+    if container_disappeared:
+        payload["container_disappeared"] = True
     if killed_by_supervise:
         payload["killed_by_supervise"] = True
     if supervise_payload:

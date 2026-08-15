@@ -954,6 +954,7 @@ _SSE_META_KEYS = {
 
 
 _JOB_LABEL = "hextech_ctf_tool_job_id"
+_JOB_ROLE_LABEL = "hextech_ctf_tool_role"
 # Jobs already reaped in THIS process. write_meta can be called again after a
 # terminal status (a late cost-counter flush, a collector callback), and the
 # disk-state gate below already handles that — this is the cheap second belt.
@@ -966,7 +967,11 @@ _REAP_TIMEOUT_S = 30.0
 
 
 def reap_job_siblings(job_id: str) -> dict:
-    """Remove every container and network labelled for this job.
+    """Remove containers and networks labelled for this job.
+
+    A role=runner container is preserved until Docker positively reports it as
+    exited/dead; an OOB callback can make the job terminal while that runner is
+    still executing. All other labelled siblings remain immediately reapable.
 
     The label is set at creation: the orchestrator tags the sandbox containers
     it spawns, and worker/docker_memguard.sh tags whatever the AGENT starts
@@ -981,7 +986,7 @@ def reap_job_siblings(job_id: str) -> dict:
     Never raises. A cleanup that breaks a finished job would be worse than the
     leak it fixes.
     """
-    out = {"containers": [], "networks": [], "errors": []}
+    out = {"containers": [], "networks": [], "preserved": [], "errors": []}
     try:
         import docker
 
@@ -989,6 +994,20 @@ def reap_job_siblings(job_id: str) -> dict:
         flt = {"label": f"{_JOB_LABEL}={job_id}"}
         for c in client.containers.list(all=True, filters=flt):
             name = getattr(c, "name", "?")
+            labels = getattr(c, "labels", {}) or {}
+            if labels.get(_JOB_ROLE_LABEL) == "runner":
+                # A collector callback can make meta terminal while the sandbox
+                # runner is still producing output.  The runner shares the job
+                # label with ordinary siblings, so preserve it unless Docker has
+                # positively reported a terminal container state.  Unknown is
+                # deliberately fail-safe: a transient daemon hiccup may leak a
+                # runner, but must never kill a live solver.
+                status = str(getattr(c, "status", "") or "").strip().lower()
+                if status not in {"exited", "dead"}:
+                    out["preserved"].append(
+                        f"{name} ({status or 'unknown status'})"
+                    )
+                    continue
             try:
                 c.remove(force=True, v=True)
                 out["containers"].append(name)
@@ -1073,6 +1092,9 @@ def _reap_after_terminal(job_id: str) -> None:
             parts.append(f"{len(res['networks'])} network(s): "
                          + ", ".join(res["networks"]))
         log_line(job_id, "[reap] removed " + "; ".join(parts))
+    if res["preserved"]:
+        log_line(job_id, "[reap] preserved active runner(s): "
+                 + ", ".join(res["preserved"]))
     if res["errors"]:
         log_line(job_id, "[reap] could not remove: " + "; ".join(res["errors"]))
 

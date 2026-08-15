@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -21,7 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--mutate", choices=("none", "stream-order"), default="none")
+parser.add_argument(
+    "--mutate",
+    choices=("none", "stream-order", "not-found-is-unknown"),
+    default="none",
+)
 args = parser.parse_args()
 
 
@@ -59,9 +64,15 @@ if _missing("claude_agent_sdk"):
 
 from modules import _runner as R  # noqa: E402
 
+_InjectedNotFound = R._DockerNotFound
+
 if args.mutate == "stream-order":
     # Test-process mutation only: production contains no mutation switch.
     R._order_live_sandbox_events = lambda events: events
+elif args.mutate == "not-found-is-unknown":
+    # Test-process mutation only: make the production NotFound handler miss the
+    # injected 404 so it falls through to the old generic-unknown behavior.
+    R._DockerNotFound = type("NeverRaisedNotFound", (Exception,), {})
 
 passed = failed = 0
 
@@ -196,7 +207,7 @@ try:
 finally:
     R._POLL_INTERVAL_S = old_interval
 
-check("wait loop preserves the sandbox exit code", result["StatusCode"], 0)
+check("W2-2c normal exit preserves the sandbox StatusCode", result["StatusCode"], 0)
 check(
     "output written immediately before exit is flushed to the raw log",
     wait_lines,
@@ -206,6 +217,137 @@ check(
         "[runner:stderr] final-warning",
     ],
 )
+
+
+class VanishedContainer:
+    status = "running"
+
+    def __init__(self):
+        self.log_calls = 0
+        self.remove_calls = 0
+        self.kill_calls = 0
+
+    def reload(self):
+        raise _InjectedNotFound("No such container")
+
+    def logs(self, **_kwargs):
+        self.log_calls += 1
+        raise _InjectedNotFound("No such container")
+
+    def remove(self, **_kwargs):
+        self.remove_calls += 1
+
+    def kill(self):
+        self.kill_calls += 1
+
+
+# W2-2a: a Docker 404 is a third terminal outcome, distinct from timeout and
+# normal exit.  The two log calls prove the last stdout/stderr flush was tried.
+vanished = VanishedContainer()
+vanished_lines: list[str] = []
+result = R._wait_with_supervise(
+    vanished,
+    timeout_s=0,
+    job_dir_path=ROOT,
+    script_rel="exploit.py",
+    log_fn=vanished_lines.append,
+    enable_supervise=False,
+)
+check(
+    "W2-2a Docker 404 returns immediately as disappeared, not timeout",
+    (result.get("container_disappeared"), result.get("timeout"), vanished.kill_calls),
+    (True, None, 0),
+)
+check("W2-2a Docker 404 still attempts the final two-stream flush",
+      vanished.log_calls, 2)
+check("W2-2a Docker 404 is operator-visible in the runner log",
+      vanished_lines, ["[runner] container disappeared (Docker 404) — stopping wait"])
+
+
+class TransientReloadContainer(SnapshotContainer):
+    status = "running"
+
+    def __init__(self):
+        super().__init__(stdout=stamped(100_000_000, b"kept-running\n"))
+        self.reloads = 0
+
+    def reload(self):
+        self.reloads += 1
+        if self.reloads == 1:
+            raise OSError("temporary docker socket hiccup")
+        self.status = "exited"
+
+    def wait(self, **_kwargs):
+        return {"StatusCode": 7}
+
+    def kill(self):
+        raise AssertionError("a transient reload error must not kill the runner")
+
+
+# W2-2b: a non-404 exception retains the old unknown-and-repoll behavior.
+transient = TransientReloadContainer()
+old_interval = R._POLL_INTERVAL_S
+try:
+    R._POLL_INTERVAL_S = 0
+    result = R._wait_with_supervise(
+        transient,
+        timeout_s=10,
+        job_dir_path=ROOT,
+        script_rel="exploit.py",
+        log_fn=lambda _line: None,
+        enable_supervise=False,
+    )
+finally:
+    R._POLL_INTERVAL_S = old_interval
+check(
+    "W2-2b transient reload error stays unknown and polls to normal exit",
+    (transient.reloads, result.get("StatusCode"), result.get("container_disappeared")),
+    (2, 7, None),
+)
+
+
+# The real caller used to re-fetch logs after wait returned and re-raise the
+# same 404, erasing the distinction above.  Drive that boundary with a fake
+# containers.run client: no Docker daemon or live job is touched.
+class _Containers:
+    def __init__(self, item):
+        self.item = item
+
+    def run(self, **_kwargs):
+        return self.item
+
+
+class _Client:
+    def __init__(self, item):
+        self.containers = _Containers(item)
+
+
+caller_vanished = VanishedContainer()
+old_from_env = R.docker.from_env
+old_host_data = os.environ.get("HOST_DATA_DIR")
+try:
+    R.docker.from_env = lambda: _Client(caller_vanished)
+    os.environ["HOST_DATA_DIR"] = "/isolated-test-data"
+    try:
+        payload = R.run_in_sandbox("W2FAKE", "exploit.py", timeout_s=0)
+        caller_error = None
+    except Exception as exc:  # mutation control: turn a rethrow into a named red
+        payload = {}
+        caller_error = type(exc).__name__
+finally:
+    R.docker.from_env = old_from_env
+    if old_host_data is None:
+        os.environ.pop("HOST_DATA_DIR", None)
+    else:
+        os.environ["HOST_DATA_DIR"] = old_host_data
+check(
+    "W2-2a run_in_sandbox preserves disappeared marker without rethrowing 404",
+    (caller_error, payload.get("container_disappeared"), payload.get("timeout"),
+     payload.get("exit_code"), payload.get("stdout"), payload.get("stderr")),
+    (None, True, None, -1, "", ""),
+)
+check("W2-2a run_in_sandbox still executes best-effort finally removal",
+      caller_vanished.remove_calls, 1)
 
 print(f"runner-live-logs: {passed} passed, {failed} failed; mutation={args.mutate}")
 raise SystemExit(1 if failed else 0)

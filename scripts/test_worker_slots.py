@@ -2,6 +2,7 @@
 """Regression suite for the per-slot worker split.
 
 Run from the repo root:   python3 scripts/test_worker_slots.py
+Mutation control:         python3 scripts/test_worker_slots.py --mutate active-runner-reap
 
 Covers the four things that were actually load-bearing, each of which was a
 real defect caught during implementation rather than a hypothetical:
@@ -20,6 +21,7 @@ No docker or redis needed; the container layer is faked.
 """
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import gzip
 import importlib.util
@@ -36,6 +38,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+_parser = argparse.ArgumentParser()
+_parser.add_argument(
+    "--mutate", choices=("none", "active-runner-reap"), default="none",
+)
+_args = _parser.parse_args()
 
 GiB = 1073741824
 VM = 15990 * 1048576  # the WSL VM this was sized against
@@ -887,9 +895,20 @@ def test_reap() -> None:
     sys.modules["modules.settings_io"] = stub
 
     src = (ROOT / "modules" / "_common.py").read_text()
+    if _args.mutate == "active-runner-reap":
+        # Test-process mutation only: restore the old behavior that reaped a
+        # live runner. The named W2-1a assertion must become red while 1b/1c
+        # stay meaningful controls.
+        src = src.replace(
+            'if status not in {"exited", "dead"}:',
+            'if False:',
+            1,
+        )
     import ast as _ast
     tree = _ast.parse(src)
-    want = {"reap_job_siblings", "_coerce_bool", "_JOB_LABEL"}
+    want = {
+        "reap_job_siblings", "_coerce_bool", "_JOB_LABEL", "_JOB_ROLE_LABEL",
+    }
     nodes = [n for n in tree.body
              if (isinstance(n, _ast.FunctionDef) and n.name in want)
              or (isinstance(n, _ast.Assign)
@@ -900,8 +919,10 @@ def test_reap() -> None:
     order: list[str] = []
 
     class _Obj:
-        def __init__(self, name, fail=False):
+        def __init__(self, name, fail=False, *, labels=None, status="running"):
             self.name, self._fail = name, fail
+            self.labels = labels or {}
+            self.status = status
 
         def remove(self, **kw):
             if self._fail:
@@ -911,8 +932,10 @@ def test_reap() -> None:
     class _Coll:
         def __init__(self, items):
             self.items = items
+            self.calls = []
 
         def list(self, **kw):
+            self.calls.append(kw)
             return self.items
 
     class _Client:
@@ -931,6 +954,43 @@ def test_reap() -> None:
     chk("no errors on the happy path", res["errors"] == [], res)
     chk("containers are removed BEFORE networks (else the network is in use)",
         order.index("chal_db") < order.index("chal_net"), order)
+
+    # W2-1a/1b: an OOB callback can make meta terminal before the runner exits.
+    # Preserve only that active role while ordinary job siblings still reap.
+    order.clear()
+    active_runner = _Obj(
+        "runner-active",
+        labels={"hextech_ctf_tool_role": "runner"},
+        status="running",
+    )
+    chal = _Obj("chal-active")
+    active_client = _Client([active_runner, chal], [])
+    fake_docker.from_env = lambda: active_client
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("W2-R1 keeps the exact job-label filter",
+        active_client.containers.calls == [{
+            "all": True,
+            "filters": {"label": "hextech_ctf_tool_job_id=JOB123"},
+        }], active_client.containers.calls)
+    chk("W2-1a terminal reap preserves the running runner",
+        "runner-active" not in order and res["preserved"] == ["runner-active (running)"],
+        (order, res))
+    chk("W2-1b terminal reap still removes the chal sibling",
+        "chal-active" in res["containers"] and "chal-active" in order,
+        (order, res))
+
+    # W2-1c: Docker's terminal state is the positive signal that makes a runner
+    # reapable.  This prevents the live-runner guard from becoming a leak.
+    order.clear()
+    exited_runner = _Obj(
+        "runner-exited",
+        labels={"hextech_ctf_tool_role": "runner"},
+        status="exited",
+    )
+    fake_docker.from_env = lambda: _Client([exited_runner], [])
+    res = ns["reap_job_siblings"]("JOB123")
+    chk("W2-1c terminal reap removes an exited runner",
+        res["containers"] == ["runner-exited"] and res["preserved"] == [], res)
 
     # a failure on one item must not abort the sweep or raise
     order.clear()
