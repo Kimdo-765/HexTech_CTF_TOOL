@@ -2189,9 +2189,16 @@ body.modal-open { overflow: hidden; }
   gap: 0.4rem;
   padding: 0.1rem 0;
 }
+/* The listing reads as one ramp: directory brightest, filename a step below,
+   size dimmest. `.jf-file` also carries `.file-preview-link`, so with no colour
+   of its own it inherited `.file-links a`'s --blue — a rule picked for a
+   different surface. That blue clears AAA against --bg on its own (7.3:1), but
+   it sits at half the luminance of the --fg-bright directory on the adjacent
+   row, so a filename sinks next to its neighbour rather than against the page.
+   Naming the colour here ends the inheritance. */
 .jf-dir { color: var(--fg-bright); text-decoration: none; }
 .jf-dir:hover { text-decoration: underline; }
-.jf-file { text-decoration: none; }
+.jf-file { color: var(--fg); text-decoration: none; }
 .jf-file:hover { text-decoration: underline; }
 /* A long generated filename must not push the size column off screen. */
 .jf-row > a {
