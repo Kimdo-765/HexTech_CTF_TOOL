@@ -58,6 +58,7 @@ MUTATIONS = (
     "permit-misc-error",
     "permit-forensic-error",
     "keep-regex-source-noise",
+    "message-truthiness",
 )
 
 parser = argparse.ArgumentParser()
@@ -74,6 +75,8 @@ def _replace_once(source: str, old: str, new: str) -> str:
 
 COMMON_SOURCE = (ROOT / "modules" / "_common.py").read_text()
 MODULE_SOURCES = {
+    "pwn": (ROOT / "modules" / "pwn" / "analyzer.py").read_text(),
+    "rev": (ROOT / "modules" / "rev" / "analyzer.py").read_text(),
     "web": (ROOT / "modules" / "web" / "analyzer.py").read_text(),
     "crypto": (ROOT / "modules" / "crypto" / "analyzer.py").read_text(),
     "web3": (ROOT / "modules" / "web3" / "analyzer.py").read_text(),
@@ -148,6 +151,20 @@ for _module in ("misc", "forensic"):
             '        return None, "summary agent returned is_error=true"\n',
         )
 
+if args.mutate == "message-truthiness":
+    for _module in ("pwn", "rev", "web", "crypto", "web3"):
+        MODULE_SOURCES[_module] = _replace_once(
+            MODULE_SOURCES[_module],
+            "            agent_error=agent_err_kind is not None,\n",
+            "            agent_error=bool(agent_err),\n",
+        )
+    for _module in ("misc", "forensic"):
+        MODULE_SOURCES[_module] = _replace_once(
+            MODULE_SOURCES[_module],
+            "            agent_error=agent_err is not None,\n",
+            "            agent_error=bool(agent_err),\n",
+        )
+
 _results: list[bool] = []
 
 
@@ -160,19 +177,35 @@ def section(name: str) -> None:
     print("\n--- " + name + " " + "-" * max(0, 56 - len(name)))
 
 
-def _load(jobdir: pathlib.Path, flag_format: str = ""):
+def _load(
+    jobdir: pathlib.Path,
+    flag_format: str = "",
+    *,
+    meta: dict | None = None,
+    meta_by_job: dict[str, dict] | None = None,
+):
     """Load the real scanner with job_dir / read_meta redirected."""
     tree = _ast.parse(COMMON_SOURCE)
     nodes = [n for n in tree.body if isinstance(n, _ast.Assign)]
     nodes += [n for n in tree.body if isinstance(n, _ast.FunctionDef)
               and n.name in {"scan_job_for_flags", "_is_placeholder_flag",
                              "job_flag_format_re", "_recorded_artifact_names",
+                             "_recorded_artifact_names_in_retry_chain",
                              "_auto_retry_success"}]
+    default_meta = dict(meta or {})
+    if flag_format:
+        default_meta.setdefault("flag_format", flag_format)
+
+    def _read_meta(job_id: str) -> dict:
+        if meta_by_job is not None and job_id in meta_by_job:
+            return dict(meta_by_job[job_id])
+        return dict(default_meta)
+
     ns: dict = {
         "re": re, "json": json, "os": __import__("os"),
         "Path": pathlib.Path,
         "job_dir": lambda j: jobdir,
-        "read_meta": lambda j: ({"flag_format": flag_format} if flag_format else {}),
+        "read_meta": _read_meta,
         "log_line": lambda j, s: _logs.append(s),
     }
     for n in nodes:
@@ -234,6 +267,7 @@ def _exercise_finalizer(module: str, agent_summary: dict, scan_flags: list[str])
         "os": _OS,
         "json": json,
         "traceback": __import__("traceback"),
+        "Path": pathlib.Path,
         "apply_to_env": lambda: None,
         "read_meta": lambda _job_id: {},
         "reap_chal_containers": lambda *_args, **_kwargs: None,
@@ -246,6 +280,7 @@ def _exercise_finalizer(module: str, agent_summary: dict, scan_flags: list[str])
         "extract_cost": lambda _summary: 0.0,
         "prior_session_cost": lambda _job_id: 0.0,
         "scan_job_for_flags": _scan,
+        "emit_event": lambda *_args, **_kwargs: None,
         "_is_placeholder_flag": lambda _flag: False,
         "has_provider_auth": lambda: True,
         "active_provider": lambda: "test",
@@ -259,8 +294,10 @@ def _exercise_finalizer(module: str, agent_summary: dict, scan_flags: list[str])
         )
     exec(compile(_ast.Module(body=funcs, type_ignores=[]), "<module>", "exec"), ns)
 
-    if module in {"web", "crypto", "web3"}:
+    if module in {"pwn", "web", "crypto", "web3"}:
         result = ns["run_job"]("j", None, None, None, True, None)
+    elif module == "rev":
+        result = ns["run_job"]("j", None, None, True, None)
     elif module == "misc":
         result = ns["run_job"]("j", None, None, None, False, None)
     else:
@@ -589,6 +626,104 @@ def main() -> int:
         (got, pv),
     )
 
+    section("I4 runner provenance blocks only stale runner outputs")
+    runner_artifacts = {
+        "script": "solver.sage",
+        "stdout": "solver.sage.stdout",
+        "stderr": "solver.sage.stderr",
+    }
+    runner_dir = _job(**{
+        "solver.sage__stdout": "FLAG_CANDIDATE: " + REAL + "\n",
+        "solver.sage__stderr": "",
+    })
+    runner_ns = _load(
+        runner_dir,
+        flag_format="DH{...}",
+        meta={"artifacts": runner_artifacts},
+    )
+    pv = {}
+    got = runner_ns["scan_job_for_flags"](
+        "same-job-attempt-2",
+        sandbox_started=False,
+        agent_error=True,
+        provenance_out=pv,
+    )
+    chk(
+        "I4 R1 ATK/multi-attempt: attempt-1 runner marker is stale when attempt-2 crashes",
+        got == [] and pv.get("tier") == "",
+        (got, pv),
+    )
+
+    pv = {}
+    got = runner_ns["scan_job_for_flags"](
+        "executed-control",
+        sandbox_started=True,
+        agent_error=False,
+        provenance_out=pv,
+    )
+    chk(
+        "I4 R1 CTL1: an executed runner artifact remains authoritative",
+        got == [REAL] and pv.get("tier") == "marker",
+        (got, pv),
+    )
+
+    legacy_dir = _job(**{
+        "solver.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n",
+        "solver.py__stderr": "",
+    })
+    legacy_ns = _load(legacy_dir, flag_format="DH{...}")
+    pv = {}
+    got = legacy_ns["scan_job_for_flags"](
+        "legacy-rescan",
+        provenance_out=pv,
+    )
+    chk(
+        "I4 R1 CTL2: a pre-recording legacy job still rescans",
+        got == [REAL] and pv.get("tier") == "marker",
+        (got, pv),
+    )
+
+    oob_dir = _job(**{
+        "callbacks.jsonl": json.dumps({"body": REAL}) + "\n",
+    })
+    oob_ns = _load(
+        oob_dir,
+        flag_format="DH{...}",
+        meta={"artifacts": runner_artifacts},
+    )
+    pv = {}
+    got = oob_ns["scan_job_for_flags"](
+        "collector-control",
+        sandbox_started=False,
+        agent_error=True,
+        provenance_out=pv,
+    )
+    chk(
+        "I4 R1 CTL3: a crash does not suppress the OOB collector",
+        got == [REAL] and pv.get("tier") == "runner_regex",
+        (got, pv),
+    )
+
+    retry_ns = _load(
+        runner_dir,
+        meta_by_job={
+            "retry-child": {"flag_format": "DH{...}", "retry_of": "retry-parent"},
+            "retry-parent": {"artifacts": runner_artifacts},
+        },
+    )
+    pv = {}
+    got = retry_ns["scan_job_for_flags"](
+        "retry-child",
+        sandbox_started=False,
+        agent_error=True,
+        provenance_out=pv,
+    )
+    chk(
+        "I4 R1 retry: copied runner provenance is inherited from retry_of",
+        got == [] and pv.get("tier") == "",
+        (got, pv),
+    )
+
     section("I1b extends crash evidence to every remaining module")
     one_shot_evidence = {
         module: _load_function(source, "_summary_agent_evidence")
@@ -619,6 +754,8 @@ def main() -> int:
         )
 
     crash_evidence = {
+        "pwn": (False, "agent crashed"),
+        "rev": (False, "agent crashed"),
         "web": (False, "agent crashed"),
         "crypto": (False, "agent crashed"),
         "web3": (False, "agent crashed"),
@@ -645,8 +782,11 @@ def main() -> int:
             got == [] and pv.get("tier") == "",
             (got, pv, started, error),
         )
-        if module in {"web", "crypto", "web3"}:
-            artifact_key = "solver_present" if module == "crypto" else "exploit_present"
+        if module in {"pwn", "rev", "web", "crypto", "web3"}:
+            artifact_key = (
+                "solver_present" if module in {"rev", "crypto"}
+                else "exploit_present"
+            )
             summary = {
                 "sandbox": None,
                 "sandbox_started": False,
@@ -669,6 +809,8 @@ def main() -> int:
         )
 
     control_files = {
+        "pwn": {"exploit.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
+        "rev": {"solver.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
         "web": {"exploit.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
         "crypto": {"solver.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
         "web3": {"exploit.py__stdout": "FLAG_CANDIDATE: " + REAL + "\n"},
@@ -676,6 +818,7 @@ def main() -> int:
         "forensic": {"summary.json": json.dumps({"flag": REAL})},
     }
     expected_tiers = {
+        "pwn": "marker", "rev": "marker",
         "web": "marker", "crypto": "marker", "web3": "marker",
         "misc": "narrative", "forensic": "runner_regex",
     }
@@ -700,8 +843,11 @@ def main() -> int:
             got == [REAL] and pv.get("tier") == expected_tiers[module],
             (got, pv, started, error),
         )
-        if module in {"web", "crypto", "web3"}:
-            artifact_key = "solver_present" if module == "crypto" else "exploit_present"
+        if module in {"pwn", "rev", "web", "crypto", "web3"}:
+            artifact_key = (
+                "solver_present" if module in {"rev", "crypto"}
+                else "exploit_present"
+            )
             summary = {
                 "sandbox": {"exit_code": 0},
                 "sandbox_started": True,
@@ -732,15 +878,13 @@ def main() -> int:
         unknown_flags,
     )
 
-    pwn_source = (ROOT / "modules" / "pwn" / "analyzer.py").read_text()
-    rev_source = (ROOT / "modules" / "rev" / "analyzer.py").read_text()
     chk(
         "pwn/rev production finalizers pass explicit sandbox-attempt and agent-error evidence",
         COMMON_SOURCE.count('summary["sandbox_started"] = True') == 1
         and all(
             "sandbox_started=sandbox_started" in source
-            and "agent_error=bool(agent_err)" in source
-            for source in (pwn_source, rev_source)
+            and "agent_error=agent_err_kind is not None" in source
+            for source in (MODULE_SOURCES["pwn"], MODULE_SOURCES["rev"])
         ),
     )
     for module in ("web", "crypto", "web3"):
@@ -749,16 +893,68 @@ def main() -> int:
             f"I1b {module}: production finalizer forwards both real summary signals",
             'sandbox_started = agent_summary.get("sandbox_started")' in source
             and "sandbox_started=sandbox_started" in source
-            and "agent_error=bool(agent_err)" in source,
+            and "agent_error=agent_err_kind is not None" in source,
         )
     for module in ("misc", "forensic"):
         source = MODULE_SOURCES[module]
         chk(
             f"I1b {module}: one-shot finalizer forwards evidence and surfaces error",
             "sandbox_started=sandbox_started" in source
-            and "agent_error=bool(agent_err)" in source
+            and "agent_error=agent_err is not None" in source
             and 'result["agent_error"] = agent_err' in source
             and 'error_kind="agent_error" if agent_err else None' in source,
+        )
+
+    section("I4 error occurrence is independent of message truthiness")
+    for module in ("pwn", "rev", "web", "crypto", "web3"):
+        artifact_key = (
+            "solver_present" if module in {"rev", "crypto"}
+            else "exploit_present"
+        )
+        for falsey_message in ("", None, 0):
+            summary = {
+                "sandbox": None,
+                "sandbox_started": False,
+                "agent_error": falsey_message,
+                "agent_error_kind": "agent_exception",
+                artifact_key: True,
+            }
+            _result, _terminal, scan_call = _exercise_finalizer(module, summary, [])
+            chk(
+                f"I4 R2 {module}: kind records an error even for message={falsey_message!r}",
+                scan_call.get("agent_error") is True,
+                scan_call,
+            )
+        no_error = {
+            "sandbox": None,
+            "sandbox_started": False,
+            "agent_error": None,
+            "agent_error_kind": None,
+            artifact_key: True,
+        }
+        _result, _terminal, scan_call = _exercise_finalizer(module, no_error, [])
+        chk(
+            f"I4 R2 {module}: absent message and kind remains the no-error control",
+            scan_call.get("agent_error") is False,
+            scan_call,
+        )
+
+    for module in ("misc", "forensic"):
+        _result, _terminal, error_call = _exercise_finalizer(
+            module, {"result": {"is_error": True}}, []
+        )
+        _result, _terminal, control_call = _exercise_finalizer(
+            module, {"result": {"is_error": False}}, []
+        )
+        chk(
+            f"I4 R2 {module}: explicit one-shot error occurrence is forwarded",
+            error_call.get("agent_error") is True,
+            error_call,
+        )
+        chk(
+            f"I4 R2 {module}: explicit one-shot success remains the no-error control",
+            control_call.get("agent_error") is False,
+            control_call,
         )
 
     section("sibling matchers share the character class")

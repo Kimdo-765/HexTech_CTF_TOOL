@@ -1471,6 +1471,37 @@ def _recorded_artifact_names(job_id: str) -> list[str]:
     return out
 
 
+def _recorded_artifact_names_in_retry_chain(job_id: str) -> list[str]:
+    """Runner-written output names recorded by this job and its retry parents.
+
+    A retry may carry an earlier attempt's work tree into a fresh job.  The new
+    job's metadata deliberately starts fresh, so the provenance needed to
+    identify a copied runner output can live on ``retry_of`` instead.  Follow a
+    bounded, cycle-safe chain and return basenames only; unreadable or malformed
+    metadata simply ends the best-effort lookup.
+    """
+    out: list[str] = []
+    current: object = job_id
+    seen: set[str] = set()
+    for _ in range(64):
+        if not isinstance(current, str) or not current or current in seen:
+            break
+        # retry_of is an internal job id, never a path.  Refuse a malformed
+        # value before read_meta could resolve it outside JOBS_DIR.
+        if Path(current).name != current:
+            break
+        seen.add(current)
+        for name in _recorded_artifact_names(current):
+            if name not in out:
+                out.append(name)
+        try:
+            meta = read_meta(current) or {}
+        except Exception:
+            break
+        current = meta.get("retry_of") if isinstance(meta, dict) else None
+    return out
+
+
 def scan_job_for_flags(
     job_id: str,
     extra_files: list[str] | None = None,
@@ -1544,9 +1575,12 @@ def scan_job_for_flags(
 
     `sandbox_started` is separate from `sandbox_result`: a runner attempt may
     legitimately return ``None``.  When the orchestrator explicitly records
-    ``sandbox_started=False`` *and* the agent errored, narrative prose cannot
-    promote the crashed job to a terminal success.  ``None`` remains unknown
-    for older and non-orchestrator callers rather than being treated as no-run.
+    ``sandbox_started=False`` *and* the agent errored, runner-owned outputs
+    recorded in ``meta.artifacts`` (including retry ancestors) and narrative
+    prose cannot promote the crashed job to a terminal success.  OOB sources
+    such as ``callbacks.jsonl`` remain eligible because they are not runner
+    outputs.  ``None`` remains unknown for older and non-orchestrator callers
+    rather than being treated as no-run.
 
     ``result.json`` is deliberately not a scan input.  Analyzers write it after
     their final scan and include the selected flags, so trusting it on a later
@@ -1646,6 +1680,8 @@ def scan_job_for_flags(
                     out.add(cand)
         return out
 
+    crashed_before_sandbox = sandbox_started is False and bool(agent_error)
+    recorded_artifacts = _recorded_artifact_names(job_id)
     trusted_set = list(_TRUSTED_FLAG_SOURCES)
     # The runner records the artifact names it ACTUALLY wrote (meta.artifacts),
     # because they derive from the script it ran and no fixed list can enumerate
@@ -1657,9 +1693,19 @@ def scan_job_for_flags(
     # UNION, not replacement. Jobs that ran before this was recorded have no
     # `meta.artifacts`, and re-scanning them must keep working — the tuple is
     # the fallback, not the truth.
-    trusted_set.extend(_recorded_artifact_names(job_id))
+    trusted_set.extend(recorded_artifacts)
     if extra_files:
         trusted_set.extend(extra_files)
+    if crashed_before_sandbox:
+        # The runner provably did not execute in this attempt.  Files it owns
+        # are therefore stale even when they contain an explicit marker.  Use
+        # metadata provenance rather than suffix/name guesses so a recorded
+        # `solver.sage.stdout` is handled like every other runner spelling,
+        # while collector/OOB sources remain available.  Retry-parent records
+        # cover a carried output whose provenance is absent from the fresh
+        # child's meta; the current record covers multiple attempts in one job.
+        runner_owned = set(_recorded_artifact_names_in_retry_chain(job_id))
+        trusted_set = [name for name in trusted_set if name not in runner_owned]
 
     # AUTHORITATIVE tier — an explicit `FLAG_CANDIDATE: <flag>` marker the
     # exploit/solver printed on a genuine run (CTF_PREAMBLE instructs it).
@@ -1780,7 +1826,6 @@ def scan_job_for_flags(
             or sandbox_result.get("error") == "prejudge_blocked"
         )
     )
-    crashed_before_sandbox = sandbox_started is False and bool(agent_error)
     if sandbox_skipped or crashed_before_sandbox or trusted_only:
         return []
 

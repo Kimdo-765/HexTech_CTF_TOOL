@@ -21,6 +21,7 @@ No docker or redis needed; the container layer is faked.
 from __future__ import annotations
 
 import fnmatch
+import gzip
 import importlib.util
 import io
 import json
@@ -139,10 +140,17 @@ def test_job_measurement_archive() -> None:
 
         removed = module._cleanup_expired_jobs(7, now=now)
         kept = archive / first.name
+        with gzip.open(kept / "run.log.gz", "rt") as compressed_log:
+            restored_log = compressed_log.read()
         chk("expired job is removed after promotion", removed == 1 and not first.exists())
         chk(
-            "only the three measurement artifacts survive with exact bytes",
-            all((kept / name).read_text() == body for name, body in expected.items())
+            "events/meta stay byte-exact and run.log survives only as gzip",
+            all(
+                (kept / name).read_text() == expected[name]
+                for name in ("events.jsonl", "meta.json")
+            )
+            and restored_log == expected["run.log"]
+            and not (kept / "run.log").exists()
             and not (kept / "work.bin").exists(),
             sorted(path.name for path in kept.iterdir()),
         )
@@ -191,6 +199,35 @@ def test_job_measurement_archive() -> None:
             and failing.name in output.getvalue()
             and "meta.json" in output.getvalue()
             and "fixture archive unavailable" in output.getvalue(),
+            output.getvalue(),
+        )
+
+        gzip_failing = jobs / "dddddddddddd"
+        gzip_failing.mkdir()
+        (gzip_failing / "run.log").write_text("log that must not pin TTL cleanup\n")
+        os.utime(gzip_failing, (old_stamp, old_stamp))
+        real_gzip_file = module.gzip.GzipFile
+
+        def fail_gzip(*args, **kwargs):
+            raise OSError("fixture gzip unavailable")
+
+        module.gzip.GzipFile = fail_gzip
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                removed = module._cleanup_expired_jobs(7, now=now)
+        finally:
+            module.gzip.GzipFile = real_gzip_file
+        chk(
+            "run.log compression failure is fail-open for TTL removal",
+            removed == 1 and not gzip_failing.exists(),
+        )
+        chk(
+            "run.log compression failure names the source and cause",
+            "measurement promotion failed" in output.getvalue()
+            and gzip_failing.name in output.getvalue()
+            and "run.log" in output.getvalue()
+            and "fixture gzip unavailable" in output.getvalue(),
             output.getvalue(),
         )
 

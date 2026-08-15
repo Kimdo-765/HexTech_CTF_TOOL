@@ -336,7 +336,7 @@ def run_job(
             job_id,
             sandbox_result=sandbox_result,
             sandbox_started=sandbox_started,
-            agent_error=bool(agent_err),
+            agent_error=agent_err_kind is not None,
         )
         if agent_err and not agent_summary.get("solver_present"):
             final_status = "failed"

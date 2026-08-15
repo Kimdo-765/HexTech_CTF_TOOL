@@ -385,7 +385,7 @@ def run_job(
         flags = scan_job_for_flags(
             job_id,
             sandbox_started=sandbox_started,
-            agent_error=bool(agent_err),
+            agent_error=agent_err is not None,
         )
         result["flags"] = flags
         result["agent_error"] = agent_err

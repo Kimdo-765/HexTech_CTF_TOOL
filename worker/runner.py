@@ -1,3 +1,4 @@
+import gzip
 import multiprocessing
 import os
 import shutil
@@ -103,11 +104,23 @@ def _promote_measurement_artifacts(job_dir: Path) -> tuple[str, ...]:
         source = job_dir / name
         if not source.is_file():
             continue
-        temporary = target_dir / f".{name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        archive_name = "run.log.gz" if name == "run.log" else name
+        temporary = target_dir / (
+            f".{archive_name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
         try:
-            shutil.copy2(source, temporary)
-            os.replace(temporary, target_dir / name)
-            promoted.append(name)
+            if name == "run.log":
+                # The log is the only unbounded measurement artifact.  Gzip is
+                # lossless for the offline classifier and avoids turning the
+                # sibling archive into another linear disk-growth source.
+                with source.open("rb") as src, temporary.open("wb") as raw:
+                    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as dst:
+                        shutil.copyfileobj(src, dst)
+                shutil.copystat(source, temporary)
+            else:
+                shutil.copy2(source, temporary)
+            os.replace(temporary, target_dir / archive_name)
+            promoted.append(archive_name)
         except Exception as e:
             try:
                 temporary.unlink(missing_ok=True)
