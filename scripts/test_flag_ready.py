@@ -444,5 +444,55 @@ check(
     409,
 )
 
-print(f"\n== summary: {PASSED} passed, {FAILED} failed ==")
+# ---------------------------------------------------------------------------
+# 5. Retryable modules. The UI gate and the route gate answered the same
+#    question from two hand-written lists, and they disagreed: web3 was
+#    supported by the backend and hidden by the UI, forensic was refused by
+#    both. A completed forensic job therefore offered the operator nothing.
+# ---------------------------------------------------------------------------
+print("\n--- which modules can be retried ---------------------------")
+
+# retry.py imports claude_agent_sdk, which a host running this file need not
+# have. Read the tuple out of the source. Asserting the line was FOUND is what
+# keeps a rename from turning every check below into a silent pass.
+_retry_src = (ROOT / "api" / "routes" / "retry.py").read_text()
+_rmline = next(
+    (l for l in _retry_src.splitlines() if l.startswith("_RETRYABLE_MODULES")), ""
+)
+check("the retryable-module list was located", bool(_rmline), True)
+RETRYABLE = tuple(
+    m.strip().strip("\"'") for m in
+    _rmline.split("(", 1)[-1].rsplit(")", 1)[0].split(",") if m.strip()
+)
+
+check("forensic can be retried", "forensic" in RETRYABLE, True)
+check("web3 too", "web3" in RETRYABLE, True)
+check(
+    "REGRESSION: misc stays out — its run_job needs a passphrase only the "
+    "operator has, so a rebuilt job would fail in a way that looks like the "
+    "module's fault",
+    "misc" in RETRYABLE,
+    False,
+)
+
+_app = (ROOT / "web-ui" / "app.js").read_text()
+_canretry = next(
+    (l for l in _app.splitlines() if "const canRetry" in l), ""
+)
+_hastarget = next((l for l in _app.splitlines() if "const hasTarget" in l), "")
+check("the UI has a separate can-retry gate", bool(_canretry), True)
+check("  ...and a separate has-target gate", bool(_hastarget), True)
+check(
+    "REGRESSION: the UI's retry gate covers every module the route accepts",
+    all(m in _app[_app.index("const canRetry"):_app.index("const canRetry") + 200]
+        for m in RETRYABLE),
+    True,
+)
+check(
+    "REGRESSION: forensic is NOT offered 'change target' — it takes none",
+    "forensic" in _hastarget,
+    False,
+)
+
+print(f"\n== retry-gate summary: {PASSED} passed, {FAILED} failed ==")
 raise SystemExit(1 if FAILED else 0)

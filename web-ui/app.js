@@ -3455,6 +3455,18 @@ async function renderJob(id, opts = {}) {
   // the last unfinished/failed scalar stage, exposing these controls would
   // submit module=hybrid to a scalar-only backend that rejects it.
   const isExploitableModule = ["web", "pwn", "crypto", "rev"].includes(job.module);
+  // Three different questions were being answered by that one list, and the
+  // answers are not the same set:
+  //   canRetry  — can the backend rebuild this job? Mirrors _RETRYABLE_MODULES
+  //               in api/routes/retry.py. web3 was supported there all along
+  //               and hidden here; forensic is supported as of this change.
+  //   hasTarget — does the module take a target at all? forensic does not, so
+  //               "change target" would edit a field nothing reads.
+  // Keeping them separate is what stops the next module from inheriting a
+  // gate that was never about it.
+  const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic"]
+    .includes(job.module);
+  const hasTarget = ["web", "pwn", "crypto", "rev", "web3"].includes(job.module);
   // Retry is offered for every TERMINAL status on an exploitable module
   // — including 'finished' with a flag, so the user can rerun against a
   // suspect / placeholder flag or grab additional flags. The reviewer
@@ -3481,7 +3493,7 @@ async function renderJob(id, opts = {}) {
   // 💬 Continue on running jobs, which the backend 409s anyway.
   // If a real orphan affordance is ever wanted, key it on rq_status plus the
   // WORKER heartbeat (both already in the payload), never on updated_at.
-  const showRetry = isExploitableModule && [
+  const showRetry = canRetry && [
     "failed", "no_flag", "finished", "stopped", "flag_ready",
   ].includes(job.status);
   // Stop & resume: only meaningful while the job is still in flight.
@@ -3493,7 +3505,7 @@ async function renderJob(id, opts = {}) {
   const showStop = job.status === "queued" || job.status === "running";
   // "Change target" only makes sense for modules that take a target
   // (web/pwn/crypto/rev) — same set as retry. Visible at any status.
-  const showChangeTarget = isExploitableModule;
+  const showChangeTarget = hasTarget;
   if (
     job.runnable_script || job.exploit_present || job.solver_present
     || showRetry || showStopResume || showChangeTarget || showStop

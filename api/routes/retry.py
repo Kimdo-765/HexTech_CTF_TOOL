@@ -118,6 +118,19 @@ def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
 
 router = APIRouter()
 
+# Which modules a retry / continue can rebuild.
+#
+# forensic was excluded for as long as this list was written by hand, which is
+# why a finished forensic job showed no retry affordance at all — the UI hid
+# the button and the route would have 400'd it anyway. The exclusion was never
+# a capability statement about forensic; it was the list not being revisited.
+#
+# `misc` is still out, and deliberately: its run_job takes a passphrase that
+# only the operator has, so a rebuilt job would re-run without it and fail in
+# a way that looks like a capability problem. Give it its own path when it is
+# wanted, rather than letting it in here and discovering that later.
+_RETRYABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3", "forensic")
+
 # Reviewer shares the same "latest model" pin as the in-runner judge. Provider
 # coercion below replaces that Claude-family fallback when GPT/Grok is active.
 # The single source of truth lives in modules._common.
@@ -1214,10 +1227,13 @@ def _resubmit(
     dropping the raw transcript is the cheaper, overflow-proof signal.
     """
     module = prev_meta.get("module")
-    if module not in ("web", "pwn", "crypto", "rev", "web3"):
+    if module not in _RETRYABLE_MODULES:
         raise HTTPException(
             status_code=400,
-            detail=f"retry-with-hint is only supported for web/pwn/crypto/rev/web3 (got {module})",
+            detail=(
+                "retry-with-hint is only supported for "
+                f"{'/'.join(sorted(_RETRYABLE_MODULES))} (got {module})"
+            ),
         )
 
     new_id = new_job_id()
@@ -1401,6 +1417,47 @@ def _resubmit(
                 new_id, new_src_root, target, description, auto_run, model,
                 job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
             )
+    elif module == "forensic":
+        # The image is the job's whole input and it can be enormous — this
+        # module exists for disk images. shutil.copy2 of a 60 GiB .raw to set
+        # up a retry would be a self-inflicted outage, so link it: same
+        # device, constant time, no second copy of the bytes. The image is
+        # read-only input to both jobs, so sharing the inode is safe.
+        # os.link fails across devices and on a filesystem without hardlinks;
+        # fall back to a copy there rather than refusing the retry.
+        image_name = prev_meta.get("filename")
+        carried = None
+        if image_name:
+            src = prev_jd / Path(image_name).name
+            if src.is_file():
+                dst = new_jd / src.name
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copy2(src, dst)
+                carried = src.name
+        meta["filename"] = carried or image_name
+        # Everything else the orchestrator is called with lives in meta and is
+        # carried verbatim: re-deciding image_type / target_os here would let a
+        # retry silently analyse the image as something the operator never
+        # chose.
+        meta["image_type"] = prev_meta.get("image_type")
+        meta["target_os"] = prev_meta.get("target_os")
+        meta["bulk_extractor"] = prev_meta.get("bulk_extractor")
+        meta["remote_only"] = carried is None
+        write_job_meta(new_id, meta)
+        q.enqueue(
+            "modules.forensic.orchestrator.run_job",
+            new_id,
+            carried or image_name,
+            prev_meta.get("image_type"),
+            prev_meta.get("target_os"),
+            description,
+            bool(prev_meta.get("bulk_extractor")),
+            False,
+            model,
+            job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
+        )
     else:  # pwn / rev
         prev_bin = prev_jd / "bin"
         binary_name = None
@@ -1470,10 +1527,13 @@ def _continue_in_place(prev_meta: dict, comment: str,
     `target_override` updates the target (a restarted DreamHack instance often
     comes back on a NEW port); blank keeps the prior, "(none)" clears it."""
     module = prev_meta.get("module")
-    if module not in ("web", "pwn", "crypto", "rev", "web3"):
+    if module not in _RETRYABLE_MODULES:
         raise HTTPException(
             status_code=400,
-            detail=f"continue is only supported for web/pwn/crypto/rev/web3 (got {module})",
+            detail=(
+                "continue is only supported for "
+                f"{'/'.join(sorted(_RETRYABLE_MODULES))} (got {module})"
+            ),
         )
     job_id = prev_meta.get("id")
     if not job_id:
