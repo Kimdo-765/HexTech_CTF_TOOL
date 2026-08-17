@@ -123,6 +123,24 @@ const mainRule = CSS.slice(CSS.indexOf("main { padding"), CSS.indexOf("}", CSS.i
 t("REGRESSION: main is ONE column now that #jobs is not its second child",
   /grid-template-columns:\s*1fr\s*;/.test(mainRule), mainRule);
 t(".dash-ring is styled", CSS.includes(".dash-ring {"));
+// The usage/cap pair is 15-17 chars ("152 MiB / 2.0 GiB"). A fixed 5.5rem tile
+// fitted the short ones and split the long ones after the slash, so the cap's
+// number and its unit landed on different lines. nowrap is the guarantee; the
+// width floor only keeps the tiles even.
+t("REGRESSION: the usage/cap pair cannot wrap mid-value",
+  /\.dash-ring \.dash-sub\s*\{[^}]*white-space:\s*nowrap/.test(CSS),
+  CSS.slice(CSS.indexOf(".dash-ring .dash-sub"), CSS.indexOf(".dash-ring .dash-sub") + 90));
+t("  ...the container tiles have a floor AND can still grow past it",
+  /\.dash-rings \.dash-ring\s*\{[^}]*width:\s*auto[^}]*min-width:\s*7rem/.test(CSS),
+  CSS.slice(CSS.indexOf(".dash-rings .dash-ring"), CSS.indexOf(".dash-rings .dash-ring") + 70));
+t("  ...a long container label still truncates instead of widening the tile",
+  /\.dash-ring-label \{[^}]*max-width:\s*7rem[^}]*text-overflow:\s*ellipsis/.test(CSS));
+// #dash-host-ring is a .dash-ring with a 92px svg and no value line. The floor
+// above is deliberately scoped away from it; an unscoped `.dash-ring { min-width }`
+// would push the Host RAM donut off its caption, which no CSS regex would catch.
+t("  ...and the host ring keeps its own width",
+  /\.dash-ring \{[^}]*width:\s*5\.5rem/.test(CSS),
+  CSS.slice(CSS.indexOf(".dash-ring {"), CSS.indexOf(".dash-ring {") + 110));
 
 console.log("\n--- wiring ------------------------------------------------");
 t("the dashboard tab loads the rings",

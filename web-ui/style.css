@@ -850,10 +850,25 @@ button[type="submit"], #refresh-jobs {
   padding-left: 1.5rem; border-left: 1px solid var(--line); flex: 1 1 320px;
 }
 .dash-ring { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; width: 5.5rem; }
+/* Container tiles only. The tile has to hold "152 MiB / 2.0 GiB" — the
+   usage/cap pair is 15-17 characters, and the fixed 5.5rem above fitted the
+   short ones and broke the long ones AFTER the slash, so "4.0" and "GiB"
+   landed on separate lines and read as two unrelated numbers. `nowrap` on the
+   value is the actual guarantee (no font can wrap it); the floor is only so
+   the tiles stay an even grid at the sizes that occur in practice, and `auto`
+   lets a tile grow rather than overflow if a cap ever prints as "unlimited".
+   Scoped to .dash-rings because #dash-host-ring is a .dash-ring too — it
+   carries a 92px svg and no value line, and widening it would move the Host
+   RAM donut away from its caption for no reason. */
+.dash-rings .dash-ring { width: auto; min-width: 7rem; }
 .dash-ring-label {
   font-size: 0.7rem; color: var(--fg-muted); text-align: center;
-  max-width: 5.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Scoped to the ring: #dash-host-detail is also a .dash-sub and it lives in a
+   wide caption where wrapping is correct. Tabular figures keep the tile from
+   twitching as the digits change under the 15s poll. */
+.dash-ring .dash-sub { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .dash-ring svg { display: block; }
 .dash-ring-track { stroke: var(--line); }
 /* The ring colour tracks HOW FULL it is, which is the one place in this UI
