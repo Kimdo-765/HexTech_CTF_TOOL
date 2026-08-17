@@ -28,7 +28,9 @@ RECIPES: dict[str, tuple[str, str]] = {
     "rev-pwn": ("rev", "pwn"),
     "web-pwn": ("web", "pwn"),
 }
-TERMINAL_STATUSES = frozenset({"finished", "failed", "no_flag", "stopped"})
+TERMINAL_STATUSES = frozenset(
+    {"finished", "failed", "no_flag", "stopped", "flag_ready"}
+)
 
 # The handoff is deliberately narrower than a child job directory.  Challenge
 # inputs remain under src/, decompiler output under decomp/, and only named

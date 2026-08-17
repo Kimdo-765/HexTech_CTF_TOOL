@@ -287,6 +287,13 @@ def _exercise_finalizer(module: str, agent_summary: dict, scan_flags: list[str])
         "_run_agent": object(),
         "_claude_summary": object(),
         "_spawn_collector": lambda *_args, **_kwargs: "collector ok",
+        # The finalizers no longer hardcode "no_flag" — they ask whether there
+        # is a candidate worth an operator verdict. Inject the REAL decider
+        # rather than a constant, so this harness keeps exercising that branch
+        # instead of pinning the answer it used to have. It reads through the
+        # `read_meta` stub above, which returns {}, so a run with no
+        # candidates still lands on "no_flag" exactly as before.
+        "no_flag_status": _load_function(COMMON_SOURCE, "no_flag_status"),
     }
     if module in {"misc", "forensic"}:
         ns["_summary_agent_evidence"] = _load_function(
@@ -967,12 +974,17 @@ def main() -> int:
         cline)
 
     section("a flagless run is not 'finished' — in EVERY module")
+    # The flagless arm now asks `no_flag_status` whether there is a candidate
+    # worth an operator verdict instead of hardcoding the answer. What this
+    # check exists to pin is unchanged and still pinned: a run WITHOUT flags
+    # must not reach "finished". Matching the call rather than the old literal
+    # keeps that guarantee without freezing the branch's implementation.
     one_shot_status_block = '''        if flags:
             final_status = "finished"
         elif agent_err:
             final_status = "failed"
         else:
-            final_status = "no_flag"'''
+            final_status = no_flag_status(job_id)'''
     for mod in ("forensic", "misc"):
         text = MODULE_SOURCES[mod]
         chk(f"  {mod} gates its terminal status on flags",

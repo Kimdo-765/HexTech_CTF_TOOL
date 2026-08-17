@@ -17,7 +17,8 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
 router = APIRouter()
 
-_USAGE_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped"}
+_USAGE_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped",
+                            "flag_ready"}
 
 # Job IDs are always 12 hex chars (api.storage.new_job_id =
 # uuid.uuid4().hex[:12]). Anything else — empty string, ".",
@@ -795,6 +796,113 @@ async def delete_job_flags(job_id: str, request: Request):
     }
 
 
+@router.post("/{job_id}/flag-verdict")
+async def flag_verdict(job_id: str, request: Request):
+    """The operator's true/false-positive call on what a run produced.
+
+    Two entry points, one verdict::
+
+        {"verdict": "ok"}      # the candidate/flag is the real one
+        {"verdict": "wrong"}   # it is not — this run did not solve it
+
+    From ``flag_ready`` (candidates recorded, none promoted) ``ok`` promotes
+    them into ``meta.flags`` and finishes the job; ``wrong`` files it as
+    ``no_flag``. From ``finished`` (a flag was promoted automatically)
+    ``wrong`` demotes it back out — job 8d132bba21fc and its two retry
+    children all read ``finished`` while carrying an answer the operator
+    later ruled wrong, and nothing in the record said so.
+
+    ``wrong`` never starts a retry itself. It records the verdict and reports
+    ``retry_suggested``; the caller drives the existing retry endpoint, which
+    owns the guards (module support, in-flight refusal, target resolution)
+    that a second launcher here would have to duplicate and would eventually
+    duplicate wrongly.
+
+    The rejected values are kept in ``meta.flag_rejected`` rather than
+    dropped. A later run that re-derives the same string is repeating a known
+    dead end, and that is worth being able to see.
+    """
+    safe = _validate_job_id(job_id)
+    meta = read_job_meta(safe)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    verdict = str(body.get("verdict") or "").strip().lower()
+    if verdict not in ("ok", "wrong"):
+        raise HTTPException(
+            status_code=400, detail='`verdict` must be "ok" or "wrong"'
+        )
+
+    status = str(meta.get("status") or "")
+    if status not in ("flag_ready", "finished", "no_flag"):
+        # A live job has no verdict to give yet, and saying so beats writing a
+        # status the worker is about to overwrite from under us.
+        raise HTTPException(
+            status_code=409,
+            detail=f"job is {status or 'unknown'}; a verdict needs a terminal run",
+        )
+
+    flags = [f for f in (meta.get("flags") or []) if f]
+    candidates = [c for c in (meta.get("flag_candidates") or []) if c]
+    rejected = [r for r in (meta.get("flag_rejected") or []) if r]
+
+    from modules._common import write_meta
+
+    if verdict == "ok":
+        promoted = flags or candidates
+        if not promoted:
+            raise HTTPException(
+                status_code=409, detail="nothing to confirm — no flag or candidate"
+            )
+        write_meta(safe, flags=promoted, status="finished", flag_verdict="ok")
+        _sync_result_flags(safe, promoted)
+        return {
+            "status": "finished",
+            "flags": promoted,
+            "retry_suggested": False,
+        }
+
+    # wrong — demote whatever was on offer and remember that it was refused.
+    refused = flags or candidates
+    new_rejected = rejected + [r for r in refused if r not in rejected]
+    write_meta(
+        safe,
+        flags=[],
+        status="no_flag",
+        flag_verdict="wrong",
+        flag_rejected=new_rejected,
+    )
+    _sync_result_flags(safe, [])
+    return {
+        "status": "no_flag",
+        "flags": [],
+        "rejected": new_rejected,
+        "retry_suggested": True,
+    }
+
+
+def _sync_result_flags(job_id: str, flags: list) -> None:
+    """Keep result.json's copy in step so a later view cannot resurrect it.
+
+    Best-effort for the same reason `delete_job_flags` treats it that way: a
+    missing or malformed result.json must not fail the operator's verdict,
+    which is the part that has to land.
+    """
+    try:
+        rp = JOBS_DIR / job_id / "result.json"
+        if rp.exists():
+            rj = json.loads(rp.read_text())
+            if isinstance(rj, dict) and "flags" in rj:
+                rj["flags"] = list(flags)
+                rp.write_text(json.dumps(rj, indent=2))
+    except Exception:
+        pass
+
+
 @router.get("/{job_id}/log", response_class=PlainTextResponse)
 def get_job_log(job_id: str, tail: int | None = None):
     """Return run.log. With ?tail=N (bytes), returns at most the last N
@@ -950,7 +1058,8 @@ def get_gpt_timeline(job_id: str, tail: int | None = None):
     }
 
 
-_TERMINAL_META_STATUSES = {"finished", "failed", "no_flag", "stopped"}
+_TERMINAL_META_STATUSES = {"finished", "failed", "no_flag", "stopped",
+                           "flag_ready"}
 
 
 @router.get("/{job_id}/stream")
@@ -1374,7 +1483,8 @@ def post_run_script(job_id: str, target: str | None = None):
         raise HTTPException(status_code=500, detail="script missing at run time")
 
     flags = scan_job_for_flags(safe)
-    new_status = "finished" if flags else "no_flag"
+    from modules._common import no_flag_status as _no_flag_status
+    new_status = "finished" if flags else _no_flag_status(safe)
     write_meta(safe, status=new_status, flags=flags, manual_run=True)
     return {"sandbox": res, "flags": flags, "status": new_status}
 

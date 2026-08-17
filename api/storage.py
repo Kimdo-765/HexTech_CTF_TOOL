@@ -58,7 +58,7 @@ def job_dir(job_id: str) -> Path:
     return p
 
 
-_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped"}
+_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped", "flag_ready"}
 
 
 def write_job_meta(job_id: str, meta: dict[str, Any]) -> None:

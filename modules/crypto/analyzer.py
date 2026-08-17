@@ -10,6 +10,7 @@ from modules._common import (
     collect_outputs,
     docker_challenge_block,
     extract_cost,
+    no_flag_status,
     prior_session_cost,
     job_dir,
     log_line,
@@ -341,7 +342,7 @@ def run_job(
         if agent_err and not agent_summary.get("solver_present"):
             final_status = "failed"
         elif not flags:
-            final_status = "no_flag"
+            final_status = no_flag_status(job_id)
         else:
             final_status = "finished"
         result = {

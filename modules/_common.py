@@ -944,7 +944,39 @@ def log_block(
         )
 
 
-_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped"}
+# A run that produced flag candidates but could not promote one is not the
+# same thing as a run that found nothing, and collapsing both into `no_flag`
+# threw away the difference. Job f24519394073 is the case: the remote returned
+# a real flag with exit 0, the reproduction run was blocked, the candidate was
+# recorded — and the job read as a plain miss until a human went looking.
+#
+# `flag_ready` is terminal for the WORKER and non-terminal for the OPERATOR.
+# The agent is done, the monitor stops, finished_at is stamped, usage counts —
+# but a verdict is still owed, so bulk-delete's safe defaults leave it alone.
+# Every terminal set below therefore includes it; `safe_default_statuses` in
+# api/routes/jobs.py deliberately does not. `scripts/test_flag_ready.py` pins
+# that split so the two halves cannot drift apart.
+FLAG_READY = "flag_ready"
+
+_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped", FLAG_READY}
+
+
+def no_flag_status(job_id: str) -> str:
+    """The terminal status for a run that promoted no flag.
+
+    `flag_ready` when there is something for the operator to adjudicate,
+    `no_flag` when there is not. Falls back to `no_flag` on any read failure:
+    a job stuck awaiting a verdict it can never receive is worse than one
+    filed as a miss, and the candidates are still on disk either way.
+    """
+    try:
+        meta = read_meta(job_id) or {}
+    except Exception:
+        return "no_flag"
+    candidates = meta.get("flag_candidates")
+    if isinstance(candidates, list) and any(c for c in candidates if c):
+        return FLAG_READY
+    return "no_flag"
 
 
 _SSE_META_KEYS = {

@@ -24,6 +24,7 @@ from modules._common import (
     capture_session_id,
     agent_heartbeat,
     extract_cost,
+    no_flag_status,
     prior_session_cost,
     format_tool_result,
     kill_guard_hooks,
@@ -66,7 +67,7 @@ def _log(job_id: str, line: str) -> None:
         fp.write(f"[{ts}] {line}\n")
 
 
-_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped"}
+_TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped", "flag_ready"}
 
 
 def _write_meta(job_id: str, **updates) -> None:
@@ -398,7 +399,7 @@ def run_job(
         elif agent_err:
             final_status = "failed"
         else:
-            final_status = "no_flag"
+            final_status = no_flag_status(job_id)
         (_job_dir(job_id) / "result.json").write_text(json.dumps(result, indent=2, default=str))
         _write_meta(job_id, status=final_status, stage="done", cost_usd=cost,
                     flags=flags, error=agent_err,

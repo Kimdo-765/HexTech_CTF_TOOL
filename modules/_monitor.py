@@ -57,7 +57,7 @@ _LANG_NAMES = {
     "es": "Spanish", "fr": "French", "de": "German", "ru": "Russian",
 }
 
-_TERMINAL = {"finished", "failed", "no_flag", "stopped"}
+_TERMINAL = {"finished", "failed", "no_flag", "stopped", "flag_ready"}
 
 POLL_S = 4.0          # run.log / meta.json poll cadence
 BATCH_MAX = 6         # flush the pending signal batch once it reaches this many
