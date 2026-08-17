@@ -890,6 +890,10 @@ button[type="submit"], #refresh-jobs {
 .status.running { background: var(--yellow); color: var(--on-accent); }
 .status.finished { background: var(--green-solid); }
 .status.no_flag { background: var(--yellow); color: var(--on-accent); }
+/* Awaiting a human verdict is not the same as a miss, and the pill has to say
+   so at a glance in the job list — cyan reads as "action available", the way
+   the yellow no_flag pill reads as "over". */
+.status.flag_ready { background: var(--cyan); color: var(--on-accent); }
 .status.failed { background: var(--red-solid); }
 .status.stopped { background: var(--purple-solid); }
 
@@ -2238,3 +2242,38 @@ body.modal-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .jf-row.jf-new { animation: none; }
 }
+
+
+/* ---------------------------------------------------------------- verdict
+   The operator's true/false-positive call on what a run produced. The
+   awaiting variant is deliberately louder: that job is BLOCKED on a click and
+   will sit there forever if nobody notices it. */
+.verdict-banner {
+  margin: 0.75rem 0; padding: 0.75rem 1rem;
+  border: 1px solid var(--line); border-left: 3px solid var(--fg-muted);
+  border-radius: 8px; background: var(--surface);
+}
+.verdict-banner--awaiting { border-left-color: var(--cyan); }
+.verdict-banner h4 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.verdict-values { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+.verdict-values code, .verdict-rejected code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem; padding: 0.15rem 0.4rem;
+  background: var(--bg-sunken); border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+.verdict-why { font-size: 0.82rem; color: var(--fg-muted); margin-bottom: 0.5rem; }
+.verdict-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.verdict-btn {
+  padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface-raised);
+  color: var(--fg); font-family: inherit; font-size: 0.85rem;
+}
+.verdict-btn:hover:not(:disabled) { border-color: var(--fg-muted); }
+.verdict-btn:disabled { opacity: 0.5; cursor: default; }
+.verdict-ok { border-color: var(--green); }
+.verdict-wrong { border-color: var(--red); }
+.verdict-rejected {
+  margin-top: 0.5rem; font-size: 0.78rem; color: var(--fg-muted);
+}
+.verdict-status { margin-top: 0.4rem; font-size: 0.8rem; color: var(--fg-muted); }

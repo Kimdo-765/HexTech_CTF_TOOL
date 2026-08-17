@@ -483,7 +483,7 @@ function _openLiveStream(id) {
       clearInterval(pollTimer);
       pollTimer = setInterval(async () => {
         const job = await renderJob(id);
-        if (job && ["finished", "failed", "no_flag"].includes(job.status)) {
+        if (job && ["finished", "failed", "no_flag", "flag_ready"].includes(job.status)) {
           clearInterval(pollTimer);
           pollTimer = null;
           await refreshJobs();
@@ -3003,7 +3003,7 @@ async function selectJob(id) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     const job = await renderJob(id);
-    if (job && ["finished", "failed", "no_flag"].includes(job.status)) {
+    if (job && ["finished", "failed", "no_flag", "flag_ready"].includes(job.status)) {
       clearInterval(pollTimer);
       pollTimer = null;
       await refreshJobs();
@@ -3247,7 +3247,7 @@ async function renderJob(id, opts = {}) {
   }
 
   let resultBlock = liveFireOutcomeHtml(job, id) + hybridStageEvidenceHtml(job);
-  if (["finished", "running", "no_flag"].includes(job.status)) {
+  if (["finished", "running", "no_flag", "flag_ready"].includes(job.status)) {
     // The per-artifact link list is gone. It hard-coded one filename per
     // module (`exploit.py.stdout`, `solver.py.stdout`, …) while the runner
     // names artifacts after the script it actually ran — so a crypto Sage job
@@ -3482,7 +3482,7 @@ async function renderJob(id, opts = {}) {
   // If a real orphan affordance is ever wanted, key it on rq_status plus the
   // WORKER heartbeat (both already in the payload), never on updated_at.
   const showRetry = isExploitableModule && [
-    "failed", "no_flag", "finished", "stopped",
+    "failed", "no_flag", "finished", "stopped", "flag_ready",
   ].includes(job.status);
   // Stop & resume: only meaningful while the job is still in flight.
   const showStopResume = isExploitableModule && (
@@ -3548,6 +3548,47 @@ async function renderJob(id, opts = {}) {
       ${stopHtml} ${runHtml} ${targetHtml} ${retryHtml} ${continueHtml} ${stopResumeHtml}
       ${freshToggleHtml}
       <small style="color:var(--fg-muted)">${helperBits.join(" · ")}</small>
+    </div>`;
+  }
+
+  // The operator's true/false-positive call. Two entry points, one banner:
+  //   flag_ready — the run recorded candidates but promoted none, and is
+  //                waiting. This is the case job f24519394073 needed: a real
+  //                remote capture that read as a plain miss because nothing
+  //                asked.
+  //   finished   — a flag WAS promoted automatically. It can still be wrong
+  //                (8d132bba21fc and its two retry children all read finished
+  //                while carrying an answer later ruled wrong), so "wrong"
+  //                stays available. There is no "ok" here: the job already
+  //                says ok, and a second confirmation would only add a click.
+  let verdictBlock = "";
+  const verdictValues = (job.flags && job.flags.length)
+    ? job.flags
+    : (job.flag_candidates || []);
+  if (job.status === "flag_ready" || (job.status === "finished" && verdictValues.length)) {
+    const awaiting = job.status === "flag_ready";
+    const rejected = job.flag_rejected || [];
+    verdictBlock = `<div class="verdict-banner${awaiting ? " verdict-banner--awaiting" : ""}"
+                         data-job="${escapeHtml(id)}">
+      <h4>${awaiting ? "⚑ Is this the flag?" : "🚩 Recorded flag"}</h4>
+      <div class="verdict-values">${
+        verdictValues.map((v) => `<code>${escapeHtml(String(v))}</code>`).join("")
+      }</div>
+      ${awaiting
+        ? `<div class="verdict-why">The run produced this but could not reproduce it
+             in the sandbox, so it was not registered automatically. Only you can
+             say whether it is the real flag.</div>` : ""}
+      <div class="verdict-actions">
+        ${awaiting
+          ? `<button class="verdict-btn verdict-ok" data-verdict="ok">✓ Ok — this is the flag</button>` : ""}
+        <button class="verdict-btn verdict-wrong" data-verdict="wrong"
+          >✗ Wrong${awaiting ? "" : " — retry this job"}</button>
+      </div>
+      ${rejected.length
+        ? `<div class="verdict-rejected">already ruled out: ${
+             rejected.map((v) => `<code>${escapeHtml(String(v))}</code>`).join(" ")
+           }</div>` : ""}
+      <div class="verdict-status" aria-live="polite"></div>
     </div>`;
   }
 
@@ -3687,6 +3728,7 @@ async function renderJob(id, opts = {}) {
       <div class="job-col-outcome">
         ${flagBlock}
         ${candBlock}
+        ${verdictBlock}
         ${errorBlock}
         ${descBlock}
         ${logFindingsBlock}
@@ -3832,6 +3874,48 @@ async function renderJob(id, opts = {}) {
     _freshCb.addEventListener("change", _sync);
     _sync();
   }
+  // Verdict buttons. Disable BOTH on the first click: the endpoint is
+  // idempotent, but a double-fire would still race two renders and flash a
+  // stale banner back over the new state.
+  for (const vb of detail.querySelectorAll(".verdict-btn")) {
+    vb.addEventListener("click", async () => {
+      const banner = vb.closest(".verdict-banner");
+      const note = banner && banner.querySelector(".verdict-status");
+      const verdict = vb.dataset.verdict;
+      if (verdict === "wrong"
+          && !confirm("Mark this as NOT the flag?\n\n"
+                      + "The value is removed from the job and recorded as ruled out, "
+                      + "and the job goes back to no_flag so it can be retried.")) {
+        return;
+      }
+      for (const b of banner.querySelectorAll(".verdict-btn")) b.disabled = true;
+      if (note) note.textContent = "recording…";
+      try {
+        const res = await fetch(`${API}/jobs/${id}/flag-verdict`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ verdict }),
+        });
+        const out = await res.json();
+        if (!res.ok) throw new Error(out.detail || `HTTP ${res.status}`);
+        if (note) note.textContent = `recorded — job is ${out.status}`;
+        await renderJob(id);
+        await refreshJobs();
+        // "Wrong" means this run did not solve it. Say so and offer the
+        // existing retry rather than launching one from here — that endpoint
+        // owns the module/in-flight/target guards.
+        if (out.retry_suggested) {
+          const rb = document.querySelector(
+            `#job-detail .retry-btn[data-action="retry"]`);
+          if (rb) rb.scrollIntoView({ block: "nearest" });
+        }
+      } catch (e) {
+        if (note) note.textContent = `failed: ${e.message}`;
+        for (const b of banner.querySelectorAll(".verdict-btn")) b.disabled = false;
+      }
+    });
+  }
+
   const retryBtn = detail.querySelector('.retry-btn[data-action="retry"]');
   if (retryBtn) {
     // Reviewer-mode retry: open an inline form with an optional MULTI-target

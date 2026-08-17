@@ -62,6 +62,9 @@ const env = {
   agentPill: '<span class="agent-pill"></span>', timeoutBlock: "",
   runBlock: stub("run"), descBlock: stub("desc"), candBlock: stub("cand"),
   errorBlock: stub("error"), flagBlock: stub("flag"),
+  // The operator's ok/wrong banner. Present for flag_ready and for a finished
+  // job whose flag can still be ruled wrong.
+  verdictBlock: stub("verdict"),
   logFindingsBlock: stub("findings"), resultBlock: stub("result"),
   monitorView: false, monitorLang: "ko", runlogTz: "utc", log: "l1\nl2",
   monitorFeedHTML: "", tokensPill: '<span class="tokens-pill"></span>',
