@@ -184,7 +184,23 @@ def _project_evidence(records: Iterable[Mapping[str, Any]]) -> tuple[list[str], 
 
 
 def _terminal_parent_status(records: Sequence[Mapping[str, Any]]) -> str:
-    return "finished" if any(r.get("disposition") == "confirmed" for r in records) else "no_flag"
+    """finished / flag_ready / no_flag for a completed hybrid parent.
+
+    A parent that ends with UNVERIFIED candidates and nothing confirmed is the
+    same situation `flag_ready` exists for everywhere else: something was
+    produced, it could not be promoted, and only the operator can say whether
+    it is the flag. Reporting `no_flag` there closed the verdict UI on the one
+    module that most often has a candidate to show — the stages each produce
+    one and the parent is where they land.
+    """
+    if any(r.get("disposition") == "confirmed" for r in records):
+        return "finished"
+    if any(
+        r.get("disposition") == "unverified" and r.get("value")
+        for r in records
+    ):
+        return "flag_ready"
+    return "no_flag"
 
 
 def _normalise_manifest_path(raw: str) -> str:

@@ -373,10 +373,14 @@ WEAK_B = {
 
 case_specs = (
     ("a-confirmed-b-skipped", [MARKER_A], "finished", 1),
-    ("a-weak-b-no-flag", [WEAK_A, NO_FLAG], "no_flag", 2),
+    # A parent ending with UNVERIFIED candidates now asks the operator instead
+    # of filing itself as a miss — the same flag_ready rule the scalar modules
+    # use. Nothing is promoted (flags stays empty); only the status moves, so
+    # what these cases guard is unaffected.
+    ("a-weak-b-no-flag", [WEAK_A, NO_FLAG], "flag_ready", 2),
     ("a-weak-b-confirmed", [WEAK_A, MARKER_B], "finished", 2),
     ("a-no-flag-b-confirmed", [NO_FLAG, MARKER_B], "finished", 2),
-    ("a-weak-b-weak", [WEAK_A, WEAK_B], "no_flag", 2),
+    ("a-weak-b-weak", [WEAK_A, WEAK_B], "flag_ready", 2),
     ("a-no-flag-b-no-flag", [NO_FLAG, NO_FLAG], "no_flag", 2),
     ("a-failed", [{"status": "failed", "flags": []}], "failed", 1),
     ("a-stopped", [{"status": "stopped", "flags": []}], "stopped", 1),

@@ -288,7 +288,7 @@ if terminal_2 is not CASE_FAILED:
     check(
         "test_terminal_2_a_weak_b_no_flag",
         (result["status"], result["flags"], result["flag_candidates"]),
-        ("no_flag", [], ["DH{a_weak}"]),
+        ("flag_ready", [], ["DH{a_weak}"]),
     )
 
 terminal_3 = capture_case(
@@ -337,7 +337,7 @@ if terminal_4 is not CASE_FAILED:
     check(
         "test_terminal_4_both_weak_exhausts_as_no_flag",
         (result["status"], result["flags"], result["flag_candidates"]),
-        ("no_flag", [], ["DH{a_weak_3}", "DH{b_weak}"]),
+        ("flag_ready", [], ["DH{a_weak_3}", "DH{b_weak}"]),
     )
 
 result, _, _, _ = run_two_stage(
@@ -478,7 +478,7 @@ if snapshot_started is not CASE_FAILED:
             snapshot_result["hybrid"]["stage_flag_evidence"][0]["value"],
         ),
         (
-            "no_flag",
+            "flag_ready",
             [],
             ["DH{stage_a_weak_snapshot}"],
             "DH{stage_a_weak_snapshot}",

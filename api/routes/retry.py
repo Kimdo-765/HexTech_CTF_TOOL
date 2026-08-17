@@ -1353,6 +1353,12 @@ def _resubmit(
         "job_timeout": job_timeout,
         "model": model,
         "retry_of": prev_meta.get("id"),
+        # Carry the operator's refusals into the child. The whole point of
+        # keeping a rejected value is that a later run which re-derives it is
+        # repeating a known dead end — and the run most likely to re-derive it
+        # is this one, started because the parent's answer was wrong. Dropping
+        # it here made the record forget precisely where it mattered most.
+        "flag_rejected": [r for r in (prev_meta.get("flag_rejected") or []) if r],
         "resumed_from": prev_meta.get("id") if mark_resumed else None,
         # Pass the prior Claude SDK session_id along so the new agent
         # can resume + fork the conversation rather than start fresh.

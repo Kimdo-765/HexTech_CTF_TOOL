@@ -853,12 +853,24 @@ async def flag_verdict(job_id: str, request: Request):
     from modules._common import write_meta
 
     if verdict == "ok":
-        promoted = flags or candidates
+        # `rejected` is a promotion source too, so a mis-click on "wrong" is
+        # undoable. When it is the source, the value must LEAVE the rejected
+        # list: `flags` and `flag_rejected` have to stay mutually exclusive or
+        # the exploit-library gate below refuses to save a flag the operator
+        # just confirmed, on the grounds that they once refused it.
+        promoted = flags or candidates or rejected
         if not promoted:
             raise HTTPException(
                 status_code=409, detail="nothing to confirm — no flag or candidate"
             )
-        write_meta(safe, flags=promoted, status="finished", flag_verdict="ok")
+        still_rejected = [r for r in rejected if r not in promoted]
+        write_meta(
+            safe,
+            flags=promoted,
+            flag_rejected=still_rejected,
+            status="finished",
+            flag_verdict="ok",
+        )
         _sync_result_flags(safe, promoted)
         return {
             "status": "finished",
@@ -867,11 +879,19 @@ async def flag_verdict(job_id: str, request: Request):
         }
 
     # wrong — demote whatever was on offer and remember that it was refused.
+    #
+    # The candidates have to be CLEARED, not just demoted. `no_flag_status`
+    # asks "is there a candidate worth a verdict?", so leaving them in place
+    # sends the job straight back to `flag_ready` the next time anything
+    # recomputes its status — a verdict the operator already gave, asked
+    # again, with no new run behind it. `flag_rejected` is where they live
+    # now, which is also what makes the refusal survive.
     refused = flags or candidates
     new_rejected = rejected + [r for r in refused if r not in rejected]
     write_meta(
         safe,
         flags=[],
+        flag_candidates=[c for c in candidates if c not in new_rejected],
         status="no_flag",
         flag_verdict="wrong",
         flag_rejected=new_rejected,

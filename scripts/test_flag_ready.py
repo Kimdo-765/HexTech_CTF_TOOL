@@ -417,9 +417,12 @@ check("REGRESSION: clicking wrong twice does not duplicate the rejection",
 j = make_job("a9", status="flag_ready", flag_candidates=["DH{maybe}"], flags=[])
 verdict(j, {"verdict": "wrong"})
 out = verdict(j, {"verdict": "ok"})
-check("wrong then ok promotes the candidate", out["flags"], ["DH{maybe}"])
-check("  ...and the earlier refusal is still on the record",
-      (C.read_meta(j) or {}).get("flag_rejected"), ["DH{maybe}"])
+check("wrong then ok promotes the value — a mis-click is undoable",
+      out["flags"], ["DH{maybe}"])
+check(
+    "REGRESSION: and it LEAVES the rejected list — a value in both would make "
+    "the exploit-library gate refuse a flag the operator just confirmed",
+    (C.read_meta(j) or {}).get("flag_rejected"), [])
 
 # result.json must not be able to resurrect a demoted flag.
 j = make_job("a10", status="finished", flags=["DH{gone}"])
@@ -492,6 +495,73 @@ check(
     "REGRESSION: forensic is NOT offered 'change target' — it takes none",
     "forensic" in _hastarget,
     False,
+)
+
+# ---------------------------------------------------------------------------
+# 6. The verdict-authority boundary. Codex reproduced four defects here that
+#    all follow from the same oversight: a verdict was written in one place
+#    and four other places kept reading the pre-verdict evidence.
+# ---------------------------------------------------------------------------
+print("\n--- a verdict has to outrank the evidence it overrules ------")
+
+# F1. `wrong` used to leave the candidates in place, so the next thing that
+# recomputed the status asked the operator a question they had just answered.
+j = make_job("f1", status="flag_ready", flag_candidates=["DH{dead}"], flags=[])
+verdict(j, {"verdict": "wrong"})
+check(
+    "REGRESSION: a refused job does not bounce back to flag_ready",
+    C.no_flag_status(j),
+    "no_flag",
+)
+check(
+    "  ...the candidate is cleared, not just demoted",
+    (C.read_meta(j) or {}).get("flag_candidates"),
+    [],
+)
+check(
+    "  ...and it survives as a refusal",
+    (C.read_meta(j) or {}).get("flag_rejected"),
+    ["DH{dead}"],
+)
+
+# F2. The retry child is the run most likely to re-derive the dead end, so it
+# is the one that most needs to know. retry.py imports claude_agent_sdk, so
+# assert on the source; the found-the-line check keeps a rename honest.
+_child_meta = _retry_src[_retry_src.index('"retry_of": prev_meta.get("id")'):][:600]
+check(
+    "REGRESSION: the retry child inherits the parent's refusals",
+    "flag_rejected" in _child_meta,
+    True,
+)
+
+# F3. A hybrid parent that ends with unverified candidates is exactly the
+# situation flag_ready exists for.
+check(
+    "REGRESSION: a hybrid parent with unverified candidates asks for a verdict",
+    HC._terminal_parent_status([{"disposition": "unverified", "value": "DH{x}"}]),
+    "flag_ready",
+)
+check(
+    "  ...a confirmed one still finishes",
+    HC._terminal_parent_status([{"disposition": "confirmed", "value": "DH{x}"}]),
+    "finished",
+)
+check(
+    "  ...and nothing at all is still a miss",
+    HC._terminal_parent_status([]),
+    "no_flag",
+)
+
+# F4. The library's fallback rescan reads trusted stdout, which still holds
+# the refused value. Saving it files a rejected answer as a known-good
+# exploit — the opposite of what the operator said.
+_expl = (ROOT / "api" / "routes" / "exploits.py").read_text()
+_gate = _expl[_expl.index("refusing to save into exploit library") - 900:
+              _expl.index("refusing to save into exploit library")]
+check(
+    "REGRESSION: an explicit wrong verdict outranks the library rescan",
+    "flag_rejected" in _gate,
+    True,
 )
 
 print(f"\n== retry-gate summary: {PASSED} passed, {FAILED} failed ==")
