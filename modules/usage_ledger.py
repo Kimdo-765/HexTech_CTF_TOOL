@@ -51,6 +51,42 @@ TOKEN_KEYS = (
     "cache_read_input_tokens",
 )
 
+# The SDK hands `model_usage` over the wire in camelCase, and all three
+# callers (main, judge, reviewer) pass their provider object straight through.
+# Normalising HERE rather than at each call site is the same decision the
+# record_usage_by_model docstring already argues for: the per-model splitting
+# defect was found twice because the logic lived in neither place. Mirrors
+# modules._common._MODEL_USAGE_KEYMAP, duplicated for the same reason
+# TOKEN_KEYS is.
+_WIRE_TOKEN_KEYS = {
+    "inputTokens": "input_tokens",
+    "outputTokens": "output_tokens",
+    "cacheCreationInputTokens": "cache_creation_input_tokens",
+    "cacheReadInputTokens": "cache_read_input_tokens",
+}
+
+
+def normalize_tokens(tokens: Any) -> dict[str, int]:
+    """Accept either the wire's camelCase or our snake_case token schema.
+
+    Applied before the row is priced, not just before it is written: the cost
+    estimator reads snake_case too, so a camelCase dict that only got cleaned
+    on the way to disk would still be estimated at $0 (live evidence: 42/42
+    main rows and 24/24 reviewer rows carried `tokens: {}` while the same
+    jobs' meta held millions of tokens).
+    """
+    if not isinstance(tokens, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in tokens.items():
+        dest = _WIRE_TOKEN_KEYS.get(k, k if k in TOKEN_KEYS else None)
+        if dest is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        out[dest] = out.get(dest, 0) + int(v)
+    return out
+
 # How a dollar figure was arrived at. The distinction matters when deciding
 # whether a cap may fire: an estimate must not silently stop a job.
 COST_BASIS = ("reported", "estimated", "none")
@@ -332,8 +368,15 @@ def record_usage_by_model(
     `dedupe_key`, when given, is suffixed per model — otherwise the first row
     would claim the key and every other model would be silently refused.
     """
+    # normalize_tokens before the map is consulted, so an all-camelCase entry
+    # is not mistaken for an empty one and silently demoted to the `tokens`
+    # fallback row.
     breakdown = {
-        str(m): t for m, t in (model_usage or {}).items() if isinstance(t, dict) and t
+        str(m): n
+        for m, t in (model_usage or {}).items()
+        if isinstance(t, dict) and t
+        for n in (normalize_tokens(t),)
+        if n
     }
     if breakdown:
         # Whenever the SDK gave a per-model map, use it — even for one model.
@@ -344,7 +387,7 @@ def record_usage_by_model(
         # number is real.
         rows = sorted(breakdown.items(), key=lambda kv: kv[0] != (primary_model or ""))
     else:
-        rows = [(primary_model, tokens or {})]
+        rows = [(primary_model, normalize_tokens(tokens))]
 
     written: list[dict[str, Any]] = []
     window = None

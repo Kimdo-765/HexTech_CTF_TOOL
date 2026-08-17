@@ -213,6 +213,54 @@ check("D1 basis is none, not estimated", row.get("cost_basis"), "none")
 check("D1 the runtime is on the row", row.get("runtime"), "codex")
 
 # ---------------------------------------------------------------------------
+# 2b-wire. The fixture above hands `model_usage` over in snake_case, which is
+# NOT the shape the SDK sends — the wire uses camelCase (`inputTokens`). That
+# gap made every check in this file pass while production dropped the tokens
+# on the floor: 42/42 live main rows and 24/24 reviewer rows carried
+# `tokens: {}` while the same jobs' meta held tens of millions of tokens.
+# Feed the REAL shape and require the same row, so the fixture can no longer
+# be kinder to the code than the SDK is.
+j2bw = make_job("mu2bw", agent_provider="gpt", model="gpt-5.6-sol")
+reset(j2bw)
+C.agent_heartbeat(j2bw, AssistantMessage({"input_tokens": 5000, "output_tokens": 800}, "m1"))
+C._heartbeat_state.pop(j2bw, None)
+C.agent_heartbeat(
+    j2bw,
+    ResultMessage(
+        cost=None,
+        session_id="gs1w",
+        model_usage={
+            "gpt-5.6-sol": {
+                "inputTokens": 5000,
+                "outputTokens": 800,
+                "cacheReadInputTokens": 1234,
+            }
+        },
+    ),
+)
+wire_row = UL.read_usage(j2bw)[-1]
+check(
+    "REGRESSION: the SDK's camelCase model_usage survives into the ledger",
+    wire_row.get("tokens"),
+    {"input_tokens": 5000, "output_tokens": 800, "cache_read_input_tokens": 1234},
+)
+check("...and it lands on the same model row", wire_row.get("model"), "gpt-5.6-sol")
+
+# Normalisation has to happen BEFORE pricing, not just before writing: the
+# estimator reads snake_case too, so a dict cleaned only on the way to disk
+# would still be priced at $0. Same tokens, two shapes, one estimate.
+check(
+    "REGRESSION: both shapes price identically (normalised before the estimate)",
+    UL.normalize_tokens({"inputTokens": 7, "outputTokens": 3}),
+    UL.normalize_tokens({"input_tokens": 7, "output_tokens": 3}),
+)
+check(
+    "  ...and an unknown key or a bool cannot smuggle itself in",
+    UL.normalize_tokens({"inputTokens": 2, "junk": 99, "outputTokens": True}),
+    {"input_tokens": 2},
+)
+
+# ---------------------------------------------------------------------------
 # 2c. turn 0010 D2 — the Responses runtime is API-key billed and its
 #     total_cost_usd is the ADAPTER's own estimate. So: dollars, but
 #     "estimated", and no Codex OAuth window (that window belongs to the
