@@ -15,6 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip zip p7zip-full xz-utils bzip2 tar \
     # Light editing / inspection helpers commonly used by the agent.
     less jq xxd vim-tiny nano \
+    # ripgrep: the agent reaches for `rg` when grepping a source tree and
+    # got "command not found" on a real analysis command in an independent
+    # web lineage — not inside a challenge container, in the worker itself.
+    # grep exists, but the agent does not fall back to it; it retries rg.
+    ripgrep \
     # --- Pwn / Rev: dynamic analysis + reverse engineering ---
     # (radare2 isn't in the slim base's apt; for full reversing the
     # decompiler sibling image already has Ghidra.)

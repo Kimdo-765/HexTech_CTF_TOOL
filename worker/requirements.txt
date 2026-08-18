@@ -82,3 +82,16 @@ python-magic==0.4.27
 # re-learning (gcc headers, cpp, gdb, fpylll, /opt/scaffold — every one of
 # those blocks is the same story with a different import).
 numpy==2.5.1
+
+# --- Windows forensic artefact parsers ------------------------------------
+# WORKER ONLY, and the parity rule above does not apply here: these are read
+# by the forensic ANALYSIS agent, which runs in the worker. Forensic produces
+# no auto-run solver for the runner to execute (README.md:375-404), so a copy
+# in the runner image would be dead weight rather than parity.
+#
+# dissect.util is not speculative — installed on demand mid-job it decompressed
+# a compressed prefetch file that had otherwise blocked the analysis. evtx and
+# registry are the same artefact family from the same lineage.
+python-evtx==0.8.2
+python-registry==1.4.0
+dissect.util==3.19
