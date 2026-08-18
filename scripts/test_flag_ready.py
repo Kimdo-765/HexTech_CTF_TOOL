@@ -609,5 +609,116 @@ check(
     True,
 )
 
+# ---------------------------------------------------------------------------
+# 8. Two things that look identical in the data and must not be: a verdict
+#    being asked again, and a NEW run genuinely finding something new.
+#    F1 fixed the first by clearing the candidates. That makes the second
+#    work — but nothing proved it, and "the bug is gone" is not the same
+#    claim as "the feature still works".
+# ---------------------------------------------------------------------------
+print("\n--- asked again vs genuinely new ---------------------------")
+
+j = make_job("g1", status="flag_ready", flag_candidates=["DH{old}"], flags=[])
+verdict(j, {"verdict": "wrong"})
+check(
+    "REGRESSION: nothing new -> stays a miss (the verdict is not re-asked)",
+    C.no_flag_status(j),
+    "no_flag",
+)
+# A later run writes a candidate the operator has never seen. That job SHOULD
+# reopen — this is the feature, not the bug.
+_m = json.loads((DATA / "jobs" / j / "meta.json").read_text())
+_m["flag_candidates"] = ["DH{brand_new}"]
+(DATA / "jobs" / j / "meta.json").write_text(json.dumps(_m))
+check(
+    "REGRESSION: a NEW candidate from a later run reopens the verdict",
+    C.no_flag_status(j),
+    "flag_ready",
+)
+# And the refusal is still on the record while that happens — the new question
+# does not erase the old answer.
+check(
+    "  ...without forgetting what was already ruled out",
+    (C.read_meta(j) or {}).get("flag_rejected"),
+    ["DH{old}"],
+)
+
+# The operator changing their mind is an UNDO, not a reopen: same value, and
+# it leaves the rejected list so the library gate can still save it.
+j = make_job("g2", status="flag_ready", flag_candidates=["DH{mind}"], flags=[])
+verdict(j, {"verdict": "wrong"})
+out = verdict(j, {"verdict": "ok"})
+check("change-of-mind promotes the same value", out["flags"], ["DH{mind}"])
+check("  ...and is an undo, not a second question",
+      (C.read_meta(j) or {}).get("status"), "finished")
+
+# ---------------------------------------------------------------------------
+# 9. One builder, four callers. retry / resume / stop-resume all fork a child
+#    through _resubmit, so the rejection inheritance had to land there rather
+#    than in whichever path someone remembered.
+# ---------------------------------------------------------------------------
+print("\n--- the child inherits on every path ------------------------")
+
+_calls = _retry_src.count("_resubmit(")
+check("every fork path shares one child-meta builder", _calls >= 5, True)
+_body = _retry_src[_retry_src.index("def _resubmit("):]
+_meta_blk = _body[_body.index('"retry_of": prev_meta.get("id")'):][:900]
+check(
+    "REGRESSION: and the inheritance lives IN that builder, not in one caller",
+    "flag_rejected" in _meta_blk,
+    True,
+)
+
+# Three generations, with the youngest re-refusing something an ancestor
+# already refused. The list must not grow a duplicate.
+def _inherit(parent):
+    return [r for r in (parent.get("flag_rejected") or []) if r]
+
+
+def _refuse(meta, values):
+    seen = [r for r in (meta.get("flag_rejected") or []) if r]
+    return seen + [v for v in values if v not in seen]
+
+
+_g0 = {"flag_rejected": []}
+_g0["flag_rejected"] = _refuse(_g0, ["DH{a}"])
+_g1 = {"flag_rejected": _inherit(_g0)}
+_g1["flag_rejected"] = _refuse(_g1, ["DH{b}"])
+_g2 = {"flag_rejected": _inherit(_g1)}
+_g2["flag_rejected"] = _refuse(_g2, ["DH{a}"])
+check(
+    "REGRESSION: a re-refused ancestor value does not duplicate down the chain",
+    _g2["flag_rejected"],
+    ["DH{a}", "DH{b}"],
+)
+
+# ---------------------------------------------------------------------------
+# 10. The hybrid parent through the real verdict route, not the status helper
+#     alone — including the bulk-delete asymmetry, which is the half that
+#     silently destroys the thing being asked about.
+# ---------------------------------------------------------------------------
+print("\n--- hybrid through the production route --------------------")
+
+j = make_job("h1", status="flag_ready", flag_candidates=["DH{hy}"], flags=[],
+             hybrid={"stage_flag_evidence": [
+                 {"disposition": "unverified", "value": "DH{hy}"}]})
+out = verdict(j, {"verdict": "ok"})
+check("a hybrid parent takes ok through the same route", out["status"], "finished")
+check("  ...and the flag is promoted", (C.read_meta(j) or {}).get("flags"), ["DH{hy}"])
+
+j = make_job("h2", status="flag_ready", flag_candidates=["DH{hy2}"], flags=[],
+             hybrid={"stage_flag_evidence": [
+                 {"disposition": "unverified", "value": "DH{hy2}"}]})
+out = verdict(j, {"verdict": "wrong"})
+check("  ...and wrong likewise", out["status"], "no_flag")
+check("  ...refusal recorded", out["rejected"], ["DH{hy2}"])
+
+check(
+    "REGRESSION: bulk-delete's safe defaults still exclude flag_ready — a job "
+    "waiting for a verdict must not be swept away before it gets one",
+    "flag_ready" in _line,
+    False,
+)
+
 print(f"\n== retry-gate summary: {PASSED} passed, {FAILED} failed ==")
 raise SystemExit(1 if FAILED else 0)
