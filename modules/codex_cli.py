@@ -871,6 +871,12 @@ class CodexCLIClient:
         # outlived us. Measured flaky, not theoretical: 2 red in 4 runs of
         # test_codex_cli.py, traceback at the unguarded proc.kill.
         #
+        # ProcessLookupError ONLY. The first version caught OSError too, which
+        # made EPERM and EIO — genuine "could not clean up" failures — return
+        # as if teardown had succeeded. That does not remove a flake, it
+        # removes the observation of one. Narrowing still closes the race this
+        # guard exists for: repeats stay green with EPERM left to propagate.
+        #
         # The returncode check at the top of this method cannot close the
         # window either — the process can exit between that check and here.
         try:
@@ -878,7 +884,7 @@ class CodexCLIClient:
         except (ProcessLookupError, PermissionError):
             try:
                 proc.terminate()
-            except (ProcessLookupError, OSError):
+            except ProcessLookupError:
                 return
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
@@ -890,7 +896,7 @@ class CodexCLIClient:
         except (ProcessLookupError, PermissionError):
             try:
                 proc.kill()
-            except (ProcessLookupError, OSError):
+            except ProcessLookupError:
                 return
         try:
             await proc.wait()

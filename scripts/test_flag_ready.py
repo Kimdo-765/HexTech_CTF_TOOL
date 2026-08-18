@@ -265,12 +265,7 @@ _bulk = (ROOT / "api" / "routes" / "jobs.py").read_text()
 _line = next(
     (l for l in _bulk.splitlines() if "safe_default_statuses" in l and "{" in l), ""
 )
-check(
-    "REGRESSION: bulk-delete's safe defaults do NOT sweep a job awaiting a verdict",
-    "flag_ready" in _line,
-    False,
-)
-check("  ...and that line was actually found", bool(_line), True)
+
 
 # ---------------------------------------------------------------------------
 # 2. no_flag_status — the only place that decides which of the two it is.
@@ -779,6 +774,48 @@ check(
     "REGRESSION: bulk-delete's safe defaults still exclude flag_ready — a job "
     "waiting for a verdict must not be swept away before it gets one",
     "flag_ready" in _line,
+    False,
+)
+
+# ---------------------------------------------------------------------------
+# 11. bulk-delete, through the real route. This lived in section 1 as a
+#     source check until Codex showed such checks pass against a broken
+#     product; it moved here because it needs make_job.
+# ---------------------------------------------------------------------------
+print("\n--- bulk-delete leaves a job awaiting a verdict -------------")
+
+def _bulk_survives(status):
+    """Call the REAL bulk-delete with no filters; does the job survive?
+
+    The source check this replaces asserted a literal was absent from a set.
+    That is equally true of a typo, a renamed variable, and a file where the
+    protection was deleted outright — so it could not tell "flag_ready is
+    protected" from "there is nothing left to protect it".
+    """
+    jid = make_job("bulk-" + status, status=status)
+    try:
+        asyncio.run(JR.bulk_delete_jobs())
+    except TypeError:
+        try:
+            asyncio.run(JR.bulk_delete_jobs(status=None))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return (DATA / "jobs" / jid).exists()
+
+
+_kept = _bulk_survives("flag_ready")
+_swept = _bulk_survives("no_flag")
+check(
+    "REGRESSION: bulk-delete leaves a job that is awaiting a verdict",
+    _kept,
+    True,
+)
+check(
+    "  ...while still sweeping a settled one — the default is protective, "
+    "not simply broken",
+    _swept,
     False,
 )
 
