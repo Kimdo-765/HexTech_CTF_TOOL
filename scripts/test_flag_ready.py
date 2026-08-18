@@ -542,24 +542,15 @@ check(
     False,
 )
 
-_app = (ROOT / "web-ui" / "app.js").read_text()
-_canretry = next(
-    (l for l in _app.splitlines() if "const canRetry" in l), ""
-)
-_hastarget = next((l for l in _app.splitlines() if "const hasTarget" in l), "")
-check("the UI has a separate can-retry gate", bool(_canretry), True)
-check("  ...and a separate has-target gate", bool(_hastarget), True)
-check(
-    "REGRESSION: the UI's retry gate covers every module the route accepts",
-    all(m in _app[_app.index("const canRetry"):_app.index("const canRetry") + 200]
-        for m in RETRYABLE),
-    True,
-)
-check(
-    "REGRESSION: forensic is NOT offered 'change target' — it takes none",
-    "forensic" in _hastarget,
-    False,
-)
+# The UI side of this — that a finished forensic job offers Retry but NOT
+# change-target, that a flag_ready web3 job still offers Retry, that misc offers
+# neither — is asserted behaviourally in scripts/test_dashboard_ui.js, which
+# executes the real renderJob() affordance block. The source version that lived
+# here read the FIRST `const hasTarget` line, which is the job-CREATE form's
+# variable (app.js ~865), not the render gate; three render-gate mutants passed
+# against it. The check moved to where it can run the code instead of grepping
+# it. The backend list (_RETRYABLE_MODULES, above) still asserts here — it is
+# the source of truth the card is checked against.
 
 # ---------------------------------------------------------------------------
 # 6. The verdict-authority boundary. Codex reproduced four defects here that
@@ -668,13 +659,49 @@ check(
 
 # F4. The library's fallback rescan reads trusted stdout, which still holds
 # the refused value. Saving it files a rejected answer as a known-good
-# exploit — the opposite of what the operator said.
-_expl = (ROOT / "api" / "routes" / "exploits.py").read_text()
-_gate = _expl[_expl.index("refusing to save into exploit library") - 900:
-              _expl.index("refusing to save into exploit library")]
+# exploit — the opposite of what the operator said. The old version of this
+# check read exploits.py's source for the word "flag_rejected" near the
+# refusal; a mutant that disables the filter (`if False and rejected`) leaves
+# that word in the file and passed. Call the real route on a real job instead.
+import api.routes.exploits as EX  # noqa: E402
+
+
+def _scalar_save(reject):
+    """Run the REAL save_exploit scalar branch on a job whose trusted stdout
+    holds a flag the operator may have ruled wrong. Returns (status, detail)
+    on refusal, or "saved" if the gate let it through."""
+    jid = make_job("scalar-save-" + str(bool(reject)), module="pwn",
+                   status="finished", flags=[],
+                   flag_rejected=(["DH{c0ffeec0ffee9a1f}"] if reject else []))
+    (DATA / "jobs" / jid / "exploit.py.stdout").write_text(
+        "solver ran\nDH{c0ffeec0ffee9a1f}\nexit 0\n"
+    )
+    try:
+        EX.save_exploit(EX.SaveBody(job_id=jid, tags=[], notes="", overwrite=True))
+        return "saved"
+    except HTTPException as e:
+        return (e.status_code, str(getattr(e, "detail", "")))
+
+
+_rej = _scalar_save(reject=True)
 check(
     "REGRESSION: an explicit wrong verdict outranks the library rescan",
-    "flag_rejected" in _gate,
+    _rej[0] if isinstance(_rej, tuple) else _rej,
+    400,
+)
+check(
+    "  ...and the refusal says why — the operator ruled it wrong",
+    isinstance(_rej, tuple) and "ruled wrong by the operator" in _rej[1],
+    True,
+)
+# Positive control: WITHOUT the refusal the same stdout flag passes the flag
+# gate (it fails later on the absent script). This is what proves the refusal
+# above did the filtering — the gate is not simply seeing an empty scan.
+_ok = _scalar_save(reject=False)
+check(
+    "  ...proving the rescan really found it (it clears the flag gate and only "
+    "fails on the missing script)",
+    isinstance(_ok, tuple) and _ok[0] == 400 and "no captured flag" not in _ok[1],
     True,
 )
 
@@ -945,79 +972,104 @@ print("\n--- teardown: which errno may be swallowed -----------------")
 
 import asyncio as _aio  # noqa: E402
 import errno as _errno  # noqa: E402
+import signal as _signal  # noqa: E402
 
 
-class _FakeProc:
-    """Duck-typed asyncio process whose signal calls raise a chosen errno."""
+def _teardown(err, fail_on):
+    """Run the REAL _stop_process and report (outcome, call_sequence).
 
-    def __init__(self, err):
-        self.pid = 424242
-        self.returncode = None
-        self._err = err
-        self.calls = []
+    os.killpg is forced to ProcessLookupError on BOTH signals so the FALLBACK —
+    the branch under test — is the one exercised each time. `fail_on` selects
+    which fallback raises `err`:
 
-    def _boom(self, name):
-        self.calls.append(name)
-        if self._err is None:
-            return
-        raise OSError(self._err, "injected")
+      "terminate"  the TERM fallback (proc.terminate), reached straight after
+                   the first killpg.
+      "kill"       the KILL fallback (proc.kill). Reaching it requires TERM to
+                   succeed and the first wait to TIME OUT. The previous version
+                   of this matrix had wait() return 0 immediately, so the KILL
+                   fallback was never once exercised — and a mutant that widened
+                   ONLY its catch to `except OSError` passed the whole suite.
 
-    def terminate(self):
-        self._boom("terminate")
-
-    def kill(self):
-        self._boom("kill")
-
-    async def wait(self):
-        return 0
-
-
-def _teardown(err):
-    """Run the REAL _stop_process against a process whose signals fail.
-
-    Returns "returned" if teardown completed, or the errno name it let
-    through. os.killpg is forced to ProcessLookupError so the fallback — the
-    branch under test — is always the one exercised.
+    outcome is "returned" if teardown completed, else the errno name it let
+    through. call_sequence records each killpg (with its signal), terminate,
+    wait and kill in the order the production path actually touched them.
     """
     import modules.codex_cli as CC
 
+    calls = []
 
-    proc = _FakeProc(err)
+    class _Proc:
+        pid = 424242
+        returncode = None
+
+        def __init__(self):
+            self._waits = 0
+
+        def terminate(self):
+            calls.append("terminate")
+            if fail_on == "terminate" and err is not None:
+                raise OSError(err, "injected")
+
+        def kill(self):
+            calls.append("kill")
+            if fail_on == "kill" and err is not None:
+                raise OSError(err, "injected")
+
+        async def wait(self):
+            self._waits += 1
+            calls.append("wait")
+            # Only the FIRST wait (the one between TERM and KILL) times out, and
+            # only when steering toward the KILL fallback. Any post-KILL wait
+            # must complete, or a genuinely-gone process would look like a hang.
+            if self._waits == 1 and fail_on == "kill":
+                raise _aio.TimeoutError
+            return 0
 
     real_killpg = CC.os.killpg
 
     def fake_killpg(pid, sig):
+        calls.append("killpg:" + ("TERM" if sig == _signal.SIGTERM
+                                  else "KILL" if sig == _signal.SIGKILL
+                                  else str(sig)))
         raise ProcessLookupError()
 
     CC.os.killpg = fake_killpg
     try:
         holder = CC.CodexCLIClient.__new__(CC.CodexCLIClient)
-        holder._proc = proc
+        holder._proc = _Proc()
         try:
             _aio.run(CC.CodexCLIClient._stop_process(holder))
-            return "returned"
+            return "returned", calls
         except OSError as e:
-            return _errno.errorcode.get(e.errno, str(e.errno))
+            return _errno.errorcode.get(e.errno, str(e.errno)), calls
     finally:
         CC.os.killpg = real_killpg
 
 
 try:
-    check(
-        "REGRESSION: ESRCH (already gone) is swallowed — that IS the race",
-        _teardown(_errno.ESRCH),
-        "returned",
-    )
-    check(
-        "REGRESSION: EPERM propagates — a broad except OSError would hide it",
-        _teardown(_errno.EPERM),
-        "EPERM",
-    )
-    check(
-        "REGRESSION: EIO propagates too",
-        _teardown(_errno.EIO),
-        "EIO",
-    )
+    # --- TERM fallback: killpg(TERM) fails, proc.terminate() is the branch. ---
+    _out, _seq = _teardown(_errno.ESRCH, "terminate")
+    check("REGRESSION: ESRCH at the TERM fallback is swallowed — that IS the race",
+          _out, "returned")
+    check("  ...and it stopped at TERM, never reaching KILL",
+          _seq, ["killpg:TERM", "terminate"])
+    check("REGRESSION: EPERM at TERM propagates — a broad except OSError would hide it",
+          _teardown(_errno.EPERM, "terminate")[0], "EPERM")
+    check("REGRESSION: EIO at TERM propagates too",
+          _teardown(_errno.EIO, "terminate")[0], "EIO")
+
+    # --- KILL fallback: TERM succeeds, the first wait TIMES OUT, killpg(KILL) --
+    # --- fails, and proc.kill() is the branch. This path used to be dead code --
+    # --- from the test's point of view — nothing here ever entered it.        --
+    _out, _seq = _teardown(_errno.ESRCH, "kill")
+    check("REGRESSION: ESRCH at the KILL fallback is swallowed too", _out, "returned")
+    check("  ...having actually walked TERM -> wait-timeout -> KILL",
+          _seq, ["killpg:TERM", "terminate", "wait", "killpg:KILL", "kill"])
+    check("REGRESSION: EPERM at the KILL fallback propagates — the mutant this "
+          "second half exists to kill",
+          _teardown(_errno.EPERM, "kill")[0], "EPERM")
+    check("REGRESSION: EIO at the KILL fallback propagates too",
+          _teardown(_errno.EIO, "kill")[0], "EIO")
 except AttributeError as _e:
     check(f"teardown matrix could not run ({_e})", False, True)
 

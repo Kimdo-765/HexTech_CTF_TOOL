@@ -159,5 +159,82 @@ t("row pills reuse the shared age formatter", /rowPills[\s\S]{0,600}_fmtAgentAge
 t("REGRESSION: the row's agent pill has no started_at fallback either",
   /if \(job\.last_agent_event_at\) \{/.test(SRC));
 
+// ------------------------------------------------------- retry/target gates
+// The job-card affordances (Retry / Change target / Stop) are computed in a
+// block inside renderJob(). This oracle used to live in test_flag_ready.py and
+// read the FIRST `const hasTarget` line out of app.js — which is the job-CREATE
+// form's variable (app.js ~865), not the render gate 2600 lines below it. So
+// three separate mutants passed against it: dropping forensic from retry,
+// adding forensic to change-target, and removing flag_ready from the retry
+// statuses. Run the real block.
+console.log("\n--- the card offers exactly the affordances the module earns ---");
+
+function sliceBlock(startNeedle, endNeedle) {
+  const start = SRC.indexOf(startNeedle);
+  if (start === -1) return null;
+  const end = SRC.indexOf(endNeedle, start);
+  if (end === -1) return null;
+  return SRC.slice(start, end);
+}
+
+const blockSrc = sliceBlock('let runBlock = "";', "// The operator's true/false-positive call");
+t("the render-affordance block was located", !!blockSrc);
+if (blockSrc) {
+  // Only `job` and `escapeHtml` cross into the block; everything else it needs
+  // it declares. Returning the gate booleans AND the rendered html lets the
+  // checks below assert both the decision and the button it produced.
+  const renderGates = new Function(
+    "job", "escapeHtml",
+    `${blockSrc}\n return {runBlock, canRetry, hasTarget, showRetry,` +
+    ` showChangeTarget, showStop, showStopResume, isExploitableModule};`
+  );
+  const gatesFor = (module, status) =>
+    renderGates({ module, status, id: "abc123abc123" }, escapeHtml);
+  const hasAction = (html, action) =>
+    new RegExp(`data-action="${action}"`).test(html);
+
+  // forensic finished: the backend rebuilds it (canRetry) but it takes no
+  // target, so change-target must be absent.
+  let g = gatesFor("forensic", "finished");
+  t("forensic is retryable", g.canRetry === true, g.canRetry);
+  t("REGRESSION: a finished forensic job offers Retry",
+    g.showRetry === true && hasAction(g.runBlock, "retry"), g.runBlock);
+  t("REGRESSION: forensic is NOT offered change-target — it takes none",
+    g.hasTarget === false && g.showChangeTarget === false
+      && !hasAction(g.runBlock, "change-target"), g.runBlock);
+
+  // web3 flag_ready: supported by the backend (was hidden by the old UI list),
+  // and flag_ready is a terminal status Retry must still cover.
+  g = gatesFor("web3", "flag_ready");
+  t("web3 is retryable and takes a target",
+    g.canRetry === true && g.hasTarget === true, [g.canRetry, g.hasTarget]);
+  t("REGRESSION: a web3 job awaiting a verdict still offers Retry (flag_ready is terminal)",
+    g.showRetry === true && hasAction(g.runBlock, "retry"), g.runBlock);
+  t("  ...and change-target, which its module accepts",
+    g.showChangeTarget === true && hasAction(g.runBlock, "change-target"), g.runBlock);
+
+  // misc failed: NOT retryable — its run_job needs an operator passphrase, so a
+  // rebuilt job would fail in a way that looks like the module's fault.
+  g = gatesFor("misc", "failed");
+  t("REGRESSION: misc is not retryable", g.canRetry === false, g.canRetry);
+  t("  ...so the card renders no Retry button",
+    g.showRetry === false && !hasAction(g.runBlock, "retry"), g.runBlock);
+
+  // pwn running: a live job offers Stop, never Retry (retry is terminal-only).
+  g = gatesFor("pwn", "running");
+  t("REGRESSION: a running job offers Stop, not Retry",
+    g.showStop === true && g.showRetry === false
+      && !hasAction(g.runBlock, "retry"), g.runBlock);
+  t("  ...while change-target stays available for a targeted module at any status",
+    g.showChangeTarget === true && hasAction(g.runBlock, "change-target"), g.runBlock);
+
+  // Parity: every module the backend will rebuild is offered Retry by the card.
+  // This is the check the old 200-char source slice was trying to make.
+  for (const m of ["web", "pwn", "crypto", "rev", "web3", "forensic"]) {
+    t(`  card offers Retry for ${m} (matches the backend _RETRYABLE_MODULES)`,
+      gatesFor(m, "no_flag").showRetry === true, m);
+  }
+}
+
 console.log(`\n${ran} checks, ${bad} failed`);
 process.exit(bad ? 1 : 0);
