@@ -205,9 +205,49 @@ def _stub_pydantic() -> None:
     sys.modules["pydantic"] = m
 
 
+def _stub_sdk() -> None:
+    """Stub claude_agent_sdk only when it is genuinely absent.
+
+    Borrowed from scripts/test_retry_provider_snapshot.py, including the part
+    that matters: `find_spec`, not `name not in sys.modules`. The latter is
+    true at startup even in a container that HAS the library, so it would
+    install a stub over a working install and this suite would never once
+    exercise the real import path.
+
+    `api.routes.retry` binds the SDK at module scope for the reviewer turn.
+    That path is not under test here; the child-meta builder is. Treating the
+    import as a wall was wrong — a harness for exactly this already existed in
+    this repo and I did not look for it.
+    """
+    import importlib.util
+    import types
+
+    try:
+        if importlib.util.find_spec("claude_agent_sdk") is not None:
+            return
+    except (ImportError, ValueError):
+        pass
+    if "claude_agent_sdk" in sys.modules:
+        return
+
+    sdk = types.ModuleType("claude_agent_sdk")
+    for name in ("AssistantMessage", "ClaudeAgentOptions", "ResultMessage",
+                 "TextBlock"):
+        setattr(sdk, name, type(name, (), {}))
+    sdk.project_key_for_directory = lambda *a, **k: ""
+
+    async def _query(*a, **k):  # pragma: no cover — never called here
+        if False:
+            yield None
+
+    sdk.query = _query
+    sys.modules["claude_agent_sdk"] = sdk
+
+
 _stub_fastapi()
 _stub_queue()
 _stub_pydantic()
+_stub_sdk()
 
 PASSED = 0
 FAILED = 0
@@ -551,11 +591,46 @@ check(
 # F2. The retry child is the run most likely to re-derive the dead end, so it
 # is the one that most needs to know. retry.py imports claude_agent_sdk, so
 # assert on the source; the found-the-line check keeps a rename honest.
-_child_meta = _retry_src[_retry_src.index('"retry_of": prev_meta.get("id")'):][:600]
+# Source slices broke here once already — a comment pushed the asserted line
+# out of the window and it passed for the wrong reason. Ask the builder. The
+# SDK stub above (borrowed from test_retry_provider_snapshot.py) is what makes
+# api.routes.retry importable; treating that import as a wall was wrong.
+import api.routes.retry as RT  # noqa: E402
+import inspect as _inspect  # noqa: E402
+
+_resub_src = _inspect.getsource(RT._resubmit)
+_rej_line = next(
+    (l for l in _resub_src.splitlines() if '"flag_rejected":' in l), ""
+)
+
+
+def _child_inherits(parent_rejected):
+    """Evaluate the builder's own expression for the child's flag_rejected.
+
+    Only that expression: the rest of _resubmit enqueues work and copies
+    artifacts, which needs a queue and a job tree. The inheritance either
+    happens in this line or nowhere.
+    """
+    if not _rej_line:
+        return "MISSING"
+    expr = _rej_line.strip().split(":", 1)[1].rstrip(",")
+    return eval(expr, {}, {"prev_meta": {"flag_rejected": parent_rejected}})
+
+
 check(
     "REGRESSION: the retry child inherits the parent's refusals",
-    "flag_rejected" in _child_meta,
-    True,
+    _child_inherits(["DH{dead}"]),
+    ["DH{dead}"],
+)
+check(
+    "  ...empty values are not carried as noise",
+    _child_inherits(["DH{a}", "", None]),
+    ["DH{a}"],
+)
+check(
+    "  ...a parent with none gives the child an empty list, not None",
+    _child_inherits(None),
+    [],
 )
 
 # F3. A hybrid parent that ends with unverified candidates is exactly the
@@ -718,12 +793,10 @@ print("\n--- the child inherits on every path ------------------------")
 
 _calls = _retry_src.count("_resubmit(")
 check("every fork path shares one child-meta builder", _calls >= 5, True)
-_body = _retry_src[_retry_src.index("def _resubmit("):]
-_meta_blk = _body[_body.index('"retry_of": prev_meta.get("id")'):][:900]
 check(
     "REGRESSION: and the inheritance lives IN that builder, not in one caller",
-    "flag_rejected" in _meta_blk,
-    True,
+    _child_inherits(["DH{x}"]),
+    ["DH{x}"],
 )
 
 # Three generations, with the youngest re-refusing something an ancestor
