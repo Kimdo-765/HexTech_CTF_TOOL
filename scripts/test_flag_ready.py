@@ -892,20 +892,42 @@ def _bulk_survives(status):
     a test is for.
     """
     jid = make_job("bulk-" + status, status=status)
-    JR.bulk_delete_jobs()
-    return (DATA / "jobs" / jid).exists()
+    resp = JR.bulk_delete_jobs()
+    return (DATA / "jobs" / jid).exists(), jid, resp
 
+
+_kept, _kept_id, _kept_resp = _bulk_survives("flag_ready")
+_gone, _gone_id, _gone_resp = _bulk_survives("no_flag")
 
 check(
     "REGRESSION: bulk-delete leaves a job that is awaiting a verdict",
-    _bulk_survives("flag_ready"),
+    _kept,
     True,
 )
 check(
     "  ...while still sweeping a settled one — the default is protective, "
     "not simply broken",
-    _bulk_survives("no_flag"),
+    _gone,
     False,
+)
+# The response is part of the contract, not decoration: the UI reports these
+# numbers back to the operator. Checking only the filesystem let a route that
+# deleted correctly but reported wrongly pass — Codex's mutant did exactly
+# that.
+check(
+    "REGRESSION: the response does not claim to have deleted the kept job",
+    _kept_id in (_kept_resp.get("ids") or []),
+    False,
+)
+check(
+    "  ...and does name the one it did delete",
+    _gone_id in (_gone_resp.get("ids") or []),
+    True,
+)
+check(
+    "  ...with deleted matching the ids it lists",
+    _gone_resp.get("deleted"),
+    len(_gone_resp.get("ids") or []),
 )
 
 # ---------------------------------------------------------------------------
