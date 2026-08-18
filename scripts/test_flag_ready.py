@@ -177,8 +177,37 @@ def _stub_queue() -> None:
             m.job = jm
 
 
+def _stub_pydantic() -> None:
+    """exploits.py declares request models with pydantic; the gate under test
+    uses none of them. Stub just enough for the import to land."""
+    import types
+
+    if "pydantic" in sys.modules:
+        return
+    try:
+        import pydantic  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    m = types.ModuleType("pydantic")
+
+    class BaseModel:
+        def __init__(self, **kw):
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    def Field(*a, **k):
+        return None
+
+    m.BaseModel = BaseModel
+    m.Field = Field
+    m.ValidationError = type("ValidationError", (Exception,), {})
+    sys.modules["pydantic"] = m
+
+
 _stub_fastapi()
 _stub_queue()
+_stub_pydantic()
 
 PASSED = 0
 FAILED = 0
@@ -576,38 +605,71 @@ check(
 # ---------------------------------------------------------------------------
 print("\n--- the library gate answers to the operator, both ways -----")
 
-_ex = (ROOT / "api" / "routes" / "exploits.py").read_text()
-_hyb = _ex[_ex.index("stage_flag_evidence"):_ex.index("has no canonical confirmed evidence")]
+# Codex mutated production six ways that break the meaning of this gate and
+# every source-string check here still returned green. A string that appears
+# in a file proves the string is in the file; it proves nothing about what the
+# code does with it. `_hybrid_save_source` is a plain function taking a meta
+# dict, so ask IT.
+import api.routes.exploits as EX  # noqa: E402
 
+
+def gate(meta):
+    """Did the hybrid save gate ALLOW this meta? Refusal is an HTTPException.
+
+    Anything else raised means the gate was passed and a later step failed on
+    the missing filesystem — which is the answer we want, so it counts as
+    allowed rather than being swallowed into a false refusal.
+    """
+    try:
+        EX._hybrid_save_source("a" * 12, meta)
+        return True
+    except HTTPException as e:
+        # Only the AUTHORITY refusal counts as a refusal. The same function
+        # later raises for a missing child artifact, and on this fixture that
+        # always happens — treating it as "refused" would make every case look
+        # refused and the oracle would be vacuous in the other direction.
+        return "canonical confirmed evidence" not in str(getattr(e, "detail", ""))
+    except Exception:
+        return True
+
+
+def hyb(disposition, value):
+    return {"hybrid": {"stage_flag_evidence": [
+        {"disposition": disposition, "value": value}]}}
+
+
+_m = hyb("unverified", "DH{v}")
+_m.update(flags=["DH{v}"], flag_verdict="ok")
+check("REGRESSION: an explicit ok authorises what the machine could not", gate(_m), True)
+
+_m = hyb("unverified", "DH{v}")
+_m.update(flags=["DH{v}"])
 check(
-    "REGRESSION: an explicit ok authorises a hybrid save the machine could not",
-    'flag_verdict") or "") == "ok"' in _hyb,
-    True,
+    "REGRESSION: with NO verdict the same meta is still refused — the gate did "
+    "not simply get looser",
+    gate(_m),
+    False,
 )
+
+_m = hyb("unverified", "DH{v}")
+_m.update(flags=["DH{other}"], flag_verdict="ok")
 check(
-    "  ...and only for values the operator actually promoted",
-    "in approved" in _hyb and 'job_meta.get("flags")' in _hyb,
-    True,
+    "REGRESSION: ok on ONE value does not drag an unrelated unverified stage in",
+    gate(_m),
+    False,
 )
-check(
-    "  ...a machine-confirmed record still authorises on its own",
-    'record.get("disposition") == "confirmed"' in _hyb,
-    True,
-)
-check(
-    "REGRESSION: with NO verdict the gate is unchanged — confirmed or nothing",
-    _hyb.index('== "confirmed"') < _hyb.index('or "") == "ok"'),
-    True,
-)
-# The wrong direction lives in the scalar gate; both halves must be present or
-# the pair is not a pair.
-_scalar = _ex[_ex.index("refusing to save into exploit library") - 900:
-              _ex.index("refusing to save into exploit library")]
-check(
-    "  ...and the wrong direction is still enforced beside it",
-    "flag_rejected" in _scalar,
-    True,
-)
+
+_m = hyb("confirmed", "DH{v}")
+_m.update(flags=["DH{v}"])
+check("a machine-confirmed record still authorises on its own", gate(_m), True)
+
+_m = hyb("unverified", "DH{v}")
+_m.update(flags=["DH{v}"], flag_verdict="wrong")
+check("REGRESSION: an explicit wrong is not authority to save", gate(_m), False)
+
+_m = hyb("unverified", "DH{v}")
+_m.update(flags=[], flag_verdict="ok")
+check("  ...and ok with nothing promoted authorises nothing", gate(_m), False)
 
 # ---------------------------------------------------------------------------
 # 8. Two things that look identical in the data and must not be: a verdict

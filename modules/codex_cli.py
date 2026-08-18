@@ -864,10 +864,22 @@ class CodexCLIClient:
         proc = self._proc
         if proc is None or proc.returncode is not None:
             return
+        # The fallback has to be guarded for the same reason it exists. A
+        # ProcessLookupError from killpg most often means the whole group is
+        # already gone — so `proc.terminate()` raises it straight back, out of
+        # a teardown path whose entire job is to not care whether the child
+        # outlived us. Measured flaky, not theoretical: 2 red in 4 runs of
+        # test_codex_cli.py, traceback at the unguarded proc.kill.
+        #
+        # The returncode check at the top of this method cannot close the
+        # window either — the process can exit between that check and here.
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
-            proc.terminate()
+            try:
+                proc.terminate()
+            except (ProcessLookupError, OSError):
+                return
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
             return
@@ -876,7 +888,10 @@ class CodexCLIClient:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
-            proc.kill()
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                return
         try:
             await proc.wait()
         except Exception:
