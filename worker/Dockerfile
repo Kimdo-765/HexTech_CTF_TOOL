@@ -25,6 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # decompiler sibling image already has Ghidra.)
     gdb gdb-multiarch strace ltrace patchelf \
     qemu-user-static \
+    # A JRE, not a JDK. Two independent lineages asked for one: job
+    # 974f165f1249 (Minecraft r.0.0.mca region file) hit
+    # `java: command not found`, and 0716 had already held
+    # default-jre-headless pending exactly this second lineage. Game data,
+    # datapacks, .class files and most NBT tooling live in the JVM
+    # ecosystem; that job worked around it by hand-writing an NBT decoder,
+    # which is not always available as an escape.
+    default-jre-headless \
     # Full-system QEMU for KERNEL pwn: boot a challenge's own bzImage /
     # vmlinuz + rootfs under qemu-system-x86_64. With `-enable-kvm` (host
     # /dev/kvm passed through by start.sh's generated compose override) the

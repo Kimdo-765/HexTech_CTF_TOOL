@@ -10,6 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential cpp \
     gdb qemu-user-static ltrace strace \
+    # A JRE, not a JDK. Two independent lineages asked for one: job
+    # 974f165f1249 (Minecraft r.0.0.mca region file) hit
+    # `java: command not found`, and 0716 had already held
+    # default-jre-headless pending exactly this second lineage. Game data,
+    # datapacks, .class files and most NBT tooling live in the JVM
+    # ecosystem; that job worked around it by hand-writing an NBT decoder,
+    # which is not always available as an escape.
+    default-jre-headless \
     bash less vim-tiny nano \
  && rm -rf /var/lib/apt/lists/*
 # build-essential (was bare `gcc`): the gcc DRIVER alone cannot compile anything
