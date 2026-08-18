@@ -785,39 +785,131 @@ check(
 print("\n--- bulk-delete leaves a job awaiting a verdict -------------")
 
 def _bulk_survives(status):
-    """Call the REAL bulk-delete with no filters; does the job survive?
+    """Create a job, run the REAL bulk delete, report whether it survived.
 
-    The source check this replaces asserted a literal was absent from a set.
-    That is equally true of a typo, a renamed variable, and a file where the
-    protection was deleted outright — so it could not tell "flag_ready is
-    protected" from "there is nothing left to protect it".
+    Two things were wrong with the first version of this and both made it
+    weaker than the source check it replaced:
+
+      * it wrapped a SYNCHRONOUS route in `asyncio.run`, so the call raised
+        TypeError and fell through to a second attempt — the thing under test
+        was never the thing being called;
+      * it ended in `except Exception: pass`, so a route that raised 500
+        after deleting still read as a pass.
+
+    That second one was written in the same commit that narrowed a too-broad
+    `except OSError` in production, for exactly the reason repeated here: a
+    broad except does not remove a failure, it removes the evidence of one.
+
+    Nothing is caught now. If the route raises, this test fails, which is what
+    a test is for.
     """
     jid = make_job("bulk-" + status, status=status)
-    try:
-        asyncio.run(JR.bulk_delete_jobs())
-    except TypeError:
-        try:
-            asyncio.run(JR.bulk_delete_jobs(status=None))
-        except Exception:
-            pass
-    except Exception:
-        pass
+    JR.bulk_delete_jobs()
     return (DATA / "jobs" / jid).exists()
 
 
-_kept = _bulk_survives("flag_ready")
-_swept = _bulk_survives("no_flag")
 check(
     "REGRESSION: bulk-delete leaves a job that is awaiting a verdict",
-    _kept,
+    _bulk_survives("flag_ready"),
     True,
 )
 check(
     "  ...while still sweeping a settled one — the default is protective, "
     "not simply broken",
-    _swept,
+    _bulk_survives("no_flag"),
     False,
 )
+
+# ---------------------------------------------------------------------------
+# 12. The teardown guard, by errno. Narrowing the catch was verified by the
+#     product behaving correctly, which says nothing about whether widening it
+#     again would be noticed. Checking the present state and preventing the
+#     regression are different jobs and only the first had been done.
+#
+#     ESRCH is the race the guard exists for and must be swallowed. EPERM and
+#     EIO are real "could not clean up" results and must propagate — a broad
+#     `except OSError` returns all three as success, which is the mutant this
+#     section kills.
+# ---------------------------------------------------------------------------
+print("\n--- teardown: which errno may be swallowed -----------------")
+
+import asyncio as _aio  # noqa: E402
+import errno as _errno  # noqa: E402
+
+
+class _FakeProc:
+    """Duck-typed asyncio process whose signal calls raise a chosen errno."""
+
+    def __init__(self, err):
+        self.pid = 424242
+        self.returncode = None
+        self._err = err
+        self.calls = []
+
+    def _boom(self, name):
+        self.calls.append(name)
+        if self._err is None:
+            return
+        raise OSError(self._err, "injected")
+
+    def terminate(self):
+        self._boom("terminate")
+
+    def kill(self):
+        self._boom("kill")
+
+    async def wait(self):
+        return 0
+
+
+def _teardown(err):
+    """Run the REAL _stop_process against a process whose signals fail.
+
+    Returns "returned" if teardown completed, or the errno name it let
+    through. os.killpg is forced to ProcessLookupError so the fallback — the
+    branch under test — is always the one exercised.
+    """
+    import modules.codex_cli as CC
+
+
+    proc = _FakeProc(err)
+
+    real_killpg = CC.os.killpg
+
+    def fake_killpg(pid, sig):
+        raise ProcessLookupError()
+
+    CC.os.killpg = fake_killpg
+    try:
+        holder = CC.CodexCLIClient.__new__(CC.CodexCLIClient)
+        holder._proc = proc
+        try:
+            _aio.run(CC.CodexCLIClient._stop_process(holder))
+            return "returned"
+        except OSError as e:
+            return _errno.errorcode.get(e.errno, str(e.errno))
+    finally:
+        CC.os.killpg = real_killpg
+
+
+try:
+    check(
+        "REGRESSION: ESRCH (already gone) is swallowed — that IS the race",
+        _teardown(_errno.ESRCH),
+        "returned",
+    )
+    check(
+        "REGRESSION: EPERM propagates — a broad except OSError would hide it",
+        _teardown(_errno.EPERM),
+        "EPERM",
+    )
+    check(
+        "REGRESSION: EIO propagates too",
+        _teardown(_errno.EIO),
+        "EIO",
+    )
+except AttributeError as _e:
+    check(f"teardown matrix could not run ({_e})", False, True)
 
 print(f"\n== retry-gate summary: {PASSED} passed, {FAILED} failed ==")
 raise SystemExit(1 if FAILED else 0)
