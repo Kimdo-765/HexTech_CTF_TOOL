@@ -564,5 +564,50 @@ check(
     True,
 )
 
+# ---------------------------------------------------------------------------
+# 7. The library gate is a TWO-WAY authority question, and fixing only one
+#    direction is what left the other broken. Codex found the second half:
+#    after an operator ok on a hybrid parent, the save still 400'd because the
+#    canonical evidence was the machine's old `unverified` disposition.
+#
+#    All three directions are pinned together. The third — no verdict at all —
+#    is the one that keeps the next change from quietly moving the baseline
+#    while the two interesting cases still pass.
+# ---------------------------------------------------------------------------
+print("\n--- the library gate answers to the operator, both ways -----")
+
+_ex = (ROOT / "api" / "routes" / "exploits.py").read_text()
+_hyb = _ex[_ex.index("stage_flag_evidence"):_ex.index("has no canonical confirmed evidence")]
+
+check(
+    "REGRESSION: an explicit ok authorises a hybrid save the machine could not",
+    'flag_verdict") or "") == "ok"' in _hyb,
+    True,
+)
+check(
+    "  ...and only for values the operator actually promoted",
+    "in approved" in _hyb and 'job_meta.get("flags")' in _hyb,
+    True,
+)
+check(
+    "  ...a machine-confirmed record still authorises on its own",
+    'record.get("disposition") == "confirmed"' in _hyb,
+    True,
+)
+check(
+    "REGRESSION: with NO verdict the gate is unchanged — confirmed or nothing",
+    _hyb.index('== "confirmed"') < _hyb.index('or "") == "ok"'),
+    True,
+)
+# The wrong direction lives in the scalar gate; both halves must be present or
+# the pair is not a pair.
+_scalar = _ex[_ex.index("refusing to save into exploit library") - 900:
+              _ex.index("refusing to save into exploit library")]
+check(
+    "  ...and the wrong direction is still enforced beside it",
+    "flag_rejected" in _scalar,
+    True,
+)
+
 print(f"\n== retry-gate summary: {PASSED} passed, {FAILED} failed ==")
 raise SystemExit(1 if FAILED else 0)
