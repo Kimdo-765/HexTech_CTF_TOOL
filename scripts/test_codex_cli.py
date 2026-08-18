@@ -640,12 +640,62 @@ async def test_process_group_reaping() -> None:
     report("A7-b timeout still reaps the spawned child", timeout_ok, timeout_detail)
 
 
+async def test_query_codex_once_cleanup_error() -> None:
+    """query_codex_once wraps the whole `async with CodexCLIClient(...)` in one
+    try/except. The teardown of that context can itself fail — killpg/kill can
+    hit EPERM/EIO (see _stop_process, the errno guard) and __aexit__ re-raises.
+    The helper must convert that into an error STRING on the returned dict; a
+    mutant that turns the error into None passes every other test here because
+    none of them makes the context exit throw."""
+    print("\n== query_codex_once: context-cleanup error ==")
+    from modules import codex_cli
+
+    work = tempfile.mkdtemp(prefix="codex-cleanup-")
+
+    class _CleanupBoom:
+        def __init__(self, options):
+            self.options = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            # The genuine teardown failure this stands in for: a "could not
+            # clean up" errno the guard is required to propagate rather than
+            # swallow.
+            raise PermissionError("context cleanup failed")
+
+        async def query(self, prompt):
+            return None
+
+        async def receive_response(self, *, turn_timeout_s=None):
+            if False:  # an async generator that yields nothing
+                yield None
+
+    original = codex_cli.CodexCLIClient
+    codex_cli.CodexCLIClient = _CleanupBoom
+    try:
+        result = await codex_cli.query_codex_once(
+            prompt="hi", cwd=work, system_prompt="sys", model="gpt-5.6-sol",
+        )
+    finally:
+        codex_cli.CodexCLIClient = original
+
+    err = result.get("error")
+    report(
+        "a cleanup PermissionError becomes an error string, not None",
+        isinstance(err, str) and "PermissionError" in err,
+        f"error={err!r}",
+    )
+
+
 async def main() -> int:
     test_settings_auth_mode()
     await test_jsonl_and_resume()
     await test_auth_retry_and_incomplete_stream()
     await test_oversized_jsonl_boundaries()
     await test_process_group_reaping()
+    await test_query_codex_once_cleanup_error()
     print(f"\n== summary: {PASS} passed, {FAIL} failed ==")
     return 1 if FAIL else 0
 
