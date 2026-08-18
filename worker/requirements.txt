@@ -89,9 +89,28 @@ numpy==2.5.1
 # no auto-run solver for the runner to execute (README.md:375-404), so a copy
 # in the runner image would be dead weight rather than parity.
 #
+# The first version of this block pinned 0.8.2 and 1.4.0. Neither release
+# exists, so `pip install -r` would have failed the whole worker layer. The
+# real versions were already in our own logs — an unpinned install in job
+# 739d3a919108 resolved to exactly these two — and were not read before
+# writing plausible-looking numbers to match the file's pinning habit.
+#
 # dissect.util is not speculative — installed on demand mid-job it decompressed
 # a compressed prefetch file that had otherwise blocked the analysis. evtx and
 # registry are the same artefact family from the same lineage.
-python-evtx==0.8.2
-python-registry==1.4.0
+python-evtx==0.8.1
+python-registry==1.3.1
 dissect.util==3.19
+
+# --- SMT solvers beyond z3 ------------------------------------------------
+# Two independent roots asked for these: crypto 5c26b3b02654 installed and
+# imported pyboolector mid-job, and rev eab2c5b5ad8e hit a pyboolector import
+# error and ran a cvc5 process. Neither is a retry of the other — different
+# module, different slot, no retry_of — so this is demand, not one lineage
+# repeating itself.
+#
+# Deliberately unpinned. The pins in the block above were invented to match
+# house style and named releases that do not exist; an unpinned install is
+# what actually worked in the job that proved the need.
+pyboolector
+cvc5

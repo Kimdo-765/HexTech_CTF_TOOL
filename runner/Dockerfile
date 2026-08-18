@@ -43,6 +43,12 @@ RUN pip install --no-cache-dir \
     gmpy2==2.2.1 \
     sympy==1.13.3 \
     z3-solver==4.13.4.0 \
+    # SMT beyond z3. crypto/rev DO auto-run their solver here, so unlike
+    # the forensic parsers these must exist in both images — a solver the
+    # worker could write and the runner cannot execute is the dev/run
+    # parity bug this file keeps re-learning. Unpinned for the reason
+    # given in worker/requirements.txt: invented pins broke the build.
+    pyboolector cvc5 \
     ecdsa==0.19.0 \
     requests==2.32.3 \
     httpx==0.27.2 \
