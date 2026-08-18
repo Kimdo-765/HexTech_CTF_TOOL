@@ -598,23 +598,38 @@ check(
 import api.routes.retry as RT  # noqa: E402
 import inspect as _inspect  # noqa: E402
 
-_resub_src = _inspect.getsource(RT._resubmit)
-_rej_line = next(
-    (l for l in _resub_src.splitlines() if '"flag_rejected":' in l), ""
-)
 
 
 def _child_inherits(parent_rejected):
-    """Evaluate the builder's own expression for the child's flag_rejected.
+    """Run the REAL _resubmit and read the child's PERSISTED meta.
 
-    Only that expression: the rest of _resubmit enqueues work and copies
-    artifacts, which needs a queue and a job tree. The inheritance either
-    happens in this line or nowhere.
+    The previous version pulled one line out of _resubmit's source and eval'd
+    its right-hand side — a source check wearing a function call. It cannot
+    notice a later statement deleting the key, and Codex's mutant did exactly
+    that and passed. What landed on disk is the only version of this check
+    that means anything.
+
+    The enqueue is stubbed because a queue is not under test; the meta write
+    is left alone because it is.
     """
-    if not _rej_line:
-        return "MISSING"
-    expr = _rej_line.strip().split(":", 1)[1].rstrip(",")
-    return eval(expr, {}, {"prev_meta": {"flag_rejected": parent_rejected}})
+    parent = make_job("retry-parent-" + str(parent_rejected), module="rev",
+                      status="no_flag", flag_rejected=parent_rejected,
+                      description="d")
+    pj = DATA / "jobs" / parent
+    (pj / "bin").mkdir(exist_ok=True)
+    (pj / "bin" / "chal").write_bytes(b"\x7fELF")
+
+    class _Q:
+        def enqueue(self, *a, **k):
+            return None
+
+    _real = RT.get_queue
+    RT.get_queue = lambda: _Q()
+    try:
+        new_id = RT._resubmit(C.read_meta(parent), "hint", pj)
+    finally:
+        RT.get_queue = _real
+    return (C.read_meta(new_id) or {}).get("flag_rejected")
 
 
 check(
