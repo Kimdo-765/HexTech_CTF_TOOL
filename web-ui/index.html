@@ -71,9 +71,10 @@
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit (requires target URL)
         </label>
-        <!-- No docker_challenge checkbox by design: web's system prompt always
-             offers local Docker as an optional fidelity check, and its analyzer
-             always reaps job-labelled challenge containers at start and finish. -->
+        <label class="checkbox" title="When ticked, the pipeline detects a Dockerfile / compose file in the operator bundle and requires the agent to build &amp; run it as the real runtime. Leave off to keep web's existing agent-decided optional Docker workflow.">
+          <input type="checkbox" name="docker_challenge" />
+          🐳 Docker challenge <span class="capture-flag-note">— require build &amp; run of the bundled Dockerfile</span>
+        </label>
         <label class="checkbox capture-flag-toggle" title="Appends a hard directive to the description: the job only counts as solved when exploit.py captures the REAL flag from the remote target. Local-only / banner-only validation will NOT pass.">
           <input type="checkbox" class="capture-remote-flag-cb" />
           🚩 Capture remote flag <span class="capture-flag-note">— require a real remote flag, not just a working exploit</span>

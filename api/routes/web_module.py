@@ -14,11 +14,10 @@ from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
 
-# Web deliberately has no ``docker_challenge`` Form/meta switch.  Unlike the
-# opt-in modules, its SYSTEM_PROMPT always offers local Docker as an optional,
-# agent-decided fidelity check, and modules.web.analyzer always performs the
-# startup/finally label reaps.  Adding a checkbox here would gate neither of
-# those behaviours and would create a misleading second contract.
+# Web's SYSTEM_PROMPT always offers local Docker as an optional, agent-decided
+# fidelity check.  This opt-in is additive: the analyzer appends a mandatory
+# build/run block only when ``docker_challenge`` is true, while its unconditional
+# startup/finally label reaps remain unchanged for both settings.
 
 @router.post("/analyze")
 async def analyze_web(
@@ -26,6 +25,7 @@ async def analyze_web(
     target_url: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     auto_run: bool = Form(False),
+    docker_challenge: bool = Form(False),
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
@@ -61,6 +61,7 @@ async def analyze_web(
         "target_urls": targets if len(targets) >= 2 else None,
         "description": description,
         "auto_run": auto_run,
+        "docker_challenge": docker_challenge,
         "job_timeout": timeout,
         "model": chosen_model,
         "effort": chosen_effort,

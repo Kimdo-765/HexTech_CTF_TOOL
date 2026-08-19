@@ -5527,22 +5527,26 @@ def docker_challenge_block(job_id: str) -> str:
       - Returns "" when the box is unticked, so the caller's ``if block:``
         guard drops it cleanly and pre-existing / non-docker jobs are wholly
         unaffected.
-      - Wired into rev/crypto/misc/forensic/web3 — and, since 2026-08-09, pwn.
+      - Wired into web/rev/crypto/misc/forensic/web3 — and, since 2026-08-09,
+        pwn. Web retains its always-available optional system guidance when the
+        box is off; the opt-in block makes BUILD + RUN mandatory when it is on.
         The original note here claimed "web and pwn already build+run challenge
-        Dockerfiles unconditionally in their own prompts". That was true of web
-        (see `modules/web/prompts.py`, "RUN THE CHALLENGE LOCALLY") and FALSE of
-        pwn, whose prompts overwhelmingly say to READ a Dockerfile for deploy
+        Dockerfiles unconditionally in their own prompts". Web only offered it
+        as an OPTIONAL agent decision (see `modules/web/prompts.py`, "RUN THE
+        CHALLENGE LOCALLY"), and the claim was FALSE of pwn, whose prompts
+        overwhelmingly say to READ a Dockerfile for deploy
         context (sysctl knobs, xinetd) with a single parenthetical about
         building one. Acting on that false premise is what kept pwn out of the
         opt-in, and job b914889c1f9c paid for it: the agent verified a 2 MiB
         libc-alignment premise against the STAGED libc, assumed the remote
         matched "from identical deployment image", and burned 10,000 remote
         attempts on a chain whose premise a local `docker build` falsifies in
-        seconds. web is still excluded — its own prompt already covers this.
-      - DETECTION is deterministic (scan the OPERATOR-SUPPLIED upload roots);
-        RUNNING is agent-driven — a CTF ENTRYPOINT almost always needs the right
-        input (e.g. ``main flag.png``), so the flag comes from the agent using
-        the container interactively, not a blind system auto-run.
+        seconds.
+      - DETECTION is deterministic (scan the OPERATOR-SUPPLIED upload roots).
+        When enabled, BUILD + RUN is mandatory; only the run parameters and
+        interaction are agent-driven because a CTF ENTRYPOINT almost always
+        needs the right input (e.g. ``main flag.png``). The flag therefore comes
+        from the agent using the container interactively, not a blind auto-run.
       - Cleanup is handled by ``reap_chal_containers`` (label
         ``hextech_job=<id>``), which the SAME modules now call at start+finally
         whenever this box is set — so a container the agent spins up here can't

@@ -15,6 +15,7 @@ import anyio
 from modules._common import (
     cleanup_job_processes,
     collect_outputs,
+    docker_challenge_block,
     extract_cost,
     no_flag_status,
     prior_session_cost,
@@ -244,6 +245,13 @@ async def _run_agent(
     _js_block = js_engine_block(job_id)
     if _js_block:
         user_prompt = user_prompt + "\n\n" + _js_block
+    # Opt-in force layered over web's existing optional Docker guidance.  The
+    # helper is an exact no-op when unticked; when ticked it detects the bundled
+    # runtime and requires BUILD + RUN rather than leaving that choice to the
+    # agent.  Cleanup remains unconditional in run_job for both settings.
+    _docker_block = docker_challenge_block(job_id)
+    if _docker_block:
+        user_prompt = user_prompt + "\n\n" + _docker_block
 
     # Auto-pre-recon — recon maps the source tree (routes, sinks, auth)
     # before main's first turn so main starts with a route inventory

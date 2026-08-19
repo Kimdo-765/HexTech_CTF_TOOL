@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Pin web's intentional always-available, agent-decided Docker contract.
+"""Pin web's opt-in Docker force without breaking its optional baseline.
 
-Web predates the operator-gated ``docker_challenge`` helper.  Its system prompt
-always offers a bundled Dockerfile as an optional runtime-fidelity check, while
-``run_job`` always sweeps/reaps labelled containers.  A standalone web checkbox
-would therefore be misleading: it would change neither prompt nor cleanup.
+The system prompt always offers a bundled Dockerfile as an agent-decided
+runtime-fidelity check.  The ``docker_challenge`` form/meta switch is additive:
+ON appends the shared mandatory BUILD+RUN block, while OFF leaves the prompt
+baseline unchanged.  ``run_job`` sweeps/reaps labelled containers in both cases.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import asyncio
 import importlib.util
 import json
 import os
@@ -22,7 +23,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MUTATIONS = ("none", "drop-prompt", "add-web-checkbox", "gate-startup-reap")
+MUTATIONS = (
+    "none",
+    "drop-optional-prompt",
+    "drop-web-checkbox",
+    "drop-web-acceptance",
+    "drop-web-persistence",
+    "drop-web-injection",
+    "gate-startup-reap",
+)
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS, default="none")
 args = parser.parse_args()
@@ -33,13 +42,26 @@ prompt_src = (ROOT / "modules" / "web" / "prompts.py").read_text()
 analyzer_src = (ROOT / "modules" / "web" / "analyzer.py").read_text()
 common_src = (ROOT / "modules" / "_common.py").read_text()
 
-if args.mutate == "drop-prompt":
+if args.mutate == "drop-optional-prompt":
     prompt_src = prompt_src.replace("RUN THE CHALLENGE LOCALLY", "REMOVED", 1)
-elif args.mutate == "add-web-checkbox":
-    marker = '<form id="web-form">'
-    html_src = html_src.replace(
-        marker,
-        marker + '\n<input type="checkbox" name="docker_challenge" />',
+elif args.mutate == "drop-web-checkbox":
+    html_src = html_src.replace('name="docker_challenge"', 'name="docker_challenge_removed"', 1)
+elif args.mutate == "drop-web-acceptance":
+    route_src = route_src.replace(
+        "docker_challenge: bool = Form(False),",
+        "docker_challenge: bool = False,",
+        1,
+    )
+elif args.mutate == "drop-web-persistence":
+    route_src = route_src.replace(
+        '"docker_challenge": docker_challenge,',
+        '"docker_challenge_removed": docker_challenge,',
+        1,
+    )
+elif args.mutate == "drop-web-injection":
+    analyzer_src = analyzer_src.replace(
+        "_docker_block = docker_challenge_block(job_id)",
+        '_docker_block = ""',
         1,
     )
 elif args.mutate == "gate-startup-reap":
@@ -86,31 +108,45 @@ def call_name(node: ast.AST) -> str | None:
 
 route_tree = ast.parse(route_src)
 analyze_web = function(route_tree, "analyze_web")
-route_parameters = {
-    arg.arg for arg in [*analyze_web.args.args, *analyze_web.args.kwonlyargs]
-}
-persisted_keys = {
-    key.value
+route_arguments = [*analyze_web.args.args, *analyze_web.args.kwonlyargs]
+route_defaults = [
+    *([None] * (len(analyze_web.args.args) - len(analyze_web.args.defaults))),
+    *analyze_web.args.defaults,
+    *analyze_web.args.kw_defaults,
+]
+route_parameter_defaults = dict(zip((arg.arg for arg in route_arguments), route_defaults))
+docker_default = route_parameter_defaults.get("docker_challenge")
+docker_is_opt_in_form = (
+    isinstance(docker_default, ast.Call)
+    and call_name(docker_default) == "Form"
+    and len(docker_default.args) == 1
+    and isinstance(docker_default.args[0], ast.Constant)
+    and docker_default.args[0].value is False
+)
+persisted_pairs = {
+    (key.value, value.id)
     for node in ast.walk(analyze_web)
     if isinstance(node, ast.Dict)
-    for key in node.keys
-    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    for key, value in zip(node.keys, node.values)
+    if isinstance(key, ast.Constant)
+    and isinstance(key.value, str)
+    and isinstance(value, ast.Name)
 }
 
 web_start = html_src.index('<section id="panel-web"')
 web_end = html_src.index('<section id="panel-', web_start + 1)
 web_panel = html_src[web_start:web_end]
 
-check("standalone web route has no docker_challenge parameter",
-      "docker_challenge" in route_parameters, False)
-check("standalone web meta has no redundant docker_challenge key",
-      "docker_challenge" in persisted_keys, False)
-check("standalone web form has no misleading Docker checkbox",
-      bool(re.search(r'name=["\']docker_challenge["\']', web_panel)), False)
-check("the route explains the intentional asymmetric contract",
-      "Web deliberately has no ``docker_challenge`` Form/meta switch" in route_src, True)
-check("the form explains why the checkbox is absent",
-      "No docker_challenge checkbox by design" in web_panel, True)
+check("standalone web form offers the Docker opt-in",
+      bool(re.search(r'name=["\']docker_challenge["\']', web_panel)), True)
+check("standalone web route accepts the box as Form(False)",
+      docker_is_opt_in_form, True)
+check("standalone web meta persists the accepted value",
+      ("docker_challenge", "docker_challenge") in persisted_pairs, True)
+check("the UI explains ON is mandatory and OFF preserves agent choice",
+      "require build &amp; run" in web_panel and "agent-decided optional" in web_panel, True)
+check("the route explains the additive force and unconditional cleanup",
+      "opt-in is additive" in route_src and "startup/finally label reaps" in route_src, True)
 
 check("web's system prompt always contains the local-Docker section",
       "RUN THE CHALLENGE LOCALLY" in prompt_src, True)
@@ -118,8 +154,9 @@ check("the prompt leaves execution agent-decided rather than mandatory",
       "This is OPTIONAL" in prompt_src, True)
 check("the prompt specifies the reaper's job label",
       "--label hextech_job=$JOB_ID" in prompt_src, True)
-check("the shared opt-in helper explicitly excludes web",
-      "web is still excluded — its own prompt already covers this" in common_src, True)
+check("the shared helper documents web's OFF/ON split",
+      "Web retains its always-available optional system guidance" in common_src
+      and "mandatory when it is on" in common_src, True)
 
 analyzer_tree = ast.parse(analyzer_src)
 run_agent = function(analyzer_tree, "_run_agent")
@@ -134,6 +171,19 @@ for node in ast.walk(run_agent):
             )
 check("_run_agent passes SYSTEM_PROMPT without consulting meta",
       system_prompt_values, ["SYSTEM_PROMPT"])
+docker_calls = [
+    node
+    for node in ast.walk(run_agent)
+    if call_name(node) == "docker_challenge_block"
+    and len(node.args) == 1
+    and isinstance(node.args[0], ast.Name)
+    and node.args[0].id == "job_id"
+]
+check("_run_agent reads the shared force block for this job",
+      len(docker_calls), 1)
+check("_run_agent appends the non-empty force block to the user prompt",
+      '_docker_block = docker_challenge_block(job_id)' in analyzer_src
+      and 'user_prompt = user_prompt + "\\n\\n" + _docker_block' in analyzer_src, True)
 
 run_job = function(analyzer_tree, "run_job")
 startup_reaps = [
@@ -191,7 +241,73 @@ with tempfile.TemporaryDirectory(prefix="web-docker-contract-") as td:
         })
 
     sys.path.insert(0, str(ROOT))
-    from modules._common import reap_chal_containers
+    from modules._common import docker_challenge_block, reap_chal_containers
+
+    # Execute the real ON/OFF helper contract against deterministic web jobs.
+    # OFF must be byte-for-byte additive (empty block); ON must issue commands,
+    # not merely echo the value persisted in meta.
+    for job_id, enabled in (("web-off", False), ("web-on", True)):
+        root = jobs / job_id
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "Dockerfile").write_text("FROM busybox\nCMD httpd -f -p 8080\n")
+        (root / "meta.json").write_text(json.dumps({
+            "id": job_id, "module": "web", "docker_challenge": enabled,
+        }))
+    off_block = docker_challenge_block("web-off")
+    on_block = docker_challenge_block("web-on")
+    check("OFF emits no force block at all", off_block, "")
+    check("ON detects web's bundled Dockerfile",
+          "/data/jobs/$JOB_ID/src/Dockerfile" in on_block, True)
+    check("ON requires both build and run instead of leaving agent discretion",
+          "BUILD IT AND RUN IT" in on_block
+          and "docker build" in on_block
+          and "docker run" in on_block, True)
+
+    # Drive the real web prompt assembler with the expensive agent/report paths
+    # replaced by recorders.  This proves the block reaches the actual
+    # ``initial_prompt`` boundary, not only that the helper can render in
+    # isolation.  The system prompt must stay byte-identical across the switch.
+    if importlib.util.find_spec("anyio") is None:
+        sys.modules["anyio"] = types.ModuleType("anyio")
+    if "modules._runner" not in sys.modules:
+        runner_stub = types.ModuleType("modules._runner")
+        runner_stub.attempt_sandbox_run = lambda *a, **k: None
+        sys.modules["modules._runner"] = runner_stub
+    from modules.web import analyzer as web_analyzer
+
+    captured_prompts: dict[str, str] = {}
+    captured_system_prompts: dict[str, str] = {}
+
+    def fake_options(*, job_id, system_prompt, **kwargs):
+        captured_system_prompts[job_id] = system_prompt
+        return object()
+
+    async def fake_main(job_id, **kwargs):
+        captured_prompts[job_id] = kwargs["initial_prompt"]
+        return None
+
+    async def fake_report(**kwargs):
+        return None
+
+    web_analyzer.make_main_session_options = fake_options
+    web_analyzer.run_main_agent_session = fake_main
+    web_analyzer.run_report_phase = fake_report
+    web_analyzer.cleanup_job_processes = lambda *a, **k: None
+    web_analyzer.collect_outputs = lambda *a, **k: {}
+    web_analyzer.log_line = lambda *a, **k: None
+
+    for job_id in ("web-off", "web-on"):
+        asyncio.run(web_analyzer._run_agent(
+            job_id, None, "http://example.test", None, False,
+        ))
+
+    check("OFF final user prompt contains no force stanza",
+          "DOCKER CHALLENGE (you opted in" in captured_prompts["web-off"], False)
+    check("ON final user prompt reaches the agent with the mandatory stanza",
+          "BUILD IT AND RUN IT" in captured_prompts["web-on"], True)
+    check("ON/OFF preserve the same optional system prompt",
+          captured_system_prompts["web-on"] == captured_system_prompts["web-off"]
+          and "This is OPTIONAL" in captured_system_prompts["web-off"], True)
 
     calls = temp / "docker.calls"
     fake_bin = temp / "bin"
