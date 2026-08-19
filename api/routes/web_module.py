@@ -14,6 +14,11 @@ from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
 
+# Web deliberately has no ``docker_challenge`` Form/meta switch.  Unlike the
+# opt-in modules, its SYSTEM_PROMPT always offers local Docker as an optional,
+# agent-decided fidelity check, and modules.web.analyzer always performs the
+# startup/finally label reaps.  Adding a checkbox here would gate neither of
+# those behaviours and would create a misleading second contract.
 
 @router.post("/analyze")
 async def analyze_web(
