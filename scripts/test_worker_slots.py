@@ -722,12 +722,15 @@ def test_carry_limits_note() -> None:
     import ast as _ast
     src = (ROOT / "api" / "routes" / "retry.py").read_text()
     tree = _ast.parse(src)
-    want = {"_CARRY_LIMITS_NOTE", "_retry_preamble", "_resume_preamble"}
+    want = {
+        "_CARRY_LIMITS_NOTE", "_RETRY_ANTI_OVERFIT_NOTE",
+        "_retry_preamble", "_resume_preamble",
+    }
     nodes = [n for n in tree.body
              if (isinstance(n, _ast.Assign)
                  and any(getattr(t, "id", "") in want for t in n.targets))
              or (isinstance(n, _ast.FunctionDef) and n.name in want)]
-    chk("both preamble builders and the note were found", len(nodes) == 3, len(nodes))
+    chk("both preamble builders and both notes were found", len(nodes) == 4, len(nodes))
     ns = {"_CTF_CONTEXT_HEADER": "[HDR]",
           "_STALE_PATH_WARNING_TMPL": "[STALE {prev_id}]",
           "_sanitize_hint": lambda h: f"[HINT:{h}]"}
@@ -747,6 +750,17 @@ def test_carry_limits_note() -> None:
     chk("the note names the global-install case", "pip install" in note)
     chk("the note tells the agent to keep a path without the tool",
         "without it" in note)
+    anti = ns["_RETRY_ANTI_OVERFIT_NOTE"]
+    chk("retry anti-overfit note requires failure classification",
+        all(k in anti for k in ("IMPLEMENTATION", "STRATEGY", "UNKNOWN")))
+    chk("retry anti-overfit note requires materially different hypotheses",
+        "materially different" in anti and "discriminating test" in anti)
+    chk("retry anti-overfit note forbids replaying refuted branches",
+        "not repeat a refuted branch" in anti)
+    for fresh in (False, True):
+        out = ns["_retry_preamble"]("PREVJOB", "do the thing", fresh=fresh)
+        chk(f"retry(fresh={fresh}) injects anti-overfit before the hint",
+            out.index("ANTI-OVERFIT") < out.index("[HINT:"))
 
 
 # --------------------------------------------------------------------------

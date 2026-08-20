@@ -4,11 +4,10 @@ Given an existing job whose exploit/solver failed (or finished without a
 flag), spin up a quick reviewer turn on the selected agent provider that:
 
 1. Reads the original description, run.log, exploit.py / solver.py,
-   their stdout/stderr, plus 1-2 key source files.
-2. Writes ONE concise paragraph that pinpoints why the previous attempt
-   failed and gives the next agent a sharp hint (e.g. "you must POST
-   the payload to /upload, the server then triggers a headless bot to
-   visit it") in <= 1500 characters.
+   their stdout/stderr, plus module-relevant source files.
+2. Writes a compact, evidence-labelled retry plan that distinguishes a
+   broken implementation from a broken strategy and requires novel,
+   falsifiable hypotheses when the prior chain itself is unproven.
 
 Then enqueue a new job in the same module with that hint appended to
 the original description. The user gets back the new job_id and can
@@ -139,7 +138,7 @@ LATEST_REVIEWER_MODEL = LATEST_JUDGE_MODEL
 # Always burn max extended-thinking budget on the reviewer. The hint is
 # the only steering signal a /retry gets, so we want the strongest
 # diagnosis the model can produce — final output is still capped at
-# ~1500 chars by the prompt, but the reasoning depth is not. 31999 is
+# ~2500 chars by the prompt, but the reasoning depth is not. 31999 is
 # the documented Opus 4.7 extended-thinking ceiling (32K - 1).
 _REVIEWER_MAX_THINKING_TOKENS = "31999"
 
@@ -169,25 +168,39 @@ competition infrastructure). The target is a disposable challenge box,
 not a production system or a third-party service.
 
 [TASK]
-Review the previous attempt's artifacts below and produce ONE concise
-paragraph (<=1500 chars) that:
+Review the previous attempt's artifacts and produce ONE compact retry plan
+(<=2500 chars). The goal is to reach the real target result, not to make a
+non-working script cleaner. Previous conclusions and retry hints are evidence
+to audit, not authoritative facts.
 
-- Names the most likely reason the previous attempt did not reach its
-  goal (wrong attack surface, wrong sink, a missing trigger step, a
-  timing/reliability problem, a missing result-reporting callback, etc.).
-- Gives the next agent the SPECIFIC, concrete correction it needs: which
-  endpoint or input to use, what the target actually does after a given
-  request, which attribute/event/offset matters, or which job-provided
-  callback variable to use for result reporting (do not hardcode
-  third-party services like webhook.site / requestbin / interact.sh).
-- Does NOT rewrite the solution and does NOT include code blocks.
-- Uses plain, neutral, factual technical phrasing throughout.
+Use exactly this plain-text shape:
+CLASS: IMPLEMENTATION | STRATEGY | ENVIRONMENT | UNKNOWN
+VERIFIED: facts directly supported by source, stdout/stderr, or an executed probe
+REFUTED: attempted hypotheses and the observed signal that disproved each one
+NEXT: the correction, or 2-3 materially distinct untested hypotheses, each with
+      its cheapest discriminating test and the success/failure signal
+PRESERVE: working primitives or artifacts that should not be discarded
 
-Reply with ONLY the hint paragraph — no preamble, no markdown headers.
+Anti-overfitting rules:
+- Choose IMPLEMENTATION only when the exploit chain is evidenced and a concrete
+  code/runtime defect prevented it. Then name the exact correction.
+- For STRATEGY or UNKNOWN, do not prescribe another polish pass on the same
+  chain. Give 2-3 hypotheses that were not already exhausted; they must differ
+  in attack surface or primitive, not merely payload spelling or wordlist size.
+- Label inference as hypothesis. Never call a route "intended", "required", or
+  "unnecessary" without direct source or runtime evidence in the artifacts.
+- Do not repeat a refuted branch unless new evidence changes one of its premises.
+- Do not invent an endpoint, writable path, callback capability, credential, or
+  deployed/source mismatch. If the supplied evidence is insufficient, say so
+  under UNKNOWN and propose a test that obtains the missing ground truth.
+- Do not include code blocks. Use neutral technical phrasing. For result
+  reporting, use only job-provided callback variables, never third-party services.
+
+Reply with ONLY the compact plan — no preamble or markdown headers.
 
 CRITICAL: Do NOT call any tools (no shell, no file read, no web, no
 subagent). Everything you need is already in the user message. Answer
-immediately with the hint paragraph only.
+immediately with the compact plan only.
 """
 
 
@@ -197,6 +210,42 @@ immediately with the hint paragraph only.
 # target), the tail holds the postjudge diagnosis + retry_hint + stop_reason.
 # Giving it a dedicated budget means adding the tail does not cost the head.
 RUN_LOG_CONTEXT_CHARS = 9000
+
+
+# The reviewer cannot call tools, so the source excerpts selected here are its
+# only chance to challenge a prior run's narrative. A Python-centric list made
+# the web reviewer infer PHP/JS behavior from report prose and overfit its retry
+# hint to an unverified "intended" path. Keep the list module-aware and bounded:
+# enough authoritative code to falsify a stale theory without flooding the
+# review turn with every file in the archive.
+_REVIEW_SOURCE_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "web": (
+        "index.php", "flag.php", "bot.php", "bot.js", "app.py",
+        "server.py", "main.py", "package.json", "Dockerfile",
+        "docker-compose.yml",
+    ),
+    "pwn": (
+        "main.c", "chall.c", "challenge.c", "vuln.c", "server.c",
+        "Dockerfile", "docker-compose.yml",
+    ),
+    "crypto": (
+        "challenge.py", "chall.py", "server.py", "task.py", "main.py",
+        "Dockerfile", "docker-compose.yml",
+    ),
+    "rev": (
+        "main.c", "main.cpp", "challenge.c", "chall.c", "*.rs", "*.go",
+        "Dockerfile",
+    ),
+    "web3": (
+        "*.sol", "challenge.py", "deploy.py", "script.js", "package.json",
+        "foundry.toml", "Dockerfile",
+    ),
+    "forensic": (
+        "challenge.py", "generator.py", "main.py", "Dockerfile",
+        "docker-compose.yml",
+    ),
+}
+_REVIEW_SOURCE_LIMIT = 6
 
 
 def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
@@ -221,6 +270,11 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     report.md at gather-time addresses the priming at the source.
     """
     parts: list[str] = []
+    try:
+        meta = json.loads((jd / "meta.json").read_text(errors="replace"))
+    except (OSError, ValueError, TypeError):
+        meta = {}
+    module = str(meta.get("module") or "").strip().lower()
 
     def _read(
         name: str, label: str | None = None, *, tail_bias: bool = False
@@ -287,18 +341,29 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     _read("solver.py.stderr", "solver stderr")
     _read("callbacks.jsonl")
 
-    # Top 2-3 source files (entry-point heuristic)
+    # Bounded, module-aware authoritative sources. The reviewer is tool-less;
+    # omitting the real entry point makes report prose look more authoritative
+    # than code and is a direct source of retry-hint overfitting.
     src_root = jd / "src" / "extracted"
     if not src_root.is_dir():
         src_root = jd / "src"
     if src_root.is_dir():
-        for cand in (
-            "deploy/app.py", "app.py", "deploy/server.py", "server.py",
-            "deploy/static/main.py", "deploy/templates/index.html",
-            "Dockerfile", "deploy/Dockerfile", "docker-compose.yml",
-        ):
-            for p in src_root.rglob(cand):
-                _read(p.relative_to(jd).as_posix(), f"src/{cand}")
+        fallback = (
+            "app.py", "server.py", "main.py", "index.php", "main.c",
+            "Dockerfile", "docker-compose.yml",
+        )
+        patterns = _REVIEW_SOURCE_CANDIDATES.get(module, fallback)
+        seen: set[Path] = set()
+        for pattern in patterns:
+            for p in sorted(src_root.rglob(pattern)):
+                if not p.is_file() or p in seen:
+                    continue
+                seen.add(p)
+                rel_job = p.relative_to(jd).as_posix()
+                rel_src = p.relative_to(src_root).as_posix()
+                _read(rel_job, f"src/{rel_src}")
+                break
+            if len(seen) >= _REVIEW_SOURCE_LIMIT:
                 break
 
     return "\n\n".join(parts)
@@ -2062,7 +2127,7 @@ def _frame_reviewer_context(context: str) -> str:
         "The following are artifacts (logs, notes, and scripts) from a "
         "previous run of an authorized security-testing harness on an "
         "isolated practice target. Review them per the system-prompt "
-        "task instructions and reply with the hint paragraph in plain, "
+        "task instructions and reply with the compact retry plan in plain, "
         "neutral phrasing.\n\n"
         + context
     )
@@ -2189,6 +2254,27 @@ _CARRY_LIMITS_NOTE = (
     "those packages either).\n\n"
 )
 
+
+_RETRY_ANTI_OVERFIT_NOTE = (
+    "PROBLEM-SOLVING / ANTI-OVERFIT CONTRACT:\n"
+    "The goal is the real remote result, not preserving the previous theory "
+    "or polishing a script that has no verified end-to-end chain. Explicit "
+    "operator decisions remain authoritative; technical claims from prior "
+    "artifacts, model conclusions, and retry hints do not. Treat such claims "
+    "as hypotheses unless source or an executed probe supports them.\n"
+    "Before editing, classify the failure as IMPLEMENTATION (verified chain, "
+    "broken code), STRATEGY (chain/prerequisite disproved), ENVIRONMENT, or "
+    "UNKNOWN. Preserve verified primitives and record which branches are "
+    "refuted. For IMPLEMENTATION, patch the concrete defect. For STRATEGY or "
+    "UNKNOWN, do not keep tuning the same payload, wordlist, or wrapper: form "
+    "at least two materially different, untested hypotheses and run the "
+    "cheapest discriminating test for each before choosing a new chain. Do "
+    "not repeat a refuted branch without new evidence that changes a premise. "
+    "Do not call a route intended/required/unnecessary without direct "
+    "evidence. Defer report, timeout, and parser polish until a required "
+    "primitive has produced its expected runtime signal.\n\n"
+)
+
 def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
     """Preamble for the standard retry path (failed / no_flag /
     finished). The new agent is launched with `resume=<prev_session>` +
@@ -2233,11 +2319,12 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
             "Write/Edit MUST use bare or `./`-relative paths per the rules "
             "above.\n\n"
             + _CARRY_LIMITS_NOTE
+            + _RETRY_ANTI_OVERFIT_NOTE
             + f"{_sanitize_hint(hint)}"
         )
     return (
         _CTF_CONTEXT_HEADER
-        + f"\n[retry of job {prev_id} — same Claude session forked]\n"
+        + f"\n[retry of job {prev_id} — prior-session fork requested]\n"
         + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
         + "\n\nYour current working directory IS the new job's work "
         f"tree. Everything the previous agent produced — partial "
@@ -2251,7 +2338,8 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
         f"session (rare), `ls` once and read whichever file matters "
         f"before applying the hint.\n\n"
         + _CARRY_LIMITS_NOTE
-            + f"{_sanitize_hint(hint)}"
+        + _RETRY_ANTI_OVERFIT_NOTE
+        + f"{_sanitize_hint(hint)}"
     )
 
 

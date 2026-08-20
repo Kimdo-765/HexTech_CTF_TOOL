@@ -6756,10 +6756,11 @@ def _format_postjudge_user_turn(
     sandbox_result: dict,
 ) -> str:
     """Compose the user-turn body that gets injected back into main's
-    SDK session after a failed sandbox run. Tells main what verdict
-    came back, gives it the postjudge retry_hint verbatim, and asks
-    for a corrected script. Tail of stdout/stderr is included so main
-    can cross-check rather than trusting judge's summary blindly.
+    SDK session after a failed sandbox run or a prejudge ship-block.
+    Tells main what verdict came back, gives it the retry_hint verbatim,
+    and asks for a corrected implementation or a genuinely different
+    strategy. Tail of stdout/stderr is included so main can cross-check
+    rather than trusting judge's summary blindly.
 
     findings.json schema validation is intentionally NOT plumbed in:
     cookbook fidelity puts the structured-output transformation in a
@@ -6797,6 +6798,17 @@ def _format_postjudge_user_turn(
             "  · supervise judge killed the container due to stalled output\n"
         )
     cap_str = "∞" if max_attempts < 0 else str(max_attempts)
+    prejudge_only = verdict == "prejudge_blocked"
+    if prejudge_only:
+        execution_notice = (
+            "PREJUDGE STOPPED THE SHIP BEFORE SANDBOX EXECUTION. The issues "
+            "below describe an unproven chain, not a failed runtime attempt."
+        )
+    else:
+        execution_notice = (
+            "THE SANDBOX RUN HAS COMPLETED. The stdout/stderr below are "
+            "runtime evidence."
+        )
 
     # Prescriptive fix snippet for the heap failure code, prepended
     # ahead of the model's free-form retry_hint. The deterministic
@@ -6838,21 +6850,20 @@ def _format_postjudge_user_turn(
     return (
         f"🔁 AUTO-RETRY {attempt_idx}/{cap_str} — postjudge feedback\n"
         f"\n"
-        f"⚠️ THE SANDBOX RUN HAS ALREADY COMPLETED. This message IS the "
-        f"postjudge verdict — do NOT respond with 'awaiting sandbox' "
+        f"⚠️ {execution_notice} This message IS the current verdict — do NOT "
+        f"respond with 'awaiting sandbox' "
         f"or 'I'll stop the loop here / reschedule'. The orchestrator "
-        f"is in the auto-retry loop NOW. Either (a) modify "
-        f"./{script_filename} per the retry hint and end your turn so "
-        f"the orchestrator can re-execute it, or (b) explicitly "
-        f"`Bash(rm -f ./{script_filename})` if you're giving up. "
+        f"is in the auto-retry loop NOW. First classify the failure: for an "
+        f"IMPLEMENTATION defect, modify ./{script_filename}; for a STRATEGY "
+        f"or UNKNOWN failure, test materially different hypotheses and "
+        f"replace the invalid chain rather than polishing it. "
         f"Doing neither — returning without an edit — makes the "
         f"orchestrator re-run the SAME unchanged script for a "
         f"guaranteed-fail second sandbox spin (wasted ~$2-5 of "
         f"cache_creation). The detection added 2026-05-25 will "
         f"actually halt that case mid-flight, so just respond and edit.\n"
         f"\n"
-        f"The orchestrator just executed `{script_filename}` in the runner "
-        f"sandbox. Result:\n"
+        f"Runner/prejudge result for `{script_filename}`:\n"
         f"  · exit_code: {exit_code}\n"
         f"  · postjudge verdict: {verdict}\n"
         f"  · postjudge summary: {summary or '(empty)'}\n"
@@ -6874,17 +6885,23 @@ def _format_postjudge_user_turn(
         f"\n"
         f"WHAT TO DO NOW:\n"
         f"  1. Read the script as it stands (`Read ./{script_filename}`).\n"
-        f"  2. Apply the fix from the retry hint. If you disagree with the\n"
-        f"     hint after seeing the tails, fix what you actually believe\n"
-        f"     is broken — but say so explicitly.\n"
-        f"  3. Re-run the JUDGE GATE (peer subagent) on the patched script\n"
+        f"  2. Audit the hint against source and executed evidence. Record\n"
+        f"     VERIFIED, REFUTED, and UNTESTED premises; the hint is not\n"
+        f"     authoritative merely because a judge wrote it.\n"
+        f"  3. If the chain is verified, patch its concrete implementation\n"
+        f"     defect. If the chain/prerequisite is refuted or unknown, test\n"
+        f"     at least two materially different untested hypotheses using\n"
+        f"     their cheapest discriminating probes, then replace the script\n"
+        f"     only with the strongest evidence-backed chain.\n"
+        f"  4. Re-run the JUDGE GATE (peer subagent) on the patched script\n"
         f"     before ending your turn. The orchestrator will rerun the\n"
         f"     sandbox automatically after you finish.\n"
-        f"  4. Keep the artifact path stable (`./{script_filename}` and\n"
+        f"  5. Keep the artifact path stable (`./{script_filename}` and\n"
         f"     `./report.md`).\n"
-        f"  5. If you cannot fix this (genuinely stuck or the bug class is\n"
-        f"     beyond the available primitive), say so and `Bash(rm -f "
-        f"./{script_filename})` so the orchestrator skips the rerun.\n"
+        f"  6. Do not delete the artifact merely because the current theory\n"
+        f"     failed. `Bash(rm -f ./{script_filename})` is the final\n"
+        f"     concession only after the alternative-hypothesis audit is\n"
+        f"     documented and no untested evidence-backed branch remains.\n"
     )
 
 
@@ -10020,9 +10037,22 @@ async def run_main_agent_session(
                     _seen.append(_pj_sig)
                     summary["prejudge_block_redirects"] = _n + 1
                     retry_hint = (
-                        "prejudge BLOCKED ship — the sandbox never ran. Fix "
-                        "THESE concrete issues and re-ship the SAME script "
-                        "(do NOT start over):\n- " + "\n- ".join(_pj_issues[:6])
+                        "prejudge BLOCKED ship — the sandbox never ran. "
+                        "These issues are evidence about the CURRENT chain, "
+                        "not proof that one proposed correction is the "
+                        "intended solution. First classify them as an "
+                        "IMPLEMENTATION defect (verified chain, broken code) "
+                        "or a STRATEGY/UNKNOWN defect (missing or disproved "
+                        "primitive). Patch and re-ship the same chain only in "
+                        "the first case. In the second case, stop polishing "
+                        "that chain: preserve verified primitives, mark "
+                        "refuted premises, test at least two materially "
+                        "different untried hypotheses with the cheapest "
+                        "discriminating probe, and replace the script with "
+                        "the strongest evidence-backed chain. Do not repeat "
+                        "a refuted branch without new evidence.\n\n"
+                        "CURRENT CHAIN ISSUES:\n- "
+                        + "\n- ".join(_pj_issues[:6])
                         + "\n\nIf an issue says a primitive is 'untestable "
                         "locally' (vsyscall / CET / kernel — the worker "
                         "physically cannot test it), do NOT abandon it: the run "
@@ -10037,7 +10067,10 @@ async def run_main_agent_session(
                         "verdict": "prejudge_blocked",
                         "next_action": "continue",
                         "retry_hint": retry_hint,
-                        "summary": "prejudge ship-block — fix the issues, re-ship",
+                        "summary": (
+                            "prejudge ship-block — classify the failure, "
+                            "reassess the chain, then retry"
+                        ),
                     }
                     log_fn(
                         f"[orchestrator] prejudge BLOCKED — redirecting its "

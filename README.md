@@ -9,8 +9,10 @@ Seven Claude-driven roles split by responsibility:
 
 - **reviewer** — no tools, always max extended thinking. Lives in the api
   container. Reads the prior job's `run.log` / exploit / stdout-stderr /
-  source on `/retry` and `/resume` and writes ONE 1500-char paragraph hint
-  that is hoisted to the next agent's prompt as `⚠ PRIORITY GUIDANCE`.
+  module-relevant source on `/retry` and `/resume` and writes one compact,
+  evidence-labelled retry plan (≤2500 chars). The plan separates verified
+  facts from refuted and untested hypotheses so the next attempt does not
+  overfit to the previous agent's theory.
   Its model is resolved per job (`resolve_reviewer_model`): preset
   `reviewer` slot > preset `judge` slot > the job's main-derived model —
   a blank `reviewer` slot behaves exactly like the old "reviewer follows
@@ -183,9 +185,9 @@ into a curated, per-language commentary feed (see
 ### reviewer (`api/routes/retry.py`)
 
 - Triggered by `/retry/stream` and `/resume/stream` when no manual hint is supplied.
-- `_gather_context()` bundles the prior job's `meta.json`, `run.log`, `report.md`, `exploit.py` / `solver.py`, std{out,err}, `callbacks.jsonl`, and 2–3 entry-point source files.
-- Replies with ONE ≤1500-char paragraph diagnosing the failure. Streams to the browser over SSE, then is hoisted into the next job's prompt as `⚠ PRIORITY GUIDANCE`.
-- **Max extended-thinking budget** (`MAX_THINKING_TOKENS=31999`) is pinned on every reviewer call — the hint is the only steering signal a `/retry` gets, so depth-of-reasoning matters more than the latency. Final output is still capped at ~1500 chars by the prompt, but the thinking trace is not.
+- `_gather_context()` bundles the prior job's `meta.json`, `run.log`, `report.md`, `exploit.py` / `solver.py`, std{out,err}, `callbacks.jsonl`, and up to six module-relevant entry-point source files (including PHP/JS for Web).
+- Replies with one ≤2500-char plan containing `CLASS`, `VERIFIED`, `REFUTED`, `NEXT`, and `PRESERVE`. Strategy/unknown failures require 2–3 materially distinct untested hypotheses with discriminating tests; unsupported “intended path” claims and repetition of refuted branches are forbidden. The plan streams over SSE and is appended to the next job as `[retry-hint]`.
+- **Max extended-thinking budget** (`MAX_THINKING_TOKENS=31999`) is pinned on every reviewer call — the hint is the only steering signal a `/retry` gets, so depth-of-reasoning matters more than the latency. Final output is capped at ~2500 chars by the prompt, but the thinking trace is not.
 - Auth / rate / credit / policy errors surface in the panel and **block** the new job from being enqueued.
 
 ### main worker (`worker/runner.py`)
@@ -1935,7 +1937,7 @@ fire while the job is still `queued` / `running`. Buttons:
 
 | Button | What happens |
 |---|---|
-| **↻ Retry with reviewer hint** | A separate Claude (Opus 4.7 by default) reads the prior job's `run.log`, exploit/solver, stdout/stderr, and key source files, then writes a one-paragraph diagnosis. That hint is appended to the original description as `[retry-hint] …` and a fresh job is enqueued. Reviewer output streams into the UI live (SSE). |
+| **↻ Retry with reviewer hint** | The routed reviewer reads the prior job's `run.log`, exploit/solver, stdout/stderr, and module-relevant source, then writes an evidence-labelled retry plan designed to avoid repeating the previous theory. That hint is appended to the original description as `[retry-hint] …` and a fresh job is enqueued. Reviewer output streams into the UI live (SSE). |
 | **✏ Retry with my hint** | Inline textarea. Whatever you type is appended as `[retry-hint]` — the reviewer is **not** called. |
 | **💬 Continue (operator note)** | `POST /api/jobs/{id}/continue {comment, target?}`. Re-runs the SAME job id (no new job, no new cwd) resuming the prior SDK session, with the operator note folded in as priority guidance under a "this is NOT a re-investigation — act on the note now; spend a one-shot resource on your COMPLETE exploit, don't probe" framing. Because the cwd is unchanged, the forked conversation's paths stay valid and there is no stale-path re-orientation. For when the agent fully solved the chal but waited on an external action (you restarted a one-shot DreamHack instance, the remote came back, a credential was handed over). The optional target updates `meta.target_url` (a restarted instance usually comes back on a new port — put it in the **New target** field, not the note). |
 | **↻ Stop & resume with reviewer hint** | Only visible while the job is `queued`/`running`. Halts the in-flight job, asks the reviewer to write a diagnosis from the partial run, and submits the new job with that hint. SSE streams progress. |
