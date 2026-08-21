@@ -1175,6 +1175,102 @@ for _label, _call in (
         _st, _new = f"TypeError: {exc}", []
     check(f"{_label}: a rejected upload still returns 400", _st, 400)
     check(f"  ...and leaves no job directory behind", _new, [])
+
+
+# ==========================================================================
+# 8 — when the cleanup cannot run, the refusal is still a refusal AND it says so
+# ==========================================================================
+# reject_job removes the directory a create route already made. If that removal
+# fails, three things must hold at once: the caller still gets the original 400,
+# the orphan is honestly still there, and somebody is told. The first version
+# used ignore_errors=True and satisfied only the first two — a surviving
+# directory was indistinguishable from a cleaned one, and the 7-day TTL reaper
+# is configurable to 0.
+import logging as _logging  # noqa: E402
+
+import api.storage as _storage  # noqa: E402
+
+
+class _Capture(_logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record.getMessage())
+
+
+def _reject_under(job_id, *, make_undeletable):
+    """Call reject_job and report (status, dir survived, diagnostics)."""
+    jd = DATA / "jobs" / job_id
+    jd.mkdir(parents=True, exist_ok=True)
+    (jd / "payload.bin").write_bytes(b"x")
+    if make_undeletable:
+        # Removing a child needs write permission on the PARENT directory, so
+        # this makes rmtree fail for real rather than by monkeypatching it.
+        jd.chmod(0o500)
+    cap = _Capture()
+    log = _logging.getLogger(_storage.__name__)
+    log.addHandler(cap)
+    prev = log.level
+    log.setLevel(_logging.WARNING)
+    status = None
+    try:
+        _storage.reject_job(job_id, 400, "empty file")
+    except _HTTPExc as exc:
+        status = (exc.status_code, exc.detail)
+    finally:
+        log.removeHandler(cap)
+        log.setLevel(prev)
+        if jd.exists():
+            jd.chmod(0o700)
+    survived = jd.exists()
+    if survived:
+        import shutil as _sh
+        _sh.rmtree(jd, ignore_errors=True)
+    return status, survived, cap.records
+
+
+# --- the failure path -------------------------------------------------------
+_st, _survived, _logs = _reject_under("rj-blocked", make_undeletable=True)
+if not _survived:
+    # Running as root (or on a filesystem that ignores the mode) defeats the
+    # injection. Say so as a NAMED failure — a silent skip here would read as
+    # a passing contract.
+    check("cleanup-failure injection actually blocked the removal", _survived, True)
+else:
+    check("a blocked cleanup still returns the original 400",
+          _st, (400, "empty file"))
+    check("  ...and does not pretend the directory is gone", _survived, True)
+    check("  ...and REGRESSION: says so, naming the job and the path",
+          bool(_logs) and "rj-blocked" in _logs[0] and "rj-blocked" in _logs[0],
+          True)
+    check("  ...with the cause, not just the fact",
+          any("Error" in m or "denied" in m or "Permission" in m for m in _logs),
+          True)
+
+# --- the two quiet paths ----------------------------------------------------
+_st, _survived, _logs = _reject_under("rj-clean", make_undeletable=False)
+check("a successful cleanup returns the 400", _st, (400, "empty file"))
+check("  ...removes the directory", _survived, False)
+check("  ...and logs nothing — a warning on the normal path is unread",
+      _logs, [])
+
+_missing = DATA / "jobs" / "rj-absent"
+if _missing.exists():
+    import shutil as _sh2
+    _sh2.rmtree(_missing)
+_cap = _Capture()
+_log = _logging.getLogger(_storage.__name__)
+_log.addHandler(_cap)
+try:
+    _storage.reject_job("rj-absent", 400, "empty file")
+except _HTTPExc as _e:
+    _st = (_e.status_code, _e.detail)
+finally:
+    _log.removeHandler(_cap)
+check("a refusal with nothing to clean still returns the 400", _st, (400, "empty file"))
+check("  ...and logs nothing", _cap.records, [])
 # never reaches this line — _harness_excepthook prints HARNESS ABORT and exits 2
 # instead — so the sweep can tell a caught assertion-red from a harness abort.
 print(f"\n{PASSED + FAILED} checks, {FAILED} failed  (mutate={ARGS.mutate})")

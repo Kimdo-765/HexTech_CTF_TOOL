@@ -229,23 +229,38 @@ if (blockSrc) {
   // — that is the whole history of this file. Neither may be derived from
   // canRetry (that defaulted new modules to allowed), so the invariant lives
   // here instead.
+  // The candidate set is discovered from EVERY declaration that takes part in
+  // the comparison — all three of them. The previous version discovered two
+  // (the server list and the card's canRetry) and therefore could not see a
+  // module added only to the card's canContinue: the name appeared in neither
+  // source it read, so the very list under test was never evaluated at that
+  // name. Discovering "not hardcoded" was half the lesson; "from every list
+  // being compared" is the other half.
+  //
+  // Each declaration is asserted to be found EXACTLY once. A rename would
+  // otherwise yield an empty array, and an empty array compares equal to an
+  // empty array — the check would pass by having nothing to say.
   const retrySrc = read(["api/routes/retry.py", "../api/routes/retry.py"]) || "";
-  const contLine = (retrySrc.split("\n")
-    .find((l) => l.startsWith("_CONTINUABLE_MODULES")) || "");
-  t("the server's continuable list was located", contLine !== "");
-  const serverCont = (contLine.match(/"([a-z0-9-]+)"/g) || [])
-    .map((x) => x.replace(/"/g, "")).sort();
-  // The candidate set is DISCOVERED, not hardcoded: it is the union of the
-  // server's list and whatever the card's own canRetry array names. A
-  // hardcoded list cannot see a module someone just added to canRetry, which
-  // is exactly the case this check exists for.
-  const uiRetryLine = (SRC.split("\n")
-    .find((l) => l.includes("const canRetry = [")) || "");
-  const uiRetry = (uiRetryLine.match(/"([a-z0-9-]+)"/g) || [])
+  const names = (line) => (line.match(/"([a-z0-9-]+)"/g) || [])
     .map((x) => x.replace(/"/g, ""));
-  t("the card's retryable array was located", uiRetry.length > 0, uiRetryLine);
+  const declLines = (src, pred) => src.split("\n").filter(pred);
+
+  const contDecl = declLines(retrySrc, (l) => l.startsWith("_CONTINUABLE_MODULES"));
+  const retryDecl = declLines(SRC, (l) => l.includes("const canRetry = ["));
+  const uiContDecl = declLines(SRC, (l) => l.includes("const canContinue = ["));
+  t("the server's continuable declaration was found exactly once",
+    contDecl.length === 1, contDecl);
+  t("the card's canRetry declaration was found exactly once",
+    retryDecl.length === 1, retryDecl);
+  t("the card's canContinue declaration was found exactly once",
+    uiContDecl.length === 1, uiContDecl);
+
+  const serverCont = names(contDecl[0] || "").sort();
   const candidates = Array.from(new Set([
-    ...serverCont, ...uiRetry, "misc", "hybrid", "live-fire",
+    ...serverCont,
+    ...names(retryDecl[0] || ""),
+    ...names(uiContDecl[0] || ""),
+    "misc", "hybrid", "live-fire",
   ]));
   const uiCont = candidates
     .filter((m) => gatesFor(m, "no_flag").canContinue === true).sort();

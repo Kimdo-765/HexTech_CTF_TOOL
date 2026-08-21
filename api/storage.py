@@ -66,15 +66,39 @@ def reject_job(job_id: str, status_code: int, detail: str) -> None:
     left one `data/jobs/<id>/` behind for every 400: pwn/rev/misc/forensic all
     did it, and nothing ever swept them.
 
-    Never raises from the cleanup: the caller asked to refuse the request, and
-    a failure to tidy must not turn a 400 into a 500. `ignore_errors` covers the
-    dir already being gone and a permission problem alike.
+    Never raises from the cleanup: the caller asked to refuse the request, and a
+    failure to tidy must not turn a 400 into a 500. But it does not stay silent
+    about it either — `ignore_errors=True` alone made a surviving directory
+    indistinguishable from a successful one, and the 7-day TTL reaper is not a
+    substitute (it is configurable to 0, and a week is a long time to carry an
+    orphan nobody knows about). A survivor is logged with the job id, the path
+    and the cause.
+
+    Nothing is logged when the cleanup succeeds, and nothing when there was no
+    directory to begin with — a warning that fires on the normal path is a
+    warning nobody reads.
     """
+    import logging
     import shutil
 
     from fastapi import HTTPException
 
-    shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
+    target = JOBS_DIR / job_id
+    if target.exists():
+        causes: list[str] = []
+
+        def _collect(_func, path, exc_info):
+            exc = exc_info[1]
+            causes.append(f"{path}: {type(exc).__name__}: {exc}")
+
+        shutil.rmtree(target, onerror=_collect)
+        if target.exists():
+            logging.getLogger(__name__).warning(
+                "reject_job(%s): refused with %s but the job directory survived "
+                "at %s — %s",
+                job_id, status_code, target,
+                "; ".join(causes) or "path still present after rmtree",
+            )
     raise HTTPException(status_code=status_code, detail=detail)
 
 

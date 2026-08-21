@@ -146,9 +146,17 @@ _RETRYABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3", "forensic")
 # for, postponed rather than removed. A module nobody has thought about must
 # default to refused.
 #
-# Drift is prevented by the parity assertion in scripts/test_flag_ready.py,
-# which requires every continuable module to have its own dispatch branch. A
-# test is the right place for that invariant; a subtraction is not.
+# Drift is prevented by two parity assertions, not by a subtraction:
+#   scripts/test_flag_ready.py      — every module here has its own dispatch
+#                                     branch, dispatches to itself, and every
+#                                     retryable-but-not-continuable module is
+#                                     refused rather than routed.
+#   scripts/test_dashboard_ui.js    — the card's canContinue list equals this
+#                                     one, with the candidate set discovered
+#                                     from all three declarations rather than
+#                                     hardcoded.
+# A test is the right place for that invariant; a subtraction is not, because a
+# subtraction also decides the default for modules nobody has considered.
 _CONTINUABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3")
 
 # Reviewer shares the same "latest model" pin as the in-runner judge. Provider
