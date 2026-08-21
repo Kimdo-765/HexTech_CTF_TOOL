@@ -54,6 +54,8 @@ MUTATIONS = (
     "read-wrong-meta-key",          # injection present but pointed at nothing
     "drop-retry-target-carry",      # child meta loses the target on rebuild
     "clobber-forensic-retry-target",# module branch patches meta after the literal
+    "typo-misc-data-field",         # form points at a param the route lacks
+    "drop-form-extraction",         # typed target never reaches FormData
     "ungate-change-target",         # inert Change Target button returns for misc
 )
 ap = argparse.ArgumentParser()
@@ -142,6 +144,16 @@ elif M == "clobber-forensic-retry-target":
         '        meta["image_type"] = prev_meta.get("image_type")\n',
         '        meta["image_type"] = prev_meta.get("image_type")\n'
         '        meta["target_url"] = None\n', 1)
+elif M == "typo-misc-data-field":
+    TEXT["index_html"] = TEXT["index_html"].replace(
+        '<div class="target-list" data-field="target" '
+        'data-placeholder="ctf.example.com:1337">',
+        '<div class="target-list" data-field="target_url" '
+        'data-placeholder="ctf.example.com:1337">', 1)
+elif M == "drop-form-extraction":
+    TEXT["app_js"] = TEXT["app_js"].replace(
+        "fd.set(tlist.dataset.field, vals.join(\"\\n\"));",
+        "fd.set(tlist.dataset.field, \"\");", 1)
 elif M == "ungate-change-target":
     TEXT["app_js"] = TEXT["app_js"].replace(
         "const showChangeTarget = hasTarget && canRetry;",
@@ -590,6 +602,102 @@ if have_node:
           _gate("live-fire")["hasTarget"], False)
     check("hybrid: targets live on its per-stage inputs, not the job panel",
           _gate("hybrid")["showChangeTarget"], False)
+
+
+# ==========================================================================
+# 6 — the wire between the form and the route
+# ==========================================================================
+# Sections 2 and 4 test opposite banks of the same river: section 4 says the
+# HTML declares `data-field="target"`, section 2 calls the handler with a
+# `target=` kwarg by hand. Neither notices if those two names disagree — a
+# data-field typo, or a form pointed at a param the route does not take, makes
+# the create succeed with `target_url: null` and looks like the operator simply
+# did not type anything. So: cross the river.
+_ROUTE_OF_PANEL = {
+    "web": ("web_module.py", "analyze_web"),
+    "pwn": ("pwn_module.py", "analyze_pwn"),
+    "crypto": ("crypto_module.py", "analyze_crypto"),
+    "rev": ("rev_module.py", "analyze_rev"),
+    "web3": ("web3_module.py", "analyze_web3"),
+    "misc": ("misc_module.py", "analyze_misc"),
+    "forensic": ("forensic_module.py", "collect_forensic"),
+}
+
+
+def _form_params(route_file: str) -> set:
+    """Parameter names the route declares with `Form(...)`. AST, so a comment
+    mentioning the name does not count and a renamed parameter does."""
+    src = (ROOT / "api" / "routes" / route_file).read_text()
+    tree = ast.parse(src)
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        a = node.args
+        names = [*a.args, *a.kwonlyargs]
+        defaults = [*([None] * (len(a.args) - len(a.defaults))), *a.defaults,
+                    *a.kw_defaults]
+        for arg, dflt in zip(names, defaults):
+            fn = getattr(getattr(dflt, "func", None), "id", None)
+            if fn in ("Form", "File"):
+                out.add(arg.arg)
+    return out
+
+
+_panel_fields = {}
+for _p, (_f, _fn) in _ROUTE_OF_PANEL.items():
+    _decl = re.findall(r'class="target-list" data-field="([a-z_]+)"', _panel(_p))
+    check(f"{_p}: exactly one target list in the panel (querySelector is singular)",
+          _panel(_p).count('class="target-list"'), 1)
+    check(f"{_p}: the list declares a data-field", len(_decl), 1)
+    if _decl:
+        _panel_fields[_p] = _decl[0]
+        check(f"{_p}: `{_decl[0]}` is a Form parameter the route actually accepts",
+              _decl[0] in _form_params(_f), True)
+
+# And the extraction itself, executed. The row inputs carry no `name`, so the
+# ONLY thing that puts the operator's text into the request is this block.
+_es = js.index('const tlist = form.querySelector(".target-list");')
+_ee = js.index("}", js.index('fd.set(tlist.dataset.field', _es)) + 1
+EXTRACT_SRC = js[_es:_ee]
+
+
+def _extract(field: str, values, rows=None) -> dict:
+    """Run the real block against a DOM stub shaped like the rendered panel."""
+    rows = len(values) if rows is None else rows
+    prog = """
+const values = %s, field = %s, rows = %d;
+const inputs = [];
+for (let i = 0; i < rows; i++) inputs.push({ value: values[i] === undefined ? "" : values[i] });
+const _tl = { dataset: { field }, querySelectorAll: (s) => (s === ".target-input" ? inputs : []) };
+const form = { querySelector: (s) => (s === ".target-list" ? _tl : null) };
+const store = {};
+const fd = { set: (k, v) => { store[k] = v; }, get: (k) => (k in store ? store[k] : null) };
+%s
+console.log(JSON.stringify(store));
+""" % (json.dumps(values), json.dumps(field), rows, EXTRACT_SRC)
+    out = subprocess.run(["node", "-e", prog], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise AssertionError(f"extract eval failed: {out.stderr.strip()}")
+    return json.loads(out.stdout)
+
+
+if have_node:
+    for _p in ("misc", "forensic"):
+        _fld = _panel_fields.get(_p)
+        got = _extract(_fld, ["h.example.com:1"])
+        check(f"{_p}: what the operator types lands under `{_fld}`",
+              got.get(_fld), "h.example.com:1")
+        got = _extract(_fld, [" a:1 ", "", "b:2"])
+        check(f"{_p}: several rows are newline-joined and blanks dropped",
+              got.get(_fld), "a:1\nb:2")
+        got = _extract(_fld, ["   "])
+        check(f"{_p}: an untouched row sends an empty value, not whitespace",
+              got.get(_fld), "")
+    # The same block serves the modules that already had a list; if it stopped
+    # working there this would be a regression, not a new-module problem.
+    check("web: the shared extraction still writes target_url",
+          _extract("target_url", ["http://x:1"]).get("target_url"), "http://x:1")
 
 
 # ==========================================================================
