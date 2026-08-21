@@ -429,13 +429,27 @@ check("script-driven multi-target still points at the TARGETS env var",
 # 2 — the route handlers, invoked
 # ==========================================================================
 def _stub_fastapi() -> None:
-    if "fastapi" in sys.modules:
-        return
-    try:
-        import fastapi  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
+    """Always install the local FastAPI surface — never the installed one.
+
+    This used to return early when `fastapi` was importable, on the theory that
+    a real install is closer to production. It is not, for this file: the
+    surface below (`APIRouter`, `HTTPException`, `UploadFile`, `Form`, `File`,
+    `responses`) is a hand-written minimum, none of the checks assert real
+    FastAPI semantics, and the route bodies are exec'd directly rather than
+    served. So the real package bought nothing — and it cost determinism.
+
+    `Form(...)`/`File(...)` make FastAPI demand `python-multipart` at import
+    time. A host with fastapi but not python-multipart therefore aborted this
+    suite before a single check ran, while the same commit passed 102/0 on a
+    host with neither. Same bytes, opposite outcome, decided by what happened
+    to be installed. Choosing the local surface unconditionally removes that
+    fork: no-fastapi, partial-install and full-install hosts now run the
+    identical program.
+
+    Real-FastAPI integration is the API image's job (api/requirements.txt pins
+    fastapi AND python-multipart together) and belongs in a test that actually
+    serves a request, not in this source-contract harness.
+    """
     mod = types.ModuleType("fastapi")
 
     class HTTPException(Exception):
