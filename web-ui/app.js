@@ -3460,6 +3460,8 @@ async function renderJob(id, opts = {}) {
   //   canRetry  — can the backend rebuild this job? Mirrors _RETRYABLE_MODULES
   //               in api/routes/retry.py. web3 was supported there all along
   //               and hidden here; forensic is supported as of this change.
+  //   canContinue — can it fork the prior conversation in place? forensic can
+  //               be rebuilt but has no session to fork, so this is narrower.
   //   hasTarget — does the module accept a target at all? Every module except
   //               live-fire does as of this change: misc and forensic take one
   //               additively (prompt directive only, no sandbox runner), and
@@ -3468,6 +3470,14 @@ async function renderJob(id, opts = {}) {
   // gate that was never about it.
   const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic"]
     .includes(job.module);
+  //   canContinue — can the backend FORK this job's conversation in place?
+  //               Not the same question as canRetry, and reusing canRetry for
+  //               it drew a Continue button on finished forensic cards that the
+  //               server answers with 400. /retry rebuilds forensic from its
+  //               image; /continue would have to resume a provider session, and
+  //               forensic's orchestrator builds none — it restarts at the
+  //               collector. Mirrors _CONTINUABLE_MODULES in api/routes/retry.py.
+  const canContinue = canRetry && job.module !== "forensic";
   const hasTarget = ["web", "pwn", "crypto", "rev", "web3", "misc", "forensic"]
     .includes(job.module);
   // Retry is offered for every TERMINAL status on an exploitable module
@@ -3539,7 +3549,7 @@ async function renderJob(id, opts = {}) {
     // Continue-in-place: same job/cwd/session + an operator note. For when the
     // agent solved it but was blocked on an external action (instance restart,
     // remote back up). NOT a retry — no re-investigation.
-    const continueHtml = showRetry
+    const continueHtml = showRetry && canContinue
       ? `<button class="retry-btn continue-open-btn" data-action="continue">💬 Continue (operator note)</button>` : "";
     const stopResumeHtml = showStopResume
       ? `<button class="retry-btn retry-stop-resume-btn" data-action="stop-resume-reviewer">↻ Stop &amp; resume with reviewer hint</button>

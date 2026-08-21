@@ -130,6 +130,18 @@ router = APIRouter()
 # wanted, rather than letting it in here and discovering that later.
 _RETRYABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3", "forensic")
 
+# Retryable and continuable are NOT the same question, and conflating them cost
+# a round. /retry rebuilds the job from its inputs, which forensic supports —
+# the image is carried forward and the collector runs again. /continue forks the
+# prior conversation in place, and forensic has no such thing to fork: none of
+# the three provider option builders in modules/forensic/orchestrator.py takes a
+# resume or fork argument, and run_job restarts at the collector regardless. A
+# forensic "continue" would therefore be a retry wearing the wrong name.
+#
+# Kept as a derivation rather than a second literal so the two cannot drift the
+# way _validate_retry drifted from _RETRYABLE_MODULES.
+_CONTINUABLE_MODULES = tuple(m for m in _RETRYABLE_MODULES if m != "forensic")
+
 # Reviewer shares the same "latest model" pin as the in-runner judge. Provider
 # coercion below replaces that Claude-family fallback when GPT/Grok is active.
 # The single source of truth lives in modules._common.
@@ -1597,13 +1609,20 @@ def _continue_in_place(prev_meta: dict, comment: str,
 
     `target_override` updates the target (a restarted DreamHack instance often
     comes back on a NEW port); blank keeps the prior, "(none)" clears it."""
+    # Refuse BEFORE any side effect. This check used to read _RETRYABLE_MODULES,
+    # so forensic passed it and was caught much later at the dispatch site —
+    # after write_job_meta had already set status=queued, rewritten the
+    # description and cleared the markers. The caller saw 400 and the operator
+    # saw a queued job that nothing had enqueued.
     module = prev_meta.get("module")
-    if module not in _RETRYABLE_MODULES:
+    if module not in _CONTINUABLE_MODULES:
         raise HTTPException(
             status_code=400,
             detail=(
                 "continue is only supported for "
-                f"{'/'.join(sorted(_RETRYABLE_MODULES))} (got {module})"
+                f"{'/'.join(sorted(_CONTINUABLE_MODULES))} (got {module})"
+                + (" — use retry, which rebuilds the job with the image "
+                   "carried forward" if module == "forensic" else "")
             ),
         )
     job_id = prev_meta.get("id")
@@ -1679,20 +1698,6 @@ def _continue_in_place(prev_meta: dict, comment: str,
         q.enqueue("modules.crypto.analyzer.run_job",
                   job_id, prev_meta.get("src_root"), target, description, auto_run, model,
                   job_id=rq_id, job_timeout=ht)
-    elif module == "forensic":
-        # There was no forensic branch here and the else below is rev, so
-        # widening the gate above without this line would enqueue
-        # modules.rev.analyzer.run_job for a disk image — Ghidra on a raw
-        # image, with the target dropped (rev's continue branch passes none).
-        # Continue forks the prior conversation in place and forensic has no
-        # such flow to fork, so refuse it in words rather than misroute it.
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "continue is not supported for forensic — use retry, which "
-                "rebuilds the job with the image carried forward"
-            ),
-        )
     elif module == "pwn":
         q.enqueue("modules.pwn.analyzer.run_job",
                   job_id, prev_meta.get("filename"), target, description, auto_run, model,

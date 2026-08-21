@@ -128,7 +128,14 @@ def _stub_fastapi() -> None:
 
     resp.PlainTextResponse = _Resp
     resp.JSONResponse = _Resp
-    resp.StreamingResponse = _Resp
+    class _Streaming(_Resp):
+        """Keeps the body generator so the SSE endpoints can be driven."""
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.body_iterator = a[0] if a else None
+
+    resp.StreamingResponse = _Streaming
     resp.FileResponse = _Resp
     resp.HTMLResponse = _Resp
     resp.Response = _Resp
@@ -615,6 +622,108 @@ check(
     continue_dispatch("pwn"),
     ("enqueued", ["modules.pwn.analyzer.run_job"]),
 )
+
+
+# ---------------------------------------------------------------------------
+# 5b. The five rebuild endpoints, driven end to end for forensic.
+#
+#     The checks above stop at the gate and the dispatch table. That was not
+#     enough: a refusal can be correct in what it returns and wrong in what it
+#     leaves behind, and that is exactly what happened — the forensic branch
+#     used to sit at the dispatch site, so /continue answered 400 after
+#     write_job_meta had already flipped the job to queued with nothing
+#     enqueued. Every check here reads state back AFTER the call.
+# ---------------------------------------------------------------------------
+print("\n--- the five rebuild endpoints, for a module that has an image ---")
+
+import asyncio as _aio  # noqa: E402
+
+
+class _Body:
+    """Duck-typed Request — the real ones only ever call .json()."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def enqueue(self, *a, **k):
+        self.calls.append(a[0] if a else None)
+        return None
+
+
+def _parent(tag, module="forensic"):
+    jid = make_job(f"ep-{tag}", module=module, status="no_flag",
+                   filename="disk.raw", image_type="raw", target_os="linux",
+                   description="inspect the disk", target_url="fx:8080")
+    (DATA / "jobs" / jid / "disk.raw").write_bytes(b"\x00" * 32)
+    return jid
+
+
+def _drive(endpoint, tag, payload, module="forensic"):
+    """Call a real route function; return (outcome, enqueued, meta_before, meta_after)."""
+    jid = _parent(tag, module)
+    before = dict(C.read_meta(jid) or {})
+    rec = _Recorder()
+    real = _RT.get_queue
+    _RT.get_queue = lambda: rec
+    try:
+        res = _aio.run(endpoint(jid, _Body(payload)))
+        gen = getattr(res, "body_iterator", None)
+        if gen is not None:                      # SSE: drain it
+            async def _drain():
+                out = []
+                async for chunk in gen:
+                    out.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
+                return "".join(out)
+            res = _aio.run(_drain())
+        outcome = ("ok", res)
+    except _HX as exc:
+        outcome = ("http", exc.status_code)
+    finally:
+        _RT.get_queue = real
+    return outcome, rec.calls, before, dict(C.read_meta(jid) or {})
+
+
+# ---- the four that rebuild: forensic must go all the way through ----------
+for _tag, _fn, _label in (
+    ("retry", _RT.retry_with_hint, "POST /retry"),
+    ("retrystream", _RT.retry_with_hint_stream, "POST /retry/stream"),
+    ("resume", _RT.stop_and_resume, "POST /resume"),
+    ("resumestream", _RT.stop_and_resume_stream, "POST /resume/stream"),
+):
+    _out, _q, _before, _after = _drive(_fn, _tag, {"hint": "look again"})
+    check(f"{_label}: a forensic job is rebuilt, not refused",
+          _out[0], "ok")
+    check(f"  ...and it reaches forensic's own orchestrator",
+          _q, ["modules.forensic.orchestrator.run_job"])
+
+
+# ---- the fifth refuses, and must leave the job exactly as it was ----------
+_out, _q, _before, _after = _drive(_RT.continue_with_comment, "cont",
+                                   {"comment": "instance is back"})
+check("POST /continue: forensic is refused", _out, ("http", 400))
+check("  ...with nothing enqueued", _q, [])
+# The postcondition the previous round did not ask for. A refusal that has
+# already rewritten status/description/markers leaves a queued job no worker
+# will ever pick up, and the operator sees a job that looks alive.
+_changed = {k: (_before.get(k), _after.get(k))
+            for k in set(_before) | set(_after)
+            if _before.get(k) != _after.get(k) and k != "updated_at"}
+check("  ...and REGRESSION: the job it refused is untouched", _changed, {})
+
+# The same endpoint on a module it supports still works, so the check above is
+# about forensic and not about /continue being broken for everyone.
+_out2, _q2, _b2, _a2 = _drive(_RT.continue_with_comment, "contpwn",
+                              {"comment": "instance is back"}, module="pwn")
+check("  ...(control) a supported module is still continued",
+      _out2[0] != "http", True)
 
 # The UI side of this — that a finished forensic job offers Retry but NOT
 # change-target, that a flag_ready web3 job still offers Retry, that misc offers

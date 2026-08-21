@@ -185,7 +185,7 @@ if (blockSrc) {
   // checks below assert both the decision and the button it produced.
   const renderGates = new Function(
     "job", "escapeHtml",
-    `${blockSrc}\n return {runBlock, canRetry, hasTarget, showRetry,` +
+    `${blockSrc}\n return {runBlock, canRetry, canContinue, hasTarget, showRetry,` +
     ` showChangeTarget, showStop, showStopResume, isExploitableModule};`
   );
   const gatesFor = (module, status) =>
@@ -206,6 +206,23 @@ if (blockSrc) {
   t("forensic now takes a target, so change-target is offered and lands somewhere",
     g.hasTarget === true && g.showChangeTarget === true
       && hasAction(g.runBlock, "change-target"), g.runBlock);
+
+  // Retryable and continuable are different questions, and the card asked only
+  // the first one. /retry rebuilds a forensic job from its image and works;
+  // /continue would have to fork a provider session, and forensic's
+  // orchestrator builds none — the server answers 400. The card used to draw
+  // the button anyway, because continueHtml was gated on showRetry.
+  t("forensic advertises BOTH retry buttons",
+    hasAction(g.runBlock, "retry") && hasAction(g.runBlock, "retry-manual"),
+    g.runBlock);
+  t("REGRESSION: forensic does NOT advertise a Continue the server refuses",
+    g.canContinue === false && !hasAction(g.runBlock, "continue"), g.runBlock);
+
+  // The control: a module that really can be continued still offers it, so the
+  // check above is about forensic and not about Continue disappearing.
+  const gp = gatesFor("pwn", "no_flag");
+  t("  ...while pwn still offers Continue",
+    gp.canContinue === true && hasAction(gp.runBlock, "continue"), gp.runBlock);
 
   // web3 flag_ready: supported by the backend (was hidden by the old UI list),
   // and flag_ready is a terminal status Retry must still cover.
