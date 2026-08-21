@@ -58,6 +58,7 @@ MUTATIONS = (
     "typo-misc-data-field",         # form points at a param the route lacks
     "drop-form-extraction",         # typed target never reaches FormData
     "ungate-change-target",         # inert Change Target button returns for misc
+    "keep-rejected-job-dir",        # 400 leaves an orphan data/jobs/<id>/
     "pwn-data-field-description",   # bound to another VALID param, not `target`
     "misc-primary-off-by-one",      # early IndexError in primary selection (CRASH)
     "drop-forensic-injection",      # forensic meta has it, prompt never gets it
@@ -233,6 +234,8 @@ SRC = {
     "forensic_orch": ROOT / "modules" / "forensic" / "orchestrator.py",
     "prompts": ROOT / "modules" / "_prompts.py",
     "retry": ROOT / "api" / "routes" / "retry.py",
+    "pwn_route": ROOT / "api" / "routes" / "pwn_module.py",
+    "rev_route": ROOT / "api" / "routes" / "rev_module.py",
     "app_js": ROOT / "web-ui" / "app.js",
     "index_html": ROOT / "web-ui" / "index.html",
 }
@@ -292,6 +295,10 @@ elif M == "drop-form-extraction":
     TEXT["app_js"] = TEXT["app_js"].replace(
         "fd.set(tlist.dataset.field, vals.join(\"\\n\"));",
         "fd.set(tlist.dataset.field, \"\");", 1)
+elif M == "keep-rejected-job-dir":
+    for _k in ("misc_route", "forensic_route", "pwn_route", "rev_route"):
+        TEXT[_k] = TEXT[_k].replace(
+            "reject_job(job_id, 400,", "_keep_and_raise(job_id, 400,")
 elif M == "ungate-change-target":
     TEXT["app_js"] = TEXT["app_js"].replace(
         "const showChangeTarget = hasTarget && canRetry;",
@@ -1105,6 +1112,69 @@ if _retry_ok:
 
 # The summary line is printed ONLY here, on the normal completion path. A crash
 # in an UNGUARDED region (e.g. section 1's compile of the module under test)
+
+
+# ==========================================================================
+# 7 — a rejected create leaves nothing behind
+# ==========================================================================
+# job_dir() mkdirs, and a create route has to call it before it can judge a
+# streamed upload. Every 400 therefore used to leave one data/jobs/<id>/ that
+# nothing ever swept. Same shape as the /continue defect: the side effect
+# preceded the verdict.
+pwn_route = _load_route("pwn_route", "pwn_module_under_test")
+rev_route = _load_route("rev_route", "rev_module_under_test")
+for _m in (pwn_route, rev_route):
+    _m.get_queue = lambda: _Recorder()
+    _m._keep_and_raise = lambda _j, code, detail: (_ for _ in ()).throw(
+        _HTTPExc(status_code=code, detail=detail))
+misc_route._keep_and_raise = forensic_route._keep_and_raise = pwn_route._keep_and_raise
+
+
+def _jobdirs():
+    return {p.name for p in (DATA / "jobs").iterdir() if p.is_dir()}
+
+
+def _rejects(fn, **kw):
+    """Call a create route expected to 400; return (status, new job dirs)."""
+    before = _jobdirs()
+    status = None
+    try:
+        asyncio.run(fn(**kw))
+    except _HTTPExc as exc:
+        status = exc.status_code
+    return status, sorted(_jobdirs() - before)
+
+
+# pwn and rev do not take skip_claude; misc and forensic do. Passing the union
+# would make every call a TypeError, which the harness reports as a failure
+# rather than a skip — signature drift must not read as a passing check.
+_EMPTY = dict(description=None, docker_challenge=False,
+              job_timeout=None, model=None, effort=None, flag_format=None)
+_SWEEP = dict(_EMPTY, skip_claude=False)
+
+for _label, _call in (
+    ("pwn", lambda: _rejects(
+        pwn_route.analyze_pwn, file=_AsyncUpload("x.bin", b""), target=None,
+        auto_run=False, **_EMPTY)),
+    ("rev (empty file)", lambda: _rejects(
+        rev_route.analyze_rev, file=_AsyncUpload("x.bin", b""), target=None,
+        auto_run=False, **_EMPTY)),
+    ("rev (invalid zip)", lambda: _rejects(
+        rev_route.analyze_rev, file=_AsyncUpload("x.zip", b"not a zip"),
+        target=None, auto_run=False, **_EMPTY)),
+    ("misc", lambda: _rejects(
+        misc_route.analyze_misc, file=_AsyncUpload("x.png", b""), target=None,
+        passphrase=None, **_SWEEP)),
+    ("forensic", lambda: _rejects(
+        forensic_route.collect_forensic, file=_Upload("x.raw", b""), target=None,
+        image_type="auto", target_os="auto", bulk_extractor=False, **_SWEEP)),
+):
+    try:
+        _st, _new = _call()
+    except TypeError as exc:            # signature drift is a failure, not a skip
+        _st, _new = f"TypeError: {exc}", []
+    check(f"{_label}: a rejected upload still returns 400", _st, 400)
+    check(f"  ...and leaves no job directory behind", _new, [])
 # never reaches this line — _harness_excepthook prints HARNESS ABORT and exits 2
 # instead — so the sweep can tell a caught assertion-red from a harness abort.
 print(f"\n{PASSED + FAILED} checks, {FAILED} failed  (mutate={ARGS.mutate})")

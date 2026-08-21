@@ -58,6 +58,26 @@ def job_dir(job_id: str) -> Path:
     return p
 
 
+def reject_job(job_id: str, status_code: int, detail: str) -> None:
+    """Refuse a create request AND remove the directory it already made.
+
+    `job_dir()` mkdirs, and a create route has to call it before it can judge a
+    streamed upload — an empty image is only empty once you have read it. That
+    left one `data/jobs/<id>/` behind for every 400: pwn/rev/misc/forensic all
+    did it, and nothing ever swept them.
+
+    Never raises from the cleanup: the caller asked to refuse the request, and
+    a failure to tidy must not turn a 400 into a 500. `ignore_errors` covers the
+    dir already being gone and a permission problem alike.
+    """
+    import shutil
+
+    from fastapi import HTTPException
+
+    shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
 _TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped", "flag_ready"}
 
 

@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
-from api.storage import job_dir, new_job_id, parse_targets, write_job_meta
+from api.storage import job_dir, new_job_id, parse_targets, write_job_meta, reject_job
 from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
@@ -84,7 +84,7 @@ async def analyze_rev(
     if has_file:
         content = await file.read()
         if not content:
-            raise HTTPException(status_code=400, detail="empty file")
+            reject_job(job_id, 400, "empty file")
         binary_name = Path(file.filename).name
         target_path = bin_dir / binary_name
         target_path.write_bytes(content)
@@ -116,7 +116,7 @@ async def analyze_rev(
                     # with no specific target; the agent explores ./bin/.
                     binary_name = None
             except zipfile.BadZipFile:
-                raise HTTPException(status_code=400, detail="invalid zip upload")
+                reject_job(job_id, 400, "invalid zip upload")
 
     timeout = resolve_timeout(job_timeout)
     chosen_model = (model or "").strip() or None

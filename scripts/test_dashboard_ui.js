@@ -224,6 +224,35 @@ if (blockSrc) {
   t("  ...while pwn still offers Continue",
     gp.canContinue === true && hasAction(gp.runBlock, "continue"), gp.runBlock);
 
+  // Cross-file parity. The card's canContinue and the server's
+  // _CONTINUABLE_MODULES are two written-out lists, and written-out lists drift
+  // — that is the whole history of this file. Neither may be derived from
+  // canRetry (that defaulted new modules to allowed), so the invariant lives
+  // here instead.
+  const retrySrc = read(["api/routes/retry.py", "../api/routes/retry.py"]) || "";
+  const contLine = (retrySrc.split("\n")
+    .find((l) => l.startsWith("_CONTINUABLE_MODULES")) || "");
+  t("the server's continuable list was located", contLine !== "");
+  const serverCont = (contLine.match(/"([a-z0-9-]+)"/g) || [])
+    .map((x) => x.replace(/"/g, "")).sort();
+  // The candidate set is DISCOVERED, not hardcoded: it is the union of the
+  // server's list and whatever the card's own canRetry array names. A
+  // hardcoded list cannot see a module someone just added to canRetry, which
+  // is exactly the case this check exists for.
+  const uiRetryLine = (SRC.split("\n")
+    .find((l) => l.includes("const canRetry = [")) || "");
+  const uiRetry = (uiRetryLine.match(/"([a-z0-9-]+)"/g) || [])
+    .map((x) => x.replace(/"/g, ""));
+  t("the card's retryable array was located", uiRetry.length > 0, uiRetryLine);
+  const candidates = Array.from(new Set([
+    ...serverCont, ...uiRetry, "misc", "hybrid", "live-fire",
+  ]));
+  const uiCont = candidates
+    .filter((m) => gatesFor(m, "no_flag").canContinue === true).sort();
+  t("REGRESSION: the card's canContinue matches the server's _CONTINUABLE_MODULES",
+    JSON.stringify(uiCont) === JSON.stringify(serverCont),
+    { ui: uiCont, server: serverCont });
+
   // web3 flag_ready: supported by the backend (was hidden by the old UI list),
   // and flag_ready is a terminal status Retry must still cover.
   g = gatesFor("web3", "flag_ready");

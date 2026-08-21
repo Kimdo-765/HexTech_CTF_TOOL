@@ -138,9 +138,18 @@ _RETRYABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3", "forensic")
 # resume or fork argument, and run_job restarts at the collector regardless. A
 # forensic "continue" would therefore be a retry wearing the wrong name.
 #
-# Kept as a derivation rather than a second literal so the two cannot drift the
-# way _validate_retry drifted from _RETRYABLE_MODULES.
-_CONTINUABLE_MODULES = tuple(m for m in _RETRYABLE_MODULES if m != "forensic")
+# Written out, NOT derived as "retryable minus forensic". The derivation stopped
+# the two lists from drifting but got the default backwards: it says "everything
+# retryable except forensic", so the next module added to _RETRYABLE_MODULES
+# becomes continuable without anyone deciding that it is — and lands in the
+# dispatch table's fallback. That is the same defect this file was just fixed
+# for, postponed rather than removed. A module nobody has thought about must
+# default to refused.
+#
+# Drift is prevented by the parity assertion in scripts/test_flag_ready.py,
+# which requires every continuable module to have its own dispatch branch. A
+# test is the right place for that invariant; a subtraction is not.
+_CONTINUABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3")
 
 # Reviewer shares the same "latest model" pin as the in-runner judge. Provider
 # coercion below replaces that Claude-family fallback when GPT/Grok is active.
@@ -1702,10 +1711,19 @@ def _continue_in_place(prev_meta: dict, comment: str,
         q.enqueue("modules.pwn.analyzer.run_job",
                   job_id, prev_meta.get("filename"), target, description, auto_run, model,
                   job_id=rq_id, job_timeout=ht)
-    else:  # rev
+    elif module == "rev":
         q.enqueue("modules.rev.analyzer.run_job",
                   job_id, prev_meta.get("filename"), description, auto_run, model,
                   job_id=rq_id, job_timeout=ht)
+    else:
+        # Unreachable while the head check and this table agree, which the
+        # parity assertion enforces. If they ever disagree, fail loudly rather
+        # than hand the job to whichever branch happens to be last — that is
+        # exactly how a forensic disk image nearly reached the rev analyzer.
+        raise HTTPException(
+            status_code=500,
+            detail=f"continue dispatch has no branch for module {module!r}",
+        )
     return job_id
 
 

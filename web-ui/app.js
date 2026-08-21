@@ -3477,7 +3477,12 @@ async function renderJob(id, opts = {}) {
   //               image; /continue would have to resume a provider session, and
   //               forensic's orchestrator builds none — it restarts at the
   //               collector. Mirrors _CONTINUABLE_MODULES in api/routes/retry.py.
-  const canContinue = canRetry && job.module !== "forensic";
+  // Written out, not "canRetry minus forensic": a new retryable module must
+  // not become continuable just by being added to canRetry. Mirrors
+  // _CONTINUABLE_MODULES in api/routes/retry.py, and the parity between
+  // them is asserted in scripts/test_dashboard_ui.js.
+  const canContinue = ["web", "pwn", "crypto", "rev", "web3"]
+    .includes(job.module);
   const hasTarget = ["web", "pwn", "crypto", "rev", "web3", "misc", "forensic"]
     .includes(job.module);
   // Retry is offered for every TERMINAL status on an exploitable module

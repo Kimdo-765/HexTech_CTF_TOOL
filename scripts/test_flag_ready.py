@@ -624,6 +624,40 @@ check(
 )
 
 
+# --- capability <-> dispatch parity ----------------------------------------
+# _CONTINUABLE_MODULES is a written-out list, not "retryable minus forensic".
+# The derivation defaulted new modules to ALLOWED, which is how an unreviewed
+# module would have reached the dispatch table's fallback. A literal defaults
+# them to refused; these two checks are what stops the literal from drifting
+# out of step with the table, which is the failure the derivation was meant to
+# prevent. The invariant belongs in a test, not in a subtraction.
+_no_branch = [m for m in _RT._CONTINUABLE_MODULES
+              if continue_dispatch(m)[0] != "enqueued"]
+check("REGRESSION: every continuable module has its own dispatch branch",
+      _no_branch, [])
+
+def _enqueued_for(m):
+    out = continue_dispatch(m)
+    return out[1] if out[0] == "enqueued" else []
+
+
+_wrong_branch = [m for m in _RT._CONTINUABLE_MODULES
+                 if not any(f"modules.{m}." in str(x) for x in _enqueued_for(m))]
+check("  ...and it dispatches to that module, not to whichever branch is last",
+      _wrong_branch, [])
+
+# A module that is retryable but not continuable must be REFUSED, never routed.
+# forensic is today's instance; the check is written over the difference of the
+# two lists so a future retryable-only module is covered the day it is added.
+_leaky = [m for m in _RT._RETRYABLE_MODULES
+          if m not in _RT._CONTINUABLE_MODULES
+          and continue_dispatch(m) != ("refused", 400)]
+check("REGRESSION: a retryable-but-not-continuable module is refused, not routed",
+      _leaky, [])
+check("  ...and continuable is a subset of retryable",
+      [m for m in _RT._CONTINUABLE_MODULES if m not in _RT._RETRYABLE_MODULES], [])
+
+
 # ---------------------------------------------------------------------------
 # 5b. The five rebuild endpoints, driven end to end for forensic.
 #
@@ -713,9 +747,13 @@ check("  ...with nothing enqueued", _q, [])
 # The postcondition the previous round did not ask for. A refusal that has
 # already rewritten status/description/markers leaves a queued job no worker
 # will ever pick up, and the operator sees a job that looks alive.
+# EXACT equality — no key is excused. The previous version excused updated_at
+# on the assumption that including it would make the check permanently red.
+# That assumption was never tested and is false: the normal path leaves the
+# whole dict untouched. The excuse only hid updated_at-only side effects.
 _changed = {k: (_before.get(k), _after.get(k))
             for k in set(_before) | set(_after)
-            if _before.get(k) != _after.get(k) and k != "updated_at"}
+            if _before.get(k) != _after.get(k)}
 check("  ...and REGRESSION: the job it refused is untouched", _changed, {})
 
 # The same endpoint on a module it supports still works, so the check above is
