@@ -337,10 +337,18 @@ if (blockSrc) {
     if (lit.interp) { UNRESOLVED.push(lit.text.slice(0, 80)); continue; }
     if (!ACTION_IN_SELECTOR.test(lit.text)) continue;
     for (const one of splitSelectors(lit.text)) {
-      const m = ACTION_IN_SELECTOR.exec(one);
+      // BOTH halves are read from the SUBJECT. Taking the action from anywhere
+      // in the group while taking the classes from the subject would pair
+      // `[data-action="x"] .child` into "x needs .child" — a requirement that
+      // is quietly wrong rather than absent, which is the partial acceptance
+      // this round is supposed to end. Read together, such a group contributes
+      // nothing, and if that action has no other binding it comes out by name
+      // in the underived check below.
+      const subj = subject(one);
+      const m = ACTION_IN_SELECTOR.exec(subj);
       if (!m) continue;
       const action = m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
-      const need = classTokens(subject(one)).sort();
+      const need = classTokens(subj).sort();
       const key = JSON.stringify(need);
       const seen = REQUIRED.get(action) || new Map();
       seen.set(key, need);
