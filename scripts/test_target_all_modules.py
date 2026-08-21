@@ -61,10 +61,11 @@ MUTATIONS = (
     "pwn-data-field-description",   # bound to another VALID param, not `target`
     "misc-primary-off-by-one",      # early IndexError in primary selection (CRASH)
     "drop-forensic-injection",      # forensic meta has it, prompt never gets it
+    "prefer-description-when-both",  # both file+description: precedence flip in _prompts
     "composite-crash-mask",         # early crash + downstream defect together
     "break-prompts-compile",        # section-1 compile fails: HARNESS ABORT, not red
 )
-# The last five extend the original twelve. The first three are ordinary
+# The last six extend the original twelve. The first four are ordinary
 # assertion-red mutants; `composite-crash-mask` combines an early crash with a
 # downstream defect (F1's masking case); `break-prompts-compile` is the
 # deliberate HARNESS-ABORT case that keeps the sweep's crash/red discriminator
@@ -321,6 +322,17 @@ elif M == "drop-forensic-injection":
         '    if _tgt_block:\n        prompt = prompt + "\\n\\n" + _tgt_block\n',
         '    if False and _tgt_block:\n        prompt = prompt + "\\n\\n" + _tgt_block\n',
         1)
+elif M == "prefer-description-when-both":
+    # Precedence flip in the runner-less primary-input directive. The sealed
+    # helper evaluates `if has_artifact:` FIRST, so a misc job carrying BOTH an
+    # uploaded artifact AND a description keeps the artifact-primary wording.
+    # Guarding that branch with `and not has_description` diverts ONLY the
+    # both-present cell to the description branch; file-only, description-only,
+    # and target-only keep their original branch. Attacks precedence alone, so
+    # only the file+description+target pin in section 3 catches it.
+    TEXT["prompts"] = TEXT["prompts"].replace(
+        "        if has_artifact:\n",
+        "        if has_artifact and not has_description:\n", 1)
 elif M == "composite-crash-mask":
     # The masking case: an EARLY crash (misc off-by-one) plus a DOWNSTREAM
     # defect (forensic prompt loss). Pre-fix the crash aborted the run, the
@@ -765,6 +777,18 @@ with guard("misc primary-input directive scenarios"):
           "SUPPLEMENTARY, NOT PRIMARY" in misc_only_t, False)
     check("misc target-only names the target as the job's primary subject",
           ("only.example.com:9999" in misc_only_t and "PRIMARY INPUT" in misc_only_t), True)
+
+    # BOTH an artifact AND a description: the sealed helper resolves this by
+    # PRECEDENCE (has_artifact evaluated first), not by presence. A hardcoded
+    # or description-first ordering would mislabel a file-bearing misc job.
+    # Pin that the both-present cell keeps artifact-primary and does NOT switch
+    # to the description wording.
+    misc_both_t = _prompt_slice("misc_orch", {"target_url": "t.example.com:4444"},
+                                filename="blob.png", description="a captured handshake")
+    check("misc file+description+target keeps artifact-primary over the description",
+          ("the uploaded artifact is still the job's main input" in misc_both_t
+           and "the description above is still the job's main input" not in misc_both_t),
+          True)
 
 # forensic's file is REQUIRED, so it always has an artifact and keeps the
 # original wording (its orchestrator passes no override — the default holds).
