@@ -175,10 +175,16 @@ async def _claude_summary(
     # the agent to re-point an exploit.py it never writes.
     from modules._prompts import build_target_directive
     _meta_now = read_meta(job_id)
+    # Tell the directive what THIS job's primary input actually is. misc's file
+    # is optional (unlike forensic), so for a target-only or description-only
+    # job there is no uploaded artifact — passing that state stops the directive
+    # from calling a non-existent artifact the job's "main input".
     _tgt_block = build_target_directive(
         (_meta_now.get("target_url") or "").strip() or None,
         _meta_now.get("target_urls"),
         script_driven=False,
+        has_artifact=bool(filename),
+        has_description=bool((description or "").strip()),
     )
     if _tgt_block:
         prompt = prompt + "\n\n" + _tgt_block

@@ -37,6 +37,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import traceback
 import types
 from pathlib import Path
 
@@ -57,10 +58,97 @@ MUTATIONS = (
     "typo-misc-data-field",         # form points at a param the route lacks
     "drop-form-extraction",         # typed target never reaches FormData
     "ungate-change-target",         # inert Change Target button returns for misc
+    "pwn-data-field-description",   # bound to another VALID param, not `target`
+    "misc-primary-off-by-one",      # early IndexError in primary selection (CRASH)
+    "drop-forensic-injection",      # forensic meta has it, prompt never gets it
+    "composite-crash-mask",         # early crash + downstream defect together
+    "break-prompts-compile",        # section-1 compile fails: HARNESS ABORT, not red
 )
+# The last five extend the original twelve. The first three are ordinary
+# assertion-red mutants; `composite-crash-mask` combines an early crash with a
+# downstream defect (F1's masking case); `break-prompts-compile` is the
+# deliberate HARNESS-ABORT case that keeps the sweep's crash/red discriminator
+# from being vacuous. See _run_sweep.
 ap = argparse.ArgumentParser()
 ap.add_argument("--mutate", choices=MUTATIONS, default="none")
+ap.add_argument("--sweep", action="store_true",
+                help="run every mutant and verify each is caught via "
+                     "assertion-red (summary reached), not a bare crash")
 ARGS = ap.parse_args()
+
+
+def _run_sweep() -> int:
+    """The mutation runner.
+
+    Every mutant must end ASSERTION-RED VIA THE SUMMARY — exit 1 with an
+    ``N checks, M>0 failed`` line — never a bare harness crash (no summary).
+    A sweep that equated any non-zero exit with "caught" would be fooled by a
+    mutation that merely CRASHED before the downstream oracles ran: that is the
+    exact false success F1 is about. So the runner keys off the SUMMARY LINE,
+    not the exit code, and one deliberate compile-break mutant proves the
+    crash/red discriminator is not vacuous.
+    """
+    summary_re = re.compile(r"(\d+) checks, (\d+) failed")
+    # node-less environments SKIP the app.js gate/extract oracles, so the two
+    # mutations only those oracles catch cannot be swept here. Detect once.
+    try:
+        _n = subprocess.run(["node", "-e", ""], capture_output=True)
+        have_node = _n.returncode == 0
+    except (FileNotFoundError, OSError):
+        have_node = False
+    node_only = {"drop-form-extraction", "ungate-change-target"}
+
+    abort = {"break-prompts-compile"}
+    red = [m for m in MUTATIONS if m != "none" and m not in abort]
+    expect = {"none": "green"}
+    expect.update({m: "assertion-red" for m in red})
+    expect.update({m: "aborted" for m in abort})
+
+    ok = True
+    order = ["none", *red, *sorted(abort)]
+    for mut in order:
+        if not have_node and mut in node_only:
+            print(f"SKIP  sweep[{mut}] — node unavailable for its only oracle")
+            continue
+        res = subprocess.run([sys.executable, __file__, "--mutate", mut],
+                             capture_output=True, text=True)
+        out = res.stdout + res.stderr
+        m = summary_re.search(out)
+        if m is None:
+            kind = "aborted" if "HARNESS ABORT" in out else "no-summary"
+        else:
+            failed = int(m.group(2))
+            if res.returncode == 0 and failed == 0:
+                kind = "green"
+            elif res.returncode == 1 and failed > 0:
+                kind = "assertion-red"
+            else:
+                kind = f"inconsistent(exit={res.returncode},failed={failed})"
+        want = expect[mut]
+        good = kind == want
+        detail = ""
+        # The composite mutant must report BOTH defects AND reach the summary:
+        # the early misc crash (now a named failure) and the downstream forensic
+        # prompt loss, proving neither masks the other any more.
+        if mut == "composite-crash-mask" and good:
+            crash = "IndexError" in out
+            downstream = ("forensic: a targeted job's prompt names the target"
+                          in out)
+            summary = m is not None
+            if not (crash and downstream and summary):
+                good = False
+                detail = (f" [crash={crash} downstream={downstream} "
+                          f"summary={summary}]")
+        ok = ok and good
+        print(f"{'PASS' if good else 'FAIL'}  sweep[{mut}] -> {kind} "
+              f"(want {want}){detail}")
+    print(f"\nsweep: {'every mutant classified as expected' if ok else 'MISCLASSIFICATION — a mutant did not bite'}")
+    return 0 if ok else 1
+
+
+if ARGS.sweep:
+    sys.exit(_run_sweep())
+
 
 _TMP = tempfile.TemporaryDirectory(prefix="target-all-")
 DATA = Path(_TMP.name)
@@ -85,6 +173,54 @@ def check(label: str, got, want) -> None:
         print(f"FAIL  {label}\n        got  = {got!r}\n        want = {want!r}")
 
 
+class guard:
+    """Absorb an exception from ONE scenario as a named FAILURE and keep going.
+
+    Without this, a mutation (or a real bug) that RAISES mid-suite aborts every
+    later check AND the final summary. A crash and an assertion miss then look
+    identical to an exit-code-only mutation sweep — the false success F1 exists
+    to prevent. A guarded scenario that raises is counted as a failed check, so
+    execution continues to the next scenario and the summary is still printed.
+
+    Only `Exception` is caught — SystemExit / KeyboardInterrupt propagate, and a
+    crash OUTSIDE any guard (e.g. section-1 compile of the module under test) is
+    an unguarded HARNESS ABORT that _harness_excepthook turns into exit 2 with
+    no summary, which is exactly what the sweep must NOT count as caught.
+    """
+
+    def __init__(self, label: str):
+        self.label = label
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        global FAILED
+        if exc_type is None or not issubclass(exc_type, Exception):
+            return False
+        FAILED += 1
+        first = "".join(traceback.format_exception_only(exc_type, exc)).strip()
+        print(f"FAIL  {self.label} — raised {first}")
+        return True
+
+
+def _harness_excepthook(exc_type, exc, tb):
+    """Any UNGUARDED exception is a harness abort, not an assertion failure.
+
+    It prints a distinct marker and exits 2 with NO summary line, so the sweep's
+    summary-keyed oracle classifies it as `aborted` rather than a caught red.
+    """
+    sys.stdout.flush()
+    print(f"HARNESS ABORT — {exc_type.__name__}: {exc}")
+    traceback.print_exception(exc_type, exc, tb)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(2)
+
+
+sys.excepthook = _harness_excepthook
+
+
 # --------------------------------------------------------------------------
 # Sources. Mutations are applied to the TEXT before anything is imported or
 # executed, so a mutant exercises a genuinely different program.
@@ -100,6 +236,7 @@ SRC = {
     "index_html": ROOT / "web-ui" / "index.html",
 }
 TEXT = {k: p.read_text() for k, p in SRC.items()}
+_ORIG_TEXT = dict(TEXT)
 
 M = ARGS.mutate
 if M == "drop-misc-route-field":
@@ -158,6 +295,61 @@ elif M == "ungate-change-target":
     TEXT["app_js"] = TEXT["app_js"].replace(
         "const showChangeTarget = hasTarget && canRetry;",
         "const showChangeTarget = hasTarget;", 1)
+elif M == "pwn-data-field-description":
+    # Codex's semantic mutation: bind the target list to another VALID Form
+    # param (`description`). The AST "is it a real Form param" check accepts it;
+    # only the exact-field oracle ("bound to `target`") rejects it. The first
+    # `data-field="target"` with this placeholder is pwn's panel.
+    TEXT["index_html"] = TEXT["index_html"].replace(
+        '<div class="target-list" data-field="target" '
+        'data-placeholder="ctf.example.com:1337">',
+        '<div class="target-list" data-field="description" '
+        'data-placeholder="ctf.example.com:1337">', 1)
+elif M == "misc-primary-off-by-one":
+    # A plausible off-by-one in primary selection. For any non-empty target
+    # list it raises IndexError INSIDE analyze_misc — a CRASH, not an assertion
+    # miss. Per-scenario guards turn it into a named failure so the summary is
+    # still reached (the F1 fix); an exit-code-only sweep would have called the
+    # pre-fix crash "caught" while the later oracles never ran.
+    TEXT["misc_route"] = TEXT["misc_route"].replace(
+        "    target = targets[0] if targets else None\n",
+        "    target = targets[len(targets)] if targets else None\n", 1)
+elif M == "drop-forensic-injection":
+    # forensic keeps the target in meta but never appends the directive to the
+    # prompt — a downstream (section-3) defect, caught by the forensic slice.
+    TEXT["forensic_orch"] = TEXT["forensic_orch"].replace(
+        '    if _tgt_block:\n        prompt = prompt + "\\n\\n" + _tgt_block\n',
+        '    if False and _tgt_block:\n        prompt = prompt + "\\n\\n" + _tgt_block\n',
+        1)
+elif M == "composite-crash-mask":
+    # The masking case: an EARLY crash (misc off-by-one) plus a DOWNSTREAM
+    # defect (forensic prompt loss). Pre-fix the crash aborted the run, the
+    # forensic defect never executed, and no summary printed — so the composite
+    # looked "caught" to an exit-code sweep. Post-fix both surface as named
+    # failures and the summary is reached.
+    TEXT["misc_route"] = TEXT["misc_route"].replace(
+        "    target = targets[0] if targets else None\n",
+        "    target = targets[len(targets)] if targets else None\n", 1)
+    TEXT["forensic_orch"] = TEXT["forensic_orch"].replace(
+        '    if _tgt_block:\n        prompt = prompt + "\\n\\n" + _tgt_block\n',
+        '    if False and _tgt_block:\n        prompt = prompt + "\\n\\n" + _tgt_block\n',
+        1)
+elif M == "break-prompts-compile":
+    # DELIBERATE harness abort: a syntax break in the module under test makes
+    # section 1's compile() raise before any check runs. The sweep must classify
+    # this as `aborted`, NOT as a caught assertion-red — that is what proves the
+    # crash/red discriminator is real and not vacuous.
+    TEXT["prompts"] = TEXT["prompts"] + "\nthis is not valid python\n"
+
+# A mutation uses `.replace(old, new, 1)`, which SILENTLY no-ops if `old`
+# drifted out of the source. An inert mutant would pass the suite green — and a
+# sweep would then read "green (want assertion-red)" as a miss with no clue why.
+# Fail loudly at the source instead: if a non-`none` mutant changed nothing, its
+# anchor is stale.
+if M != "none" and TEXT == _ORIG_TEXT:
+    raise RuntimeError(
+        f"mutation {M!r} matched no anchor (source drifted?) — the mutant is "
+        f"inert, so it proves nothing")
 
 
 # ==========================================================================
@@ -371,93 +563,103 @@ def _meta_of(job_id: str) -> dict:
 
 
 # --- misc ------------------------------------------------------------------
+# Each scenario is isolated: an exception (e.g. the misc-primary-off-by-one
+# mutant's IndexError) becomes a named failure, so the NEXT scenario and the
+# final summary still run instead of the whole suite aborting silently.
 misc_route.get_queue = lambda: _Recorder()
-res = asyncio.run(misc_route.analyze_misc(
-    file=_AsyncUpload("blob.png"),
-    target="a.example.com:1337 , b.example.com:1338",
-    passphrase=None, description="d", skip_claude=False, docker_challenge=False,
-    job_timeout=None, model=None, effort=None, flag_format=None,
-))
-mm = _meta_of(res["job_id"])
-check("misc persists the primary target", mm.get("target_url"), "a.example.com:1337")
-check("misc persists the full multi-target list",
-      mm.get("target_urls"), ["a.example.com:1337", "b.example.com:1338"])
-check("misc still records the uploaded filename", mm.get("filename"), "blob.png")
-# misc had the same local `target` holding the on-disk path. Shadowed, meta
-# carries a PosixPath and write_job_meta raises before the job is ever queued.
-check("misc writes the upload under the job dir, not shadowed by the target",
-      (DATA / "jobs" / res["job_id"] / "blob.png").is_file(), True)
-check("misc's target_url is the operator's string, not a filesystem path",
-      isinstance(mm.get("target_url"), str) and "/jobs/" not in str(mm.get("target_url")),
-      True)
+with guard("misc multi-target persistence scenario"):
+    res = asyncio.run(misc_route.analyze_misc(
+        file=_AsyncUpload("blob.png"),
+        target="a.example.com:1337 , b.example.com:1338",
+        passphrase=None, description="d", skip_claude=False, docker_challenge=False,
+        job_timeout=None, model=None, effort=None, flag_format=None,
+    ))
+    mm = _meta_of(res["job_id"])
+    check("misc persists the primary target", mm.get("target_url"), "a.example.com:1337")
+    check("misc persists the full multi-target list",
+          mm.get("target_urls"), ["a.example.com:1337", "b.example.com:1338"])
+    check("misc still records the uploaded filename", mm.get("filename"), "blob.png")
+    # misc had the same local `target` holding the on-disk path. Shadowed, meta
+    # carries a PosixPath and write_job_meta raises before the job is ever queued.
+    check("misc writes the upload under the job dir, not shadowed by the target",
+          (DATA / "jobs" / res["job_id"] / "blob.png").is_file(), True)
+    check("misc's target_url is the operator's string, not a filesystem path",
+          isinstance(mm.get("target_url"), str) and "/jobs/" not in str(mm.get("target_url")),
+          True)
 
-res = asyncio.run(misc_route.analyze_misc(
-    file=None, target=None, passphrase=None, description="desc only",
-    skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
-    effort=None, flag_format=None,
-))
-mm2 = _meta_of(res["job_id"])
-check("misc without a target writes an explicit null", mm2.get("target_url"), None)
-check("misc without several targets omits the list", mm2.get("target_urls"), None)
-check("misc keeps its description-only mode (no file, no target)",
-      mm2.get("filename"), None)
-
-res = asyncio.run(misc_route.analyze_misc(
-    file=None, target="only.example.com:9999", passphrase=None, description=None,
-    skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
-    effort=None, flag_format=None,
-))
-check("misc accepts a target with no file at all",
-      _meta_of(res["job_id"]).get("target_url"), "only.example.com:9999")
-
-# --- forensic --------------------------------------------------------------
-forensic_route.get_queue = lambda: _Recorder()
-res = asyncio.run(forensic_route.collect_forensic(
-    file=_Upload("disk.raw", b"\x00" * 64), target="fx.example.com:8080",
-    image_type="raw", target_os="linux", description=None, bulk_extractor=False,
-    skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
-    effort=None, flag_format=None,
-))
-fm = _meta_of(res["job_id"])
-check("forensic persists the remote target", fm.get("target_url"), "fx.example.com:8080")
-check("forensic keeps target_os separate from the remote target",
-      fm.get("target_os"), "linux")
-# The route had a local `target` holding the on-disk image path. If the remote
-# target reuses that name the image write and the meta value fight each other,
-# and the symptom is a meta whose target_url is a Path under /data/jobs.
-check("the image is written under the job dir, not shadowed by the target",
-      (DATA / "jobs" / res["job_id"] / "disk.raw").is_file(), True)
-check("forensic's target_url is the operator's string, not a filesystem path",
-      isinstance(fm.get("target_url"), str) and "/jobs/" not in str(fm.get("target_url")),
-      True)
-check("forensic still records the image size", fm.get("size_bytes"), 64)
-
-raised = None
-try:
-    asyncio.run(forensic_route.collect_forensic(
-        file=_Upload("", b""), target="fx.example.com:8080", image_type="auto",
-        target_os="auto", description=None, bulk_extractor=False,
+with guard("misc description-only scenario"):
+    res = asyncio.run(misc_route.analyze_misc(
+        file=None, target=None, passphrase=None, description="desc only",
         skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
         effort=None, flag_format=None,
     ))
-except _HTTPExc as exc:
-    raised = exc.status_code
-check("forensic still REQUIRES an image — a target alone is rejected", raised, 400)
+    mm2 = _meta_of(res["job_id"])
+    check("misc without a target writes an explicit null", mm2.get("target_url"), None)
+    check("misc without several targets omits the list", mm2.get("target_urls"), None)
+    check("misc keeps its description-only mode (no file, no target)",
+          mm2.get("filename"), None)
 
-res = asyncio.run(forensic_route.collect_forensic(
-    file=_Upload("mem.dmp", b"\x01" * 8), target=None, image_type="memory",
-    target_os="auto", description=None, bulk_extractor=False, skip_claude=False,
-    docker_challenge=False, job_timeout=None, model=None, effort=None,
-    flag_format=None,
-))
-check("a forensic job with no target is unchanged",
-      _meta_of(res["job_id"]).get("target_url"), None)
+with guard("misc target-only scenario"):
+    res = asyncio.run(misc_route.analyze_misc(
+        file=None, target="only.example.com:9999", passphrase=None, description=None,
+        skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
+        effort=None, flag_format=None,
+    ))
+    check("misc accepts a target with no file at all",
+          _meta_of(res["job_id"]).get("target_url"), "only.example.com:9999")
+
+# --- forensic --------------------------------------------------------------
+forensic_route.get_queue = lambda: _Recorder()
+with guard("forensic persistence scenario"):
+    res = asyncio.run(forensic_route.collect_forensic(
+        file=_Upload("disk.raw", b"\x00" * 64), target="fx.example.com:8080",
+        image_type="raw", target_os="linux", description=None, bulk_extractor=False,
+        skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
+        effort=None, flag_format=None,
+    ))
+    fm = _meta_of(res["job_id"])
+    check("forensic persists the remote target", fm.get("target_url"), "fx.example.com:8080")
+    check("forensic keeps target_os separate from the remote target",
+          fm.get("target_os"), "linux")
+    # The route had a local `target` holding the on-disk image path. If the remote
+    # target reuses that name the image write and the meta value fight each other,
+    # and the symptom is a meta whose target_url is a Path under /data/jobs.
+    check("the image is written under the job dir, not shadowed by the target",
+          (DATA / "jobs" / res["job_id"] / "disk.raw").is_file(), True)
+    check("forensic's target_url is the operator's string, not a filesystem path",
+          isinstance(fm.get("target_url"), str) and "/jobs/" not in str(fm.get("target_url")),
+          True)
+    check("forensic still records the image size", fm.get("size_bytes"), 64)
+
+with guard("forensic requires-an-image scenario"):
+    raised = None
+    try:
+        asyncio.run(forensic_route.collect_forensic(
+            file=_Upload("", b""), target="fx.example.com:8080", image_type="auto",
+            target_os="auto", description=None, bulk_extractor=False,
+            skip_claude=False, docker_challenge=False, job_timeout=None, model=None,
+            effort=None, flag_format=None,
+        ))
+    except _HTTPExc as exc:
+        raised = exc.status_code
+    check("forensic still REQUIRES an image — a target alone is rejected", raised, 400)
+
+with guard("forensic no-target scenario"):
+    res = asyncio.run(forensic_route.collect_forensic(
+        file=_Upload("mem.dmp", b"\x01" * 8), target=None, image_type="memory",
+        target_os="auto", description=None, bulk_extractor=False, skip_claude=False,
+        docker_challenge=False, job_timeout=None, model=None, effort=None,
+        flag_format=None,
+    ))
+    check("a forensic job with no target is unchanged",
+          _meta_of(res["job_id"]).get("target_url"), None)
 
 
 # ==========================================================================
 # 3 — the prompt the agent would actually receive
 # ==========================================================================
-def _prompt_slice(src_key: str, meta: dict, fake_base: str = "BASE-PROMPT") -> str:
+def _prompt_slice(src_key: str, meta: dict, fake_base: str = "BASE-PROMPT",
+                  *, filename="blob.png", description=None) -> str:
     """Execute the real prologue of `_claude_summary` and return its `prompt`.
 
     Everything the prologue reaches for is stubbed EXCEPT `_prompts`, which is
@@ -495,7 +697,7 @@ def _prompt_slice(src_key: str, meta: dict, fake_base: str = "BASE-PROMPT") -> s
     slice_dir = DATA / "jobs" / "prompt-slice"
     slice_dir.mkdir(parents=True, exist_ok=True)
     g = {
-        "job_id": "JOB", "filename": "blob.png", "description": None,
+        "job_id": "JOB", "filename": filename, "description": description,
         "model_override": None, "target_os": "linux", "kind": "raw",
         "Path": Path,
         "_job_dir": lambda _j: slice_dir,
@@ -515,24 +717,61 @@ def _prompt_slice(src_key: str, meta: dict, fake_base: str = "BASE-PROMPT") -> s
                 sys.modules.pop(k, None)
 
 
+# Guard the loop BODY per module, not the loop: a misc-side raise inside
+# _prompt_slice must not also kill the forensic iteration (composite masking).
 for label, key in (("misc", "misc_orch"), ("forensic", "forensic_orch")):
-    with_t = _prompt_slice(key, {"target_url": "t.example.com:4444"})
-    without = _prompt_slice(key, {})
-    check(f"{label}: a targeted job's prompt names the target",
-          "t.example.com:4444" in with_t, True)
-    check(f"{label}: the directive is appended, not substituted",
-          with_t.startswith("BASE-PROMPT"), True)
-    check(f"{label}: an untargeted job's prompt is byte-identical to before",
-          without, "BASE-PROMPT")
-    check(f"{label}: the prompt uses the runner-less directive variant",
-          ("argv[1]" in with_t or "TARGETS" in with_t), False)
-    check(f"{label}: the prompt keeps the authoritative-on-retry clause",
-          "AUTHORITATIVE" in with_t, True)
-    multi = _prompt_slice(key, {"target_url": "p:1", "target_urls": ["p:1", "q:2"]})
-    check(f"{label}: extra targets survive into the prompt",
-          ("1) p:1" in multi and "2) q:2" in multi), True)
-    blank = _prompt_slice(key, {"target_url": "   "})
-    check(f"{label}: a whitespace-only target adds nothing", blank, "BASE-PROMPT")
+    with guard(f"{label} prompt-slice scenario"):
+        with_t = _prompt_slice(key, {"target_url": "t.example.com:4444"})
+        without = _prompt_slice(key, {})
+        check(f"{label}: a targeted job's prompt names the target",
+              "t.example.com:4444" in with_t, True)
+        check(f"{label}: the directive is appended, not substituted",
+              with_t.startswith("BASE-PROMPT"), True)
+        check(f"{label}: an untargeted job's prompt is byte-identical to before",
+              without, "BASE-PROMPT")
+        check(f"{label}: the prompt uses the runner-less directive variant",
+              ("argv[1]" in with_t or "TARGETS" in with_t), False)
+        check(f"{label}: the prompt keeps the authoritative-on-retry clause",
+              "AUTHORITATIVE" in with_t, True)
+        multi = _prompt_slice(key, {"target_url": "p:1", "target_urls": ["p:1", "q:2"]})
+        check(f"{label}: extra targets survive into the prompt",
+              ("1) p:1" in multi and "2) q:2" in multi), True)
+        blank = _prompt_slice(key, {"target_url": "   "})
+        check(f"{label}: a whitespace-only target adds nothing", blank, "BASE-PROMPT")
+
+# The runner-less directive's "what is the PRIMARY input" line must match the
+# job the operator actually created. misc's file is OPTIONAL, so the orchestrator
+# passes has_artifact/has_description off the real job state; a hardcoded
+# "the uploaded artifact is the main input" is a lie for a description-only or
+# target-only misc job. Run the real misc prologue for each shape.
+with guard("misc primary-input directive scenarios"):
+    misc_file_t = _prompt_slice("misc_orch", {"target_url": "t.example.com:4444"},
+                                filename="blob.png", description=None)
+    check("misc file+target keeps the artifact-primary wording",
+          "the uploaded artifact is still the job's main input" in misc_file_t, True)
+
+    misc_desc_t = _prompt_slice("misc_orch", {"target_url": "t.example.com:4444"},
+                                filename=None, description="a captured handshake")
+    check("misc description+target names the description as the primary input",
+          "the description above is still the job's main input" in misc_desc_t, True)
+    check("misc description+target invents no uploaded artifact",
+          "the uploaded artifact is still the job's main input" in misc_desc_t, False)
+
+    misc_only_t = _prompt_slice("misc_orch", {"target_url": "only.example.com:9999"},
+                                filename=None, description=None)
+    check("misc target-only does not invent an uploaded artifact",
+          "the uploaded artifact is still the job's main input" in misc_only_t, False)
+    check("misc target-only does not call the sole target supplementary",
+          "SUPPLEMENTARY, NOT PRIMARY" in misc_only_t, False)
+    check("misc target-only names the target as the job's primary subject",
+          ("only.example.com:9999" in misc_only_t and "PRIMARY INPUT" in misc_only_t), True)
+
+# forensic's file is REQUIRED, so it always has an artifact and keeps the
+# original wording (its orchestrator passes no override — the default holds).
+with guard("forensic primary-input directive scenario"):
+    forensic_file_t = _prompt_slice("forensic_orch", {"target_url": "fz.example.com:22"})
+    check("forensic keeps the artifact-primary wording (its file is required)",
+          "the uploaded artifact is still the job's main input" in forensic_file_t, True)
 
 
 # ==========================================================================
@@ -549,9 +788,10 @@ def _panel(name: str) -> str:
 
 for mod_name, field in (("misc", "target"), ("forensic", "target"),
                         ("pwn", "target"), ("web", "target_url")):
-    panel = _panel(mod_name)
-    check(f"{mod_name} form offers a target list bound to `{field}`",
-          bool(re.search(r'class="target-list" data-field="%s"' % field, panel)), True)
+    with guard(f"{mod_name} panel target-field scenario"):
+        panel = _panel(mod_name)
+        check(f"{mod_name} form offers a target list bound to `{field}`",
+              bool(re.search(r'class="target-list" data-field="%s"' % field, panel)), True)
 
 check("forensic's file input is still marked required",
       bool(re.search(r'<input type="file" name="file" required', _panel("forensic"))),
@@ -589,19 +829,20 @@ except (FileNotFoundError, AssertionError, OSError) as exc:
     print(f"SKIP  node unavailable for the gate evaluation ({exc})")
 
 if have_node:
-    for _m in ("web", "pwn", "crypto", "rev", "web3"):
-        check(f"{_m}: Change target still shown (no regression)",
-              _gate(_m)["showChangeTarget"], True)
-    check("forensic: Change target shown — it is retryable, so the value is read",
-          _gate("forensic")["showChangeTarget"], True)
-    check("misc: target accepted at create time",
-          _gate("misc")["hasTarget"], True)
-    check("misc: Change target HIDDEN — no retry/resume/run would ever read it",
-          _gate("misc")["showChangeTarget"], False)
-    check("live-fire: no target affordance at all",
-          _gate("live-fire")["hasTarget"], False)
-    check("hybrid: targets live on its per-stage inputs, not the job panel",
-          _gate("hybrid")["showChangeTarget"], False)
+    with guard("Change-target gate evaluation scenario"):
+        for _m in ("web", "pwn", "crypto", "rev", "web3"):
+            check(f"{_m}: Change target still shown (no regression)",
+                  _gate(_m)["showChangeTarget"], True)
+        check("forensic: Change target shown — it is retryable, so the value is read",
+              _gate("forensic")["showChangeTarget"], True)
+        check("misc: target accepted at create time",
+              _gate("misc")["hasTarget"], True)
+        check("misc: Change target HIDDEN — no retry/resume/run would ever read it",
+              _gate("misc")["showChangeTarget"], False)
+        check("live-fire: no target affordance at all",
+              _gate("live-fire")["hasTarget"], False)
+        check("hybrid: targets live on its per-stage inputs, not the job panel",
+              _gate("hybrid")["showChangeTarget"], False)
 
 
 # ==========================================================================
@@ -646,14 +887,15 @@ def _form_params(route_file: str) -> set:
 
 _panel_fields = {}
 for _p, (_f, _fn) in _ROUTE_OF_PANEL.items():
-    _decl = re.findall(r'class="target-list" data-field="([a-z_]+)"', _panel(_p))
-    check(f"{_p}: exactly one target list in the panel (querySelector is singular)",
-          _panel(_p).count('class="target-list"'), 1)
-    check(f"{_p}: the list declares a data-field", len(_decl), 1)
-    if _decl:
-        _panel_fields[_p] = _decl[0]
-        check(f"{_p}: `{_decl[0]}` is a Form parameter the route actually accepts",
-              _decl[0] in _form_params(_f), True)
+    with guard(f"{_p} form-to-route wire scenario"):
+        _decl = re.findall(r'class="target-list" data-field="([a-z_]+)"', _panel(_p))
+        check(f"{_p}: exactly one target list in the panel (querySelector is singular)",
+              _panel(_p).count('class="target-list"'), 1)
+        check(f"{_p}: the list declares a data-field", len(_decl), 1)
+        if _decl:
+            _panel_fields[_p] = _decl[0]
+            check(f"{_p}: `{_decl[0]}` is a Form parameter the route actually accepts",
+                  _decl[0] in _form_params(_f), True)
 
 # And the extraction itself, executed. The row inputs carry no `name`, so the
 # ONLY thing that puts the operator's text into the request is this block.
@@ -683,21 +925,22 @@ console.log(JSON.stringify(store));
 
 
 if have_node:
-    for _p in ("misc", "forensic"):
-        _fld = _panel_fields.get(_p)
-        got = _extract(_fld, ["h.example.com:1"])
-        check(f"{_p}: what the operator types lands under `{_fld}`",
-              got.get(_fld), "h.example.com:1")
-        got = _extract(_fld, [" a:1 ", "", "b:2"])
-        check(f"{_p}: several rows are newline-joined and blanks dropped",
-              got.get(_fld), "a:1\nb:2")
-        got = _extract(_fld, ["   "])
-        check(f"{_p}: an untouched row sends an empty value, not whitespace",
-              got.get(_fld), "")
-    # The same block serves the modules that already had a list; if it stopped
-    # working there this would be a regression, not a new-module problem.
-    check("web: the shared extraction still writes target_url",
-          _extract("target_url", ["http://x:1"]).get("target_url"), "http://x:1")
+    with guard("form extraction scenario"):
+        for _p in ("misc", "forensic"):
+            _fld = _panel_fields.get(_p)
+            got = _extract(_fld, ["h.example.com:1"])
+            check(f"{_p}: what the operator types lands under `{_fld}`",
+                  got.get(_fld), "h.example.com:1")
+            got = _extract(_fld, [" a:1 ", "", "b:2"])
+            check(f"{_p}: several rows are newline-joined and blanks dropped",
+                  got.get(_fld), "a:1\nb:2")
+            got = _extract(_fld, ["   "])
+            check(f"{_p}: an untouched row sends an empty value, not whitespace",
+                  got.get(_fld), "")
+        # The same block serves the modules that already had a list; if it stopped
+        # working there this would be a regression, not a new-module problem.
+        check("web: the shared extraction still writes target_url",
+              _extract("target_url", ["http://x:1"]).get("target_url"), "http://x:1")
 
 
 # ==========================================================================
@@ -797,26 +1040,34 @@ if _retry_ok:
             RT.get_queue = real
         return _read_meta(new_id) or {}
 
-    child = _forensic_child("keep.example.com:7000")
-    check("a forensic retry carries the parent's target into the child",
-          child.get("target_url"), "keep.example.com:7000")
-    check("  ...and still carries the image forward",
-          child.get("filename"), "disk.raw")
-    check("  ...and does not confuse target_os with the remote target",
-          child.get("target_os"), "linux")
+    with guard("forensic retry carry scenario"):
+        child = _forensic_child("keep.example.com:7000")
+        check("a forensic retry carries the parent's target into the child",
+              child.get("target_url"), "keep.example.com:7000")
+        check("  ...and still carries the image forward",
+              child.get("filename"), "disk.raw")
+        check("  ...and does not confuse target_os with the remote target",
+              child.get("target_os"), "linux")
 
-    child = _forensic_child("old.example.com:1", override="new.example.com:2")
-    check("a Change-target override reaches the forensic retry",
-          child.get("target_url"), "new.example.com:2")
+    with guard("forensic retry override scenario"):
+        child = _forensic_child("old.example.com:1", override="new.example.com:2")
+        check("a Change-target override reaches the forensic retry",
+              child.get("target_url"), "new.example.com:2")
 
-    child = _forensic_child("old.example.com:1", override="(none)")
-    check("  ...and \"(none)\" clears it rather than re-using the old value",
-          child.get("target_url"), None)
+    with guard("forensic retry clear-override scenario"):
+        child = _forensic_child("old.example.com:1", override="(none)")
+        check("  ...and \"(none)\" clears it rather than re-using the old value",
+              child.get("target_url"), None)
 
-    child = _forensic_child("p:1", parent_urls=["p:1", "q:2"])
-    check("a multi-target forensic retry keeps the extras",
-          child.get("target_urls"), ["p:1", "q:2"])
+    with guard("forensic retry multi-target scenario"):
+        child = _forensic_child("p:1", parent_urls=["p:1", "q:2"])
+        check("a multi-target forensic retry keeps the extras",
+              child.get("target_urls"), ["p:1", "q:2"])
 
 
+# The summary line is printed ONLY here, on the normal completion path. A crash
+# in an UNGUARDED region (e.g. section 1's compile of the module under test)
+# never reaches this line — _harness_excepthook prints HARNESS ABORT and exits 2
+# instead — so the sweep can tell a caught assertion-red from a harness abort.
 print(f"\n{PASSED + FAILED} checks, {FAILED} failed  (mutate={ARGS.mutate})")
 sys.exit(1 if FAILED else 0)

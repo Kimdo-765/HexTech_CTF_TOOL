@@ -54,8 +54,18 @@ def build_multi_target_block(targets) -> str:
 def build_target_directive(
     primary_target: str | None, target_urls: list[str] | None = None,
     *, script_driven: bool = True,
+    has_artifact: bool = True, has_description: bool = False,
 ) -> str:
     """Authoritative TARGET directive appended to every remote job's prompt.
+
+    ``has_artifact`` / ``has_description`` only steer the runner-less
+    (``script_driven=False``) "what is the PRIMARY input" clause and have no
+    effect on the script-driven text the five analyzer modules already get.
+    misc's file is OPTIONAL, so a target-only or description-only misc job has
+    no uploaded artifact to call "the job's main input" — the caller declares
+    which input actually leads so the directive does not assert a phantom
+    artifact. Defaults describe an artifact-primary job (forensic always
+    uploads one; its call site passes no override).
 
     Supersedes `build_multi_target_block` at the analyzer call sites: it fires
     for a SINGLE target too (that block only fired for ≥2), so the "drive off
@@ -125,14 +135,36 @@ def build_target_directive(
             "runner and no argv-driven script, so nothing rewrites a target for "
             "you — a stale host:port stays stale until you re-read this line."
         )
-        lines.append(
-            "• SUPPLEMENTARY, NOT PRIMARY: the uploaded artifact is still the "
-            "job's main input. Use the target for what the artifact cannot give "
-            "you (a live service the evidence points at, a hosted copy of a "
-            "truncated capture, an oracle that decodes what you extracted). If "
-            "it is unreachable, say so and keep working the artifact — an "
-            "unreachable target does not make the job unsolvable."
-        )
+        # What the agent's PRIMARY input actually is decides this last line.
+        # misc's file is optional, so "the uploaded artifact is the main input"
+        # is a lie for a description-only or target-only job. Forensic (file
+        # required) and file-bearing misc keep the artifact wording verbatim.
+        if has_artifact:
+            lines.append(
+                "• SUPPLEMENTARY, NOT PRIMARY: the uploaded artifact is still the "
+                "job's main input. Use the target for what the artifact cannot give "
+                "you (a live service the evidence points at, a hosted copy of a "
+                "truncated capture, an oracle that decodes what you extracted). If "
+                "it is unreachable, say so and keep working the artifact — an "
+                "unreachable target does not make the job unsolvable."
+            )
+        elif has_description:
+            lines.append(
+                "• SUPPLEMENTARY, NOT PRIMARY: the description above is still the "
+                "job's main input. Use the target for what the description points "
+                "you at (a live service it names, a hosted copy of the material, an "
+                "oracle that decodes it). If it is unreachable, say so and keep "
+                "working from the description — an unreachable target does not make "
+                "the job unsolvable."
+            )
+        else:
+            lines.append(
+                "• PRIMARY INPUT: no file and no description were supplied, so this "
+                "remote target is the job's main subject — investigate it directly "
+                "(enumerate the service, read what it exposes, interact with it to "
+                "find the flag). If it is unreachable, say so and report what you "
+                "tried — an unreachable target does not make the job unsolvable."
+            )
     if len(ts) >= 2:
         listed = "\n".join(f"    {i + 1}) {t}" for i, t in enumerate(ts))
         where = (
