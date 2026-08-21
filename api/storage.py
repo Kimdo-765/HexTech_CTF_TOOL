@@ -64,7 +64,9 @@ def reject_job(job_id: str, status_code: int, detail: str) -> None:
     `job_dir()` mkdirs, and a create route has to call it before it can judge a
     streamed upload — an empty image is only empty once you have read it. That
     left one `data/jobs/<id>/` behind for every 400: pwn/rev/misc/forensic all
-    did it, and nothing ever swept them.
+    did it. The TTL reaper does eventually collect a meta-less directory, but
+    "eventually" is up to the configured TTL — seven days by default, and never
+    at all when it is set to 0.
 
     Never raises from the cleanup: the caller asked to refuse the request, and a
     failure to tidy must not turn a 400 into a 500. But it does not stay silent

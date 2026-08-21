@@ -1201,14 +1201,29 @@ class _Capture(_logging.Handler):
 
 
 def _reject_under(job_id, *, make_undeletable):
-    """Call reject_job and report (status, dir survived, diagnostics)."""
+    """Call reject_job and report (status, dir survived, diagnostics).
+
+    The failure is injected by making os.unlink refuse for paths under this one
+    job directory. An earlier version chmod'd the directory instead, which is
+    not deterministic: the mode is advisory to root, so the whole contract went
+    unexercised on any host that runs the suite as root. A patched unlink fails
+    the same way for everyone, and is restored in `finally` whatever happens.
+    """
+    import os as _os
+
     jd = DATA / "jobs" / job_id
     jd.mkdir(parents=True, exist_ok=True)
     (jd / "payload.bin").write_bytes(b"x")
-    if make_undeletable:
-        # Removing a child needs write permission on the PARENT directory, so
-        # this makes rmtree fail for real rather than by monkeypatching it.
-        jd.chmod(0o500)
+
+    real_unlink = _os.unlink
+
+    def _refuse(path, *a, **k):
+        # dir_fd-relative names arrive as bare strings; refuse by name too.
+        name = path if isinstance(path, str) else str(path)
+        if "payload.bin" in name:
+            raise PermissionError(13, "Permission denied", name)
+        return real_unlink(path, *a, **k)
+
     cap = _Capture()
     log = _logging.getLogger(_storage.__name__)
     log.addHandler(cap)
@@ -1216,14 +1231,15 @@ def _reject_under(job_id, *, make_undeletable):
     log.setLevel(_logging.WARNING)
     status = None
     try:
+        if make_undeletable:
+            _os.unlink = _refuse
         _storage.reject_job(job_id, 400, "empty file")
     except _HTTPExc as exc:
         status = (exc.status_code, exc.detail)
     finally:
+        _os.unlink = real_unlink          # always, even on an unexpected raise
         log.removeHandler(cap)
         log.setLevel(prev)
-        if jd.exists():
-            jd.chmod(0o700)
     survived = jd.exists()
     if survived:
         import shutil as _sh
@@ -1242,12 +1258,21 @@ else:
     check("a blocked cleanup still returns the original 400",
           _st, (400, "empty file"))
     check("  ...and does not pretend the directory is gone", _survived, True)
-    check("  ...and REGRESSION: says so, naming the job and the path",
-          bool(_logs) and "rj-blocked" in _logs[0] and "rj-blocked" in _logs[0],
-          True)
-    check("  ...with the cause, not just the fact",
-          any("Error" in m or "denied" in m or "Permission" in m for m in _logs),
-          True)
+    _joined = " ".join(_logs)
+    # Three separate things, asserted separately. The previous version wrote
+    # the same condition twice and so never checked the second one at all.
+    check("  ...and REGRESSION: names the job", "rj-blocked" in _joined, True)
+    # The diagnostic must STATE the path, not merely carry one inside a cause.
+    # Two earlier attempts at this check both passed against a diagnostic with
+    # its path argument removed: a plain substring matched the child path in a
+    # cause, and a negative lookahead matched the rmdir cause, which names the
+    # directory itself. So the message is split at the separator and the path is
+    # required in the part the function writes, before any cause text.
+    _stated = _joined.split("—")[0]
+    check("  ...and REGRESSION: STATES the directory path, not just inside a cause",
+          str(DATA / "jobs" / "rj-blocked") in _stated, True)
+    check("  ...and the cause, not just the fact",
+          "PermissionError" in _joined or "Permission denied" in _joined, True)
 
 # --- the two quiet paths ----------------------------------------------------
 _st, _survived, _logs = _reject_under("rj-clean", make_undeletable=False)

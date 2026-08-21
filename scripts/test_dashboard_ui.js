@@ -185,8 +185,20 @@ if (blockSrc) {
   // checks below assert both the decision and the button it produced.
   const renderGates = new Function(
     "job", "escapeHtml",
-    `${blockSrc}\n return {runBlock, canRetry, canContinue, hasTarget, showRetry,` +
-    ` showChangeTarget, showStop, showStopResume, isExploitableModule};`
+    // `typeof x === "undefined"` does not throw for an identifier that was
+    // never declared, so a RENAMED gate yields undefined here instead of a
+    // ReferenceError that kills the run before the summary. A crash is not a
+    // named failure, and this file's whole job is to fail by name.
+    `${blockSrc}\n const g = (n) => n;` +
+    ` return {runBlock,` +
+    `  canRetry: typeof canRetry === "undefined" ? undefined : canRetry,` +
+    `  canContinue: typeof canContinue === "undefined" ? undefined : canContinue,` +
+    `  hasTarget: typeof hasTarget === "undefined" ? undefined : hasTarget,` +
+    `  showRetry: typeof showRetry === "undefined" ? undefined : showRetry,` +
+    `  showChangeTarget: typeof showChangeTarget === "undefined" ? undefined : showChangeTarget,` +
+    `  showStop: typeof showStop === "undefined" ? undefined : showStop,` +
+    `  showStopResume: typeof showStopResume === "undefined" ? undefined : showStopResume,` +
+    `  isExploitableModule: typeof isExploitableModule === "undefined" ? undefined : isExploitableModule};`
   );
   const gatesFor = (module, status) =>
     renderGates({ module, status, id: "abc123abc123" }, escapeHtml);
@@ -229,44 +241,53 @@ if (blockSrc) {
   // — that is the whole history of this file. Neither may be derived from
   // canRetry (that defaulted new modules to allowed), so the invariant lives
   // here instead.
-  // The candidate set is discovered from EVERY declaration that takes part in
-  // the comparison — all three of them. The previous version discovered two
-  // (the server list and the card's canRetry) and therefore could not see a
-  // module added only to the card's canContinue: the name appeared in neither
-  // source it read, so the very list under test was never evaluated at that
-  // name. Discovering "not hardcoded" was half the lesson; "from every list
-  // being compared" is the other half.
+  // Four declarations take part in this comparison, and all four are read
+  // WHOLE. The previous version found them by line, which meant a declaration
+  // split across lines contributed only the names on its first line — the check
+  // would silently see half a list. It also left the server's retryable list
+  // out of the candidate set entirely.
   //
-  // Each declaration is asserted to be found EXACTLY once. A rename would
-  // otherwise yield an empty array, and an empty array compares equal to an
-  // empty array — the check would pass by having nothing to say.
+  // Each is required to appear exactly once. A rename otherwise yields an empty
+  // array, and empty arrays compare equal: the check would pass by having
+  // nothing left to say.
   const retrySrc = read(["api/routes/retry.py", "../api/routes/retry.py"]) || "";
-  const names = (line) => (line.match(/"([a-z0-9-]+)"/g) || [])
+  const decls = (src, re) => src.match(re) || [];
+  const names = (blob) => (blob.match(/"([a-z0-9-]+)"/g) || [])
     .map((x) => x.replace(/"/g, ""));
-  const declLines = (src, pred) => src.split("\n").filter(pred);
 
-  const contDecl = declLines(retrySrc, (l) => l.startsWith("_CONTINUABLE_MODULES"));
-  const retryDecl = declLines(SRC, (l) => l.includes("const canRetry = ["));
-  const uiContDecl = declLines(SRC, (l) => l.includes("const canContinue = ["));
-  t("the server's continuable declaration was found exactly once",
-    contDecl.length === 1, contDecl);
-  t("the card's canRetry declaration was found exactly once",
-    retryDecl.length === 1, retryDecl);
-  t("the card's canContinue declaration was found exactly once",
-    uiContDecl.length === 1, uiContDecl);
+  const D = {
+    serverRetry: decls(retrySrc, /_RETRYABLE_MODULES\s*=\s*\(([\s\S]*?)\)/g),
+    serverCont: decls(retrySrc, /_CONTINUABLE_MODULES\s*=\s*\(([\s\S]*?)\)/g),
+    uiRetry: decls(SRC, /const canRetry\s*=\s*\[([\s\S]*?)\]/g),
+    uiCont: decls(SRC, /const canContinue\s*=\s*\[([\s\S]*?)\]/g),
+  };
+  for (const [k, v] of Object.entries(D)) {
+    t(`the ${k} declaration appears exactly once`, v.length === 1, v);
+  }
 
-  const serverCont = names(contDecl[0] || "").sort();
+  const L = {};
+  for (const [k, v] of Object.entries(D)) L[k] = names(v[0] || "").sort();
+
+  // Candidates come from ALL FOUR lists, so a module added to any one of them
+  // is evaluated against the others.
   const candidates = Array.from(new Set([
-    ...serverCont,
-    ...names(retryDecl[0] || ""),
-    ...names(uiContDecl[0] || ""),
+    ...L.serverRetry, ...L.serverCont, ...L.uiRetry, ...L.uiCont,
     "misc", "hybrid", "live-fire",
   ]));
-  const uiCont = candidates
-    .filter((m) => gatesFor(m, "no_flag").canContinue === true).sort();
-  t("REGRESSION: the card's canContinue matches the server's _CONTINUABLE_MODULES",
-    JSON.stringify(uiCont) === JSON.stringify(serverCont),
-    { ui: uiCont, server: serverCont });
+
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  t("REGRESSION: the card's canRetry equals the server's _RETRYABLE_MODULES",
+    eq(L.uiRetry, L.serverRetry), { ui: L.uiRetry, server: L.serverRetry });
+  t("REGRESSION: the card's canContinue equals the server's _CONTINUABLE_MODULES",
+    eq(L.uiCont, L.serverCont), { ui: L.uiCont, server: L.serverCont });
+
+  // Declared capability is one thing; what the card actually renders is
+  // another. Assert the rendered action too, on a terminal status.
+  const renderedContinue = candidates
+    .filter((m) => hasAction(gatesFor(m, "no_flag").runBlock, "continue")).sort();
+  t("REGRESSION: the Continue buttons actually rendered match the server list",
+    eq(renderedContinue, L.serverCont),
+    { rendered: renderedContinue, server: L.serverCont });
 
   // web3 flag_ready: supported by the backend (was hidden by the old UI list),
   // and flag_ready is a terminal status Retry must still cover.
@@ -304,7 +325,10 @@ if (blockSrc) {
 
   // Parity: every module the backend will rebuild is offered Retry by the card.
   // This is the check the old 200-char source slice was trying to make.
-  for (const m of ["web", "pwn", "crypto", "rev", "web3", "forensic"]) {
+  // Discovered, not hardcoded: a six-name literal here would go stale the day
+  // the server list changes, and stale-but-green is the failure this file keeps
+  // producing.
+  for (const m of L.serverRetry) {
     t(`  card offers Retry for ${m} (matches the backend _RETRYABLE_MODULES)`,
       gatesFor(m, "no_flag").showRetry === true, m);
   }
