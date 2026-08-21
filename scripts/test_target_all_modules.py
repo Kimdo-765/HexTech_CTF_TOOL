@@ -1197,7 +1197,12 @@ class _Capture(_logging.Handler):
         self.records = []
 
     def emit(self, record):
-        self.records.append(record.getMessage())
+        # Keep the RECORD, not its rendering. Asserting on rendered text made
+        # the check hostage to wording: a substring matched a path inside a
+        # cause, a lookahead matched the rmdir cause, and a delimiter split
+        # stopped working the moment the delimiter changed. The structured
+        # field cannot be reworded away.
+        self.records.append(record)
 
 
 def _reject_under(job_id, *, make_undeletable):
@@ -1258,19 +1263,16 @@ else:
     check("a blocked cleanup still returns the original 400",
           _st, (400, "empty file"))
     check("  ...and does not pretend the directory is gone", _survived, True)
-    _joined = " ".join(_logs)
+    _joined = " ".join(r.getMessage() for r in _logs)
+    _dirs = [getattr(r, "reject_job_dir", None) for r in _logs]
     # Three separate things, asserted separately. The previous version wrote
     # the same condition twice and so never checked the second one at all.
     check("  ...and REGRESSION: names the job", "rj-blocked" in _joined, True)
-    # The diagnostic must STATE the path, not merely carry one inside a cause.
-    # Two earlier attempts at this check both passed against a diagnostic with
-    # its path argument removed: a plain substring matched the child path in a
-    # cause, and a negative lookahead matched the rmdir cause, which names the
-    # directory itself. So the message is split at the separator and the path is
-    # required in the part the function writes, before any cause text.
-    _stated = _joined.split("—")[0]
-    check("  ...and REGRESSION: STATES the directory path, not just inside a cause",
-          str(DATA / "jobs" / "rj-blocked") in _stated, True)
+    # Structural, not textual. Three earlier versions of this check parsed the
+    # rendered message and each was defeated by a different rewording — the last
+    # one turned a pathless diagnostic GREEN as soon as the delimiter changed.
+    check("  ...and REGRESSION: carries the directory as a structured field",
+          _dirs, [str(DATA / "jobs" / "rj-blocked")])
     check("  ...and the cause, not just the fact",
           "PermissionError" in _joined or "Permission denied" in _joined, True)
 

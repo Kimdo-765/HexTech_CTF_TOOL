@@ -100,6 +100,12 @@ def reject_job(job_id: str, status_code: int, detail: str) -> None:
                 "at %s — %s",
                 job_id, status_code, target,
                 "; ".join(causes) or "path still present after rmtree",
+                # The path is also carried as a structured field. The rendered
+                # message is for a human; a test that has to parse it ends up
+                # asserting the wording, and three attempts at doing that were
+                # each defeated by a different rewording. `reject_job_dir` says
+                # which directory survived in a way no phrasing change touches.
+                extra={"reject_job_dir": str(target)},
             )
     raise HTTPException(status_code=status_code, detail=detail)
 

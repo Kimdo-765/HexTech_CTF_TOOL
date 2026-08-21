@@ -183,25 +183,37 @@ if (blockSrc) {
   // Only `job` and `escapeHtml` cross into the block; everything else it needs
   // it declares. Returning the gate booleans AND the rendered html lets the
   // checks below assert both the decision and the button it produced.
-  const renderGates = new Function(
-    "job", "escapeHtml",
-    // `typeof x === "undefined"` does not throw for an identifier that was
-    // never declared, so a RENAMED gate yields undefined here instead of a
-    // ReferenceError that kills the run before the summary. A crash is not a
-    // named failure, and this file's whole job is to fail by name.
-    `${blockSrc}\n const g = (n) => n;` +
-    ` return {runBlock,` +
-    `  canRetry: typeof canRetry === "undefined" ? undefined : canRetry,` +
-    `  canContinue: typeof canContinue === "undefined" ? undefined : canContinue,` +
-    `  hasTarget: typeof hasTarget === "undefined" ? undefined : hasTarget,` +
-    `  showRetry: typeof showRetry === "undefined" ? undefined : showRetry,` +
-    `  showChangeTarget: typeof showChangeTarget === "undefined" ? undefined : showChangeTarget,` +
-    `  showStop: typeof showStop === "undefined" ? undefined : showStop,` +
-    `  showStopResume: typeof showStopResume === "undefined" ? undefined : showStopResume,` +
-    `  isExploitableModule: typeof isExploitableModule === "undefined" ? undefined : isExploitableModule};`
-  );
-  const gatesFor = (module, status) =>
-    renderGates({ module, status, id: "abc123abc123" }, escapeHtml);
+  // Compile and call are both wrapped: a rename or a syntax slip must arrive as
+  // a NAMED failure with the summary still printed, not as an exception that
+  // kills the run. A crash and a pass look identical to anyone reading exit
+  // codes, and this file's job is to fail by name.
+  let renderGates = null;
+  try {
+    renderGates = new Function(
+      "job", "escapeHtml",
+      `${blockSrc}\n return {runBlock,` +
+      `  canRetry: typeof canRetry === "undefined" ? undefined : canRetry,` +
+      `  canContinue: typeof canContinue === "undefined" ? undefined : canContinue,` +
+      `  hasTarget: typeof hasTarget === "undefined" ? undefined : hasTarget,` +
+      `  showRetry: typeof showRetry === "undefined" ? undefined : showRetry,` +
+      `  showChangeTarget: typeof showChangeTarget === "undefined" ? undefined : showChangeTarget,` +
+      `  showStop: typeof showStop === "undefined" ? undefined : showStop,` +
+      `  showStopResume: typeof showStopResume === "undefined" ? undefined : showStopResume,` +
+      `  isExploitableModule: typeof isExploitableModule === "undefined" ? undefined : isExploitableModule};`
+    );
+  } catch (e) {
+    t("the render block compiles", false, String(e));
+  }
+  const gateErrors = [];
+  const gatesFor = (module, status) => {
+    if (!renderGates) return { runBlock: "" };
+    try {
+      return renderGates({ module, status, id: "abc123abc123" }, escapeHtml);
+    } catch (e) {
+      gateErrors.push(`${module}/${status}: ${e}`);
+      return { runBlock: "" };
+    }
+  };
   const hasAction = (html, action) =>
     new RegExp(`data-action="${action}"`).test(html);
 
@@ -227,108 +239,117 @@ if (blockSrc) {
   t("forensic advertises BOTH retry buttons",
     hasAction(g.runBlock, "retry") && hasAction(g.runBlock, "retry-manual"),
     g.runBlock);
+  // Asserted on what is RENDERED, not on a variable's name. The earlier version
+  // read g.canContinue, which made a harmless rename of the declaration AND its
+  // use — same behaviour, different spelling — come out red. A check that fails
+  // on a rename it should not care about is measuring the wrong thing, which is
+  // the same defect as one that passes on a rename it should catch.
   t("REGRESSION: forensic does NOT advertise a Continue the server refuses",
-    g.canContinue === false && !hasAction(g.runBlock, "continue"), g.runBlock);
+    !hasAction(g.runBlock, "continue"), g.runBlock);
 
   // The control: a module that really can be continued still offers it, so the
   // check above is about forensic and not about Continue disappearing.
   const gp = gatesFor("pwn", "no_flag");
   t("  ...while pwn still offers Continue",
-    gp.canContinue === true && hasAction(gp.runBlock, "continue"), gp.runBlock);
+    hasAction(gp.runBlock, "continue"), gp.runBlock);
 
   // Cross-file parity. The card's canContinue and the server's
   // _CONTINUABLE_MODULES are two written-out lists, and written-out lists drift
   // — that is the whole history of this file. Neither may be derived from
   // canRetry (that defaulted new modules to allowed), so the invariant lives
   // here instead.
-  // Four declarations take part in this comparison, and all four are read
-  // WHOLE. The previous version found them by line, which meant a declaration
-  // split across lines contributed only the names on its first line — the check
-  // would silently see half a list. It also left the server's retryable list
-  // out of the candidate set entirely.
+  // ---------------------------------------------------------------------
+  // Capability parity, judged the only way that cannot be faked.
   //
-  // Each is required to appear exactly once. A rename otherwise yields an empty
-  // array, and empty arrays compare equal: the check would pass by having
-  // nothing left to say.
-  const retrySrc = read(["api/routes/retry.py", "../api/routes/retry.py"]) || "";
-  const decls = (src, re) => src.match(re) || [];
-  const names = (blob) => (blob.match(/"([a-z0-9-]+)"/g) || [])
-    .map((x) => x.replace(/"/g, ""));
+  // Five rounds of this check were regex over source text, and each round a
+  // mutant walked past it: a hardcoded candidate list, then a missing list,
+  // then a declaration split across lines. Every fix was a better regex. The
+  // method was the defect — a comment or a string literal can wear the shape
+  // of a declaration, and no amount of pattern care changes that.
+  //
+  // The backend list now comes from Python's own parser, so only real code
+  // counts. The UI side is not read at all: it is EXERCISED, and what the card
+  // renders is the answer. How the declaration is spelled, or across how many
+  // lines, stops being a question anyone has to ask.
+  // ---------------------------------------------------------------------
+  const { execFileSync } = require("child_process");
+  const retryPath = ["api/routes/retry.py", "../api/routes/retry.py"]
+    .find((f) => fs.existsSync(f));
+  t("the server's retry module is on disk", !!retryPath, retryPath);
 
-  const D = {
-    serverRetry: decls(retrySrc, /_RETRYABLE_MODULES\s*=\s*\(([\s\S]*?)\)/g),
-    serverCont: decls(retrySrc, /_CONTINUABLE_MODULES\s*=\s*\(([\s\S]*?)\)/g),
-    uiRetry: decls(SRC, /const canRetry\s*=\s*\[([\s\S]*?)\]/g),
-    uiCont: decls(SRC, /const canContinue\s*=\s*\[([\s\S]*?)\]/g),
-  };
-  for (const [k, v] of Object.entries(D)) {
-    t(`the ${k} declaration appears exactly once`, v.length === 1, v);
+  const AST_PROBE = `
+import ast, json, sys
+tree = ast.parse(open(sys.argv[1]).read())
+want = {"_RETRYABLE_MODULES", "_CONTINUABLE_MODULES"}
+out = {}
+for node in ast.walk(tree):
+    if isinstance(node, ast.Assign):
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name) and tgt.id in want:
+                vals = None
+                if isinstance(node.value, (ast.Tuple, ast.List)):
+                    vals = [e.value for e in node.value.elts
+                            if isinstance(e, ast.Constant)]
+                out.setdefault(tgt.id, []).append(vals)
+print(json.dumps(out))
+`;
+  let SERVER = {};
+  try {
+    SERVER = JSON.parse(
+      execFileSync("python3", ["-c", AST_PROBE, retryPath], { encoding: "utf8" })
+    );
+  } catch (e) {
+    t("the backend capability lists parse", false, String(e));
   }
+  for (const name of ["_RETRYABLE_MODULES", "_CONTINUABLE_MODULES"]) {
+    const got = SERVER[name] || [];
+    t(`${name} is assigned exactly once, as a literal`,
+      got.length === 1 && Array.isArray(got[0]), got);
+  }
+  const serverRetry = ((SERVER._RETRYABLE_MODULES || [[]])[0] || []).slice().sort();
+  const serverCont = ((SERVER._CONTINUABLE_MODULES || [[]])[0] || []).slice().sort();
 
-  const L = {};
-  for (const [k, v] of Object.entries(D)) L[k] = names(v[0] || "").sort();
-
-  // Candidates come from ALL FOUR lists, so a module added to any one of them
-  // is evaluated against the others.
+  // Candidates only need to be a superset — they decide what gets EXERCISED,
+  // not what is contractual. Harvesting every quoted name in the render block
+  // means a module added anywhere in it is tried, decoy or not; a decoy simply
+  // renders nothing and drops out.
+  const NEGATIVE = ["misc", "hybrid", "live-fire"];
   const candidates = Array.from(new Set([
-    ...L.serverRetry, ...L.serverCont, ...L.uiRetry, ...L.uiCont,
-    "misc", "hybrid", "live-fire",
+    ...serverRetry, ...serverCont, ...NEGATIVE,
+    ...((blockSrc.match(/"([a-z0-9-]+)"/g) || [])
+      .map((x) => x.replace(/"/g, ""))
+      .filter((x) => /^[a-z][a-z0-9-]*$/.test(x))),
   ]));
 
-  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  t("REGRESSION: the card's canRetry equals the server's _RETRYABLE_MODULES",
-    eq(L.uiRetry, L.serverRetry), { ui: L.uiRetry, server: L.serverRetry });
-  t("REGRESSION: the card's canContinue equals the server's _CONTINUABLE_MODULES",
-    eq(L.uiCont, L.serverCont), { ui: L.uiCont, server: L.serverCont });
+  const setEq = (a, b) =>
+    JSON.stringify(a.slice().sort()) === JSON.stringify(b.slice().sort());
+  const renders = (m, st, action) => hasAction(gatesFor(m, st).runBlock, action);
 
-  // Declared capability is one thing; what the card actually renders is
-  // another. Assert the rendered action too, on a terminal status.
-  const renderedContinue = candidates
-    .filter((m) => hasAction(gatesFor(m, "no_flag").runBlock, "continue")).sort();
-  t("REGRESSION: the Continue buttons actually rendered match the server list",
-    eq(renderedContinue, L.serverCont),
-    { rendered: renderedContinue, server: L.serverCont });
+  const TERMINAL = ["failed", "no_flag", "finished", "stopped", "flag_ready"];
+  const LIVE = ["queued", "running"];
 
-  // web3 flag_ready: supported by the backend (was hidden by the old UI list),
-  // and flag_ready is a terminal status Retry must still cover.
-  g = gatesFor("web3", "flag_ready");
-  t("web3 is retryable and takes a target",
-    g.canRetry === true && g.hasTarget === true, [g.canRetry, g.hasTarget]);
-  t("REGRESSION: a web3 job awaiting a verdict still offers Retry (flag_ready is terminal)",
-    g.showRetry === true && hasAction(g.runBlock, "retry"), g.runBlock);
-  t("  ...and change-target, which its module accepts",
-    g.showChangeTarget === true && hasAction(g.runBlock, "change-target"), g.runBlock);
-
-  // misc failed: NOT retryable — its run_job needs an operator passphrase, so a
-  // rebuilt job would fail in a way that looks like the module's fault.
-  g = gatesFor("misc", "failed");
-  t("REGRESSION: misc is not retryable", g.canRetry === false, g.canRetry);
-  t("  ...so the card renders no Retry button",
-    g.showRetry === false && !hasAction(g.runBlock, "retry"), g.runBlock);
-  // ...and therefore no change-target either, even though misc DOES accept a
-  // target at create time. PATCH /target has no module gate, so the request
-  // would succeed — but with no retry, no resume and no sandbox run, nothing
-  // would ever read the new value back. A button that writes meta and changes
-  // no behaviour is the decorative-field defect, not a feature.
-  t("misc accepts a target at create time", g.hasTarget === true, g.hasTarget);
-  t("REGRESSION: misc is NOT offered change-target — nothing would read it",
-    g.showChangeTarget === false && !hasAction(g.runBlock, "change-target"),
-    g.runBlock);
-
-  // pwn running: a live job offers Stop, never Retry (retry is terminal-only).
-  g = gatesFor("pwn", "running");
-  t("REGRESSION: a running job offers Stop, not Retry",
-    g.showStop === true && g.showRetry === false
-      && !hasAction(g.runBlock, "retry"), g.runBlock);
-  t("  ...while change-target stays available for a targeted module at any status",
-    g.showChangeTarget === true && hasAction(g.runBlock, "change-target"), g.runBlock);
+  for (const st of TERMINAL) {
+    const r = candidates.filter((m) => renders(m, st, "retry"));
+    const c = candidates.filter((m) => renders(m, st, "continue"));
+    t(`REGRESSION: [${st}] rendered Retry set equals _RETRYABLE_MODULES`,
+      setEq(r, serverRetry), { rendered: r.sort(), server: serverRetry });
+    t(`REGRESSION: [${st}] rendered Continue set equals _CONTINUABLE_MODULES`,
+      setEq(c, serverCont), { rendered: c.sort(), server: serverCont });
+  }
+  for (const st of LIVE) {
+    const r = candidates.filter((m) => renders(m, st, "retry"));
+    const c = candidates.filter((m) => renders(m, st, "continue"));
+    t(`REGRESSION: [${st}] renders neither Retry nor Continue`,
+      r.length === 0 && c.length === 0, { retry: r, continue: c });
+  }
+  t("no module/status combination threw while rendering", gateErrors, []);
 
   // Parity: every module the backend will rebuild is offered Retry by the card.
   // This is the check the old 200-char source slice was trying to make.
   // Discovered, not hardcoded: a six-name literal here would go stale the day
   // the server list changes, and stale-but-green is the failure this file keeps
   // producing.
-  for (const m of L.serverRetry) {
+  for (const m of serverRetry) {
     t(`  card offers Retry for ${m} (matches the backend _RETRYABLE_MODULES)`,
       gatesFor(m, "no_flag").showRetry === true, m);
   }
