@@ -215,17 +215,165 @@ if (blockSrc) {
     }
   };
   // An action counts only when a real <button> carries it AND wears the class
-  // token the listener binds on (app.js selects `.retry-btn[data-action=...]`).
-  // The old version was a substring test over the whole blob, so a mention in
-  // an HTML comment, an attribute of some other element, or a stray bit of text
-  // all read as a rendered control.
+  // token the listener binds on. Both halves of that sentence have been wrong
+  // here before, in opposite directions:
+  //
+  //   before F13  any substring counted — a mention in an HTML comment or on
+  //               some element no listener touches read as a rendered control
+  //   F13         required a real <button> with the exact action AND
+  //               `retry-btn` — and generalised that ONE class to EVERY action
+  //   F16         app.js does not bind that way. change-target binds on
+  //               `.change-target-btn`, stop on `.stop-job-btn`, and three of
+  //               the gpt actions bind on no class at all. Strip
+  //               `change-target-btn` from the Change Target button and the
+  //               click handler never attaches — and the suite said 73/0.
+  //
+  // A hand-written table is right for the two rows you copied and wrong for the
+  // seventh, which is the shape this file has produced six rounds running. So
+  // the requirement is READ OUT of the selectors app.js hands to
+  // querySelector/querySelectorAll. If it cannot be read whole, nothing is
+  // guessed: the action is reported as underived and the named check below is
+  // red.
+
+  // A left-to-right scanner, because the two obvious shortcuts are both wrong.
+  // Stripping `//` comments with a regex eats the `//` in a URL inside a
+  // string; scanning for quotes without knowing about comments lets a selector
+  // sitting in a comment pose as a binding. One pass that knows about line
+  // comments, block comments, regex literals and all three quote forms answers
+  // both. Template literals are returned with a flag when they interpolate,
+  // because an interpolated selector is not statically knowable and must not be
+  // silently dropped.
+  const scanLiterals = (src) => {
+    const out = [];
+    let i = 0, prev = "";
+    const n = src.length;
+    while (i < n) {
+      const c = src[i];
+      if (c === "/" && src[i + 1] === "/") {
+        while (i < n && src[i] !== "\n") i++;
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "*") {
+        const e = src.indexOf("*/", i + 2);
+        i = e < 0 ? n : e + 2;
+        continue;
+      }
+      if (c === "/" && !/[\w$)\]]/.test(prev)) {   // regex literal, not division
+        i++;
+        let inClass = false;
+        while (i < n) {
+          const d = src[i];
+          if (d === "\\") { i += 2; continue; }
+          if (d === "\n") break;
+          if (d === "[") inClass = true;
+          else if (d === "]") inClass = false;
+          else if (d === "/" && !inClass) { i++; break; }
+          i++;
+        }
+        prev = "/";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") {
+        let j = i + 1, buf = "", interp = false;
+        while (j < n) {
+          const d = src[j];
+          if (d === "\\") { buf += src[j + 1] || ""; j += 2; continue; }
+          if (d === c) break;
+          if (c !== "`" && d === "\n") break;       // unterminated: give up here
+          if (c === "`" && d === "$" && src[j + 1] === "{") interp = true;
+          buf += d;
+          j++;
+        }
+        out.push({ text: buf, interp });
+        i = j + 1;
+        prev = c;
+        continue;
+      }
+      if (!/\s/.test(c)) prev = c;
+      i++;
+    }
+    return out;
+  };
+
+  // `a, b` at top level is two selectors; `a b` and `a > b` are one selector
+  // whose SUBJECT is the last compound — `#job-detail .retry-btn[...]` selects
+  // the .retry-btn, not the panel. Commas inside `[...]` are not separators.
+  const splitSelectors = (sel) => {
+    const out = [];
+    let depth = 0, cur = "", q = null;
+    for (const ch of sel) {
+      if (q) { cur += ch; if (ch === q) q = null; continue; }
+      if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
+      if (ch === "[") depth++;
+      else if (ch === "]") depth--;
+      else if (ch === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+      cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const subject = (sel) => {
+    const parts = sel.split(/[\s>+~]+/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "";
+  };
+  const ACTION_IN_SELECTOR =
+    /\[data-action\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*\]/;
+  const classTokens = (compound) =>
+    (compound.replace(/\[[^\]]*\]/g, " ").match(/\.[A-Za-z0-9_-]+/g) || [])
+      .map((x) => x.slice(1));
+
+  const REQUIRED = new Map();          // action -> distinct class-requirements
+  const UNRESOLVED = [];               // literals that mention data-action but
+                                       // cannot be read statically
+  // A SELECTOR spells it bracketed — `[data-action="retry"]`. The rendered HTML
+  // spells the same attribute bare — `<button data-action="retry">`. Matching on
+  // the bare form pulled every button template into the derivation, so the
+  // bracket is the discriminator, and it is checked BEFORE the interpolation
+  // test: an interpolated HTML template is not an unreadable selector, it is
+  // not a selector at all.
+  const SELECTOR_SHAPED = /\[\s*data-action/;
+  for (const lit of scanLiterals(SRC)) {
+    if (!SELECTOR_SHAPED.test(lit.text)) continue;
+    if (lit.interp) { UNRESOLVED.push(lit.text.slice(0, 80)); continue; }
+    if (!ACTION_IN_SELECTOR.test(lit.text)) continue;
+    for (const one of splitSelectors(lit.text)) {
+      const m = ACTION_IN_SELECTOR.exec(one);
+      if (!m) continue;
+      const action = m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
+      const need = classTokens(subject(one)).sort();
+      const key = JSON.stringify(need);
+      const seen = REQUIRED.get(action) || new Map();
+      seen.set(key, need);
+      REQUIRED.set(action, seen);
+    }
+  }
+
+  // Quote-agnostic, because `class='x'` and `class="x"` are the same element to
+  // a browser. Making the suite red for a reformat is the same kind of wrong
+  // answer as making it green for a broken binding — it just fails in the
+  // direction that looks diligent.
+  const attrOf = (tag, name) => {
+    const m = new RegExp(
+      `\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
+    if (!m) return "";
+    return m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
+  };
+
+  const askedActions = new Set();
   const hasAction = (html, action) => {
+    askedActions.add(action);
+    const seen = REQUIRED.get(action);
+    // Underived or ambiguous is NOT "no requirement" — answering false here
+    // would let a negative assertion pass for free, so the named check at the
+    // end of this block reports it by name instead.
+    if (!seen || seen.size !== 1) return false;
+    const need = seen.values().next().value;
     const visible = String(html || "").replace(/<!--[\s\S]*?-->/g, "");
-    const buttons = visible.match(/<button\b[^>]*>/g) || [];
+    const buttons = visible.match(/<button\b[^>]*>/gi) || [];
     return buttons.some((tag) => {
-      const cls = (tag.match(/\sclass="([^"]*)"/) || [, ""])[1].split(/\s+/);
-      const act = (tag.match(/\sdata-action="([^"]*)"/) || [, ""])[1];
-      return act === action && cls.includes("retry-btn");
+      if (attrOf(tag, "data-action") !== action) return false;
+      const cls = attrOf(tag, "class").split(/\s+/).filter(Boolean);
+      return need.every((k) => cls.includes(k));
     });
   };
 
@@ -405,6 +553,57 @@ print(json.dumps(out))
     t(`  card offers Retry for ${m} (matches the backend _RETRYABLE_MODULES)`,
       gatesFor(m, "no_flag").showRetry === true, m);
   }
+
+  // These two run LAST, because they report on what every hasAction call above
+  // actually asked for. They are the reason hasAction may return false for an
+  // action it could not resolve: the silence is turned into a named failure
+  // here instead of being spent as a free pass on `!hasAction(...)`.
+  t("app.js listener selectors were derived whole, with nothing interpolated",
+    UNRESOLVED.length === 0, UNRESOLVED);
+  const underived = [...askedActions].map((a) => {
+    const seen = REQUIRED.get(a);
+    if (!seen) return { action: a, why: "no app.js selector binds it" };
+    if (seen.size !== 1) {
+      return { action: a, why: "ambiguous", requirements: [...seen.values()] };
+    }
+    return null;
+  }).filter(Boolean);
+  t("every action the card asks about is bound by exactly one app.js selector",
+    underived.length === 0, underived);
+  // Non-vacuity — and it must not name a class. The first version of this check
+  // asserted change-target's requirement WAS "change-target-btn", which turned a
+  // rename of the render and its selector TOGETHER — same behaviour, different
+  // spelling — red. That is the same wrong answer as F16, just pointing the
+  // other way, and this file has now produced it twice.
+  //
+  // The property, stated without a name: each action must be matched by ITS OWN
+  // derived classes and NOT by another action's. A hasAction that ignored the
+  // derivation and hardcoded one class would let a button wearing the wrong
+  // action's class count, so the cross pairs are what catches a relapse.
+  const needOf = (a) => {
+    const seen = REQUIRED.get(a);
+    return seen && seen.size === 1 ? [...seen.values()][0] : null;
+  };
+  const pairs = [...askedActions]
+    .map((a) => [a, needOf(a)])
+    .filter((x) => x[1] !== null && x[1].length > 0);
+  const distinct = new Set(pairs.map((x) => JSON.stringify(x[1])));
+  const crossTalk = [];
+  for (const [a, need] of pairs) {
+    const own = `<button class="${need.join(" ")}" data-action="${a}">x</button>`;
+    if (hasAction(own, a) !== true) crossTalk.push({ action: a, why: "own classes rejected" });
+    for (const other of pairs.map((x) => x[1])) {
+      if (JSON.stringify(other) === JSON.stringify(need)) continue;
+      const foreign = `<button class="${other.join(" ")}" data-action="${a}">x</button>`;
+      if (hasAction(foreign, a) !== false) crossTalk.push({ action: a, wore: other });
+    }
+  }
+  // `distinct.size >= 2` is part of the condition, not a precondition: with one
+  // requirement the loop above compares nothing and the check would pass by
+  // having nothing to say. It fails out loud instead.
+  t("each action is matched by its OWN derived class, not another action's",
+    distinct.size >= 2 && crossTalk.length === 0,
+    { distinct: [...distinct], crossTalk });
 }
 
 console.log(`\n${ran} checks, ${bad} failed`);
