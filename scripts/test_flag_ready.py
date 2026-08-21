@@ -56,16 +56,18 @@ def _stub_fastapi() -> None:
     the part with the defects. `HTTPException` must be a real exception class
     carrying `status_code`, because the adversarial section asserts on those
     codes and a lenient stub would turn every refusal into a silent pass.
+
+    The surface below is installed unconditionally — an installed FastAPI is
+    never preferred. It used to be, and that made the file's outcome depend on
+    what pip had done to the host rather than on what the code says: the routes
+    this suite execs declare `Form(...)`, so a FastAPI without python-multipart
+    raises at import and the whole file aborts before the first check, while a
+    host with no FastAPI at all passes 90/0 on the same bytes. Nothing here
+    asserts real FastAPI semantics — the verdict endpoint is driven by a
+    duck-typed Request, never a TestClient — so the installed package decided
+    whether the file ran without contributing to what it proved.
     """
     import types
-
-    if "fastapi" in sys.modules:
-        return
-    try:
-        import fastapi  # noqa: F401
-        return
-    except ModuleNotFoundError:
-        pass
 
     mod = types.ModuleType("fastapi")
 
