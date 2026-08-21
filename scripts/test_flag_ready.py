@@ -521,20 +521,23 @@ check(
 # ---------------------------------------------------------------------------
 print("\n--- which modules can be retried ---------------------------")
 
-# retry.py imports claude_agent_sdk, which a host running this file need not
-# have. Read the tuple out of the source. Asserting the line was FOUND is what
-# keeps a rename from turning every check below into a silent pass.
-_retry_src = (ROOT / "api" / "routes" / "retry.py").read_text()
-_rmline = next(
-    (l for l in _retry_src.splitlines() if l.startswith("_RETRYABLE_MODULES")), ""
-)
-check("the retryable-module list was located", bool(_rmline), True)
-RETRYABLE = tuple(
-    m.strip().strip("\"'") for m in
-    _rmline.split("(", 1)[-1].rsplit(")", 1)[0].split(",") if m.strip()
-)
+# This used to read the tuple out of the source text, with a comment saying
+# retry.py imports claude_agent_sdk and the host might not have it. That was
+# true when written and is not now — the SDK stub above makes the module
+# importable, and a later section already does `import api.routes.retry`.
+#
+# Reading the text cost far more than it saved. `_validate_retry` carries its
+# OWN hardcoded module list, and it disagreed with _RETRYABLE_MODULES about
+# forensic while this check happily reported "forensic can be retried" — it was
+# asking the constant, not the gate an HTTP request actually reaches. The UI
+# rendered Retry / Retry-with-my-hint / Continue on finished forensic jobs and
+# all three returned 400. Ask the gate.
+import api.routes.retry as _RT  # noqa: E402
+from fastapi import HTTPException as _HX  # noqa: E402
 
-check("forensic can be retried", "forensic" in RETRYABLE, True)
+RETRYABLE = _RT._RETRYABLE_MODULES
+check("the retryable-module list is importable, not scraped", bool(RETRYABLE), True)
+check("forensic is in the list", "forensic" in RETRYABLE, True)
 check("web3 too", "web3" in RETRYABLE, True)
 check(
     "REGRESSION: misc stays out — its run_job needs a passphrase only the "
@@ -542,6 +545,75 @@ check(
     "module's fault",
     "misc" in RETRYABLE,
     False,
+)
+
+
+def gate_status(module):
+    """Run the REAL gate that every retry-family endpoint calls first.
+
+    Returns None when it admits the job, or the HTTP status when it refuses.
+    """
+    jid = make_job(f"gate-{module}", module=module, status="no_flag",
+                   filename="disk.raw", description="d")
+    try:
+        _RT._validate_retry(jid, require_claude_auth=False)
+        return None
+    except _HX as exc:
+        return exc.status_code
+
+
+# The invariant the old check could not see: the gate and the list must agree.
+_refused = [m for m in RETRYABLE if gate_status(m) is not None]
+check(
+    "REGRESSION: the gate admits EVERY module in _RETRYABLE_MODULES — it used "
+    "to keep its own literal, and forensic fell in the gap between them",
+    _refused,
+    [],
+)
+check(
+    "  ...and still refuses one that is not in the list",
+    gate_status("misc"),
+    400,
+)
+
+
+def continue_dispatch(module):
+    """What would /continue enqueue for this module — or how does it refuse?"""
+    jid = make_job(f"cont-{module}", module=module, status="no_flag",
+                   filename="disk.raw", description="d", target_url="t:1")
+
+    class _Q:
+        def __init__(self):
+            self.seen = []
+
+        def enqueue(self, *a, **k):
+            self.seen.append(a[0] if a else None)
+            return None
+
+    q = _Q()
+    real = _RT.get_queue
+    _RT.get_queue = lambda: q
+    try:
+        _RT._continue_in_place(C.read_meta(jid), "note")
+        return ("enqueued", q.seen)
+    except _HX as exc:
+        return ("refused", exc.status_code)
+    finally:
+        _RT.get_queue = real
+
+
+# Opening the gate without this is worse than leaving it shut: _continue_in_place
+# had no forensic branch and its else is rev, so a Continue on a finished
+# forensic job would have run Ghidra over a raw disk image.
+check(
+    "REGRESSION: /continue REFUSES forensic rather than falling through to rev",
+    continue_dispatch("forensic"),
+    ("refused", 400),
+)
+check(
+    "  ...while a module it does support still dispatches to its own analyzer",
+    continue_dispatch("pwn"),
+    ("enqueued", ["modules.pwn.analyzer.run_job"]),
 )
 
 # The UI side of this — that a finished forensic job offers Retry but NOT
@@ -835,6 +907,9 @@ check("  ...and is an undo, not a second question",
 # ---------------------------------------------------------------------------
 print("\n--- the child inherits on every path ------------------------")
 
+# Read here rather than at module scope: the retryable-module section above
+# no longer scrapes this file, so this is the only remaining reader.
+_retry_src = (ROOT / "api" / "routes" / "retry.py").read_text()
 _calls = _retry_src.count("_resubmit(")
 check("every fork path shares one child-meta builder", _calls >= 5, True)
 check(

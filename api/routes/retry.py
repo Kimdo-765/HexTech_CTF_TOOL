@@ -1679,6 +1679,20 @@ def _continue_in_place(prev_meta: dict, comment: str,
         q.enqueue("modules.crypto.analyzer.run_job",
                   job_id, prev_meta.get("src_root"), target, description, auto_run, model,
                   job_id=rq_id, job_timeout=ht)
+    elif module == "forensic":
+        # There was no forensic branch here and the else below is rev, so
+        # widening the gate above without this line would enqueue
+        # modules.rev.analyzer.run_job for a disk image — Ghidra on a raw
+        # image, with the target dropped (rev's continue branch passes none).
+        # Continue forks the prior conversation in place and forensic has no
+        # such flow to fork, so refuse it in words rather than misroute it.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "continue is not supported for forensic — use retry, which "
+                "rebuilds the job with the image carried forward"
+            ),
+        )
     elif module == "pwn":
         q.enqueue("modules.pwn.analyzer.run_job",
                   job_id, prev_meta.get("filename"), target, description, auto_run, model,
@@ -1706,10 +1720,20 @@ def _validate_retry(safe: str, *, require_claude_auth: bool = True) -> tuple[Pat
     if not jd.is_dir():
         raise HTTPException(status_code=404, detail="job not found")
     prev_meta = read_job_meta(safe) or {}
-    if prev_meta.get("module") not in ("web", "pwn", "crypto", "rev", "web3"):
+    # Reads the module list rather than repeating it. 58326cb introduced
+    # _RETRYABLE_MODULES and converted the two builders (_resubmit,
+    # _continue_in_place) but not this one — and this is the only one an HTTP
+    # request reaches, so a finished forensic job rendered Retry, Retry-with-
+    # my-hint and Continue and got 400 from all three. A literal here cannot
+    # disagree with the list if it is the list.
+    module = prev_meta.get("module")
+    if module not in _RETRYABLE_MODULES:
         raise HTTPException(
             status_code=400,
-            detail="retry-with-hint only works for web/pwn/crypto/rev jobs",
+            detail=(
+                "retry is only supported for "
+                f"{'/'.join(sorted(_RETRYABLE_MODULES))} (got {module})"
+            ),
         )
     if require_claude_auth:
         apply_to_env()
