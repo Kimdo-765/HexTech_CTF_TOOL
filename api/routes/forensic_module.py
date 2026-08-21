@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
-from api.storage import job_dir, new_job_id, write_job_meta
+from api.storage import job_dir, new_job_id, parse_targets, write_job_meta
 from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
@@ -28,6 +28,7 @@ def _stream_to(path: Path, upload: UploadFile) -> int:
 @router.post("/collect")
 async def collect_forensic(
     file: UploadFile = File(...),
+    target: Optional[str] = Form(None),
     image_type: str = Form("auto"),  # auto/raw/qcow2/vmdk/memory
     target_os: str = Form("auto"),  # auto/linux/windows
     description: Optional[str] = Form(None),
@@ -39,13 +40,21 @@ async def collect_forensic(
     effort: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
 ):
+    # The image stays REQUIRED. A target is additive context — the artifact is
+    # what this module analyses, and a target-only forensic job would hand the
+    # orchestrator nothing to triage (it assumes an image throughout). Reaches
+    # the agent as a prompt directive only; forensic has no sandbox runner, so
+    # there is no argv[1]/TARGETS plumbing behind it.
     if not file.filename:
         raise HTTPException(status_code=400, detail="file required")
 
+    targets = parse_targets(target)
+    target = targets[0] if targets else None
+
     job_id = new_job_id()
     image_name = Path(file.filename).name
-    target = job_dir(job_id) / image_name
-    size = _stream_to(target, file)
+    image_path = job_dir(job_id) / image_name
+    size = _stream_to(image_path, file)
     if size == 0:
         raise HTTPException(status_code=400, detail="empty file")
 
@@ -57,6 +66,8 @@ async def collect_forensic(
         "module": "forensic",
         "status": "queued",
         "filename": image_name,
+        "target_url": target,
+        "target_urls": targets if len(targets) >= 2 else None,
         "image_type": image_type,
         "target_os": target_os,
         "description": description,

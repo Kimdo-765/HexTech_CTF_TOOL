@@ -193,15 +193,19 @@ if (blockSrc) {
   const hasAction = (html, action) =>
     new RegExp(`data-action="${action}"`).test(html);
 
-  // forensic finished: the backend rebuilds it (canRetry) but it takes no
-  // target, so change-target must be absent.
+  // forensic finished: the backend rebuilds it (canRetry) AND, as of the
+  // all-modules target round, it accepts a target. This assertion used to read
+  // "forensic is NOT offered change-target — it takes none"; that was true when
+  // the module had no target field at all. It has one now, `_resubmit` carries
+  // target_url into the child meta, and the orchestrator reads it back — so a
+  // change-target here reaches a real consumer and the button is correct.
   let g = gatesFor("forensic", "finished");
   t("forensic is retryable", g.canRetry === true, g.canRetry);
   t("REGRESSION: a finished forensic job offers Retry",
     g.showRetry === true && hasAction(g.runBlock, "retry"), g.runBlock);
-  t("REGRESSION: forensic is NOT offered change-target — it takes none",
-    g.hasTarget === false && g.showChangeTarget === false
-      && !hasAction(g.runBlock, "change-target"), g.runBlock);
+  t("forensic now takes a target, so change-target is offered and lands somewhere",
+    g.hasTarget === true && g.showChangeTarget === true
+      && hasAction(g.runBlock, "change-target"), g.runBlock);
 
   // web3 flag_ready: supported by the backend (was hidden by the old UI list),
   // and flag_ready is a terminal status Retry must still cover.
@@ -219,6 +223,15 @@ if (blockSrc) {
   t("REGRESSION: misc is not retryable", g.canRetry === false, g.canRetry);
   t("  ...so the card renders no Retry button",
     g.showRetry === false && !hasAction(g.runBlock, "retry"), g.runBlock);
+  // ...and therefore no change-target either, even though misc DOES accept a
+  // target at create time. PATCH /target has no module gate, so the request
+  // would succeed — but with no retry, no resume and no sandbox run, nothing
+  // would ever read the new value back. A button that writes meta and changes
+  // no behaviour is the decorative-field defect, not a feature.
+  t("misc accepts a target at create time", g.hasTarget === true, g.hasTarget);
+  t("REGRESSION: misc is NOT offered change-target — nothing would read it",
+    g.showChangeTarget === false && !hasAction(g.runBlock, "change-target"),
+    g.runBlock);
 
   // pwn running: a live job offers Stop, never Retry (retry is terminal-only).
   g = gatesFor("pwn", "running");

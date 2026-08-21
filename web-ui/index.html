@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HexTech_CTF_TOOL</title>
-  <link rel="stylesheet" href="/static/style.css?v=a2d552dfe" />
+  <link rel="stylesheet" href="/static/style.css?v=ac84bacc9" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -194,6 +194,19 @@
           </select>
         </label>
         <label>
+          Remote target (optional; host:port or URL) <small>— click + to add more</small>
+          <div class="target-list" data-field="target" data-placeholder="http://chal.example.com:8080">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="http://chal.example.com:8080" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
+          <small style="color:var(--fg-muted)">Additive — the image is still the job's input. Use it for a live service the evidence points at, a hosted copy of a truncated capture, or a decode oracle. The agent reaches it from Bash; there is no auto-run sandbox in this module.</small>
+        </label>
+        <label>
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. suspect lateral movement, look for SSH keys"></textarea>
         </label>
@@ -241,6 +254,19 @@
         <label>
           Steghide passphrase (optional)
           <input type="text" name="passphrase" placeholder="leave empty to also try blank passphrase" />
+        </label>
+        <label>
+          Remote target (optional; host:port or URL) <small>— click + to add more</small>
+          <div class="target-list" data-field="target" data-placeholder="ctf.example.com:1337">
+            <div class="target-rows">
+              <div class="target-row">
+                <input type="text" class="target-input" placeholder="ctf.example.com:1337" />
+                <button type="button" class="target-remove" tabindex="-1" title="Remove this target">×</button>
+              </div>
+            </div>
+            <button type="button" class="target-add" title="Add another target">+ add target</button>
+          </div>
+          <small style="color:var(--fg-muted)">Additive context for the agent (a decode oracle, a service the blob was pulled from). The agent reaches it from Bash; there is no auto-run sandbox in this module.</small>
         </label>
         <label>
           Description / hints (optional)
@@ -1060,6 +1086,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=a2d552dfe"></script>
+  <script src="/static/app.js?v=ac84bacc9"></script>
 </body>
 </html>

@@ -176,6 +176,20 @@ async def _claude_summary(
     _docker_block = docker_challenge_block(job_id)
     if _docker_block:
         prompt = prompt + "\n\n" + _docker_block
+    # Optional remote target. Read from META (not a run_job argument) so a
+    # /retry, a /resume or a PATCH /target reaches the agent with no queue
+    # signature change — the same wiring rev uses. script_driven=False because
+    # this module has no sandbox runner: the argv[1]/TARGETS mandate would tell
+    # the agent to re-point an exploit.py it never writes.
+    from modules._prompts import build_target_directive
+    _meta_now = read_meta(job_id)
+    _tgt_block = build_target_directive(
+        (_meta_now.get("target_url") or "").strip() or None,
+        _meta_now.get("target_urls"),
+        script_driven=False,
+    )
+    if _tgt_block:
+        prompt = prompt + "\n\n" + _tgt_block
 
     provider = active_provider()
     summary: dict = {"messages": 0, "tool_calls": 0, "agent_provider": provider}

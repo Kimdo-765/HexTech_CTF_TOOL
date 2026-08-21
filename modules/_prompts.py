@@ -53,6 +53,7 @@ def build_multi_target_block(targets) -> str:
 
 def build_target_directive(
     primary_target: str | None, target_urls: list[str] | None = None,
+    *, script_driven: bool = True,
 ) -> str:
     """Authoritative TARGET directive appended to every remote job's prompt.
 
@@ -88,24 +89,59 @@ def build_target_directive(
         return ""
     lines = [
         f"TARGET DIRECTIVE — the remote target for THIS run is `{primary}`.",
-        "• AUTHORITATIVE: if you are resuming / retrying a prior attempt, the "
-        "target may have CHANGED since then (the operator can update it between "
-        "runs). Trust THIS value — discard any different host:port in your "
-        "conversation history AND in any carried exploit.py / solver.py, and "
-        "re-point every remote() / connection at it before you test.",
-        "• DRIVE OFF sys.argv[1] (and the `TARGETS` env var if it is set), "
-        "NEVER a hardcoded host:port literal. The orchestrator re-reads the "
-        "live target and rewrites argv[1] on every SANDBOX run, so an "
-        "argv-driven exploit picks up a target change with NO code edit — a "
-        "hardcoded one silently keeps hitting the old host. (Your own ad-hoc "
-        "remote() Bash smoke tests are NOT auto-refreshed — use the value "
-        "above for those.)",
     ]
+    if script_driven:
+        lines.append(
+            "• AUTHORITATIVE: if you are resuming / retrying a prior attempt, the "
+            "target may have CHANGED since then (the operator can update it between "
+            "runs). Trust THIS value — discard any different host:port in your "
+            "conversation history AND in any carried exploit.py / solver.py, and "
+            "re-point every remote() / connection at it before you test."
+        )
+        lines.append(
+            "• DRIVE OFF sys.argv[1] (and the `TARGETS` env var if it is set), "
+            "NEVER a hardcoded host:port literal. The orchestrator re-reads the "
+            "live target and rewrites argv[1] on every SANDBOX run, so an "
+            "argv-driven exploit picks up a target change with NO code edit — a "
+            "hardcoded one silently keeps hitting the old host. (Your own ad-hoc "
+            "remote() Bash smoke tests are NOT auto-refreshed — use the value "
+            "above for those.)"
+        )
+    else:
+        # misc / forensic: no sandbox runner, no argv[1] script, no TARGETS env.
+        # The argv/refresh mandate above would order the agent to re-point an
+        # exploit.py that this module never produces, so it is replaced rather
+        # than merely trimmed. The AUTHORITATIVE half still applies — a retry
+        # forks the prior conversation here too.
+        lines.append(
+            "• AUTHORITATIVE: if you are resuming / retrying a prior attempt, the "
+            "target may have CHANGED since then (the operator can update it between "
+            "runs). Trust THIS value — discard any different host:port in your "
+            "conversation history and in any command you carried over."
+        )
+        lines.append(
+            "• REACH IT YOURSELF from Bash (curl / nc / python), copying the "
+            "value above verbatim on every call. This module has no sandbox "
+            "runner and no argv-driven script, so nothing rewrites a target for "
+            "you — a stale host:port stays stale until you re-read this line."
+        )
+        lines.append(
+            "• SUPPLEMENTARY, NOT PRIMARY: the uploaded artifact is still the "
+            "job's main input. Use the target for what the artifact cannot give "
+            "you (a live service the evidence points at, a hosted copy of a "
+            "truncated capture, an oracle that decodes what you extracted). If "
+            "it is unreachable, say so and keep working the artifact — an "
+            "unreachable target does not make the job unsolvable."
+        )
     if len(ts) >= 2:
         listed = "\n".join(f"    {i + 1}) {t}" for i, t in enumerate(ts))
+        where = (
+            "is in the `TARGETS` env var, one per line" if script_driven
+            else "follows, one per line"
+        )
         lines.append(
-            f"• MULTIPLE TARGETS ({len(ts)}) — full list (primary first) is in "
-            f"the `TARGETS` env var, one per line:\n{listed}\n"
+            f"• MULTIPLE TARGETS ({len(ts)}) — full list (primary first) "
+            f"{where}:\n{listed}\n"
             "  If they mirror ONE service across instances, try each and use "
             "the FIRST that responds (instances expire fast). If they are "
             "DISTINCT roles in one chain (e.g. app + an out-of-band/callback "

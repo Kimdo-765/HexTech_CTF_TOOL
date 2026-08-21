@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
-from api.storage import job_dir, new_job_id, write_job_meta
+from api.storage import job_dir, new_job_id, parse_targets, write_job_meta
 from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
@@ -28,6 +28,7 @@ def _stream_to(path: Path, upload: UploadFile) -> int:
 @router.post("/analyze")
 async def analyze_misc(
     file: Optional[UploadFile] = File(None),
+    target: Optional[str] = Form(None),
     passphrase: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     skip_claude: bool = Form(False),
@@ -37,6 +38,15 @@ async def analyze_misc(
     effort: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
 ):
+    # Optional remote target (host:port / URL). ADDITIVE for misc: the file (or
+    # the description) is still the job's input, and a target alone is already a
+    # legal misc job because the file was optional before this. It reaches the
+    # agent as a prompt directive only — misc has no sandbox runner, so there is
+    # no argv[1]/TARGETS plumbing behind it (see build_target_directive's
+    # script_driven=False branch).
+    targets = parse_targets(target)
+    target = targets[0] if targets else None
+
     job_id = new_job_id()
 
     # File is OPTIONAL: with no file the misc tool sweep is skipped and the
@@ -47,8 +57,10 @@ async def analyze_misc(
     size = 0
     if has_file:
         fname = Path(file.filename).name
-        target = job_dir(job_id) / fname
-        size = _stream_to(target, file)
+        # NOT `target`: that name now holds the operator's remote target and
+        # reusing it here would put a PosixPath into meta.target_url.
+        dest = job_dir(job_id) / fname
+        size = _stream_to(dest, file)
         if size == 0:
             raise HTTPException(status_code=400, detail="empty file")
 
@@ -60,6 +72,8 @@ async def analyze_misc(
         "module": "misc",
         "status": "queued",
         "filename": fname,
+        "target_url": target,
+        "target_urls": targets if len(targets) >= 2 else None,
         "description": description,
         "skip_claude": skip_claude,
         "docker_challenge": docker_challenge,

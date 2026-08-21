@@ -3460,13 +3460,16 @@ async function renderJob(id, opts = {}) {
   //   canRetry  — can the backend rebuild this job? Mirrors _RETRYABLE_MODULES
   //               in api/routes/retry.py. web3 was supported there all along
   //               and hidden here; forensic is supported as of this change.
-  //   hasTarget — does the module take a target at all? forensic does not, so
-  //               "change target" would edit a field nothing reads.
+  //   hasTarget — does the module accept a target at all? Every module except
+  //               live-fire does as of this change: misc and forensic take one
+  //               additively (prompt directive only, no sandbox runner), and
+  //               hybrid carries its targets on its per-stage inputs instead.
   // Keeping them separate is what stops the next module from inheriting a
   // gate that was never about it.
   const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic"]
     .includes(job.module);
-  const hasTarget = ["web", "pwn", "crypto", "rev", "web3"].includes(job.module);
+  const hasTarget = ["web", "pwn", "crypto", "rev", "web3", "misc", "forensic"]
+    .includes(job.module);
   // Retry is offered for every TERMINAL status on an exploitable module
   // — including 'finished' with a flag, so the user can rerun against a
   // suspect / placeholder flag or grab additional flags. The reviewer
@@ -3503,9 +3506,16 @@ async function renderJob(id, opts = {}) {
   // Pure stop: halt a live job of ANY module WITHOUT deleting it or forking a
   // resume — keeps the record + ./work/ artifacts, just stops the work.
   const showStop = job.status === "queued" || job.status === "running";
-  // "Change target" only makes sense for modules that take a target
-  // (web/pwn/crypto/rev) — same set as retry. Visible at any status.
-  const showChangeTarget = hasTarget;
+  // "Change target" needs BOTH halves to be true, and they are no longer the
+  // same set. PATCH /target has no module gate, so the request would succeed
+  // for misc — but misc is absent from _RETRYABLE_MODULES and has no resume
+  // and no sandbox run, so nothing would ever read the value back: the button
+  // would write meta and change behaviour not at all. That is exactly the
+  // decorative-field defect the web docker_challenge round was about, so gate
+  // on a consumer existing, not on the field existing. No-op for the modules
+  // that already had the button: {web,pwn,crypto,rev,web3} ⊂ canRetry's set.
+  // Visible at any status.
+  const showChangeTarget = hasTarget && canRetry;
   if (
     job.runnable_script || job.exploit_present || job.solver_present
     || showRetry || showStopResume || showChangeTarget || showStop
