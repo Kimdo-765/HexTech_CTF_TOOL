@@ -1273,8 +1273,49 @@ else:
     # one turned a pathless diagnostic GREEN as soon as the delimiter changed.
     check("  ...and REGRESSION: carries the directory as a structured field",
           _dirs, [str(DATA / "jobs" / "rj-blocked")])
+    # The structured field is the contract; it is not what an operator reads.
+    # Uvicorn's default config leaves this logger to lastResort, which prints
+    # the RENDERED message and nothing else — a path that lives only in an
+    # attribute is invisible there. So both are asserted, and neither pins the
+    # wording: this looks for the path anywhere in the message.
+    check("  ...and REGRESSION: the rendered message shows the path too",
+          str(DATA / "jobs" / "rj-blocked") in _joined, True)
+
     check("  ...and the cause, not just the fact",
           "PermissionError" in _joined or "Permission denied" in _joined, True)
+
+# The check above is satisfied by luck when rmtree reports errors, because every
+# cause carries a path. The discriminating case is a directory that survives
+# with NO causes: then the only path in the message is the one the function
+# states. rmtree is replaced with a no-op to produce exactly that.
+def _reject_silent(job_id):
+    import shutil as _sh
+
+    jd = DATA / "jobs" / job_id
+    jd.mkdir(parents=True, exist_ok=True)
+    (jd / "payload.bin").write_bytes(b"x")
+    real_rmtree = _sh.rmtree
+    cap = _Capture()
+    log = _logging.getLogger(_storage.__name__)
+    log.addHandler(cap)
+    status = None
+    try:
+        _sh.rmtree = lambda *a, **k: None          # survives, reports nothing
+        _storage.reject_job(job_id, 400, "empty file")
+    except _HTTPExc as exc:
+        status = (exc.status_code, exc.detail)
+    finally:
+        _sh.rmtree = real_rmtree
+        log.removeHandler(cap)
+    msgs = [r.getMessage() for r in cap.records]
+    real_rmtree(jd, ignore_errors=True)
+    return status, msgs
+
+
+_st_s, _msgs_s = _reject_silent("rj-silent")
+check("a silent survivor still returns the 400", _st_s, (400, "empty file"))
+check("  ...and REGRESSION: the message names the path even with no cause text",
+      any(str(DATA / "jobs" / "rj-silent") in m for m in _msgs_s), True)
 
 # --- the two quiet paths ----------------------------------------------------
 _st, _survived, _logs = _reject_under("rj-clean", make_undeletable=False)

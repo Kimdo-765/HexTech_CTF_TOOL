@@ -214,8 +214,20 @@ if (blockSrc) {
       return { runBlock: "" };
     }
   };
-  const hasAction = (html, action) =>
-    new RegExp(`data-action="${action}"`).test(html);
+  // An action counts only when a real <button> carries it AND wears the class
+  // token the listener binds on (app.js selects `.retry-btn[data-action=...]`).
+  // The old version was a substring test over the whole blob, so a mention in
+  // an HTML comment, an attribute of some other element, or a stray bit of text
+  // all read as a rendered control.
+  const hasAction = (html, action) => {
+    const visible = String(html || "").replace(/<!--[\s\S]*?-->/g, "");
+    const buttons = visible.match(/<button\b[^>]*>/g) || [];
+    return buttons.some((tag) => {
+      const cls = (tag.match(/\sclass="([^"]*)"/) || [, ""])[1].split(/\s+/);
+      const act = (tag.match(/\sdata-action="([^"]*)"/) || [, ""])[1];
+      return act === action && cls.includes("retry-btn");
+    });
+  };
 
   // forensic finished: the backend rebuilds it (canRetry) AND, as of the
   // all-modules target round, it accepts a target. This assertion used to read
@@ -279,18 +291,42 @@ if (blockSrc) {
 
   const AST_PROBE = `
 import ast, json, sys
+
+# Every WRITE to these names is counted — Assign, AnnAssign and AugAssign alike.
+# Counting only Assign let a later "+=" reshape a list after the fact without
+# the probe noticing there were two writes.
+#
+# The value is read with literal_eval, all or nothing. Filtering elements to the
+# ones that happen to be constants was the defect: a conditional, a starred
+# unpack or a call would be dropped SILENTLY and the survivors passed off as the
+# whole list. If it is not a plain tuple of strings, this reports null and the
+# exactly-once assertion turns red rather than comparing against a guess.
 tree = ast.parse(open(sys.argv[1]).read())
 want = {"_RETRYABLE_MODULES", "_CONTINUABLE_MODULES"}
 out = {}
+
+
+def record(name, value_node):
+    try:
+        val = ast.literal_eval(value_node)
+    except Exception:
+        val = None
+    ok = (
+        isinstance(val, tuple)                       # immutable literal only
+        and all(isinstance(x, str) for x in val)
+    )
+    out.setdefault(name, []).append(list(val) if ok else None)
+
+
 for node in ast.walk(tree):
     if isinstance(node, ast.Assign):
         for tgt in node.targets:
             if isinstance(tgt, ast.Name) and tgt.id in want:
-                vals = None
-                if isinstance(node.value, (ast.Tuple, ast.List)):
-                    vals = [e.value for e in node.value.elts
-                            if isinstance(e, ast.Constant)]
-                out.setdefault(tgt.id, []).append(vals)
+                record(tgt.id, node.value)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        tgt = node.target
+        if isinstance(tgt, ast.Name) and tgt.id in want:
+            record(tgt.id, node.value if node.value is not None else ast.Constant(None))
 print(json.dumps(out))
 `;
   let SERVER = {};
@@ -313,12 +349,24 @@ print(json.dumps(out))
   // not what is contractual. Harvesting every quoted name in the render block
   // means a module added anywhere in it is tried, decoy or not; a decoy simply
   // renders nothing and drops out.
-  const NEGATIVE = ["misc", "hybrid", "live-fire"];
+  // The candidate set decides what gets EXERCISED, so it has to be a superset
+  // of anything the block could branch on. Harvesting only double-quoted atoms
+  // meant a module named with single quotes or a template literal was never
+  // tried at all — the check had nothing to say about it. Every quoting style
+  // is harvested now, and the canonical module universe is added outright so a
+  // module the block never mentions is still probed.
+  const UNIVERSE = ["web", "pwn", "crypto", "rev", "web3", "forensic",
+                    "misc", "hybrid", "live-fire"];
+  const atoms = (src) => {
+    const out = [];
+    for (const re of [/"([a-z0-9-]+)"/g, /'([a-z0-9-]+)'/g, /`([a-z0-9-]+)`/g]) {
+      let m;
+      while ((m = re.exec(src)) !== null) out.push(m[1]);
+    }
+    return out.filter((x) => /^[a-z][a-z0-9-]*$/.test(x));
+  };
   const candidates = Array.from(new Set([
-    ...serverRetry, ...serverCont, ...NEGATIVE,
-    ...((blockSrc.match(/"([a-z0-9-]+)"/g) || [])
-      .map((x) => x.replace(/"/g, ""))
-      .filter((x) => /^[a-z][a-z0-9-]*$/.test(x))),
+    ...serverRetry, ...serverCont, ...UNIVERSE, ...atoms(blockSrc),
   ]));
 
   const setEq = (a, b) =>
@@ -342,7 +390,11 @@ print(json.dumps(out))
     t(`REGRESSION: [${st}] renders neither Retry nor Continue`,
       r.length === 0 && c.length === 0, { retry: r, continue: c });
   }
-  t("no module/status combination threw while rendering", gateErrors, []);
+  // `.length === 0`, not the array. An array — empty or not — is truthy, so the
+  // previous form passed unconditionally: it was a check that could not fail,
+  // cited as a safeguard two turns before this was noticed.
+  t("no module/status combination threw while rendering",
+    gateErrors.length === 0, gateErrors);
 
   // Parity: every module the backend will rebuild is offered Retry by the card.
   // This is the check the old 200-char source slice was trying to make.
