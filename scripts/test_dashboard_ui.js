@@ -294,7 +294,11 @@ if (blockSrc) {
   const nEnd = SRC.split(BIND_END).length - 1;
 
   const CLICK_SELECTORS = [];   // queries whose result got a click listener
-  const OTHER_QUERIES = [];     // queries that bound nothing — F17's false-red
+  // Diagnostic-only, by design: no mutant changes colour if this list is
+  // dropped. P1/P2 green and P9 red already pin the listener criterion in both
+  // directions; this is here so a failure message can say what the block queried
+  // WITHOUT binding, which is the first thing a reader wants to know.
+  const OTHER_QUERIES = [];
   let widenedBy = null;
   const attempts = [];
 
@@ -354,7 +358,14 @@ if (blockSrc) {
     // renamed start needle. Today the two sets coincide exactly: the card
     // renders seven actions and the window binds those same seven, checked by
     // running, not by asserting.
-    for (let k = starts.length - 1; k >= 0; k--) {
+    // NARROWEST first, not widest. Widest-first would silently prefer a bigger
+    // window that happened to parse and run, pulling in queries the block does
+    // not make and marking things wired that its own bindings never touch —
+    // extra bound selectors only ever make MORE look wired, which is the
+    // false-green direction. Taking the smallest window that runs means a line
+    // is included because the block cannot run without it, and not one line
+    // more. The widening stops the moment it succeeds.
+    for (let k = 0; k < starts.length; k++) {
       const res = tryWindow(SRC.slice(starts[k], endIdx));
       if (res.ok) {
         widenedBy = k;
@@ -585,7 +596,7 @@ print(json.dumps(out))
   // `!hasAction(...)` assertion: each way the machinery can come up empty has a
   // name here instead.
   t("app.js's button-binding block was located by both of its ends",
-    sliceDiag.length === 0, sliceDiag);
+    sliceDiag.length === 0, { sliceDiag, widenedBy, attempts });
   t("  ...and running it bound listeners without throwing",
     runDiag.length === 0, runDiag);
   t("  ...and every selector it binds on evaluates as CSS",
