@@ -456,6 +456,86 @@ RUN pip install --no-cache-dir slither-analyzer==0.11.6 2>&1 | tail -3 || true \
  && ( slither --version >/dev/null 2>&1 && echo "slither OK $(slither --version 2>&1 | head -1)" \
       || echo "[WARN] slither unavailable; Solidity static analysis disabled" )
 
+# ---------------------------------------------------------------------------
+# Added 2026-08-22 after auditing the day's run logs for what agents reached
+# for and did not find. Each group names its evidence; nothing here is on the
+# list merely because it is standard CTF tooling.
+# ---------------------------------------------------------------------------
+
+# A BROWSER — selenium has been installed all along with nothing to drive.
+# There was no chromium, no chrome and no puppeteer/playwright cache in this
+# image, so three independent lineages apt-installed google-chrome-stable INTO
+# the challenge image to get one, and the bot-visits-your-URL class (job
+# daee7ea287d4, bot/bot.js + bot.php) had no way to reproduce the bot locally.
+# chromium-driver is the matching webdriver, so selenium does not need a
+# version-matching dance. Callers must pass --no-sandbox: chromium's sandbox
+# needs privileges this container deliberately does not have.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      chromium chromium-driver \
+ && rm -rf /var/lib/apt/lists/* \
+ && chromium --headless --no-sandbox --disable-gpu --dump-dom about:blank >/dev/null 2>&1 \
+ && echo "chromium OK $(chromium --version 2>&1 | head -1)" \
+ && echo "chromedriver OK $(chromedriver --version 2>&1 | head -1)"
+
+# PCAP — job ee0bb8c866cf (rev) worked on a .pcap and reached for tshark. It
+# was in neither this image nor the forensic sibling, so there was nowhere to
+# go. tshark's postinst asks whether non-superusers may capture; preseed it to
+# `false` or the build hangs on an interactive prompt.
+#
+# wabt gives wasm2wat / wat2wasm / wasm-objdump: WebAssembly shows up in both
+# web and rev challenges and there was no way to read a .wasm at all.
+RUN echo "wireshark-common wireshark-common/install-setuid boolean false" \
+      | debconf-set-selections \
+ && DEBIAN_FRONTEND=noninteractive apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      tshark tcpdump wabt \
+ && rm -rf /var/lib/apt/lists/* \
+ && tshark --version >/dev/null 2>&1 && echo "tshark OK $(tshark --version 2>&1 | head -1)" \
+ && tcpdump --version >/dev/null 2>&1 && echo "tcpdump OK" \
+ && echo "wabt OK $(wasm2wat --version 2>&1 | head -1)"
+
+# ffuf — content discovery against a remote web target. sqlmap was here and a
+# directory/endpoint fuzzer was not, and job 7398c17bf7dd reached for ffuf by
+# name. Not in bookworm's apt, so it comes from the pinned release tarball.
+#
+# The wordlist is NOT an extra: a fuzzer with nothing to fuzz from is the same
+# half-tool as selenium with no browser, which is the defect this whole block
+# exists to fix. dirb is ~2 MB and is here for its common.txt only.
+ARG FFUF_VERSION=2.1.0
+RUN ( curl -fsSL -o /tmp/ffuf.tar.gz \
+        "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" \
+      && tar -xzf /tmp/ffuf.tar.gz -C /usr/local/bin ffuf \
+      && rm -f /tmp/ffuf.tar.gz \
+      && chmod +x /usr/local/bin/ffuf \
+      && echo "ffuf OK $(ffuf -V 2>&1 | head -1)" ) \
+    || echo "[WARN] ffuf unavailable; web content discovery falls back to curl loops"
+RUN apt-get update && apt-get install -y --no-install-recommends dirb \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -s /usr/share/dirb/wordlists/common.txt \
+ && echo "wordlist OK /usr/share/dirb/wordlists/common.txt ($(wc -l < /usr/share/dirb/wordlists/common.txt) entries)"
+
+# seccomp-tools — dumps a binary's seccomp-bpf filter as readable rules. The
+# pwn agent otherwise hand-decodes the BPF program from a disassembly. Native
+# extension; ruby-dev is already installed above for one_gadget.
+RUN ( gem install --no-document seccomp-tools \
+      && echo "seccomp-tools OK $(seccomp-tools --version 2>&1 | head -1)" ) \
+    || echo "[WARN] seccomp-tools unavailable; seccomp filters must be read by hand"
+
+# volatility3 — memory-image forensics, referenced by job fddaec60c2a7 and
+# present in no image at all. Symbol tables for Windows profiles are fetched at
+# run time, so a network-less run only has the Linux/Mac paths.
+#
+# scapy — packet crafting and pcap manipulation from Python, the companion to
+# tshark for anything that has to SEND rather than read.
+#
+# keystone-engine — the assembler counterpart to capstone, which was already
+# here. pwntools' asm() covers the common cases; keystone covers the ones where
+# a raw architecture/mode pair is needed without pwntools' opinions.
+RUN pip install --no-cache-dir volatility3 scapy keystone-engine 2>&1 | tail -3 \
+ && python3 -c "import scapy.all, keystone; print('scapy OK', scapy.all.conf.version); print('keystone OK')" \
+ && ( vol --help >/dev/null 2>&1 || python3 -m volatility3 --help >/dev/null 2>&1 ) \
+ && echo "volatility3 OK"
+
 ENV PYTHONPATH=/app
 
 CMD ["python", "-m", "worker.runner"]
