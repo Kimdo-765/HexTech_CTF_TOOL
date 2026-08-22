@@ -22,6 +22,19 @@
 // every panel would otherwise render into the left half of the window.
 
 const fs = require("fs");
+// A hard requirement, deliberately NOT the `try { require } catch { SKIP }`
+// shape used by test_role_provider_ui.js and test_job_files_quiet_poll.js.
+// This file's whole job is to say whether a control is really wired up, and a
+// suite that answers "skipped" to that question while printing green is the
+// exact failure mode the last four rounds were about. Resolved from the system
+// path (/usr/share/nodejs/jsdom), so it works from a /tmp archive too.
+let JSDOM;
+try {
+  ({ JSDOM } = require("jsdom"));
+} catch (e) {
+  console.log(`FATAL  jsdom is required and could not be loaded: ${e.message}`);
+  process.exit(2);
+}
 
 let bad = 0, ran = 0;
 const t = (label, cond, got) => {
@@ -214,175 +227,105 @@ if (blockSrc) {
       return { runBlock: "" };
     }
   };
-  // An action counts only when a real <button> carries it AND wears the class
-  // token the listener binds on. Both halves of that sentence have been wrong
-  // here before, in opposite directions:
+  // ---------------------------------------------------------------------
+  // Is this control really wired up? Asked by EXECUTION, not by spelling.
+  // ---------------------------------------------------------------------
+  // Four attempts answered it by reading source text, each wrong in a new way:
   //
-  //   before F13  any substring counted — a mention in an HTML comment or on
-  //               some element no listener touches read as a rendered control
-  //   F13         required a real <button> with the exact action AND
-  //               `retry-btn` — and generalised that ONE class to EVERY action
-  //   F16         app.js does not bind that way. change-target binds on
-  //               `.change-target-btn`, stop on `.stop-job-btn`, and three of
-  //               the gpt actions bind on no class at all. Strip
-  //               `change-target-btn` from the Change Target button and the
-  //               click handler never attaches — and the suite said 73/0.
+  //   substring       any mention counted, including one inside a comment
+  //   + real <button> fixed that, then demanded `retry-btn` for EVERY action —
+  //                   but change-target binds on `.change-target-btn`, stop on
+  //                   `.stop-job-btn`, and three gpt actions on no class at all
+  //   + derived map   read the selectors out of app.js with a hand-written
+  //                   lexer, which then rejected spellings that RUN the same (a
+  //                   division after a string, a d escape, a template) and,
+  //                   worse, reduced a CSS selector to a list of dotted names —
+  //                   so `[class~="retry-btn"]` yielded an EMPTY requirement and
+  //                   a genuinely unbound button passed
   //
-  // A hand-written table is right for the two rows you copied and wrong for the
-  // seventh, which is the shape this file has produced six rounds running. So
-  // the requirement is READ OUT of the selectors app.js hands to
-  // querySelector/querySelectorAll. If it cannot be read whole, nothing is
-  // guessed: the action is reported as underived and the named check below is
-  // red.
+  // One mistake wearing four hats: source spelling standing in for behaviour.
+  // Both stand-ins are gone.
+  //
+  //   WHICH selectors — from RUNNING the binding block against a recording
+  //   `detail`. The engine resolves escapes, templates and arithmetic, so the
+  //   strings collected are whatever the code actually passes. And only a query
+  //   whose result is handed to addEventListener counts: a lookup that merely
+  //   sets a title or scrolls something into view binds nothing and must not
+  //   constrain the render.
+  //
+  //   DOES IT MATCH — asked of jsdom's selector engine, the same CSS a browser
+  //   runs. `[class~=]`, `:not()` and selector lists are its problem now. A
+  //   button inside an HTML comment does not match either, so the hand-rolled
+  //   comment strip is gone as well: one less barrier of ours to keep alive.
+  const sliceDiag = [];
+  const runDiag = [];
 
-  // A left-to-right scanner, because the two obvious shortcuts are both wrong.
-  // Stripping `//` comments with a regex eats the `//` in a URL inside a
-  // string; scanning for quotes without knowing about comments lets a selector
-  // sitting in a comment pose as a binding. One pass that knows about line
-  // comments, block comments, regex literals and all three quote forms answers
-  // both. Template literals are returned with a flag when they interpolate,
-  // because an interpolated selector is not statically knowable and must not be
-  // silently dropped.
-  const scanLiterals = (src) => {
-    const out = [];
-    let i = 0, prev = "";
-    const n = src.length;
-    while (i < n) {
-      const c = src[i];
-      if (c === "/" && src[i + 1] === "/") {
-        while (i < n && src[i] !== "\n") i++;
-        continue;
-      }
-      if (c === "/" && src[i + 1] === "*") {
-        const e = src.indexOf("*/", i + 2);
-        i = e < 0 ? n : e + 2;
-        continue;
-      }
-      if (c === "/" && !/[\w$)\]]/.test(prev)) {   // regex literal, not division
-        i++;
-        let inClass = false;
-        while (i < n) {
-          const d = src[i];
-          if (d === "\\") { i += 2; continue; }
-          if (d === "\n") break;
-          if (d === "[") inClass = true;
-          else if (d === "]") inClass = false;
-          else if (d === "/" && !inClass) { i++; break; }
-          i++;
-        }
-        prev = "/";
-        continue;
-      }
-      if (c === '"' || c === "'" || c === "`") {
-        let j = i + 1, buf = "", interp = false;
-        while (j < n) {
-          const d = src[j];
-          if (d === "\\") { buf += src[j + 1] || ""; j += 2; continue; }
-          if (d === c) break;
-          if (c !== "`" && d === "\n") break;       // unterminated: give up here
-          if (c === "`" && d === "$" && src[j + 1] === "{") interp = true;
-          buf += d;
-          j++;
-        }
-        out.push({ text: buf, interp });
-        i = j + 1;
-        prev = c;
-        continue;
-      }
-      if (!/\s/.test(c)) prev = c;
-      i++;
-    }
-    return out;
-  };
+  // Taken by its two ends, not by line number. Either needle appearing zero or
+  // twice is reported rather than guessed at.
+  const BIND_START = "  const retryBtn = detail.querySelector(";
+  const BIND_END = "  const runBtn = detail.querySelector(";
+  const nStart = SRC.split(BIND_START).length - 1;
+  const nEnd = SRC.split(BIND_END).length - 1;
+  let bindSrc = null;
+  if (nStart !== 1 || nEnd !== 1) {
+    sliceDiag.push({ startNeedleCount: nStart, endNeedleCount: nEnd });
+  } else {
+    bindSrc = SRC.slice(SRC.indexOf(BIND_START), SRC.indexOf(BIND_END));
+  }
 
-  // `a, b` at top level is two selectors; `a b` and `a > b` are one selector
-  // whose SUBJECT is the last compound — `#job-detail .retry-btn[...]` selects
-  // the .retry-btn, not the panel. Commas inside `[...]` are not separators.
-  const splitSelectors = (sel) => {
-    const out = [];
-    let depth = 0, cur = "", q = null;
-    for (const ch of sel) {
-      if (q) { cur += ch; if (ch === q) q = null; continue; }
-      if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
-      if (ch === "[") depth++;
-      else if (ch === "]") depth--;
-      else if (ch === "," && depth === 0) { out.push(cur); cur = ""; continue; }
-      cur += ch;
-    }
-    out.push(cur);
-    return out;
-  };
-  const subject = (sel) => {
-    const parts = sel.split(/[\s>+~]+/).filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : "";
-  };
-  const ACTION_IN_SELECTOR =
-    /\[data-action\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*\]/;
-  const classTokens = (compound) =>
-    (compound.replace(/\[[^\]]*\]/g, " ").match(/\.[A-Za-z0-9_-]+/g) || [])
-      .map((x) => x.slice(1));
-
-  const REQUIRED = new Map();          // action -> distinct class-requirements
-  const UNRESOLVED = [];               // literals that mention data-action but
-                                       // cannot be read statically
-  // A SELECTOR spells it bracketed — `[data-action="retry"]`. The rendered HTML
-  // spells the same attribute bare — `<button data-action="retry">`. Matching on
-  // the bare form pulled every button template into the derivation, so the
-  // bracket is the discriminator, and it is checked BEFORE the interpolation
-  // test: an interpolated HTML template is not an unreadable selector, it is
-  // not a selector at all.
-  const SELECTOR_SHAPED = /\[\s*data-action/;
-  for (const lit of scanLiterals(SRC)) {
-    if (!SELECTOR_SHAPED.test(lit.text)) continue;
-    if (lit.interp) { UNRESOLVED.push(lit.text.slice(0, 80)); continue; }
-    if (!ACTION_IN_SELECTOR.test(lit.text)) continue;
-    for (const one of splitSelectors(lit.text)) {
-      // BOTH halves are read from the SUBJECT. Taking the action from anywhere
-      // in the group while taking the classes from the subject would pair
-      // `[data-action="x"] .child` into "x needs .child" — a requirement that
-      // is quietly wrong rather than absent, which is the partial acceptance
-      // this round is supposed to end. Read together, such a group contributes
-      // nothing, and if that action has no other binding it comes out by name
-      // in the underived check below.
-      const subj = subject(one);
-      const m = ACTION_IN_SELECTOR.exec(subj);
-      if (!m) continue;
-      const action = m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
-      const need = classTokens(subj).sort();
-      const key = JSON.stringify(need);
-      const seen = REQUIRED.get(action) || new Map();
-      seen.set(key, need);
-      REQUIRED.set(action, seen);
+  const CLICK_SELECTORS = [];   // queries whose result got a click listener
+  const OTHER_QUERIES = [];     // queries that bound nothing — F17's false-red
+  if (bindSrc !== null) {
+    const seen = [];
+    const detailStub = {
+      querySelector(sel) {
+        const node = { selector: sel, bound: false, dataset: {} };
+        seen.push(node);
+        return {
+          dataset: node.dataset,
+          addEventListener(type) { if (type === "click") node.bound = true; },
+        };
+      },
+      querySelectorAll() { return []; },
+    };
+    try {
+      // `new Function`, NOT window.eval — jsdom 19 drops listeners registered
+      // through window.eval, reproduced on a three-line DOM with no app code at
+      // all (recorded at scripts/test_container_processes.py:418).
+      new Function("detail", bindSrc)(detailStub);
+      for (const n of seen) (n.bound ? CLICK_SELECTORS : OTHER_QUERIES).push(n.selector);
+    } catch (e) {
+      // An exception here would otherwise read as "nothing is bound", which is
+      // a silent false in the direction that looks like a passing negative.
+      runDiag.push(`${e.constructor.name}: ${e.message}`);
     }
   }
 
-  // Quote-agnostic, because `class='x'` and `class="x"` are the same element to
-  // a browser. Making the suite red for a reformat is the same kind of wrong
-  // answer as making it green for a broken binding — it just fails in the
-  // direction that looks diligent.
-  const attrOf = (tag, name) => {
-    const m = new RegExp(
-      `\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
-    if (!m) return "";
-    return m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
-  };
+  const panel = new JSDOM('<!doctype html><body><div id="job-detail"></div></body>')
+    .window.document.getElementById("job-detail");
+  const selErrors = [];
 
-  const askedActions = new Set();
+  // The rendered block is parsed as HTML and queried with the selectors the app
+  // binds on. `<button>` is still required: the card's contract is that these
+  // affordances are buttons, and a listener attached to a <span> would work in a
+  // browser but is not what this file is pinning.
   const hasAction = (html, action) => {
-    askedActions.add(action);
-    const seen = REQUIRED.get(action);
-    // Underived or ambiguous is NOT "no requirement" — answering false here
-    // would let a negative assertion pass for free, so the named check at the
-    // end of this block reports it by name instead.
-    if (!seen || seen.size !== 1) return false;
-    const need = seen.values().next().value;
-    const visible = String(html || "").replace(/<!--[\s\S]*?-->/g, "");
-    const buttons = visible.match(/<button\b[^>]*>/gi) || [];
-    return buttons.some((tag) => {
-      if (attrOf(tag, "data-action") !== action) return false;
-      const cls = attrOf(tag, "class").split(/\s+/).filter(Boolean);
-      return need.every((k) => cls.includes(k));
-    });
+    panel.innerHTML = String(html || "");
+    for (const sel of CLICK_SELECTORS) {
+      let hits;
+      try {
+        hits = panel.querySelectorAll(sel);
+      } catch (e) {
+        selErrors.push([sel, e.message]);
+        continue;
+      }
+      for (const el of Array.from(hits)) {
+        if (el.tagName === "BUTTON" && el.getAttribute("data-action") === action) {
+          return true;
+        }
+      }
+    }
+    return false;
   };
 
   // forensic finished: the backend rebuilds it (canRetry) AND, as of the
@@ -562,56 +505,53 @@ print(json.dumps(out))
       gatesFor(m, "no_flag").showRetry === true, m);
   }
 
-  // These two run LAST, because they report on what every hasAction call above
-  // actually asked for. They are the reason hasAction may return false for an
-  // action it could not resolve: the silence is turned into a named failure
-  // here instead of being spent as a free pass on `!hasAction(...)`.
-  t("app.js listener selectors were derived whole, with nothing interpolated",
-    UNRESOLVED.length === 0, UNRESOLVED);
-  const underived = [...askedActions].map((a) => {
-    const seen = REQUIRED.get(a);
-    if (!seen) return { action: a, why: "no app.js selector binds it" };
-    if (seen.size !== 1) {
-      return { action: a, why: "ambiguous", requirements: [...seen.values()] };
-    }
-    return null;
-  }).filter(Boolean);
-  t("every action the card asks about is bound by exactly one app.js selector",
-    underived.length === 0, underived);
-  // Non-vacuity — and it must not name a class. The first version of this check
-  // asserted change-target's requirement WAS "change-target-btn", which turned a
-  // rename of the render and its selector TOGETHER — same behaviour, different
-  // spelling — red. That is the same wrong answer as F16, just pointing the
-  // other way, and this file has now produced it twice.
+  // These run LAST and report on the machinery every hasAction call above used.
+  // They exist so that "nothing matched" can never be spent as a free pass on a
+  // `!hasAction(...)` assertion: each way the machinery can come up empty has a
+  // name here instead.
+  t("app.js's button-binding block was located by both of its ends",
+    sliceDiag.length === 0, sliceDiag);
+  t("  ...and running it bound listeners without throwing",
+    runDiag.length === 0, runDiag);
+  t("  ...and every selector it binds on evaluates as CSS",
+    selErrors.length === 0, selErrors);
+  // Non-vacuity for the recording itself: if it collected nothing, every answer
+  // above is false and the negative assertions pass by having nothing to say.
+  t("the recording found the click bindings app.js actually makes",
+    CLICK_SELECTORS.length >= 7, { bound: CLICK_SELECTORS, unbound: OTHER_QUERIES });
+
+  // Non-vacuity for the MATCHING, stated without naming a class. Take a block
+  // app.js really renders and read its actions out of the DOM rather than from a
+  // list here. Each one must count as rendered; the same markup with its classes
+  // stripped must not (that is the unbound case F16 was about, and the case the
+  // `[class~=]` spelling silently readmitted); and the same markup inside an
+  // HTML comment must not.
   //
-  // The property, stated without a name: each action must be matched by ITS OWN
-  // derived classes and NOT by another action's. A hasAction that ignored the
-  // derivation and hardcoded one class would let a button wearing the wrong
-  // action's class count, so the cross pairs are what catches a relapse.
-  const needOf = (a) => {
-    const seen = REQUIRED.get(a);
-    return seen && seen.size === 1 ? [...seen.values()][0] : null;
-  };
-  const pairs = [...askedActions]
-    .map((a) => [a, needOf(a)])
-    .filter((x) => x[1] !== null && x[1].length > 0);
-  const distinct = new Set(pairs.map((x) => JSON.stringify(x[1])));
-  const crossTalk = [];
-  for (const [a, need] of pairs) {
-    const own = `<button class="${need.join(" ")}" data-action="${a}">x</button>`;
-    if (hasAction(own, a) !== true) crossTalk.push({ action: a, why: "own classes rejected" });
-    for (const other of pairs.map((x) => x[1])) {
-      if (JSON.stringify(other) === JSON.stringify(need)) continue;
-      const foreign = `<button class="${other.join(" ")}" data-action="${a}">x</button>`;
-      if (hasAction(foreign, a) !== false) crossTalk.push({ action: a, wore: other });
-    }
-  }
-  // `distinct.size >= 2` is part of the condition, not a precondition: with one
-  // requirement the loop above compares nothing and the check would pass by
-  // having nothing to say. It fails out loud instead.
-  t("each action is matched by its OWN derived class, not another action's",
-    distinct.size >= 2 && crossTalk.length === 0,
-    { distinct: [...distinct], crossTalk });
+  // "with its classes stripped must not count" holds because every binding in
+  // this block requires a class. If app.js ever binds an action with a bare
+  // `[data-action=...]`, this turns red — deliberately, so that the change is
+  // looked at rather than absorbed.
+  const probeHtml = String(gatesFor("forensic", "finished").runBlock || "");
+  panel.innerHTML = probeHtml;
+  const renderedActions = Array.from(panel.querySelectorAll("button[data-action]"))
+    .map((b) => b.getAttribute("data-action"));
+  // Classes are stripped through the DOM, not with a regex. `\sclass="[^"]*"`
+  // is blind to class='...' — the same quote-blindness this round is removing
+  // from the matcher, reappearing in the check that is supposed to police it.
+  for (const el of Array.from(panel.querySelectorAll("*"))) el.removeAttribute("class");
+  const noClasses = panel.innerHTML;
+  const inComment = `<!-- ${probeHtml} -->`;
+  const probes = renderedActions.map((a) => ({
+    action: a,
+    rendered: hasAction(probeHtml, a),
+    classesStripped: hasAction(noClasses, a),
+    insideComment: hasAction(inComment, a),
+  }));
+  t("a rendered button counts; the same markup unclassed or commented out does not",
+    renderedActions.length >= 2
+      && probes.every((x) => x.rendered === true
+        && x.classesStripped === false && x.insideComment === false),
+    probes);
 }
 
 console.log(`\n${ran} checks, ${bad} failed`);
