@@ -273,22 +273,32 @@ if (blockSrc) {
   const sliceDiag = [];
   const runDiag = [];
 
-  // Taken by its two ends, not by line number. Either needle appearing zero or
-  // twice is reported rather than guessed at.
+  // The block's END is a needle. Its START is FOUND BY RUNNING, not asserted.
+  //
+  // Anchoring the start on a needle made the answer depend on where a
+  // declaration sits: hoist `const cls = "retry-btn"` one line above the first
+  // binding and the selector it builds is byte-identical at runtime, but the
+  // slice cannot see the constant and the suite went red on a refactor that
+  // changed nothing. That is a source-layout contract wearing a behaviour
+  // contract's clothes — the same disease as reading selectors out of the text.
+  //
+  // So the start is widened backwards one line at a time and the WIDEST window
+  // that both parses and runs is the one used. Nothing is hand-written into
+  // scope; a declaration the block needs is included because including it makes
+  // the block run, and a window that does not run is not used. If no window
+  // runs, the failure carries the identifier's name.
   const BIND_START = "  const retryBtn = detail.querySelector(";
   const BIND_END = "  const runBtn = detail.querySelector(";
+  const WIDEN_MAX = 25;      // lines the start may move back
   const nStart = SRC.split(BIND_START).length - 1;
   const nEnd = SRC.split(BIND_END).length - 1;
-  let bindSrc = null;
-  if (nStart !== 1 || nEnd !== 1) {
-    sliceDiag.push({ startNeedleCount: nStart, endNeedleCount: nEnd });
-  } else {
-    bindSrc = SRC.slice(SRC.indexOf(BIND_START), SRC.indexOf(BIND_END));
-  }
 
   const CLICK_SELECTORS = [];   // queries whose result got a click listener
   const OTHER_QUERIES = [];     // queries that bound nothing — F17's false-red
-  if (bindSrc !== null) {
+  let widenedBy = null;
+  const attempts = [];
+
+  const tryWindow = (src) => {
     const seen = [];
     const record = (sel) => {
       const node = { selector: sel, bound: false, dataset: {} };
@@ -304,21 +314,60 @@ if (blockSrc) {
       // loop today, so no mutant reaches this arm — but an empty answer would
       // make `for (const b of detail.querySelectorAll(sel)) b.addEventListener`
       // vanish from the recording with NO diagnostic, and the suite would go
-      // quietly narrower instead of red. That is the silence-spent-as-an-answer
-      // shape this round exists to remove; leaving one in the new code would be
-      // the joke telling itself.
+      // quietly narrower instead of red.
       querySelectorAll: (sel) => [record(sel)],
     };
     try {
       // `new Function`, NOT window.eval — jsdom 19 drops listeners registered
       // through window.eval, reproduced on a three-line DOM with no app code at
       // all (recorded at scripts/test_container_processes.py:418).
-      new Function("detail", bindSrc)(detailStub);
-      for (const n of seen) (n.bound ? CLICK_SELECTORS : OTHER_QUERIES).push(n.selector);
+      new Function("detail", src)(detailStub);
+      return { ok: true, seen };
     } catch (e) {
-      // An exception here would otherwise read as "nothing is bound", which is
-      // a silent false in the direction that looks like a passing negative.
-      runDiag.push(`${e.constructor.name}: ${e.message}`);
+      return { ok: false, error: `${e.constructor.name}: ${e.message}` };
+    }
+  };
+
+  if (nStart !== 1 || nEnd !== 1) {
+    sliceDiag.push({ startNeedleCount: nStart, endNeedleCount: nEnd });
+  } else {
+    const endIdx = SRC.indexOf(BIND_END);
+    const starts = [SRC.indexOf(BIND_START)];
+    for (let k = 0; k < WIDEN_MAX; k++) {
+      const here = starts[starts.length - 1];
+      if (here <= 0) break;
+      const prev = SRC.lastIndexOf("\n", here - 2);
+      if (prev < 0) break;
+      starts.push(prev + 1);
+    }
+    // The END stays a needle, and that is a measurement, not a preference: of
+    // the next 300 line boundaries below it, exactly ONE produces a window that
+    // even executes, and that one cuts `const runBtn = detail.querySelector(...)`
+    // off from the addEventListener below it — recording a query as unbound
+    // when the product really does bind it. Everything wider is either
+    // unbalanced or reaches a module-level variable (`_sdkLiveHidden`) the
+    // window cannot see. Widening forward buys nothing and pays in a half-truth.
+    //
+    // What that leaves: a binding BELOW this needle is outside the window, so
+    // if its action ever renders the sweep calls it unwired. That is a red
+    // saying "look here", not a silent pass — the same maintenance-red as a
+    // renamed start needle. Today the two sets coincide exactly: the card
+    // renders seven actions and the window binds those same seven, checked by
+    // running, not by asserting.
+    for (let k = starts.length - 1; k >= 0; k--) {
+      const res = tryWindow(SRC.slice(starts[k], endIdx));
+      if (res.ok) {
+        widenedBy = k;
+        for (const n of res.seen) (n.bound ? CLICK_SELECTORS : OTHER_QUERIES).push(n.selector);
+        break;
+      }
+      attempts.push({ widenLines: k, error: res.error });
+    }
+    if (widenedBy === null) {
+      // Every window failed. The narrowest attempt's error is the one that
+      // names what the block itself needed; report it rather than reading the
+      // silence as "nothing is bound".
+      runDiag.push(attempts[attempts.length - 1].error);
     }
   }
 
@@ -330,18 +379,13 @@ if (blockSrc) {
   // binds on. `<button>` is still required: the card's contract is that these
   // affordances are buttons, and a listener attached to a <span> would work in a
   // browser but is not what this file is pinning.
-  // Two questions, deliberately not merged: is this action WIRED UP, and is the
-  // thing carrying it a <button>. The real selectors do not require a button
-  // tag, so a <span> wearing the listener class really would get a working
-  // click handler in a browser. Answering false for it inside hasAction alone
-  // would make `!hasAction(block, "continue")` pass while the card advertises a
-  // working Continue — a false-green reached through a negative assertion. So
-  // the tag contract is recorded here and asserted by name at the end, where it
-  // cannot be mistaken for "not wired up".
-  const nonButtonMatches = [];
+  // "Is this action wired up AND carried by a button." The tag half used to be
+  // policed here, which only ever saw the four actions hasAction happens to be
+  // called with — Stop and Stop-resume could become <span>s unseen. Both halves
+  // are now swept over EVERY rendered action at the end of this block; this
+  // helper keeps the conjunction so the parity assertions read the same.
   const hasAction = (html, action) => {
     panel.innerHTML = String(html || "");
-    let found = false;
     for (const sel of CLICK_SELECTORS) {
       let hits;
       try {
@@ -351,12 +395,12 @@ if (blockSrc) {
         continue;
       }
       for (const el of Array.from(hits)) {
-        if (el.getAttribute("data-action") !== action) continue;
-        if (el.tagName === "BUTTON") found = true;
-        else nonButtonMatches.push({ action, tag: el.tagName, selector: sel });
+        if (el.tagName === "BUTTON" && el.getAttribute("data-action") === action) {
+          return true;
+        }
       }
     }
-    return found;
+    return false;
   };
 
   // forensic finished: the backend rebuilds it (canRetry) AND, as of the
@@ -546,12 +590,45 @@ print(json.dumps(out))
     runDiag.length === 0, runDiag);
   t("  ...and every selector it binds on evaluates as CSS",
     selErrors.length === 0, selErrors);
-  // Non-vacuity for the recording itself: if it collected nothing, every answer
-  // above is false and the negative assertions pass by having nothing to say.
-  t("the recording found the click bindings app.js actually makes",
-    CLICK_SELECTORS.length >= 7, { bound: CLICK_SELECTORS, unbound: OTHER_QUERIES });
-  t("everything a bound selector matches in the rendered card is a <button>",
-    nonButtonMatches.length === 0, nonButtonMatches);
+  // A COUNT is not coverage. `CLICK_SELECTORS.length >= 7` was satisfied while
+  // Stop's selector had been swapped for a duplicate of Retry's — seven
+  // bindings, six distinct, Stop bound to nothing, and the suite green. And the
+  // tag check only saw actions someone had thought to call hasAction with.
+  //
+  // So both questions are asked of EVERY action the card actually renders,
+  // found by enumerating the DOM rather than by naming them here.
+  const unwiredActions = [];
+  const nonButtonActions = [];
+  const sweptActions = new Set();
+  for (const m of candidates) {
+    for (const st of [...TERMINAL, ...LIVE]) {
+      let block;
+      try {
+        block = gatesFor(m, st).runBlock;
+      } catch (e) {
+        continue;   // gateErrors above already reports a throw by name
+      }
+      panel.innerHTML = String(block || "");
+      for (const el of Array.from(panel.querySelectorAll("[data-action]"))) {
+        const action = el.getAttribute("data-action");
+        sweptActions.add(action);
+        const wired = CLICK_SELECTORS.some((sel) => {
+          try { return el.matches(sel); } catch (e) { return false; }
+        });
+        const where = { module: m, status: st, action, tag: el.tagName };
+        if (!wired) unwiredActions.push(where);
+        if (el.tagName !== "BUTTON") nonButtonActions.push(where);
+      }
+    }
+  }
+  t("every action the card renders is wired to a real click listener",
+    unwiredActions.length === 0, unwiredActions);
+  t("every action the card renders is carried by a <button>",
+    nonButtonActions.length === 0, nonButtonActions);
+  // Non-vacuity for the sweep: with nothing rendered both lists are empty and
+  // the two checks above pass by having nothing to look at.
+  t("  ...and the sweep actually had actions to look at",
+    sweptActions.size >= 5, [...sweptActions].sort());
 
   // Non-vacuity for the MATCHING, stated without naming a class. Take a block
   // app.js really renders and read its actions out of the DOM rather than from a
