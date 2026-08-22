@@ -1,7 +1,20 @@
 // Regression suite for the Dashboard panel.
 //
-// Run in a container with node 20 (the host's node is too old for this repo's
-// app.js — it uses optional chaining):
+// HOW TO RUN
+//
+//   node scripts/test_dashboard_ui.js
+//
+// The suite itself avoids the syntax the host's old node cannot parse, and it
+// never evaluates app.js whole — it slices the pieces it needs — so it runs on
+// the host directly. It REQUIRES jsdom, which decides whether a rendered button
+// matches the selectors app.js binds on. jsdom 19 resolves from the system path
+// (/usr/share/nodejs/jsdom), independent of cwd, so running from a copied tree
+// or a /tmp archive works. Without it the suite exits 2 with FATAL rather than
+// printing a green skip: "skipped" is not an answer to "is this control wired
+// up?", and this file exists to answer exactly that.
+//
+// To run it inside the worker container instead, the tree must be copied and
+// that image must also provide jsdom:
 //
 //   docker cp web-ui/app.js      <worker>:/tmp/app.js
 //   docker cp web-ui/index.html  <worker>:/tmp/index.html
@@ -277,16 +290,24 @@ if (blockSrc) {
   const OTHER_QUERIES = [];     // queries that bound nothing — F17's false-red
   if (bindSrc !== null) {
     const seen = [];
+    const record = (sel) => {
+      const node = { selector: sel, bound: false, dataset: {} };
+      seen.push(node);
+      return {
+        dataset: node.dataset,
+        addEventListener(type) { if (type === "click") node.bound = true; },
+      };
+    };
     const detailStub = {
-      querySelector(sel) {
-        const node = { selector: sel, bound: false, dataset: {} };
-        seen.push(node);
-        return {
-          dataset: node.dataset,
-          addEventListener(type) { if (type === "click") node.bound = true; },
-        };
-      },
-      querySelectorAll() { return []; },
+      querySelector: (sel) => record(sel),
+      // Modelled, not answered with []. Nothing in the block binds through a
+      // loop today, so no mutant reaches this arm — but an empty answer would
+      // make `for (const b of detail.querySelectorAll(sel)) b.addEventListener`
+      // vanish from the recording with NO diagnostic, and the suite would go
+      // quietly narrower instead of red. That is the silence-spent-as-an-answer
+      // shape this round exists to remove; leaving one in the new code would be
+      // the joke telling itself.
+      querySelectorAll: (sel) => [record(sel)],
     };
     try {
       // `new Function`, NOT window.eval — jsdom 19 drops listeners registered
@@ -309,8 +330,18 @@ if (blockSrc) {
   // binds on. `<button>` is still required: the card's contract is that these
   // affordances are buttons, and a listener attached to a <span> would work in a
   // browser but is not what this file is pinning.
+  // Two questions, deliberately not merged: is this action WIRED UP, and is the
+  // thing carrying it a <button>. The real selectors do not require a button
+  // tag, so a <span> wearing the listener class really would get a working
+  // click handler in a browser. Answering false for it inside hasAction alone
+  // would make `!hasAction(block, "continue")` pass while the card advertises a
+  // working Continue — a false-green reached through a negative assertion. So
+  // the tag contract is recorded here and asserted by name at the end, where it
+  // cannot be mistaken for "not wired up".
+  const nonButtonMatches = [];
   const hasAction = (html, action) => {
     panel.innerHTML = String(html || "");
+    let found = false;
     for (const sel of CLICK_SELECTORS) {
       let hits;
       try {
@@ -320,12 +351,12 @@ if (blockSrc) {
         continue;
       }
       for (const el of Array.from(hits)) {
-        if (el.tagName === "BUTTON" && el.getAttribute("data-action") === action) {
-          return true;
-        }
+        if (el.getAttribute("data-action") !== action) continue;
+        if (el.tagName === "BUTTON") found = true;
+        else nonButtonMatches.push({ action, tag: el.tagName, selector: sel });
       }
     }
-    return false;
+    return found;
   };
 
   // forensic finished: the backend rebuilds it (canRetry) AND, as of the
@@ -519,6 +550,8 @@ print(json.dumps(out))
   // above is false and the negative assertions pass by having nothing to say.
   t("the recording found the click bindings app.js actually makes",
     CLICK_SELECTORS.length >= 7, { bound: CLICK_SELECTORS, unbound: OTHER_QUERIES });
+  t("everything a bound selector matches in the rendered card is a <button>",
+    nonButtonMatches.length === 0, nonButtonMatches);
 
   // Non-vacuity for the MATCHING, stated without naming a class. Take a block
   // app.js really renders and read its actions out of the DOM rather than from a
