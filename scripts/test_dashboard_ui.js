@@ -282,18 +282,19 @@ if (blockSrc) {
   // changed nothing. That is a source-layout contract wearing a behaviour
   // contract's clothes — the same disease as reading selectors out of the text.
   //
-  // So the start is widened backwards one line at a time and the WIDEST window
-  // that both parses and runs is the one used. Nothing is hand-written into
-  // scope; a declaration the block needs is included because including it makes
-  // the block run, and a window that does not run is not used. If no window
-  // runs, the failure carries the identifier's name.
+  // So the start is widened backwards one line at a time and the NARROWEST
+  // window that both parses and runs is the one used — see the loop below for
+  // why the direction matters. Nothing is hand-written into scope; a
+  // declaration the block needs is included because including it makes the
+  // block run, and a window that does not run is not used. If no window runs,
+  // the failure carries the identifier's name.
   const BIND_START = "  const retryBtn = detail.querySelector(";
   const BIND_END = "  const runBtn = detail.querySelector(";
   const WIDEN_MAX = 25;      // lines the start may move back
   const nStart = SRC.split(BIND_START).length - 1;
   const nEnd = SRC.split(BIND_END).length - 1;
 
-  const CLICK_SELECTORS = [];   // queries whose result got a click listener
+  const CLICK_BINDINGS = [];    // {selector, kind} whose result got a click listener
   // Diagnostic-only, by design: no mutant changes colour if this list is
   // dropped. P1/P2 green and P9 red already pin the listener criterion in both
   // directions; this is here so a failure message can say what the block queried
@@ -304,8 +305,11 @@ if (blockSrc) {
 
   const tryWindow = (src) => {
     const seen = [];
-    const record = (sel) => {
-      const node = { selector: sel, bound: false, dataset: {} };
+    // The KIND is recorded with the selector, because querySelector and
+    // querySelectorAll bind different things and the difference is the whole of
+    // F25: one attaches to the first match, the other to every match.
+    const record = (sel, kind) => {
+      const node = { selector: sel, kind, bound: false, dataset: {} };
       seen.push(node);
       return {
         dataset: node.dataset,
@@ -313,13 +317,13 @@ if (blockSrc) {
       };
     };
     const detailStub = {
-      querySelector: (sel) => record(sel),
+      querySelector: (sel) => record(sel, "one"),
       // Modelled, not answered with []. Nothing in the block binds through a
       // loop today, so no mutant reaches this arm — but an empty answer would
       // make `for (const b of detail.querySelectorAll(sel)) b.addEventListener`
       // vanish from the recording with NO diagnostic, and the suite would go
       // quietly narrower instead of red.
-      querySelectorAll: (sel) => [record(sel)],
+      querySelectorAll: (sel) => [record(sel, "all")],
     };
     try {
       // `new Function`, NOT window.eval — jsdom 19 drops listeners registered
@@ -369,16 +373,22 @@ if (blockSrc) {
       const res = tryWindow(SRC.slice(starts[k], endIdx));
       if (res.ok) {
         widenedBy = k;
-        for (const n of res.seen) (n.bound ? CLICK_SELECTORS : OTHER_QUERIES).push(n.selector);
+        for (const n of res.seen) {
+          if (n.bound) CLICK_BINDINGS.push({ selector: n.selector, kind: n.kind });
+          else OTHER_QUERIES.push(n.selector);
+        }
         break;
       }
       attempts.push({ widenLines: k, error: res.error });
     }
     if (widenedBy === null) {
-      // Every window failed. The narrowest attempt's error is the one that
-      // names what the block itself needed; report it rather than reading the
-      // silence as "nothing is bound".
-      runDiag.push(attempts[attempts.length - 1].error);
+      // Every window failed. attempts[0] is the NARROWEST — the block on its
+      // own — and its error is the one that names the identifier the block
+      // actually needed. Taking the last element instead handed back whatever
+      // the WIDEST window choked on ("await is only valid in async function"),
+      // burying the name that this whole mechanism exists to report. Both are
+      // kept: one to read, all of them to inspect.
+      runDiag.push(attempts[0].error);
     }
   }
 
@@ -395,20 +405,35 @@ if (blockSrc) {
   // called with — Stop and Stop-resume could become <span>s unseen. Both halves
   // are now swept over EVERY rendered action at the end of this block; this
   // helper keeps the conjunction so the parity assertions read the same.
+  // The nodes the PRODUCT would actually attach a listener to, for whatever is
+  // currently in `panel`. `el.matches(selector)` was the wrong question: it
+  // treats every element matching a binding's selector as wired, but
+  // `detail.querySelector(sel)` attaches to the FIRST match and nothing else.
+  // Widen a selector to `[class][data-action]` and the listener goes to the
+  // first control in document order — Change Target — while Retry gets none,
+  // and matches() called them both wired.
+  const boundNodes = () => {
+    const out = new Set();
+    for (const b of CLICK_BINDINGS) {
+      try {
+        if (b.kind === "all") {
+          for (const el of Array.from(panel.querySelectorAll(b.selector))) out.add(el);
+        } else {
+          const el = panel.querySelector(b.selector);
+          if (el !== null) out.add(el);
+        }
+      } catch (e) {
+        if (!selErrors.some((x) => x[0] === b.selector)) selErrors.push([b.selector, e.message]);
+      }
+    }
+    return out;
+  };
+
   const hasAction = (html, action) => {
     panel.innerHTML = String(html || "");
-    for (const sel of CLICK_SELECTORS) {
-      let hits;
-      try {
-        hits = panel.querySelectorAll(sel);
-      } catch (e) {
-        selErrors.push([sel, e.message]);
-        continue;
-      }
-      for (const el of Array.from(hits)) {
-        if (el.tagName === "BUTTON" && el.getAttribute("data-action") === action) {
-          return true;
-        }
+    for (const el of boundNodes()) {
+      if (el.tagName === "BUTTON" && el.getAttribute("data-action") === action) {
+        return true;
       }
     }
     return false;
@@ -598,10 +623,10 @@ print(json.dumps(out))
   t("app.js's button-binding block was located by both of its ends",
     sliceDiag.length === 0, { sliceDiag, widenedBy, attempts });
   t("  ...and running it bound listeners without throwing",
-    runDiag.length === 0, runDiag);
+    runDiag.length === 0, { runDiag, attempts });
   t("  ...and every selector it binds on evaluates as CSS",
     selErrors.length === 0, selErrors);
-  // A COUNT is not coverage. `CLICK_SELECTORS.length >= 7` was satisfied while
+  // A COUNT is not coverage. A floor on the number of bindings was satisfied while
   // Stop's selector had been swapped for a duplicate of Retry's — seven
   // bindings, six distinct, Stop bound to nothing, and the suite green. And the
   // tag check only saw actions someone had thought to call hasAction with.
@@ -610,7 +635,9 @@ print(json.dumps(out))
   // found by enumerating the DOM rather than by naming them here.
   const unwiredActions = [];
   const nonButtonActions = [];
+  const actionlessButtons = [];
   const sweptActions = new Set();
+  const modulesWithActions = new Set();
   for (const m of candidates) {
     for (const st of [...TERMINAL, ...LIVE]) {
       let block;
@@ -620,15 +647,28 @@ print(json.dumps(out))
         continue;   // gateErrors above already reports a throw by name
       }
       panel.innerHTML = String(block || "");
+      const bound = boundNodes();
       for (const el of Array.from(panel.querySelectorAll("[data-action]"))) {
         const action = el.getAttribute("data-action");
         sweptActions.add(action);
-        const wired = CLICK_SELECTORS.some((sel) => {
-          try { return el.matches(sel); } catch (e) { return false; }
-        });
+        modulesWithActions.add(m);
         const where = { module: m, status: st, action, tag: el.tagName };
-        if (!wired) unwiredActions.push(where);
+        if (!bound.has(el)) unwiredActions.push(where);
         if (el.tagName !== "BUTTON") nonButtonActions.push(where);
+      }
+      // Enumerating `[data-action]` cannot see a control that LOST the
+      // attribute: misspell it and the element leaves the inventory instead of
+      // failing it, while the button still renders and binds nothing. So the
+      // buttons are enumerated too, and a rendered button with no action is a
+      // finding in its own right.
+      for (const el of Array.from(panel.querySelectorAll("button"))) {
+        if (el.getAttribute("data-action") === null) {
+          actionlessButtons.push({
+            module: m, status: st, tag: el.tagName,
+            className: el.getAttribute("class"),
+            text: (el.textContent || "").trim().slice(0, 24),
+          });
+        }
       }
     }
   }
@@ -636,10 +676,15 @@ print(json.dumps(out))
     unwiredActions.length === 0, unwiredActions);
   t("every action the card renders is carried by a <button>",
     nonButtonActions.length === 0, nonButtonActions);
-  // Non-vacuity for the sweep: with nothing rendered both lists are empty and
-  // the two checks above pass by having nothing to look at.
-  t("  ...and the sweep actually had actions to look at",
-    sweptActions.size >= 5, [...sweptActions].sort());
+  t("every <button> the card renders carries a data-action",
+    actionlessButtons.length === 0, actionlessButtons);
+  // Non-vacuity, derived rather than picked. `>= 5` was a number someone chose:
+  // it stayed satisfied at six when one of seven actions vanished. The backend
+  // list is the thing that says which modules get rebuilt, so every one of them
+  // must have shown the sweep at least one action.
+  t("  ...and the sweep saw actions for every module the backend rebuilds",
+    serverRetry.every((m) => modulesWithActions.has(m)),
+    { saw: [...modulesWithActions].sort(), server: serverRetry, actions: [...sweptActions].sort() });
 
   // Non-vacuity for the MATCHING, stated without naming a class. Take a block
   // app.js really renders and read its actions out of the DOM rather than from a
