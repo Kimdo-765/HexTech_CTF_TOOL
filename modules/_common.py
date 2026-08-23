@@ -893,6 +893,9 @@ def _publish(job_id: str, channel_suffix: str, payload: dict) -> None:
 
 
 def log_line(job_id: str, line: str) -> None:
+    from modules.job_secrets import redact_job_value
+
+    line = str(redact_job_value(job_id, str(line)))
     f = job_dir(job_id) / "run.log"
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     with f.open("a") as fp:
@@ -926,10 +929,13 @@ def log_block(
 
     Single-line bodies behave the same as log_line.
     """
+    from modules.job_secrets import redact_job_value
+
+    prefix = str(redact_job_value(job_id, str(prefix)))
+    body = str(redact_job_value(job_id, str(body or "")))
     f = job_dir(job_id) / "run.log"
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     tag_part = f"[{tag}] " if tag else ""
-    body = body or ""
     lines = body.splitlines() or [""]
     out = "".join(f"[{ts}] {tag_part}{prefix}: {line}\n" for line in lines)
     with f.open("a") as fp:
@@ -1182,6 +1188,10 @@ def write_meta(job_id: str, **updates: Any) -> None:
 
     meta.update(updates)
     meta["updated_at"] = now_iso
+    from modules.job_secrets import redact_job_value
+
+    meta = redact_job_value(job_id, meta)
+    updates = redact_job_value(job_id, updates)
     f.write_text(json.dumps(meta, indent=2))
 
     # SSE: publish only the "lifecycle" subset to avoid spamming the
@@ -2602,6 +2612,9 @@ def agent_job_env(
     env.setdefault("PWNLIB_NOTERM", "1")
     if extra:
         env.update({k: str(v) for k, v in extra.items()})
+    from modules.job_secrets import read_job_secrets
+
+    env.update(read_job_secrets(job_id))
     return env
 
 
@@ -6169,6 +6182,18 @@ def _rates_for_model(model: str | None) -> tuple[float, float, float, float]:
 # these is how a structured AUP block came back classified as a generic error.
 AGENT_FAILURE_ATTRS = ("errors", "result", "error", "error_detail", "api_error_status")
 
+_STOP_REASON_KIND = {
+    "timeout": "timeout",
+    "process_error": "transport_error",
+    "unexpected_eof": "transport_error",
+    "eof": "transport_error",
+    "cancelled": "killed",
+    "canceled": "killed",
+    "max_tokens": "agent_error",
+    "max_tool_rounds": "agent_error",
+}
+_AGENT_FAILURE_DETAIL_MAX_CHARS = 2000
+
 
 def structured_failure_bits(msg: Any) -> list[str]:
     """Authoritative failure strings an adapter/SDK set on a result message.
@@ -6205,6 +6230,38 @@ def classify_failure_kind(detail: str, fallback: str) -> str:
     """
     kind = classify_agent_error(detail or "")
     return fallback if kind in (None, "", "unknown") else kind
+
+
+def classify_result_failure(
+    msg: Any, parts: list[str], fallback: str,
+) -> tuple[str, str]:
+    """Classify a failed provider result with structured fields first.
+
+    Adapter ``stop_reason`` is authoritative for transport/process failures;
+    assistant prose is consulted only when structured fields are ambiguous.
+    This is shared by main and judge so the same ResultMessage cannot become a
+    transport error in one path and ``unknown`` in the other.
+    """
+
+    structured = structured_failure_bits(msg)
+    prose = "".join(parts).strip() if parts else ""
+    detail = " | ".join(structured + ([prose] if prose else []))
+    stored_detail = detail.strip(" |")[:_AGENT_FAILURE_DETAIL_MAX_CHARS]
+
+    for source in structured:
+        kind = classify_failure_kind(source, "")
+        if kind:
+            return kind, stored_detail
+
+    stop_reason = str(getattr(msg, "stop_reason", "") or "").strip().lower()
+    if stop_reason in _STOP_REASON_KIND:
+        return _STOP_REASON_KIND[stop_reason], stored_detail
+
+    tail = next((part for part in reversed(parts) if part and part.strip()), "")
+    kind = classify_failure_kind(tail, "")
+    if kind:
+        return kind, stored_detail
+    return fallback, stored_detail
 
 
 def model_rates_are_known(model: str | None) -> bool:
@@ -6912,6 +6969,26 @@ def _pick_present_artifact(
         if (work_dir / n).is_file():
             return n
     return None
+
+
+def failed_turn_reuses_artifact(
+    work_dir: Path,
+    names: tuple[str, ...],
+    before: dict[str, str | None],
+) -> tuple[str, bool]:
+    """Return the runnable artifact and whether its bytes predate the turn."""
+
+    picked = _pick_present_artifact(work_dir, names)
+    if not picked:
+        return "", False
+    prior_sha = before.get(picked)
+    if prior_sha is None:
+        return picked, False
+    try:
+        current_sha = hashlib.sha256((work_dir / picked).read_bytes()).hexdigest()
+    except OSError:
+        return picked, False
+    return picked, current_sha == prior_sha
 
 
 # Minimal pwntools skeleton the orchestrator drops in when the budget
@@ -8803,6 +8880,10 @@ async def run_main_agent_session(
         attempt = 0  # 0 = initial run; 1..N = postjudge-driven retries
         while True:
             log_fn(f"Main session turn (attempt {attempt}/{cap_str})")
+            artifact_sha_before_turn = {
+                name: _script_sha(work_dir / name) for name in artifact_names
+            }
+            last_assistant_text["value"] = ""
             try:
                 async for msg in client.receive_response():
                     capture_session_id(msg, job_id)
@@ -8928,11 +9009,13 @@ async def run_main_agent_session(
                             # turn actually DIED (job ca27378ee3ee: a redirect
                             # turn refused on AUP, recorded as retry_hint_ignored).
                             _err_txt = last_assistant_text["value"]
-                            _err_kind = classify_agent_error(_err_txt) or "agent_error"
+                            _err_kind, _err_detail = classify_result_failure(
+                                msg, [_err_txt], "agent_error"
+                            )
                             summary["agent_error"] = (
                                 _err_txt[:300] if _err_kind == "policy_refusal"
-                                else "SDK ResultMessage is_error (transport "
-                                "failure / timeout / refusal); no artifact"
+                                else (_err_detail[:300] or
+                                      "SDK ResultMessage is_error")
                             )
                             summary["agent_error_kind"] = _err_kind
                             _snapshot_cost(summary, "RESULT_IS_ERROR")
@@ -8941,7 +9024,9 @@ async def run_main_agent_session(
                             # soft-eject / scaffold) so they can't re-query the
                             # blocked session and re-block. The postjudge-redirect
                             # re-block is gated separately below.
-                            if _err_kind == "policy_refusal":
+                            if _err_kind in (
+                                "policy_refusal", "transport_error", "timeout", "killed"
+                            ):
                                 final_draft_pending["value"] = False
                                 soft_eject_pending["value"] = False
                                 scaffold_nudge_pending["value"] = False
@@ -9012,6 +9097,42 @@ async def run_main_agent_session(
                     soft_eject_pending["value"] = False
                     scaffold_nudge_pending["value"] = False
                 else:
+                    return last_sandbox
+
+            # A failed turn may inherit a runnable script from the source job.
+            # It is not evidence produced by this turn. Never let that stale
+            # file reach prejudge/sandbox: doing so converted Codex's
+            # process_error into a misleading exploit failure on c387c20adc61.
+            if bool((summary.get("result") or {}).get("is_error")):
+                stale_name, is_stale = failed_turn_reuses_artifact(
+                    work_dir, artifact_names, artifact_sha_before_turn
+                )
+                if is_stale:
+                    error_kind = summary.get("agent_error_kind") or "agent_error"
+                    summary["failed_turn_stale_artifact"] = stale_name
+                    summary["judge_stop_reason"] = (
+                        f"agent turn failed ({error_kind}); carried {stale_name} "
+                        "was unchanged, so it was not sent to prejudge or sandbox"
+                    )
+                    log_fn(
+                        f"[orchestrator] failed turn left carried {stale_name} "
+                        "byte-identical — blocking stale artifact before prejudge"
+                    )
+                    write_meta(
+                        job_id,
+                        judge_next_action="stop",
+                        judge_stop_reason=summary["judge_stop_reason"],
+                    )
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="agent_error",
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out=judge_out,
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
                     return last_sandbox
 
             # ---- Cost-cap halt (Tooth 2) — highest priority: stop the bleed ----

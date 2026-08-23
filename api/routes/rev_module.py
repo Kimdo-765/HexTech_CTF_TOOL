@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
-from api.storage import job_dir, new_job_id, parse_targets, write_job_meta, reject_job
+from api.storage import job_dir, new_job_id, parse_targets, prepare_job_description, write_job_meta, reject_job
 from modules.agent_provider import enrich_job_meta
 
 router = APIRouter()
@@ -57,6 +57,8 @@ async def analyze_rev(
     file: Optional[UploadFile] = File(None),
     target: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
+    challenge_secret_key: Optional[str] = Form(None),
+    challenge_secret_value: Optional[str] = Form(None),
     auto_run: bool = Form(False),
     docker_challenge: bool = Form(False),
     job_timeout: Optional[int] = Form(None),
@@ -117,6 +119,9 @@ async def analyze_rev(
                     binary_name = None
             except zipfile.BadZipFile:
                 reject_job(job_id, 400, "invalid zip upload")
+    description = prepare_job_description(
+        job_id, description, challenge_secret_key, challenge_secret_value
+    )
 
     timeout = resolve_timeout(job_timeout)
     chosen_model = (model or "").strip() or None

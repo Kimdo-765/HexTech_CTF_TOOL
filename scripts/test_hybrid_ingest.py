@@ -159,6 +159,9 @@ storage_module.JOBS_DIR = JOBS
 storage_module.UPLOADS_DIR = UPLOADS
 storage_module.new_job_id = lambda: next(job_ids)
 storage_module.parse_targets = parse_targets
+storage_module.prepare_job_description = (
+    lambda _job_id, description, _secret_key, _secret_value: description
+)
 sys.modules["api.storage"] = storage_module
 
 enriched = []

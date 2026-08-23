@@ -67,9 +67,11 @@ def _read_meta(job_id: str) -> dict[str, Any]:
 
 
 def _write_meta(job_id: str, meta: Mapping[str, Any]) -> None:
+    from modules.job_secrets import redact_job_value
+
     path = JOBS_DIR / job_id / "meta.json"
     path.write_text(
-        json.dumps(dict(meta), indent=2, ensure_ascii=False) + "\n",
+        json.dumps(redact_job_value(job_id, dict(meta)), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
@@ -378,6 +380,9 @@ def run_job(parent_job_id: str) -> dict[str, Any]:
                 parent_job_id, parent, first_child_job_id, first_module
             ),
         )
+        from modules.job_secrets import copy_job_secrets
+
+        copy_job_secrets(parent_job_id, first_child_job_id)
         try:
             first_meta = _execute_child(
                 parent_job_id, parent, first_child_job_id, first_module
@@ -406,6 +411,7 @@ def run_job(parent_job_id: str) -> dict[str, Any]:
             next_child_meta=second_child_meta,
             handoff_paths=handoff_paths,
         )
+        copy_job_secrets(parent_job_id, second_child_job_id)
         coordinator.verify_handoff(second_child_job_id)
         _stage_verified_handoff(second_child_job_id)
         _execute_child(parent_job_id, parent, second_child_job_id, second_module)

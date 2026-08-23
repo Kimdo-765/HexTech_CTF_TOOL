@@ -237,6 +237,10 @@ async def test_jsonl_and_resume() -> None:
         ).SUBPROCESS_STREAM_LIMIT_BYTES,
     )
     report(
+        "turn acknowledgement fd is inherited by Codex",
+        len(first_kwargs.get("pass_fds") or ()) == 1,
+    )
+    report(
         "user config and rules are ignored",
         "--ignore-user-config" in first_cmd and "--ignore-rules" in first_cmd,
     )

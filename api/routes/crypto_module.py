@@ -7,6 +7,7 @@ from api.storage import (
     extract_if_archive,
     new_job_id,
     parse_targets,
+    prepare_job_description,
     save_upload,
     write_job_meta,
 )
@@ -20,6 +21,8 @@ async def analyze_crypto(
     file: Optional[UploadFile] = File(None),
     target: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
+    challenge_secret_key: Optional[str] = Form(None),
+    challenge_secret_value: Optional[str] = Form(None),
     auto_run: bool = Form(False),
     docker_challenge: bool = Form(False),
     job_timeout: Optional[int] = Form(None),
@@ -44,6 +47,9 @@ async def analyze_crypto(
             raise HTTPException(status_code=400, detail="empty file")
         saved = save_upload(job_id, file.filename, content)
         src_root = str(extract_if_archive(saved))
+    description = prepare_job_description(
+        job_id, description, challenge_secret_key, challenge_secret_value
+    )
 
     timeout = resolve_timeout(job_timeout)
     chosen_model = (model or "").strip() or None

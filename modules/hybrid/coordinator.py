@@ -93,8 +93,11 @@ def _write_object(path: Path, value: Mapping[str, Any]) -> None:
     ``meta.json``.
     """
 
+    from modules.job_secrets import redact_job_value
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(dict(value), indent=2, ensure_ascii=False) + "\n"
+    safe_value = redact_job_value(path.parent.name, dict(value))
+    payload = json.dumps(safe_value, indent=2, ensure_ascii=False) + "\n"
     path.write_text(payload, encoding="utf-8")
 
 

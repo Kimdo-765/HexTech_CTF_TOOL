@@ -69,7 +69,9 @@ def emit_gpt_event(job_id: str, kind: str, **fields: Any) -> None:
             "provider": "gpt",
             "kind": str(kind or "event"),
         }
-        rec.update(fields)
+        from modules.job_secrets import redact_job_value
+
+        rec.update(redact_job_value(safe, fields))
         line = json.dumps(rec, ensure_ascii=False, default=str)
         with (job / "gpt-events.jsonl").open("a") as fp:
             fp.write(line + "\n")

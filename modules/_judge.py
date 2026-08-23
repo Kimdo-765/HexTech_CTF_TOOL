@@ -624,38 +624,9 @@ def classify_failure(msg: Any, parts: list[str], fallback: str) -> tuple[str, st
 
     Classification always runs on the FULL text; truncation is for storage.
     """
-    structured = _structured_failure_bits(msg)
-    detail = " | ".join(structured + ([("".join(parts)).strip()] if parts else []))
-    detail = detail.strip(" |")[:_DETAIL_MAX_CHARS]
+    from modules._common import classify_result_failure
 
-    # 1. The server's own message, when the adapter preserved one.
-    for src in structured:
-        kind = _classify(src, "")
-        if kind:
-            return kind, detail
-
-    # 2. stop_reason names the category for adapter-level failures.
-    stop_reason = str(getattr(msg, "stop_reason", "") or "").strip().lower()
-    if stop_reason in _STOP_REASON_KIND:
-        return _STOP_REASON_KIND[stop_reason], detail
-
-    # 3. Ambiguous or unmapped stop_reason: the reason is in the body. Read
-    #    ONLY THE LAST message, never earlier ones.
-    #
-    #    Every adapter emits its failure detail as the final assistant message
-    #    before the error result (codex_cli, grok_acp). Anything before that is
-    #    the judge's own output, and scanning it is how an analysis that merely
-    #    DISCUSSED a usage policy turned a broken pipe into a refusal. Reading
-    #    one message instead of all of them removes that whole class, and it
-    #    keeps working for adapter values nobody has mapped yet — which
-    #    matters, because an unmapped value is exactly the case the map above
-    #    was missing twice.
-    tail = next((p for p in reversed(parts) if p and p.strip()), "")
-    kind = _classify(tail, "")
-    if kind:
-        return kind, detail
-
-    return fallback, detail
+    return classify_result_failure(msg, parts, fallback)
 
 
 def _record_judge_usage(job_id: str, stage: str, res: JudgeTurnResult) -> None:

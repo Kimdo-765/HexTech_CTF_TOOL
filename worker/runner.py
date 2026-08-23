@@ -139,6 +139,12 @@ def _cleanup_expired_jobs(ttl: int, *, now: datetime | None = None) -> int:
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=ttl)
     removed = 0
     if not JOBS_DIR.exists():
+        try:
+            from modules.job_secrets import cleanup_orphaned_secrets
+
+            cleanup_orphaned_secrets(older_than_epoch=cutoff.timestamp())
+        except Exception as e:
+            print(f"[cleanup] orphan secret sweep failed: {e}", flush=True)
         return removed
     for d in JOBS_DIR.iterdir():
         if not d.is_dir():
@@ -149,9 +155,22 @@ def _cleanup_expired_jobs(ttl: int, *, now: datetime | None = None) -> int:
         _promote_measurement_artifacts(d)
         try:
             shutil.rmtree(d)
-            removed += 1
         except Exception as e:
             print(f"[cleanup] failed to rm {d}: {e}", flush=True)
+            continue
+        removed += 1
+        try:
+            from modules.job_secrets import delete_job_secrets
+
+            delete_job_secrets(d.name)
+        except Exception as e:
+            print(f"[cleanup] secret delete failed for {d.name}: {e}", flush=True)
+    try:
+        from modules.job_secrets import cleanup_orphaned_secrets
+
+        cleanup_orphaned_secrets(older_than_epoch=cutoff.timestamp())
+    except Exception as e:
+        print(f"[cleanup] orphan secret sweep failed: {e}", flush=True)
     return removed
 
 

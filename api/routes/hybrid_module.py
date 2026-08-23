@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from rq import Callback
 
 from api.queue import get_queue, hard_timeout_for, normalize_effort, resolve_timeout
-from api.storage import JOBS_DIR, UPLOADS_DIR, new_job_id, parse_targets
+from api.storage import JOBS_DIR, UPLOADS_DIR, new_job_id, parse_targets, prepare_job_description
 from modules.agent_provider import enrich_job_meta
 from modules.hybrid.coordinator import (
     HybridCoordinator,
@@ -79,6 +79,8 @@ async def analyze_hybrid(
     recipe: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     description: Optional[str] = Form(None),
+    challenge_secret_key: Optional[str] = Form(None),
+    challenge_secret_value: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
@@ -131,6 +133,9 @@ async def analyze_hybrid(
     inputs = {module: inputs[module] for module in modules}
 
     job_id = new_job_id()
+    description = prepare_job_description(
+        job_id, description, challenge_secret_key, challenge_secret_value
+    )
     upload_dir = UPLOADS_DIR / job_id
     saved: Path | None = None
     if content is not None and filename is not None:
@@ -139,6 +144,9 @@ async def analyze_hybrid(
         try:
             saved.write_bytes(content)
         except Exception:
+            from modules.job_secrets import delete_job_secrets
+
+            delete_job_secrets(job_id)
             shutil.rmtree(upload_dir, ignore_errors=True)
             raise
 
@@ -156,10 +164,16 @@ async def analyze_hybrid(
         enrich_job_meta(meta)
         parent = HybridCoordinator(JOBS_DIR).create_parent(job_id, canonical, meta=meta)
     except HybridCoordinatorError as exc:
+        from modules.job_secrets import delete_job_secrets
+
+        delete_job_secrets(job_id)
         if saved is not None:
             shutil.rmtree(upload_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
+        from modules.job_secrets import delete_job_secrets
+
+        delete_job_secrets(job_id)
         if saved is not None:
             shutil.rmtree(upload_dir, ignore_errors=True)
         raise

@@ -32,6 +32,7 @@ from modules.gpt_responses import (
     UserMessage,
 )
 from modules.gpt_run_events import context_from_options, emit_gpt_event
+from modules.codex_turn_guard import acquire_turn_guard, release_turn_guard
 
 
 DEFAULT_TURN_TIMEOUT_S = 3600.0
@@ -547,7 +548,13 @@ class CodexCLIClient:
         command = self._command(resuming=resuming)
         cwd = Path(self.options.cwd)
         cwd.mkdir(parents=True, exist_ok=True)
+        turn_guard = None
         try:
+            # Acquire outside the subprocess and inherit the descriptor into
+            # Codex.  The API can therefore distinguish "RQ stop was sent"
+            # from "the actual CLI writer has terminated" before resuming the
+            # same thread in a successor job.
+            turn_guard = await asyncio.to_thread(acquire_turn_guard, cwd)
             self._proc = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(cwd),
@@ -557,8 +564,11 @@ class CodexCLIClient:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
                 limit=SUBPROCESS_STREAM_LIMIT_BYTES,
+                pass_fds=(turn_guard.fileno(),),
             )
         except Exception as exc:
+            release_turn_guard(turn_guard)
+            turn_guard = None
             emit_gpt_event(
                 event_job_id,
                 "turn_failed",
@@ -813,6 +823,7 @@ class CodexCLIClient:
             except Exception:
                 pass
             self._proc = None
+            release_turn_guard(turn_guard)
 
         duration_ms = int((time.monotonic() - started) * 1000)
         emit_gpt_event(

@@ -41,6 +41,28 @@ def parse_targets(raw: Optional[str], *, limit: int = 32) -> list[str]:
                 break
     return out
 
+
+def prepare_job_description(
+    job_id: str,
+    description: Optional[str],
+    secret_key: Optional[str],
+    secret_value: Optional[str],
+) -> Optional[str]:
+    """Move challenge credentials out of request prose before persistence."""
+
+    from modules.job_secrets import SecretIngressError, prepare_job_secret
+
+    try:
+        return prepare_job_secret(
+            job_id,
+            description,
+            secret_key=secret_key,
+            secret_value=secret_value,
+        )
+    except SecretIngressError as exc:
+        reject_job(job_id, 400, str(exc))
+        raise AssertionError("reject_job always raises")
+
 # Operator-curated library of past exploits/solvers a future job can
 # consult when stuck on technique / leak-vector choice. Filesystem-
 # backed (no SQLite) so `tar -czf - data/exploits/` is a complete
@@ -107,6 +129,9 @@ def reject_job(job_id: str, status_code: int, detail: str) -> None:
                 # which directory survived in a way no phrasing change touches.
                 extra={"reject_job_dir": str(target)},
             )
+    from modules.job_secrets import delete_job_secrets
+
+    delete_job_secrets(job_id)
     raise HTTPException(status_code=status_code, detail=detail)
 
 
@@ -114,6 +139,9 @@ _TERMINAL_STATUSES = {"finished", "failed", "no_flag", "stopped", "flag_ready"}
 
 
 def write_job_meta(job_id: str, meta: dict[str, Any]) -> None:
+    from modules.job_secrets import redact_job_value
+
+    meta = redact_job_value(job_id, meta)
     f = job_dir(job_id) / "meta.json"
     prev: dict[str, Any] = {}
     if f.exists():
@@ -167,6 +195,9 @@ def save_upload(job_id: str, filename: str, content: bytes) -> Path:
 
 
 def cleanup_job(job_id: str) -> None:
+    from modules.job_secrets import delete_job_secrets
+
     p = JOBS_DIR / job_id
     if p.exists():
         shutil.rmtree(p)
+    delete_job_secrets(job_id)

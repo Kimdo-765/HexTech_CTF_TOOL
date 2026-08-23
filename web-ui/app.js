@@ -1005,6 +1005,22 @@ function gatherTargets(formEl) {
     .join("\n");
 }
 
+function challengeSecretHtml() {
+  return `
+    <label class="retry-manual-label" style="margin-top:0.4rem">Challenge credential (optional · stored job-scoped, never in the hint/log)</label>
+    <input type="password" class="challenge-secret-value" autocomplete="new-password" placeholder="CTFD_ACCESS_TOKEN value" />
+  `;
+}
+
+function appendChallengeSecret(formEl, body) {
+  const value = formEl.querySelector(".challenge-secret-value")?.value.trim() || "";
+  if (value) {
+    body.challenge_secret_key = "CTFD_ACCESS_TOKEN";
+    body.challenge_secret_value = value;
+  }
+  return value;
+}
+
 // Reviewer-mode retry/resume with an optional MULTI-target override (was a
 // single-line window.prompt). No manual hint — the auto-reviewer generates it;
 // this just lets the operator point the retry/resume at one or more new targets
@@ -1020,6 +1036,7 @@ function openReviewerRetryForm(jobId, anchorBtn, opts) {
   form.innerHTML = `
     <label class="retry-manual-label">Target (override; blank = keep prior, "(none)" = clear · <b>+ add target</b> for several)</label>
     ${targetListHtml("e.g. http://newhost:8080  ·  ctf.example.com:31337")}
+    ${challengeSecretHtml()}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit">${opts.submitLabel || "↻ Retry (reviewer)"}</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -1034,11 +1051,13 @@ function openReviewerRetryForm(jobId, anchorBtn, opts) {
   submit.addEventListener("click", () => {
     const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
     const target = gatherTargets(form);
+    const secretValue = form.querySelector(".challenge-secret-value")?.value.trim() || "";
     form.remove();
     streamRetry(jobId, anchorBtn, null, {
       ...(opts.streamOpts || {}),
       target,
       fresh: !!(freshCb && freshCb.checked),
+      secretValue,
     });
   });
 }
@@ -2468,6 +2487,10 @@ async function streamRetry(jobId, btn, manualHint = null, opts = {}) {
   // (carried files + hint only). Defends against retry-fork-chain context
   // overflow ("Prompt is too long") on deep chains. Operator-selected.
   if (opts.fresh) body.fresh = true;
+  if (opts.secretValue) {
+    body.challenge_secret_key = "CTFD_ACCESS_TOKEN";
+    body.challenge_secret_value = opts.secretValue;
+  }
   const fetchOpts = { method: "POST" };
   if (Object.keys(body).length) {
     fetchOpts.headers = { "Content-Type": "application/json" };
@@ -2594,6 +2617,7 @@ function openStopResumeForm(jobId, anchorBtn) {
     <textarea rows="5" placeholder="What should the next attempt do differently? e.g. 'the leaked endpoint is /api/v2/profile, not /profile' — appended to the new job's description as [retry-hint]"></textarea>
     <label class="retry-manual-label" style="margin-top:0.4rem">Target (override; blank = keep prior, "(none)" = clear · <b>+ add target</b> for several)</label>
     ${targetListHtml("e.g. http://newhost:8080  ·  ctf.example.com:31337")}
+    ${challengeSecretHtml()}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit stop-resume-submit">✋ Stop &amp; resume</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -2611,7 +2635,8 @@ function openStopResumeForm(jobId, anchorBtn) {
   cancel.addEventListener("click", () => form.remove());
   submit.addEventListener("click", async () => {
     const hint = ta.value.trim();
-    if (!hint) {
+    const secretValue = form.querySelector(".challenge-secret-value")?.value.trim() || "";
+    if (!hint && !secretValue) {
       ta.focus();
       ta.classList.add("invalid");
       setTimeout(() => ta.classList.remove("invalid"), 600);
@@ -2624,7 +2649,8 @@ function openStopResumeForm(jobId, anchorBtn) {
     // Stop polling so it doesn't fight the upcoming selectJob call.
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     try {
-      const reqBody = { hint };
+      const reqBody = { hint: hint || "Challenge credential supplied through the dedicated secret ingress." };
+      appendChallengeSecret(form, reqBody);
       const t = gatherTargets(form);
       if (t) reqBody.target = t;
       const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
@@ -2681,6 +2707,7 @@ function openManualHintForm(jobId, anchorBtn) {
     <textarea rows="5" placeholder="e.g. The bot visits /report?id= and the cookie is on .site.com — exfiltrate via document.cookie to \$COLLECTOR_URL. Or: the heap leak comes from the formatted error on /api/echo, not /api/profile."></textarea>
     <label class="retry-manual-label" style="margin-top:0.4rem">Target (override; blank = keep prior, "(none)" = clear · <b>+ add target</b> for several)</label>
     ${targetListHtml("e.g. http://newhost:8080  ·  ctf.example.com:31337")}
+    ${challengeSecretHtml()}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit">Submit hint &amp; retry</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -2699,17 +2726,24 @@ function openManualHintForm(jobId, anchorBtn) {
   cancel.addEventListener("click", () => form.remove());
   submit.addEventListener("click", () => {
     const hint = ta.value.trim();
-    if (!hint) {
+    const secretValue = form.querySelector(".challenge-secret-value")?.value.trim() || "";
+    if (!hint && !secretValue) {
       ta.focus();
       ta.classList.add("invalid");
       setTimeout(() => ta.classList.remove("invalid"), 600);
       return;
     }
     const freshCb = document.getElementById(`fresh-ctx-${jobId}`);
-    streamRetry(jobId, submit, hint, {
+    streamRetry(
+      jobId,
+      submit,
+      hint || "Challenge credential supplied through the dedicated secret ingress.",
+      {
       target: gatherTargets(form),
       fresh: !!(freshCb && freshCb.checked),
-    });
+      secretValue,
+      },
+    );
   });
   // Ctrl/Cmd+Enter shortcut
   for (const el of [ta]) {
@@ -2739,6 +2773,7 @@ function openContinueForm(jobId, anchorBtn) {
     <textarea rows="4" placeholder="e.g. I restarted the instance — the registration slot is fresh now. Run your existing exploit (BASE72 long-pw oracle) in one shot; don't probe."></textarea>
     <label class="retry-manual-label" style="margin-top:0.4rem">New target (blank = keep prior; a restarted instance usually has a new port · <b>+ add target</b> for several)</label>
     ${targetListHtml("e.g. http://host8.dreamhack.games:NEWPORT")}
+    ${challengeSecretHtml()}
     <div class="retry-manual-row">
       <button type="button" class="retry-manual-submit continue-submit">💬 Continue with note</button>
       <button type="button" class="retry-manual-cancel">Cancel</button>
@@ -2753,7 +2788,8 @@ function openContinueForm(jobId, anchorBtn) {
   cancel.addEventListener("click", () => form.remove());
   submit.addEventListener("click", async () => {
     const comment = ta.value.trim();
-    if (!comment) {
+    const secretValue = form.querySelector(".challenge-secret-value")?.value.trim() || "";
+    if (!comment && !secretValue) {
       ta.focus(); ta.classList.add("invalid");
       setTimeout(() => ta.classList.remove("invalid"), 600);
       return;
@@ -2762,6 +2798,7 @@ function openContinueForm(jobId, anchorBtn) {
     submit.textContent = "Continuing…";
     try {
       const body = { comment };
+      appendChallengeSecret(form, body);
       const _tg = gatherTargets(form);
       if (_tg) body.target = _tg;
       const res = await fetch(`${API}/jobs/${jobId}/continue`, {

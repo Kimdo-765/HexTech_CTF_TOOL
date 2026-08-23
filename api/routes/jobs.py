@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from api.queue import get_queue, get_redis
 from api.storage import JOBS_DIR, UPLOADS_DIR, parse_targets, read_job_meta, write_job_meta
+from api.stop_audit import append_operator_stop_audit
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
@@ -192,6 +193,9 @@ def _delete_hybrid_children(parent_job_id: str, parent_meta: dict) -> list[dict]
             shutil.rmtree(JOBS_DIR / child["id"])
         except FileNotFoundError:
             pass
+        from modules.job_secrets import delete_job_secrets
+
+        delete_job_secrets(child["id"])
         results.append({"id": child["id"], "halt": child_halt})
     return results
 
@@ -653,6 +657,9 @@ def bulk_delete_jobs(
                 continue
         try:
             shutil.rmtree(d)
+            from modules.job_secrets import delete_job_secrets
+
+            delete_job_secrets(d.name)
             deleted_ids.append(d.name)
         except Exception:
             skipped += 1
@@ -688,6 +695,9 @@ def delete_job(job_id: str):
     if upload_dir.exists():
         shutil.rmtree(upload_dir)
     shutil.rmtree(d)
+    from modules.job_secrets import delete_job_secrets
+
+    delete_job_secrets(safe)
     return {"deleted": safe, "halt": halt_info, "children_deleted": child_results}
 
 
@@ -712,27 +722,35 @@ def stop_job(job_id: str):
     was = meta.get("status")
     halt_info = None
     if was in ("queued", "running"):
+        from modules.codex_turn_guard import request_turn_stop
+
+        request_turn_stop(JOBS_DIR / safe / "work")
         halt_info = _hard_stop_job(safe)
     stopped_children = []
     for stage, child in _hybrid_children(safe, meta):
         if child.get("status") not in ("queued", "running", "analyze", "analyzing"):
             continue
+        from modules.codex_turn_guard import request_turn_stop
+
+        request_turn_stop(JOBS_DIR / child["id"] / "work")
         child_halt = _hard_stop_job(child["id"])
         write_job_meta(
             child["id"],
-            {
+            append_operator_stop_audit({
                 **child,
                 "status": "stopped",
                 "stopped_at": datetime.now(timezone.utc).isoformat(),
-            },
+            }, action="hybrid_parent_stop", previous_status=child.get("status"),
+                halt=child_halt, termination_acknowledged=None),
         )
         stage["status"] = "stopped"
         stopped_children.append({"id": child["id"], "halt": child_halt})
-    stopped_meta = {
+    stopped_meta = append_operator_stop_audit({
         **meta,
         "status": "stopped",
         "stopped_at": datetime.now(timezone.utc).isoformat(),
-    }
+    }, action="stop", previous_status=was, halt=halt_info,
+        termination_acknowledged=None)
     write_job_meta(safe, stopped_meta)
     return {
         "stopped": safe,

@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import stat
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import AsyncIterator
@@ -114,6 +115,14 @@ def _diagnose_reviewer_text(accumulated: str) -> tuple[str, str] | None:
     if _looks_like_api_error(s):
         return (_reviewer_error_kind(s), s)
     return None
+
+
+def _public_hint(job_id: str, hint: str) -> str:
+    """Return a response-safe hint after job-scoped exact-value redaction."""
+
+    from modules.job_secrets import redact_job_value
+
+    return str(redact_job_value(job_id, str(hint or "")))
 
 router = APIRouter()
 
@@ -1216,7 +1225,9 @@ def _carry_session_jsonl(sid: str, prev_work: Path, new_work: Path) -> None:
 #               re-staged deterministically each attempt from the chal's
 #               manifests, so carrying it just bloats the retry tree by
 #               tens of MB (and re-pays the copytree cost) for nothing.
-_CARRY_WORK_IGNORE_NAMES = frozenset({"tmp", "__pycache__", "libsrc"})
+_CARRY_WORK_IGNORE_NAMES = frozenset({
+    "tmp", "__pycache__", "libsrc", ".codex-stop-requested",
+})
 
 
 # Special-file types that shutil.copytree would try to open(.., 'rb') and
@@ -1297,6 +1308,8 @@ def _resubmit(
     mark_resumed: bool = False,
     target_override: str | None = None,
     fresh_session: bool = False,
+    secret_key: str | None = None,
+    secret_value: str | None = None,
 ) -> str:
     """Enqueue a new job in the same module with description + hint, copying
     over the original uploaded source/binary so the user doesn't re-upload.
@@ -1328,6 +1341,29 @@ def _resubmit(
                 "retry-with-hint is only supported for "
                 f"{'/'.join(sorted(_RETRYABLE_MODULES))} (got {module})"
             ),
+        )
+
+    # A source may already say ``stopped`` while its killed Codex CLI is still
+    # unwinding.  The direct /resume path waits in _halt_source_job(), but a
+    # later /retry of that stopped job reaches this shared builder instead.
+    # Recheck the inherited turn guard immediately before allocating any
+    # successor state so no route can reopen the same thread concurrently.
+    from modules.codex_turn_guard import wait_for_turn_teardown
+
+    source_quiescent, _ = wait_for_turn_teardown(
+        prev_jd / "work",
+        timeout_s=0.0,
+    )
+    if not source_quiescent:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "stop_ack_timeout",
+                "message": (
+                    "source Codex process is still terminating; "
+                    "no successor job was created"
+                ),
+            },
         )
 
     new_id = new_job_id()
@@ -1394,6 +1430,21 @@ def _resubmit(
     else:
         description = description[:cut].rstrip()
     description = (description + "\n\n[retry-hint]\n" + hint).strip()
+    from modules.job_secrets import SecretIngressError, prepare_job_secret
+
+    try:
+        description = prepare_job_secret(
+            new_id,
+            description,
+            secret_key=secret_key,
+            secret_value=secret_value,
+            copy_from=str(prev_meta.get("id") or "") or None,
+        ) or ""
+    except SecretIngressError as exc:
+        from api.storage import cleanup_job
+
+        cleanup_job(new_id)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     auto_run = bool(prev_meta.get("auto_run"))
     # Carry the 'Docker challenge' opt-in forward (mirrors auto_run) — a retry of
     # a docker-challenge job must keep detecting+running the bundled Dockerfile,
@@ -1617,8 +1668,14 @@ _CONTINUE_HINT_TMPL = (
 )
 
 
-def _continue_in_place(prev_meta: dict, comment: str,
-                       target_override: str | None = None) -> str:
+def _continue_in_place(
+    prev_meta: dict,
+    comment: str,
+    target_override: str | None = None,
+    *,
+    secret_key: str | None = None,
+    secret_value: str | None = None,
+) -> str:
     """Re-enqueue the SAME job id, resuming its SDK session with the operator's
     note folded in as priority guidance. No new job, no cwd change, no work
     copy — build_user_prompt surfaces the [retry-hint] and the forked session
@@ -1646,6 +1703,37 @@ def _continue_in_place(prev_meta: dict, comment: str,
     if not job_id:
         raise HTTPException(status_code=400, detail="job has no id")
 
+    from modules.codex_turn_guard import clear_turn_stop, wait_for_turn_teardown
+    from modules.job_secrets import SecretIngressError, prepare_job_secret
+
+    try:
+        continue_ack_timeout = float(
+            os.environ.get("CODEX_STOP_ACK_TIMEOUT_S", "15")
+        )
+    except (TypeError, ValueError):
+        continue_ack_timeout = 15.0
+    acknowledged, _ = wait_for_turn_teardown(
+        JOBS_DIR / job_id / "work",
+        timeout_s=max(0.0, continue_ack_timeout),
+    )
+    if not acknowledged:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "stop_ack_timeout",
+                "message": "prior Codex process is still terminating; continue was not queued",
+            },
+        )
+    try:
+        comment = prepare_job_secret(
+            job_id,
+            comment,
+            secret_key=secret_key,
+            secret_value=secret_value,
+        ) or ""
+    except SecretIngressError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    clear_turn_stop(JOBS_DIR / job_id / "work")
     hint = _CONTINUE_HINT_TMPL.format(comment=_sanitize_hint(comment).strip())
     # Strip any prior [retry-hint] block so repeated continues don't stack.
     description = (prev_meta.get("description") or "").strip()
@@ -1824,8 +1912,8 @@ _MAX_MANUAL_TARGET = 4096
 
 async def _read_retry_body(
     request: Request,
-) -> tuple[str | None, str | None, bool]:
-    """Parse `{"hint": "...", "target": "...", "fresh": bool}` from the body.
+) -> tuple[str | None, str | None, bool, str | None, str | None]:
+    """Parse retry controls plus optional dedicated challenge secret fields.
 
     `hint` / `target` are optional; empty / whitespace-only values become None
     so callers can detect "user supplied nothing" vs "user wanted to blank it
@@ -1840,9 +1928,9 @@ async def _read_retry_body(
     try:
         body = await request.json()
     except Exception:
-        return None, None, False
+        return None, None, False, None, None
     if not isinstance(body, dict):
-        return None, None, False
+        return None, None, False, None, None
 
     hint_raw = body.get("hint")
     hint = (hint_raw.strip()[:_MAX_MANUAL_HINT]) if isinstance(hint_raw, str) and hint_raw.strip() else None
@@ -1857,7 +1945,11 @@ async def _read_retry_body(
         fresh = fresh_raw.strip().lower() in ("1", "true", "yes", "on")
     else:
         fresh = bool(fresh_raw)
-    return hint, target, fresh
+    secret_key_raw = body.get("challenge_secret_key")
+    secret_value_raw = body.get("challenge_secret_value")
+    secret_key = secret_key_raw if isinstance(secret_key_raw, str) else None
+    secret_value = secret_value_raw if isinstance(secret_value_raw, str) else None
+    return hint, target, fresh, secret_key, secret_value
 
 
 async def _read_manual_hint(request: Request) -> str | None:
@@ -1866,7 +1958,7 @@ async def _read_manual_hint(request: Request) -> str | None:
     All current call sites have been migrated to _read_retry_body, so
     this exists only for any out-of-tree caller still on the old name.
     """
-    hint, _, _ = await _read_retry_body(request)
+    hint, _, _, _, _ = await _read_retry_body(request)
     return hint
 
 
@@ -1886,7 +1978,9 @@ async def retry_with_hint_stream(job_id: str, request: Request):
     omitted — only 'submitting' and 'done' fire.
     """
     safe = Path(job_id).name
-    manual_hint, target_override, fresh_session = await _read_retry_body(request)
+    manual_hint, target_override, fresh_session, secret_key, secret_value = (
+        await _read_retry_body(request)
+    )
     jd, prev_meta = _validate_retry(safe, require_claude_auth=manual_hint is None)
 
     async def event_gen():
@@ -1952,6 +2046,8 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 carry_work=True,
                 target_override=target_override,
                 fresh_session=fresh_session,
+                secret_key=secret_key,
+                secret_value=secret_value,
             )
         except HTTPException as he:
             yield sse("error", {
@@ -1968,7 +2064,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
 
         yield sse("done", {
             "new_job_id": new_id,
-            "hint": hint,
+            "hint": _public_hint(new_id, hint),
             "retry_of": safe,
             "manual": manual_hint is not None,
             "carried_work": (jd / "work").is_dir(),
@@ -1997,7 +2093,9 @@ async def retry_with_hint(job_id: str, request: Request):
     target_url; pass "(none)" to clear it.
     """
     safe = Path(job_id).name
-    manual_hint, target_override, fresh_session = await _read_retry_body(request)
+    manual_hint, target_override, fresh_session, secret_key, secret_value = (
+        await _read_retry_body(request)
+    )
     jd, prev_meta = _validate_retry(safe, require_claude_auth=manual_hint is None)
 
     if manual_hint is not None:
@@ -2028,10 +2126,12 @@ async def retry_with_hint(job_id: str, request: Request):
         carry_work=True,
         target_override=target_override,
         fresh_session=fresh_session,
+        secret_key=secret_key,
+        secret_value=secret_value,
     )
     return {
         "new_job_id": new_id,
-        "hint": hint,
+        "hint": _public_hint(new_id, hint),
         "retry_of": safe,
         "manual": manual_hint is not None,
         "carried_work": (jd / "work").is_dir(),
@@ -2049,7 +2149,9 @@ async def continue_with_comment(job_id: str, request: Request):
     Keeps the same job id / cwd / work tree / SDK session and just injects the
     operator's note so the agent acts on it without re-investigating.
 
-    Body: JSON `{"comment": "..."}` (required).
+    Body: JSON `{"comment": "...", "challenge_secret_key":
+    "CTFD_ACCESS_TOKEN", "challenge_secret_value": "..."}`. A credential-only
+    continuation may omit ``comment``; a safe generic note is injected.
     """
     safe = Path(job_id).name
     _jd, prev_meta = _validate_retry(safe)
@@ -2063,13 +2165,27 @@ async def continue_with_comment(job_id: str, request: Request):
     except Exception:
         body = {}
     comment = (body.get("comment") or "").strip() if isinstance(body, dict) else ""
+    secret_key = body.get("challenge_secret_key") if isinstance(body, dict) else None
+    secret_value = body.get("challenge_secret_value") if isinstance(body, dict) else None
+    has_secret_input = bool(
+        isinstance(secret_key, str) and secret_key.strip()
+        or isinstance(secret_value, str) and secret_value.strip()
+    )
+    if not comment and not has_secret_input:
+        raise HTTPException(status_code=400, detail="comment or challenge secret required")
     if not comment:
-        raise HTTPException(status_code=400, detail="comment required")
+        comment = "Challenge credential supplied through the dedicated secret ingress."
     if len(comment) > _MAX_MANUAL_HINT:
         comment = comment[:_MAX_MANUAL_HINT]
     target_raw = body.get("target") if isinstance(body, dict) else None
     target_override = target_raw if isinstance(target_raw, str) and target_raw.strip() else None
-    new_id = _continue_in_place(prev_meta, comment, target_override=target_override)
+    new_id = _continue_in_place(
+        prev_meta,
+        comment,
+        target_override=target_override,
+        secret_key=secret_key if isinstance(secret_key, str) else None,
+        secret_value=secret_value if isinstance(secret_value, str) else None,
+    )
     return {
         "job_id": new_id,
         "status": "queued",
@@ -2092,7 +2208,9 @@ async def stop_and_resume(job_id: str, request: Request):
     `/retry` with a manual hint (no stop is needed).
     """
     safe = Path(job_id).name
-    manual_hint, target_override, fresh_session = await _read_retry_body(request)
+    manual_hint, target_override, fresh_session, secret_key, secret_value = (
+        await _read_retry_body(request)
+    )
     if manual_hint is None:
         raise HTTPException(
             status_code=400,
@@ -2103,7 +2221,10 @@ async def stop_and_resume(job_id: str, request: Request):
     jd, prev_meta = _validate_retry(safe, require_claude_auth=False)
 
     prev_status = prev_meta.get("status")
-    halt_info = _halt_source_job(safe, prev_meta) if prev_status in ("queued", "running") else None
+    halt_info = (
+        await asyncio.to_thread(_halt_source_job, safe, prev_meta)
+        if prev_status in ("queued", "running") else None
+    )
     augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session)
 
     new_id = _resubmit(
@@ -2111,10 +2232,12 @@ async def stop_and_resume(job_id: str, request: Request):
         carry_work=True, mark_resumed=True,
         target_override=target_override,
         fresh_session=fresh_session,
+        secret_key=secret_key,
+        secret_value=secret_value,
     )
     return {
         "new_job_id": new_id,
-        "hint": manual_hint,
+        "hint": _public_hint(new_id, manual_hint),
         "stopped_from": safe,
         "prev_status": prev_status,
         "halt": halt_info,
@@ -2130,15 +2253,46 @@ def _halt_source_job(safe: str, prev_meta: dict) -> dict:
     circular at module load.
     """
     from api.routes.jobs import _hard_stop_job
+    from api.stop_audit import append_operator_stop_audit
+    from modules.codex_turn_guard import request_turn_stop, wait_for_turn_teardown
 
+    request_turn_stop(JOBS_DIR / safe / "work")
     halt = _hard_stop_job(safe)
-    stopped_meta = {
+    try:
+        timeout_s = float(os.environ.get("CODEX_STOP_ACK_TIMEOUT_S", "15"))
+    except (TypeError, ValueError):
+        timeout_s = 15.0
+    acknowledged, waited_s = wait_for_turn_teardown(
+        JOBS_DIR / safe / "work",
+        timeout_s=max(0.0, timeout_s),
+    )
+    stopped_meta = append_operator_stop_audit({
         **prev_meta,
         "status": "stopped",
+        "stopped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "error": "Stopped by user (resume with extra hint)",
         "error_kind": "stopped_for_resume",
-    }
+    }, action="stop_and_resume", previous_status=prev_meta.get("status"),
+        halt=halt, termination_acknowledged=acknowledged,
+        acknowledgement_wait_ms=round(waited_s * 1000))
     write_job_meta(safe, stopped_meta)
+    halt = {
+        **halt,
+        "termination_acknowledged": acknowledged,
+        "acknowledgement_wait_ms": round(waited_s * 1000),
+    }
+    if not acknowledged:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "stop_ack_timeout",
+                "message": (
+                    "source Codex process has not acknowledged termination; "
+                    "no successor job was created"
+                ),
+                "stopped_from": safe,
+            },
+        )
     return halt
 
 
@@ -2469,7 +2623,9 @@ async def stop_and_resume_stream(job_id: str, request: Request):
       error : {"message": "...", "kind": "..."}
     """
     safe = Path(job_id).name
-    manual_hint, target_override, fresh_session = await _read_retry_body(request)
+    manual_hint, target_override, fresh_session, secret_key, secret_value = (
+        await _read_retry_body(request)
+    )
     jd, prev_meta = _validate_retry(safe, require_claude_auth=manual_hint is None)
 
     async def event_gen():
@@ -2483,7 +2639,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
         if prev_status in ("queued", "running"):
             yield sse("stage", {"name": "halting"})
             try:
-                halt_info = _halt_source_job(safe, prev_meta)
+                halt_info = await asyncio.to_thread(_halt_source_job, safe, prev_meta)
             except Exception as e:
                 yield sse("error", {
                     "message": f"halt failed: {e}",
@@ -2552,6 +2708,8 @@ async def stop_and_resume_stream(job_id: str, request: Request):
                 carry_work=True, mark_resumed=True,
                 target_override=target_override,
                 fresh_session=fresh_session,
+                secret_key=secret_key,
+                secret_value=secret_value,
             )
         except HTTPException as he:
             yield sse("error", {
@@ -2568,7 +2726,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
 
         yield sse("done", {
             "new_job_id": new_id,
-            "hint": hint,
+            "hint": _public_hint(new_id, hint),
             "stopped_from": safe,
             "prev_status": prev_status,
             "manual": manual_hint is not None,

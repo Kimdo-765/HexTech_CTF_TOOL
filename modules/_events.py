@@ -77,6 +77,9 @@ def emit_event(job_id: str, phase: str, kind: str, **fields: Any) -> None:
             "phase": phase if phase in PHASES else f"?{phase}",
             "kind": kind,
         }
+        from modules.job_secrets import redact_job_value
+
+        fields = redact_job_value(job_id, fields)
         for k, v in fields.items():
             rec[k] = v
         p = _events_path(job_id)

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HexTech_CTF_TOOL</title>
-  <link rel="stylesheet" href="/static/style.css?v=a0cda08b8" />
+  <link rel="stylesheet" href="/static/style.css?v=add507d23" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -67,6 +67,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. login bypass, flag at /flag.txt"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit (requires target URL)
@@ -126,6 +131,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. 32-bit, no canary, libc provided"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit (requires remote target)
@@ -210,6 +220,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. suspect lateral movement, look for SSH keys"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="skip_claude" />
           Skip AI summary (collection only)
@@ -272,6 +287,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. PNG with strange dimensions, suspect LSB"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="skip_claude" />
           Skip AI summary (raw findings only)
@@ -328,6 +348,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. RSA with small e, IV reuse on AES-CTR"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
@@ -387,6 +412,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="paste the handout here — RPC URL, private key, Setup address; plus any hints"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated exploit
@@ -447,6 +477,11 @@
           Description / hints (optional)
           <textarea name="description" rows="3" placeholder="e.g. crackme — wants a valid serial; XOR'd flag with key in .data"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label class="checkbox">
           <input type="checkbox" name="auto_run" />
           Auto-run generated solver
@@ -509,6 +544,11 @@
           Description / hints (shared)
           <textarea name="description" rows="3" placeholder="context shared by both stages"></textarea>
         </label>
+        <details class="challenge-secret-ingress">
+          <summary>Challenge credential (kept out of description and logs)</summary>
+          <label>Secret key <select name="challenge_secret_key"><option value="">None</option><option value="CTFD_ACCESS_TOKEN">CTFD_ACCESS_TOKEN</option></select></label>
+          <label>Secret value <input type="password" name="challenge_secret_value" autocomplete="new-password" /></label>
+        </details>
         <label>
           Flag format (shared, optional)
           <input type="text" name="flag_format" placeholder="e.g. DH{...}" />
@@ -1086,6 +1126,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=a0cda08b8"></script>
+  <script src="/static/app.js?v=add507d23"></script>
 </body>
 </html>

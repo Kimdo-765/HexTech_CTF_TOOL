@@ -61,6 +61,9 @@ def _job_dir(job_id: str) -> Path:
 
 
 def _log(job_id: str, line: str) -> None:
+    from modules.job_secrets import redact_job_value
+
+    line = str(redact_job_value(job_id, str(line)))
     f = _job_dir(job_id) / "run.log"
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     with f.open("a") as fp:
@@ -83,6 +86,9 @@ def _write_meta(job_id: str, **updates) -> None:
         updates.setdefault("finished_at", now_iso)
     meta.update(updates)
     meta["updated_at"] = now_iso
+    from modules.job_secrets import redact_job_value
+
+    meta = redact_job_value(job_id, meta)
     f.write_text(json.dumps(meta, indent=2))
 
 

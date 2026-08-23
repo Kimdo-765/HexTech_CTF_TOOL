@@ -722,6 +722,9 @@ def run_in_sandbox(
             _all_targets.append(_t)
     if len(_all_targets) >= 2:
         env["TARGETS"] = "\n".join(_all_targets)
+    from modules.job_secrets import read_job_secrets
+
+    env.update(read_job_secrets(job_id))
 
     client = docker.from_env()
     container = client.containers.run(
