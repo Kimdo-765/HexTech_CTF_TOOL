@@ -666,7 +666,7 @@ Loop terminates on the FIRST hit among:
   unrecoverable" verdict — final authority, overrides remaining budget)
 - postjudge produced no actionable retry_hint
 - main's SDK session errored / hit `INVESTIGATION_BUDGET`
-- total spend (main + subagents) hit the cost-cap circuit breaker
+- total spend (main + subagents + reviewer calls) hit the cost-cap circuit breaker
   (`COST_CAP_USD`) — recoverable halt, see [circuit breaker](#anti-anchoring-circuit-breaker)
 - `AUTO_RETRY_MAX` cap reached (when configured to a non-negative N)
 - user pressed Stop / soft / hard timeout
@@ -705,7 +705,7 @@ a decoy echoed by a later run would look like a capture.
 | `retry_hint_ignored` | Main returned without editing the script after a postjudge hint (a re-run would be a guaranteed-fail repeat) | `/retry` with a manual hint, or read the script + diagnosis and edit by hand |
 | `unsolvable_by_analysis` | Artifacts self-admit no working chain and prejudge `flag_likelihood≈0` (confident true-negative, not a near-miss) | Read `report.md` / `chain.json` — any `verified=true` primitive is still real; `/retry` only with a demonstrably-missed primitive |
 | `policy_refusal` | Main's turn was blocked by the server-side Usage-Policy classifier (AUP) — retrying in place re-blocks | `/retry` — a fresh SDK session is force-started automatically and usually sheds the poison |
-| `cost_cap` | Total spend (main + subagents) hit `COST_CAP_USD` — bounds a non-converging / anchored run | `/retry` (fresh start breaks an anchored frame), or raise `COST_CAP_USD` if the chal legitimately needs the spend |
+| `cost_cap` | Total spend (main + subagents + reviewer calls) hit `COST_CAP_USD` — bounds a non-converging / anchored run | `/retry` (fresh start breaks an anchored frame), or raise `COST_CAP_USD` if the chal legitimately needs the spend |
 
 Each `WHY_STOPPED.md` consolidates the judge's structured fields —
 `stop_reason`, `failure_code`, `specific_diagnosis`, `what_worked`,
@@ -722,18 +722,18 @@ grinding a frame that the evidence has already disconfirmed (e.g. an
 anti-AI chal that names a known challenge to bait the "intended"
 solution, then modifies one line so it no longer applies). Two mechanical
 teeth in `run_main_agent_session`, both operating on the shared running
-cost meter (main + every subagent):
+cost meter (main + every subagent + reviewer calls):
 
-- **Cost cap (framing-independent backstop) — DISABLED BY DEFAULT.**
-  `DEFAULT_COST_CAP_USD = 0.0` and `COST_CAP_USD` is set in neither `.env`
-  nor `docker-compose.yml`, so on a stock deployment `_maybe_cost_cap`
-  returns immediately and **there is no spend ceiling** (4655a94 — an
-  operator decision: a legitimately hard heap/kernel solve can run $30+
-  all-in, and halting mid-chain costs more than it saves). The mechanism is
-  intact but unarmed — set `COST_CAP_USD` to a positive dollar amount in
-  `.env` to re-arm it. When armed, crossing it HALTS the loop with a
+- **Cost cap (framing-independent backstop) — $40 by default.**
+  `DEFAULT_COST_CAP_USD`, `.env.example`, the deployed `.env`, and Compose's
+  worker environment agree on `40`. The value preserves headroom above the
+  observed $30+ hard heap/kernel solves; one reviewer averages $0.19 across 28
+  measured calls ($5.33 total), so reviews do not meaningfully consume that
+  headroom. It still bounds the observed $131.70 non-converging lineage far
+  below its eventual loss. Crossing the cap HALTS the loop with a
   recoverable `WHY_STOPPED.md` (`stop_kind=cost_cap`) so the operator can
-  `/retry`, ideally fresh-start, instead of paying for more of the same.
+  `/retry`, ideally fresh-start, instead of paying for more of the same. Set
+  `COST_CAP_USD<=0` only as an explicit override to disable the ceiling.
 - **Contrarian reframe (targeted).** When an isolated subagent returns a
   premise-refuted / dead-end signal AND the job is *easy-/shortcut-framed*
   (the operator description leans on difficulty-minimizing words) AND
@@ -742,11 +742,10 @@ cost meter (main + every subagent):
   frame and points it at a genuinely independent subagent or a
   reframe/concede. One-shot per job.
 
-Both are env-overridable. With the cap disabled by default, the contrarian
-reframe is the tooth that actually fires on a stock deployment — and it is
-advisory (one injected turn), not a bound. Neither guarantees a solve; the
-value is *reframe-or-bound-the-loss*, not a fix. If you want a hard ceiling
-back, arm `COST_CAP_USD`.
+Both are env-overridable. The cost cap provides the stock deployment's hard
+bound; the contrarian reframe can still fire earlier and is advisory (one
+injected turn). Neither guarantees a solve; the value is
+*reframe-or-bound-the-loss*, not a fix.
 
 ### Fallback artifact safety net
 
@@ -1176,7 +1175,7 @@ All knobs live in two places:
    | `USE_ISOLATED_SUBAGENTS` | `1` | when `1` (default), main delegates via the MCP tool `mcp__team__spawn_subagent` — each subagent runs in its own `claude` CLI subprocess and only the final-text reply lands in main's history. Set to `0` for the legacy in-process `agents={}` path (kept as a fast rollback). See [Subagent isolation](#subagent-isolation-default-on). |
    | `SUBAGENT_SPAWN_CAP` | `0` | **inert — nothing reads it.** The name appears in `.env` and in prompt text shown to the model (`modules/_prompts.py`), but no code path consults it: the guard the comments name, `_maybe_subagent_cap()`, has no definition in the repo. Setting a positive int changes nothing. Delegation is unbounded in practice — see [Spawn cap — not implemented](#subagent-isolation-default-on). |
    | `ENABLE_EXPLOIT_LIBRARY_HINT` | `0` | when `1`, every job's user prompt is prepended with a short paragraph listing same-module entries from the operator-curated [Exploit Library](#exploit-library) at `/data/exploits/`. OFF by default — flip on once the library has curated entries you trust. |
-   | `COST_CAP_USD` | `0` | total-spend circuit breaker (main + subagents). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). **Disabled by default** (`DEFAULT_COST_CAP_USD = 0.0`, `modules/_common.py:4862`; `.env.example` ships `0`). Set a positive number to arm it. See [circuit breaker](#anti-anchoring-circuit-breaker). |
+   | `COST_CAP_USD` | `40` | total-spend circuit breaker (main + subagents + reviewer calls). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). Set `0` or a negative value only to disable it explicitly. See [circuit breaker](#anti-anchoring-circuit-breaker). |
    | `CONTRARIAN_MIN_COST_USD` | `6` | minimum total spend before a subagent dead-end signal can arm the one-shot contrarian-reframe user-turn (only on easy-/shortcut-framed jobs). See [circuit breaker](#anti-anchoring-circuit-breaker). |
    | `MONITOR_ENABLED` | `1` | live per-job [monitor](#monitor-modules_monitorpy) narration feed. `0` disables the always-on supervisor and all narration. |
    | `MONITOR_MODEL` | `claude-sonnet-4-6` | cheap model pinned for monitor narration — never the job's opus. |
@@ -1272,7 +1271,11 @@ The top bar shows a budget pill plus provider usage chips, all best-effort:
 
 - **Budget pill** — `budget_usd` from Settings vs summed job spend
   (`GET /api/jobs/usage`). Purely informational: **nothing enforces it**
-  (the cost cap is a separate mechanism, disabled by default).
+  (the separately configured `$40` cost cap is the enforcement mechanism).
+  Reviewer ledger dollars are added as a role-only subtotal instead of summing
+  the entire ledger and duplicating main rows; `spent_usd_complete=false`
+  remains visible when a terminal main job or reviewer has no authoritative
+  dollar figure (for example Codex OAuth).
 - **Claude quota chip** — actively polls the mounted Claude Code OAuth
   account's five-hour / seven-day usage, showing the most constrained ordinary
   window and caching the sanitized result in `/data/rate_limit.json` for 15
