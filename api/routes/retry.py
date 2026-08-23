@@ -2367,13 +2367,22 @@ _HINT_REPLACEMENTS: tuple[tuple[_re.Pattern, str], ...] = (
      "report back"),
     (_re.compile(r"\bexfil\b", _re.IGNORECASE),
      "OOB report"),
-    # Firewall bypass framing → factual network constraint. Subject
-    # generalized to catch "container is firewalled", "bot/server is
-    # firewalled", "webhook.site is firewalled", etc. — all observed
-    # in live reviewer output. \S+ accepts a single token so we don't
-    # over-eat into multi-word subjects.
-    (_re.compile(r"\b\S+ is firewalled\b", _re.IGNORECASE),
-     "the target is network-restricted to the orchestrator's collector"),
+    # Firewall bypass framing → factual network constraint.
+    #
+    # REWRITE ONLY THE PREDICATE. The previous pattern was
+    # `\b\S+ is firewalled\b` replaced by a phrase that began with its own
+    # subject ("the target is …"), so the `\S+` ATE the real subject:
+    #   "REFUTED: outbound DNS is firewalled"
+    #     -> "REFUTED: outbound the target is network-restricted …"
+    #   "REFUTED: egress to port 443 is firewalled"
+    #     -> "REFUTED: egress to port the target is network-restricted …"
+    # The comment claimed a single token was safe to eat; the token it ate was
+    # the thing the sentence was about. Worse, the direction inverted: a
+    # REFUTATION of a capability came out as an assertion that the collector is
+    # reachable, which is the opposite of what the reviewer observed. Matching
+    # only "is firewalled" keeps whatever subject the reviewer wrote.
+    (_re.compile(r"\bis firewalled\b", _re.IGNORECASE),
+     "is network-restricted to the orchestrator's collector"),
     (_re.compile(r"\b(?:to )?bypass(?:es|ed|ing)? the firewall\b", _re.IGNORECASE),
      "to use the job's OOB callback URL instead"),
     (_re.compile(r"\bfirewall(?:ed)? bypass\b", _re.IGNORECASE),
