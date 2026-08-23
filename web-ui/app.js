@@ -1329,6 +1329,7 @@ async function loadSettings() {
   document.getElementById("auth-status").textContent = s.auth_token_set
     ? `set (${s.auth_token_masked})`
     : (s.auth_token_env_set ? "using AUTH_TOKEN from env" : "not set (auth disabled)");
+  _settingsDirtyClear();
 }
 
 // Live-toggle provider cards without saving (save still required).
@@ -1357,6 +1358,23 @@ document.getElementById("settings-form")?.addEventListener("change", (e) => {
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  // The form carries `novalidate`, so this handler always runs. Without it, a
+  // constraint-invalid control sitting in a HIDDEN section aborts submission
+  // before any listener fires and the browser cannot focus it to say why —
+  // Save becomes a silent no-op. Validate here, reveal the offender's section,
+  // then point at it. (form.elements includes <fieldset>, whose willValidate is
+  // false, which is why this filters on willValidate rather than `:invalid`.)
+  const bad = Array.from(e.target.elements).find((el) => el.willValidate && !el.checkValidity());
+  if (bad) {
+    const pane = bad.closest("[data-settings-pane]");
+    if (pane) showSettingsPane(pane.dataset.settingsPane);
+    // If a browser ever refuses to paint the bubble on a control revealed in
+    // this same task, wrap these two lines in requestAnimationFrame(...): the
+    // reveal is a synchronous class toggle, the bubble is painted.
+    bad.focus();
+    if (bad.reportValidity) bad.reportValidity();
+    return;
+  }
   const fd = new FormData(e.target);
   // Custom-text overrides the corresponding provider model dropdown.
   const custom = (fd.get("claude_model_custom") || "").toString().trim();
@@ -1504,11 +1522,111 @@ function renderWorkerMemLive(live) {
   el.innerHTML = html;
 }
 
-document.getElementById("settings-reload").addEventListener("click", loadSettings);
+// --- Settings sections (click-into list) -----------------------------------
+// The one long Settings form is presented as six click-into sections. Panes are
+// hidden by CLASS ONLY: every named control stays in #settings-form, in the DOM,
+// enabled, and is filled by the single loadSettings() pass. That is what keeps
+// one Save covering all sections — a hidden field is still in FormData, so a
+// section the operator never opened is not saved as `null` by the
+// `v === ""` -> clear-the-override branch of the save loop.
+const SETTINGS_PANE_KEY = "htct.settingsPane";
+
+function _settingsPanes() {
+  return Array.from(document.querySelectorAll("#panel-settings [data-settings-pane]"));
+}
+
+function showSettingsPane(name) {
+  const panes = _settingsPanes();
+  if (!panes.length) return;
+  const known = new Set(panes.map((p) => p.dataset.settingsPane));
+  // A stored/typo'd name must not blank the page: fall back to the first section.
+  const want = known.has(name) ? name : panes[0].dataset.settingsPane;
+  panes.forEach((p) => p.classList.toggle("settings-pane--on", p.dataset.settingsPane === want));
+  document.querySelectorAll("#settings-nav [data-settings-target]").forEach((b) => {
+    const on = b.dataset.settingsTarget === want;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+  });
+  // Save writes /api/settings, i.e. the FORM. The presets pane has no form
+  // fields and its own Save writes model_presets.json, so a form Save floating
+  // over it would read as "presets saved" and save nothing of the kind.
+  const footer = document.getElementById("settings-footer");
+  const form = document.getElementById("settings-form");
+  if (footer && form) footer.hidden = !form.querySelector('[data-settings-pane="' + want + '"]');
+  try { localStorage.setItem(SETTINGS_PANE_KEY, want); } catch (_) {}
+  // Two live readouts stop being live once their pane can be off-screen.
+  if (want === "access") loadTunnelStatus();
+  if (want === "ops") refreshWorkerMemLive();
+}
+
+// The ONLY partial refresh. It must never touch a field: loadSettings()
+// overwrites every control from the server, so calling it on navigation would
+// silently discard unsaved edits made in the other sections.
+async function refreshWorkerMemLive() {
+  try {
+    const res = await fetch(`${API}/settings`);
+    if (!res.ok) return;
+    const s = await res.json();
+    renderWorkerMemLive(s.worker_mem_live);
+  } catch (_) { /* readout only */ }
+}
+
+function _syncSettingsDirtyDots() {
+  document.querySelectorAll("#settings-nav [data-settings-target]").forEach((b) => {
+    const pane = document.querySelector(
+      '#settings-form [data-settings-pane="' + b.dataset.settingsTarget + '"]');
+    b.classList.toggle("settings-nav--dirty", !!(pane && pane.dataset.dirty));
+  });
+}
+function _settingsDirtyClear() {
+  document.querySelectorAll("#settings-form [data-settings-pane]")
+    .forEach((p) => { delete p.dataset.dirty; });
+  _syncSettingsDirtyDots();
+}
+function _markSettingsDirty(e) {
+  const pane = e.target && e.target.closest && e.target.closest("[data-settings-pane]");
+  if (!pane) return;
+  pane.dataset.dirty = "1";
+  _syncSettingsDirtyDots();
+}
+document.getElementById("settings-form")?.addEventListener("input", _markSettingsDirty);
+document.getElementById("settings-form")?.addEventListener("change", _markSettingsDirty);
+
+document.getElementById("settings-nav")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-settings-target]");
+  if (!btn) return;
+  showSettingsPane(btn.dataset.settingsTarget);
+  document.getElementById(btn.getAttribute("aria-controls"))?.focus();
+});
+document.getElementById("settings-nav")?.addEventListener("keydown", (e) => {
+  const items = Array.from(e.currentTarget.querySelectorAll("[data-settings-target]"));
+  const i = items.indexOf(document.activeElement);
+  if (i < 0) return;
+  let j = null;
+  if (e.key === "ArrowDown") j = (i + 1) % items.length;
+  else if (e.key === "ArrowUp") j = (i - 1 + items.length) % items.length;
+  else if (e.key === "Home") j = 0;
+  else if (e.key === "End") j = items.length - 1;
+  if (j === null) return;
+  e.preventDefault();
+  items[j].focus();
+  showSettingsPane(items[j].dataset.settingsTarget);
+});
+
+// loadSettings() refetches EVERY section, not just the visible one, so both
+// entry points into it can discard edits the operator cannot see. That was
+// survivable while the whole form was on screen; with sections it is not.
+function reloadSettingsGuarded() {
+  if (document.querySelector("#settings-form [data-settings-pane][data-dirty]")
+      && !confirm("Reload discards unsaved edits in EVERY section, not just this one. Continue?")) return;
+  loadSettings();
+}
+document.getElementById("settings-reload").addEventListener("click", reloadSettingsGuarded);
 
 // Load settings whenever the user clicks the Settings tab
 document.querySelector('.tab[data-tab="settings"]').addEventListener("click", () => {
-  loadSettings();
+  reloadSettingsGuarded();
   loadModelPresets();
   loadTunnelStatus();
 });
@@ -1570,7 +1688,10 @@ async function loadTunnelStatus(probe = false) {
     if (s.running && s.url && s.reachable === false && _tunnelPollTicks >= 12) s._dud = true;
     renderTunnel(s);
     const connecting = s.running && (!s.url || s.reachable === false) && !s._dud;
-    const onSettings = document.getElementById("panel-settings").classList.contains("active");
+    // The tunnel UI is one SECTION now, not the whole panel: keep the 5s poll
+    // (and its 12-tick dud budget) tied to the section actually being on screen.
+    const onSettings = !!document.getElementById("panel-settings")?.classList.contains("active")
+      && !!document.getElementById("tunnel-block")?.classList.contains("settings-pane--on");
     if (connecting && onSettings) {
       _tunnelPollTicks++;
       if (!_tunnelPoll) _tunnelPoll = setInterval(() => loadTunnelStatus(true), 5000);
@@ -5010,6 +5131,7 @@ fillEffortSelects();
 loadSettings().catch(() => {});
 loadModelPresets();
 loadTunnelStatus();
+try { showSettingsPane(localStorage.getItem(SETTINGS_PANE_KEY)); } catch (_) { showSettingsPane(""); }
 refreshJobs();
 refreshStats();
 

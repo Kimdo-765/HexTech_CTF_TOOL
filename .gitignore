@@ -18,3 +18,4 @@ docker-compose.override.yml
 # Scratch from the dynamic-memory simulation work (flock race proof).
 # Kept on disk, never tracked: it contains a FIFO and per-run state.
 .flockproof/
+.setprobe/

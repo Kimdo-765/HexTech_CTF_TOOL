@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HexTech_CTF_TOOL</title>
-  <link rel="stylesheet" href="/static/style.css?v=afaeeb3c2" />
+  <link rel="stylesheet" href="/static/style.css?v=ad808f809" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -757,7 +757,37 @@
         and apply to the next job (no restart). Leave a field blank to revert
         to its env/default.
       </p>
-      <form id="settings-form">
+      <div class="settings-layout">
+        <!-- Menu order is the OPERATOR's order and deliberately differs from DOM
+             order: only one section is ever on screen, so DOM order is invisible,
+             and matching it would cost three large block moves for no user-visible
+             gain. The one block that did move is the Auth token field, which
+             joined Callback URL + tunnel in "Access, callbacks & tunnel". -->
+        <nav id="settings-nav" class="settings-nav" role="tablist"
+             aria-orientation="vertical" aria-label="Settings sections">
+          <button type="button" role="tab" id="settings-tab-agent"
+                  data-settings-target="agent" aria-controls="settings-pane-agent"
+                  aria-selected="true" tabindex="0">Agent &amp; routing</button>
+          <button type="button" role="tab" id="settings-tab-models"
+                  data-settings-target="models" aria-controls="settings-pane-models"
+                  aria-selected="false" tabindex="-1">Providers &amp; models</button>
+          <button type="button" role="tab" id="settings-tab-presets"
+                  data-settings-target="presets" aria-controls="model-presets"
+                  aria-selected="false" tabindex="-1">Model presets</button>
+          <button type="button" role="tab" id="settings-tab-run"
+                  data-settings-target="run" aria-controls="settings-pane-run"
+                  aria-selected="false" tabindex="-1">Judge &amp; hints</button>
+          <button type="button" role="tab" id="settings-tab-ops"
+                  data-settings-target="ops" aria-controls="settings-pane-ops"
+                  aria-selected="false" tabindex="-1">Jobs, workers &amp; spend</button>
+          <button type="button" role="tab" id="settings-tab-access"
+                  data-settings-target="access" aria-controls="settings-pane-access"
+                  aria-selected="false" tabindex="-1">Access, callbacks &amp; tunnel</button>
+        </nav>
+        <div class="settings-body">
+      <form id="settings-form" novalidate>
+        <div class="settings-pane settings-pane--on" data-settings-pane="agent"
+             id="settings-pane-agent" role="tabpanel" aria-labelledby="settings-tab-agent" tabindex="-1">
         <fieldset class="provider-fieldset">
           <legend>Agent provider</legend>
           <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.5rem">
@@ -855,7 +885,10 @@
           </div>
           <small id="role-provider-status" style="color:var(--fg-muted)"></small>
         </fieldset>
+        </div>
 
+        <div class="settings-pane" data-settings-pane="models"
+             id="settings-pane-models" role="tabpanel" aria-labelledby="settings-tab-models" tabindex="-1">
         <div id="settings-claude-block" class="provider-settings-block">
           <h3 class="provider-block-title">Claude credentials &amp; model</h3>
           <label>
@@ -933,11 +966,10 @@
           </label>
         </div>
 
-        <label>
-          Auth token (UI/API access)
-          <input type="password" name="auth_token" placeholder="leave empty to disable auth" autocomplete="new-password" />
-          <small id="auth-status" style="color:var(--fg-muted)"></small>
-        </label>
+        </div>
+
+        <div class="settings-pane" data-settings-pane="ops"
+             id="settings-pane-ops" role="tabpanel" aria-labelledby="settings-tab-ops" tabindex="-1">
         <label>
           Job retention (days, 0=keep forever)
           <input type="number" name="job_ttl_days" min="0" placeholder="7" />
@@ -988,11 +1020,24 @@
           <input type="number" name="budget_usd" min="0" step="1" placeholder="0" />
           <small style="color:var(--fg-muted)">operator budget for the top-bar <code>used / budget</code> pill — cumulative spend vs this ceiling. This is YOUR budget, not the Claude account limit (a true remaining-quota number isn't retrievable on OAuth).</small>
         </label>
+        </div>
+
+        <div class="settings-pane" data-settings-pane="access"
+             id="settings-pane-access" role="tabpanel" aria-labelledby="settings-tab-access" tabindex="-1">
+        <label>
+          Auth token (UI/API access)
+          <input type="password" name="auth_token" placeholder="leave empty to disable auth" autocomplete="new-password" />
+          <small id="auth-status" style="color:var(--fg-muted)"></small>
+        </label>
         <label>
           Callback URL (for XSS / SSRF / blind RCE)
           <input type="url" name="callback_url" placeholder="https://your-listener.example.com/x" />
           <small style="color:var(--fg-muted)">forwarded to exploits as <code>CALLBACK_URL</code> env. Run <code>./tunnel.sh</code> (cloudflared) to auto-fill this with a tunnel that has no ngrok interstitial — or use requestbin / your own VPS for remote bots that can't reach private IPs.</small>
         </label>
+        </div>
+
+        <div class="settings-pane" data-settings-pane="run"
+             id="settings-pane-run" role="tabpanel" aria-labelledby="settings-tab-run" tabindex="-1">
         <label>
           Judge mode (pre-flight script review · post-mortem verdict)
           <select name="judge_mode">
@@ -1025,13 +1070,16 @@
           Use Exploit Library hints (prepend same-module saved exploits to agent's user prompt)
           <small style="color:var(--fg-muted)">when ON, the agent sees a short list of operator-saved exploits at the top of its first prompt and can <code>cat /data/exploits/&lt;id&gt;/report.md</code> for insight. OFF by default — turn on once the library has trusted entries.</small>
         </label>
-        <div style="display:flex;gap:0.5rem">
+        </div>
+
+        <div id="settings-footer" class="settings-footer">
           <button type="submit">Save</button>
           <button type="button" id="settings-reload" style="background:var(--surface-2);border:1px solid var(--line);color:var(--fg-bright);padding:0.5rem 1rem;border-radius:6px;cursor:pointer">Reload</button>
         </div>
       </form>
 
-      <div id="model-presets" class="preset-block">
+      <div id="model-presets" class="preset-block settings-pane" data-settings-pane="presets"
+           role="tabpanel" aria-labelledby="settings-tab-presets" tabindex="-1">
         <h3 style="margin-bottom:0.25rem">Provider model presets</h3>
         <p style="color:var(--fg-muted);font-size:0.85rem;margin-top:0">
           Claude, Grok, and GPT each keep their own named presets and active
@@ -1077,11 +1125,11 @@
         </div>
       </div>
 
-      <div id="tunnel-block" class="preset-block">
+      <div id="tunnel-block" class="preset-block settings-pane" data-settings-pane="access">
         <h3 style="margin-bottom:0.25rem">Cloudflared tunnel <span style="color:var(--fg-muted);font-weight:normal;font-size:0.85rem">— OOB collector</span></h3>
         <p style="color:var(--fg-muted);font-size:0.85rem;margin-top:0">
           Opens a public <code>*.trycloudflare.com</code> quick-tunnel to the api and
-          auto-fills the <strong>Callback URL</strong> above, so remote bots (XSS / SSRF /
+          auto-fills the <strong>Callback URL</strong> in this same section, so remote bots (XSS / SSRF /
           blind RCE) can beacon back to the built-in collector. Runs as a sibling
           container, so it survives api redeploys and keeps a stable URL. A dead tunnel
           stays dead — re-roll manually (Cloudflare rate-limits fresh tunnels).
@@ -1102,6 +1150,8 @@
           <button type="button" id="tunnel-stop">Stop</button>
           <button type="button" id="tunnel-refresh">Refresh</button>
           <small id="tunnel-status-text" style="color:var(--fg-muted);align-self:center"></small>
+        </div>
+      </div>
         </div>
       </div>
     </section>
@@ -1141,6 +1191,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=afaeeb3c2"></script>
+  <script src="/static/app.js?v=ad808f809"></script>
 </body>
 </html>
