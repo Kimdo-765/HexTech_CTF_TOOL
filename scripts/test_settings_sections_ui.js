@@ -142,6 +142,40 @@ t("the two checkboxes are still read off the form, not off FormData",
 t("...and no section is disabled (a <fieldset disabled> drops everything inside it)",
   !panelSettings.querySelector("fieldset[disabled], [data-settings-pane][disabled]"));
 
+// --- 4b. layout conventions jsdom cannot see -------------------------------
+// jsdom does not lay anything out, so nothing above can notice a control that
+// renders in the wrong PLACE. Both checks below come from a shipped bug: the
+// dynamic_worker_mem checkbox was written with class="row", which matches no
+// rule in style.css, so it inherited `label { flex-direction: column }` and
+// drifted into the middle of the page, detached from its own text.
+console.log("\n--- layout conventions (a DOM test cannot see position; assert the convention instead) ---");
+const CSS_SRC = fs.readFileSync(path.join(ROOT, "web-ui/style.css"), "utf8");
+
+const boxes = Array.from(form.querySelectorAll('input[type="checkbox"]'));
+t("every settings checkbox sits in a label.checkbox (the row convention; " +
+  "a plain label is a COLUMN and separates the box from its text)",
+  boxes.length > 0 && boxes.every((b) => {
+    const l = b.closest("label");
+    return l && l.classList.contains("checkbox");
+  }),
+  boxes.filter((b) => {
+    const l = b.closest("label");
+    return !(l && l.classList.contains("checkbox"));
+  }).map((b) => b.name).join(","));
+
+// A class token that appears in NO stylesheet rule and in NO script is dead: it
+// looks like styling to whoever wrote it and does nothing at all.
+const dead = [];
+for (const el of Array.from(panelSettings.querySelectorAll("[class]"))) {
+  for (const c of Array.from(el.classList)) {
+    if (CSS_SRC.includes("." + c)) continue;
+    if (SRC.includes('"' + c + '"') || SRC.includes("'" + c + "'")) continue;
+    if (!dead.includes(c)) dead.push(c);
+  }
+}
+t("no class in the Settings panel is styled by nothing and scripted by nothing",
+  dead.length === 0, dead.join(","));
+
 // --- 5. Save must not become a silent no-op ---------------------------------
 console.log("\n--- an invalid field in a hidden section still reaches the handler ---");
 t("the form is novalidate", form.hasAttribute("novalidate"));

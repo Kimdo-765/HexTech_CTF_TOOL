@@ -2331,6 +2331,36 @@ body.modal-open { overflow: hidden; }
 /* #model-presets / #tunnel-block are .preset-block: block flow, and their
    separator border is meaningless once they are their own section. */
 #panel-settings .preset-block[data-settings-pane].settings-pane--on { display: block; }
+/* A feature toggle whose DEFAULT is the point needs to read as one thing, not
+   as a stray checkbox above four lines of grey. The accent bar and sunken
+   ground borrow .provider-fieldset's language so it belongs to this page. */
+.setting-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue-solid);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+}
+.setting-toggle label.checkbox { font-size: 0.95rem; }
+.setting-toggle input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--blue-solid);
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.setting-toggle .setting-toggle-state {
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.45rem;
+}
+.setting-toggle small { line-height: 1.5; }
+
 #panel-settings .preset-block[data-settings-pane] {
   margin-top: 0;
   padding-top: 0;

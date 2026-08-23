@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HexTech_CTF_TOOL</title>
-  <link rel="stylesheet" href="/static/style.css?v=ad808f809" />
+  <link rel="stylesheet" href="/static/style.css?v=ab8e75f7e" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -1000,21 +1000,24 @@
             <span id="worker-mem-live"></span>
           </small>
         </label>
-        <label class="row">
-          <input type="checkbox" name="dynamic_worker_mem" />
-          Dynamic per-slot memory (OFF = today's behaviour)
+        <div class="setting-toggle">
+          <label class="checkbox">
+            <input type="checkbox" name="dynamic_worker_mem" />
+            <b>Dynamic per-slot memory</b>
+            <span class="setting-toggle-state">OFF = today's behaviour</span>
+          </label>
           <small style="color:var(--fg-muted)">
-            OFF, the default, means the cap above is the only authority and nothing
-            changes a slot's cgroup while a job runs. ON lets a job raise ITS OWN slot
-            for the run and hands it back afterwards.
+            OFF, the default: the cap above is the only authority and nothing touches a
+            slot's cgroup while a job runs. ON lets a job raise its own slot for the run
+            and hand it back afterwards. Usage sampling runs either way.
+            <br />
             <b>Leave this OFF until the host RAM upgrade lands.</b> The safety budget is
             70% of the VM, so on a 16&nbsp;GB VM one slot at 8g is 12&nbsp;GiB against a
-            10.9&nbsp;GiB ceiling — the expansion would simply be refused. Raise
-            <code>memory=</code> in <code>.wslconfig</code> first; at 80&nbsp;GB the
+            10.9&nbsp;GiB ceiling and the expansion is simply refused. Raise
+            <code>memory=</code> in <code>.wslconfig</code> first — at 80&nbsp;GB the
             budget is 56&nbsp;GiB and it fits.
-            Usage sampling runs either way, so there is data to size this from.
           </small>
-        </label>
+        </div>
         <label>
           Spend budget (USD, 0=off)
           <input type="number" name="budget_usd" min="0" step="1" placeholder="0" />
@@ -1191,6 +1194,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=ad808f809"></script>
+  <script src="/static/app.js?v=ab8e75f7e"></script>
 </body>
 </html>
