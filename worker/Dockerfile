@@ -514,6 +514,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends dirb \
  && test -s /usr/share/dirb/wordlists/common.txt \
  && echo "wordlist OK /usr/share/dirb/wordlists/common.txt ($(wc -l < /usr/share/dirb/wordlists/common.txt) entries)"
 
+# gawk — the image shipped mawk, and an agent reached for `strtonum` to read the
+# hex fields of /proc/net/route (job 0723ae851f5c, 2026-08-23). mawk has no such
+# function, so the command failed; the agent recovered five seconds later by
+# rewriting it in Python, but the assumption it made is the common one — gawk
+# extensions (strtonum, gensub, asort) are what "awk" means to most people and
+# to most models. Debian's alternatives make gawk the default awk once it is
+# installed. The repo's own worker-side awk is two POSIX programs in
+# worker/chal_libc_fix.py; both were run against identical input under mawk and
+# gawk and gave byte-identical output before this went in.
+RUN apt-get update && apt-get install -y --no-install-recommends gawk \
+ && rm -rf /var/lib/apt/lists/* \
+ && echo "gawk OK $(gawk --version 2>&1 | head -1)" \
+ && test "$(echo | awk '{print strtonum("0x10")}')" = "16" \
+ && echo "default awk is gawk: strtonum resolves"
+
 # seccomp-tools — dumps a binary's seccomp-bpf filter as readable rules. The
 # pwn agent otherwise hand-decodes the BPF program from a disassembly. Native
 # extension; ruby-dev is already installed above for one_gadget.
