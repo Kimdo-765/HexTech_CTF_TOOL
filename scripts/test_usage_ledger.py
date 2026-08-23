@@ -132,6 +132,20 @@ prov2 = UL.aggregate_usage("j2")["providers"]
 check("one silent claude call flips the bucket to incomplete", prov2["claude"]["usd_complete"], False)
 check("...but the known dollars are still reported", prov2["claude"]["usd"], 0.49)
 
+# The UI spend meter and the in-run cost cap need the reviewer-only subtotal
+# without also folding unrelated main/judge ledger rows into this addition.
+reviewer_usd, reviewer_complete = UL.dollar_cost_parts(
+    UL.read_usage("j2"), roles={"reviewer"}
+)
+check("reviewer dollar subtotal excludes main and judge", reviewer_usd, 0.18)
+check("priced reviewer subtotal is complete", reviewer_complete, True)
+UL.record_usage("j2", role="reviewer", stage="reviewer", provider="gpt")
+reviewer_usd2, reviewer_complete2 = UL.dollar_cost_parts(
+    UL.read_usage("j2"), roles={"reviewer"}
+)
+check("known reviewer dollars survive an unpriced reviewer", reviewer_usd2, 0.18)
+check("an unpriced reviewer marks its subtotal incomplete", reviewer_complete2, False)
+
 # ---------------------------------------------------------------------------
 # 3. attempt counter: per (role, stage), and survives a process restart.
 # ---------------------------------------------------------------------------

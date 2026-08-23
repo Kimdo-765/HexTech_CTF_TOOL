@@ -435,15 +435,15 @@ def record_usage_by_model(
     return written
 
 
-def read_usage(job_id: str) -> list[dict[str, Any]]:
-    """All ledger records for a job, oldest first. Malformed lines are skipped.
+def read_usage_path(path: Path) -> list[dict[str, Any]]:
+    """All records at one ledger path. Malformed lines are skipped.
 
     A truncated final line (the process died mid-append) must not make the
     whole ledger unreadable — that would turn a cosmetic loss into a total one.
     """
     out: list[dict[str, Any]] = []
     try:
-        text = ledger_path(job_id).read_text(encoding="utf-8", errors="ignore")
+        text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return out
     for line in text.splitlines():
@@ -457,6 +457,35 @@ def read_usage(job_id: str) -> list[dict[str, Any]]:
         if isinstance(rec, dict):
             out.append(rec)
     return out
+
+
+def read_usage(job_id: str) -> list[dict[str, Any]]:
+    """All ledger records for a job, oldest first."""
+
+    return read_usage_path(ledger_path(job_id))
+
+
+def dollar_cost_parts(
+    records: list[dict[str, Any]], *, roles: set[str] | None = None
+) -> tuple[float, bool]:
+    """Return (known USD subtotal, completeness) for selected ledger roles.
+
+    This deliberately keeps the completeness bit beside the subtotal. A known
+    Claude reviewer charge may coexist with an unpriced Codex OAuth reviewer;
+    returning the known dollars alone would mislabel that partial sum as total.
+    """
+
+    total = 0.0
+    complete = True
+    for rec in records:
+        if roles is not None and str(rec.get("role") or "") not in roles:
+            continue
+        cost = rec.get("cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            total += float(cost)
+        else:
+            complete = False
+    return round(total, 6), complete
 
 
 def aggregate_usage(job_id: str) -> dict[str, Any]:

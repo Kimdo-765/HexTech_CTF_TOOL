@@ -98,6 +98,10 @@ x-worker-environment: &worker-environment
   # path guarantees the run never aborts. A soft eject + scaffold
   # nudge fire well before the cap; the fallback is the safety net.
   INVESTIGATION_BUDGET: ${INVESTIGATION_BUDGET:-150}
+  # Recoverable spend breaker. Reviewer calls are part of the meter too; $40
+  # leaves headroom above observed $30+ hard solves while bounding runaway
+  # lineages. Set <=0 only as an explicit operator override.
+  COST_CAP_USD: ${COST_CAP_USD:-40}
   # Max postjudge-driven auto retries within a single job (in
   # addition to the first attempt). When auto_run is on and the
   # sandbox returns a non-success verdict with an actionable

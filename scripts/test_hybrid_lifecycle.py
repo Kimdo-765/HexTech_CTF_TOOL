@@ -393,11 +393,18 @@ write_usage_meta(
     "f00000000003",
     {"status": "running", "cost_usd": 0, "cost_usd_estimate": 3.5},
 )
+(usage_jobs / "f00000000001" / "usage.jsonl").write_text(
+    json.dumps({
+        "role": "reviewer", "provider": "claude",
+        "cost_usd": 0.25, "cost_basis": "reported",
+    }) + "\n",
+    encoding="utf-8",
+)
 
 original_jobs_dir = jobs_module.JOBS_DIR
 jobs_module.JOBS_DIR = usage_jobs
 usage_stats = jobs_module.get_stats()
-check("test_usage_authoritative_cost_stays_in_spent_only", usage_stats["total_cost_usd"], 2.5)
+check("test_usage_authoritative_cost_includes_reviewer", usage_stats["total_cost_usd"], 2.75)
 check(
     "test_usage_terminal_unpriced_estimate_is_separate",
     usage_stats["terminal_unpriced_estimate_usd"],
@@ -429,11 +436,11 @@ finally:
         else:
             sys.modules[name] = previous
 
-check("test_usage_endpoint_spent_excludes_both_estimate_units", usage["spent_usd"], 2.5)
+check("test_usage_endpoint_spent_includes_reviewer_not_estimates", usage["spent_usd"], 2.75)
 check("test_usage_endpoint_exposes_terminal_unpriced_estimate", usage["terminal_unpriced_estimate_usd"], 6.25)
 check("test_usage_endpoint_exposes_completeness", usage["spent_usd_complete"], False)
-check("test_usage_budget_remaining_uses_authoritative_spend", usage["remaining_usd"], 7.5)
-check("test_usage_budget_percent_uses_authoritative_spend", usage["pct_used"], 25.0)
+check("test_usage_budget_remaining_uses_authoritative_spend", usage["remaining_usd"], 7.25)
+check("test_usage_budget_percent_uses_authoritative_spend", usage["pct_used"], 27.5)
 
 authoritative_only = DATA / "usage-authoritative-only"
 authoritative_only.mkdir()
@@ -455,6 +462,16 @@ jobs_module.JOBS_DIR = authoritative_only
 authoritative_stats = jobs_module.get_stats()
 check("test_usage_authoritative_only_is_complete", authoritative_stats["spent_usd_complete"], True)
 check("test_usage_authoritative_job_estimate_is_not_reclassified", authoritative_stats["terminal_unpriced_estimate_usd"], 0.0)
+(only_dir / "usage.jsonl").write_text(
+    json.dumps({
+        "role": "reviewer", "provider": "gpt",
+        "cost_usd": None, "cost_basis": "none",
+    }) + "\n",
+    encoding="utf-8",
+)
+reviewer_unpriced_stats = jobs_module.get_stats()
+check("test_usage_unpriced_reviewer_marks_spend_incomplete", reviewer_unpriced_stats["spent_usd_complete"], False)
+check("test_usage_unpriced_reviewer_does_not_invent_dollars", reviewer_unpriced_stats["total_cost_usd"], 1.75)
 jobs_module.JOBS_DIR = original_jobs_dir
 
 detail = jobs_module.get_job(PARENT)

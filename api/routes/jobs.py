@@ -107,16 +107,29 @@ def _scalar_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, boo
     complete dollar total is the bug this split fixes.  A positive estimate is
     preserved in a separate unit and never folded into authoritative spend.
     """
+    from modules.usage_ledger import (
+        LEDGER_FILENAME,
+        dollar_cost_parts,
+        read_usage_path,
+    )
+
+    # meta.cost_usd is the existing authoritative job scalar and main also has
+    # ledger rows that mirror it. Reviewer calls are separate API/worker
+    # invocations recorded only in usage.jsonl, so add that role alone; summing
+    # the whole ledger would double-count the main session.
+    reviewer_spent, reviewer_complete = dollar_cost_parts(
+        read_usage_path(JOBS_DIR / job_id / LEDGER_FILENAME), roles={"reviewer"}
+    )
     cost = _job_cost(job_id, meta)
     if cost != 0.0:
-        return cost, 0.0, True
+        return cost + reviewer_spent, 0.0, reviewer_complete
     if str(meta.get("status") or "") not in _USAGE_TERMINAL_STATUSES:
-        return 0.0, 0.0, True
+        return reviewer_spent, 0.0, reviewer_complete
     try:
         estimate = max(0.0, float(meta.get("cost_usd_estimate") or 0.0))
     except (TypeError, ValueError):
         estimate = 0.0
-    return 0.0, estimate, False
+    return reviewer_spent, estimate, False
 
 
 def _job_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, bool]:

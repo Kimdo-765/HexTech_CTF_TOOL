@@ -286,7 +286,12 @@ _REVIEW_SOURCE_CANDIDATES: dict[str, tuple[str, ...]] = {
 _REVIEW_SOURCE_LIMIT = 6
 
 
-def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
+def _gather_context(
+    jd: Path | None = None,
+    max_per_file: int = 6000,
+    *,
+    roots: tuple[Path, ...] | None = None,
+) -> str:
     """Bundle the prior job's evidence for the reviewer.
 
     `report.md` is sanitized via `_sanitize_hint` before being handed
@@ -307,9 +312,27 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     unsanitized prior report.md primed it too heavily. Sanitizing
     report.md at gather-time addresses the priming at the source.
     """
+    if roots is None:
+        if jd is None:
+            raise TypeError("_gather_context requires jd or roots")
+        roots = (jd,)
+    elif jd is not None:
+        raise TypeError("_gather_context accepts jd or roots, not both")
+    roots = tuple(Path(root) for root in roots)
+    if not roots:
+        return ""
+
+    def _first_file(name: str) -> Path | None:
+        for root in roots:
+            candidate = root / name
+            if candidate.is_file():
+                return candidate
+        return None
+
     parts: list[str] = []
     try:
-        meta = json.loads((jd / "meta.json").read_text(errors="replace"))
+        meta_path = _first_file("meta.json")
+        meta = json.loads(meta_path.read_text(errors="replace")) if meta_path else {}
     except (OSError, ValueError, TypeError):
         meta = {}
     module = str(meta.get("module") or "").strip().lower()
@@ -317,8 +340,8 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     def _read(
         name: str, label: str | None = None, *, tail_bias: bool = False
     ) -> None:
-        p = jd / name
-        if not p.is_file():
+        p = _first_file(name)
+        if p is None:
             return
         try:
             raw = p.read_text(errors="replace")
@@ -382,10 +405,17 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
     # Bounded, module-aware authoritative sources. The reviewer is tool-less;
     # omitting the real entry point makes report prose look more authoritative
     # than code and is a direct source of retry-hint overfitting.
-    src_root = jd / "src" / "extracted"
-    if not src_root.is_dir():
-        src_root = jd / "src"
-    if src_root.is_dir():
+    source_owner = None
+    src_root = None
+    for root in roots:
+        candidate = root / "src" / "extracted"
+        if not candidate.is_dir():
+            candidate = root / "src"
+        if candidate.is_dir():
+            source_owner = root
+            src_root = candidate
+            break
+    if src_root is not None and source_owner is not None:
         fallback = (
             "app.py", "server.py", "main.py", "index.php", "main.c",
             "Dockerfile", "docker-compose.yml",
@@ -397,7 +427,7 @@ def _gather_context(jd: Path, max_per_file: int = 6000) -> str:
                 if not p.is_file() or p in seen:
                     continue
                 seen.add(p)
-                rel_job = p.relative_to(jd).as_posix()
+                rel_job = p.relative_to(source_owner).as_posix()
                 rel_src = p.relative_to(src_root).as_posix()
                 _read(rel_job, f"src/{rel_src}")
                 break
@@ -1993,7 +2023,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
             yield sse("stage", {"name": "gathering"})
             await asyncio.sleep(0)
             try:
-                context = _gather_context(jd)
+                context = _gather_context(roots=(jd,))
                 if not context.strip():
                     yield sse("error", {
                         "message": "no prior-job context found to review",
@@ -2101,7 +2131,7 @@ async def retry_with_hint(job_id: str, request: Request):
     if manual_hint is not None:
         hint = manual_hint
     else:
-        context = _gather_context(jd)
+        context = _gather_context(roots=(jd,))
         if not context.strip():
             raise HTTPException(status_code=400, detail="no context to review")
         try:
@@ -2662,7 +2692,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
             yield sse("stage", {"name": "gathering"})
             await asyncio.sleep(0)
             try:
-                context = _gather_context(jd)
+                context = _gather_context(roots=(jd,))
                 if not context.strip():
                     yield sse("error", {
                         "message": "no prior-job context found to review",
