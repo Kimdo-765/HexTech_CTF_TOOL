@@ -252,11 +252,20 @@ def _mem_aware_worker(Worker):
                     if not res.get("applied") and res.get("reason"):
                         _log("[worker-mem] cap not applied: %s" % res["reason"])
                 if job_id:
+                    # The escalator is a no-op while the flag is OFF — it
+                    # re-checks on every call rather than capturing the flag —
+                    # so the sampler is wired the same way in both states and
+                    # there is no second code path to get wrong.
+                    escalate = wm.OomEscalator(log=_log)
+
+                    def _on_oom(d, _e=escalate):
+                        _log("[worker-mem] cgroup oom_kill +%d in this slot" % d)
+                        _e(d)
+
                     sampler = wm.JobSampler(
                         job_id,
-                        Path("/data/jobs") / job_id / "worker_mem.jsonl",
-                        on_oom=lambda d: _log(
-                            "[worker-mem] cgroup oom_kill +%d in this slot" % d),
+                        JOBS_DIR / job_id / "worker_mem.jsonl",
+                        on_oom=_on_oom,
                     ).start()
             except Exception as e:
                 print("[worker-mem] pre-job setup failed: %s" % e, flush=True)
@@ -281,7 +290,19 @@ def _mem_aware_worker(Worker):
                     print("[worker-mem] sampler stop failed: %s" % e, flush=True)
                 try:
                     if base is not None:
-                        wm.apply_cap(base, log=_log)
+                        res = wm.apply_cap(base, log=_log)
+                        # apply_cap only logs on SUCCESS, so discarding this
+                        # made a REFUSED restore completely silent — and the
+                        # refusal that can actually happen here is the shrink
+                        # floor, when the slot's unreclaimable footprint at the
+                        # end of a job leaves no headroom under the base. The
+                        # cap stays raised; the next job's start heals it. Say
+                        # so, or the only symptom is a slot that is quietly
+                        # bigger than the operator believes.
+                        if not res.get("applied"):
+                            _log("[worker-mem] cap NOT restored to base (%s) — "
+                                 "the next job's start will heal it"
+                                 % (res.get("reason") or "no reason given"))
                 except Exception as e:
                     print("[worker-mem] cap restore FAILED: %s" % e, flush=True)
                 try:

@@ -22,10 +22,12 @@ import modules.worker_mem as wm  # noqa: E402
 
 GiB = 1024 ** 3
 fails = 0
+checks = 0
 
 
 def chk(label, cond, got=None):
-    global fails
+    global fails, checks
+    checks += 1
     if cond:
         print("PASS  %s" % label)
     else:
@@ -166,6 +168,71 @@ chk("sampler NEVER touched meta.json",
     meta_file.read_text())
 
 
+
+# ---------------------------------------------------------------- escalator
+# The operator's step 2: on a real OOM, raise this slot by 1.5x. These shipped
+# as constants with no caller for one revision - defined, documented, and dead.
+# The first assertion is the one that matters: with the flag OFF the escalator
+# must not move a cgroup at all, because a feature that is "off" and still
+# changes a cap is not off.
+_applied: list = []
+
+
+def _fake_apply(want, log=None):
+    _applied.append(want)
+    return {"applied": True}
+
+
+_real_apply = wm.apply_cap
+_real_readint = wm._read_int
+wm.apply_cap = _fake_apply
+wm._read_int = lambda name: (4 * GiB if name == "memory.max" else 0)
+
+real, sio = _with_settings(worker_slot_mem="4g", dynamic_worker_mem=False)
+try:
+    _applied.clear()
+    esc = wm.OomEscalator()
+    esc(1)
+    chk("flag OFF: an OOM does NOT escalate", _applied == [], _applied)
+    chk("flag OFF: the escalation count stays 0", esc.count == 0, esc.count)
+finally:
+    _restore(real, sio)
+
+real, sio = _with_settings(worker_slot_mem="4g", dynamic_worker_mem=True)
+try:
+    _applied.clear()
+    esc = wm.OomEscalator()
+    esc(1)
+    chk("flag ON: the first OOM escalates by exactly 1.5x",
+        _applied == [int(4 * GiB * 1.5)], _applied)
+    esc(2)
+    chk("flag ON: a second OOM escalates again", len(_applied) == 2, _applied)
+    esc(3)
+    esc(4)
+    chk("flag ON: escalation stops at MAX_ESCALATIONS",
+        len(_applied) == wm.MAX_ESCALATIONS, _applied)
+
+    # a refused escalation must not be counted as one
+    _applied.clear()
+    wm.apply_cap = lambda want, log=None: {"applied": False, "reason": "refused"}
+    esc2 = wm.OomEscalator()
+    esc2(1)
+    chk("a REFUSED escalation does not consume the budget of attempts",
+        esc2.count == 0, esc2.count)
+    wm.apply_cap = _fake_apply
+
+    # no readable cap -> never guess one
+    _applied.clear()
+    wm._read_int = lambda name: None
+    esc3 = wm.OomEscalator()
+    esc3(1)
+    chk("no readable memory.max -> no escalation, no invented number",
+        _applied == [], _applied)
+finally:
+    _restore(real, sio)
+    wm.apply_cap = _real_apply
+    wm._read_int = _real_readint
+
 # ------------------------------------------------- lifecycle ordering (fake)
 # Prove the wrapper applies a cap BEFORE the job body and restores AFTER it,
 # and that the restore still happens when the body raises - the SIGKILL case
@@ -242,5 +309,8 @@ finally:
     (wm.base_cap_bytes, wm.desired_cap_bytes, wm.apply_cap, wm.JobSampler) = _real
 
 print("")
-print("%d checks, %d failed" % (44 + len(wm.EXPANSION_MODULES), fails))
+# Counted, never hardcoded. A literal total keeps printing the same
+# number after a check is deleted, so the suite reports full coverage
+# of checks it no longer runs.
+print("%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)

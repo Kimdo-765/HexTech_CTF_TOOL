@@ -44,6 +44,27 @@ CGROUP = Path("/sys/fs/cgroup")
 LOCK_PATH = Path("/data/.worker-memory.lock")
 SAMPLE_INTERVAL_S = 5.0
 
+# What makes a container a slot, for the budget sum in `_worker_containers`.
+SLOT_NAME_MATCH = "worker-"
+
+
+def _slot_name_match() -> str:
+    """The slot-name fragment, read from the environment AT CALL TIME.
+
+    Not a module constant a test can monkeypatch, and the difference is not
+    stylistic. `run_one_worker` is launched with
+    `multiprocessing.get_context("spawn")` (worker/runner.py), so the child
+    re-imports this module from source and any attribute a parent had patched
+    is gone. A simulation that patched the constant would therefore fall back
+    to "worker-" inside the very process that dispatches jobs — and would then
+    point the governor at the PRODUCTION slots while reporting that it had
+    isolated itself. That is worse than an untested feature.
+
+    An env var survives spawn, and reading it per call means nothing caches a
+    stale answer. Production never sets it; the default is the shipped value.
+    """
+    return os.environ.get("WORKER_SLOT_NAME_MATCH") or SLOT_NAME_MATCH
+
 # The share of the VM that worker slot caps may claim in total. Same number and
 # same reason as api/routes/settings.py: the remainder is kernel, dockerd, the
 # api and redis containers, and the challenge containers an agent starts as
@@ -192,11 +213,21 @@ class CapRefused(RuntimeError):
 
 
 def _worker_containers(client) -> list:
-    """Every worker slot container docker can see, running or not."""
+    """Every worker slot container docker can see, running or not.
+
+    The name fragment is a module constant so a simulation can point the whole
+    governor at disposable containers instead. That is not a convenience: the
+    budget gate sums every container this returns, so a harness that reuses the
+    production fragment either (a) leaks a container that then counts against
+    every future real job, or (b) computes `others` as the two REAL slots — 8
+    GiB against a 10.93 GiB budget — and can therefore only ever observe a
+    REFUSAL, never an allowed expansion. Half the behaviour would be untestable
+    and the harness would still report success.
+    """
     out = []
     for c in client.containers.list(all=True):
         name = getattr(c, "name", "") or ""
-        if "worker-" in name:
+        if _slot_name_match() in name:
             env = (c.attrs.get("Config", {}) or {}).get("Env") or []
             if any(str(e).startswith("WORKER_SLOT=") for e in env):
                 out.append(c)
@@ -324,6 +355,65 @@ def desired_cap_bytes(module: str | None) -> Optional[int]:
     if (module or "").lower() in EXPANSION_MODULES:
         return max(base, 8 * 1024 ** 3)
     return base
+
+
+class OomEscalator:
+    """Raise this slot's cap after a REAL cgroup OOM kill, a bounded number of times.
+
+    Wired to the sampler's `on_oom`, which fires on a rise in this slot's own
+    `memory.events:oom_kill`. It is deliberately reactive and deliberately
+    limited:
+
+      * It cannot help the process that already died. Escalating buys the
+        agent's NEXT attempt more room; it does not resurrect the first.
+      * `dynamic_enabled()` is checked on every call, not captured at
+        construction. With the flag OFF this must be a no-op — a feature that is
+        "off" and still moves a cgroup is not off.
+      * `MAX_ESCALATIONS` exists because an unbounded ladder walks one slot into
+        the entire budget, one OOM at a time, and every step passes the total
+        gate individually.
+
+    Runs on the sampler thread, so the counter is taken under a lock; the
+    cross-process race is already handled by the flock inside `apply_cap`.
+    """
+
+    def __init__(self, log: Optional[Callable[[str], None]] = None) -> None:
+        self.count = 0
+        self.log = log
+        self._lock = threading.Lock()
+
+    def _say(self, msg: str) -> None:
+        if self.log:
+            try:
+                self.log(msg)
+            except Exception:
+                pass
+
+    def __call__(self, delta: int) -> None:
+        if not dynamic_enabled():
+            return
+        with self._lock:
+            if self.count >= MAX_ESCALATIONS:
+                if self.count == MAX_ESCALATIONS:
+                    self.count += 1          # log the ceiling exactly once
+                    self._say("[worker-mem] OOM again, but this slot has already "
+                              "escalated %d times — not raising further"
+                              % MAX_ESCALATIONS)
+                return
+            current = _read_int("memory.max")
+            if not current:
+                self._say("[worker-mem] OOM seen but this slot has no readable "
+                          "cap; not escalating")
+                return
+            want = int(current * OOM_ESCALATION_FACTOR)
+            res = apply_cap(want, log=self.log)
+            if res.get("applied"):
+                self.count += 1
+                self._say("[worker-mem] OOM -> escalated %d B to %d B (%d/%d)"
+                          % (current, want, self.count, MAX_ESCALATIONS))
+            else:
+                self._say("[worker-mem] OOM -> escalation to %d B refused: %s"
+                          % (want, res.get("reason") or "no reason given"))
 
 
 # --------------------------------------------------------------------------
