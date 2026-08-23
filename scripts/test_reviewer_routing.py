@@ -12,6 +12,7 @@ which is exactly the case a cross-provider retry distinguishes.
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib.util
 import json
 import os
@@ -101,7 +102,8 @@ if _missing("rq"):
     _rq.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
     sys.modules["rq"] = _rq
 
-from api.routes import retry as R  # noqa: E402
+from api.routes import retry as RT  # noqa: E402
+from modules import reviewer as R  # noqa: E402
 import modules.agent_provider as AP  # noqa: E402
 import modules.gpt_agent as GA  # noqa: E402
 from modules import usage_ledger as UL  # noqa: E402
@@ -117,6 +119,26 @@ def check(label: str, got, want) -> None:
     else:
         FAILED += 1
         print(f"FAIL  {label}\n        got  = {got!r}\n        want = {want!r}")
+
+
+check("API re-exports the worker-safe ReviewerError",
+      RT.ReviewerError is R.ReviewerError, True)
+check("API re-exports the worker-safe context gatherer",
+      RT._gather_context is R._gather_context, True)
+check("API re-exports the worker-safe sync reviewer",
+      RT._ask_reviewer_with_failover is R._ask_reviewer_with_failover, True)
+check("API re-exports the worker-safe streaming reviewer",
+      RT._ask_reviewer_streaming is R._ask_reviewer_streaming, True)
+_reviewer_tree = ast.parse((ROOT / "modules" / "reviewer.py").read_text())
+_api_imports = []
+for _node in ast.walk(_reviewer_tree):
+    if isinstance(_node, ast.ImportFrom) and (_node.module or "").split(".")[0] == "api":
+        _api_imports.append(_node.module)
+    elif isinstance(_node, ast.Import):
+        _api_imports.extend(
+            alias.name for alias in _node.names if alias.name.split(".")[0] == "api"
+        )
+check("worker reviewer has no FastAPI api-package import", _api_imports, [])
 
 
 def make_job(job_id: str, **meta) -> str:
@@ -502,12 +524,12 @@ gate_bad = make_job("gate-bad", module="pwn", status="no_flag",
                     agent_role_providers={"reviewer": "claude"})
 AP.has_provider_auth = lambda p=None: p == "gpt"   # only GPT is configured
 try:
-    R._validate_retry(gate_ok)
+    RT._validate_retry(gate_ok)
     check("a reviewer routed to the AUTHED backend is admitted", True, True)
 except Exception as e:
     check(f"a reviewer routed to the AUTHED backend is admitted ({e})", False, True)
 try:
-    R._validate_retry(gate_bad)
+    RT._validate_retry(gate_bad)
     check("a reviewer routed to an UNAUTHED backend is refused", False, True)
 except Exception:
     check("a reviewer routed to an UNAUTHED backend is refused", True, True)

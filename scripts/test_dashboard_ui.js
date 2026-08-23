@@ -495,9 +495,9 @@ if (blockSrc) {
   // lines, stops being a question anyone has to ask.
   // ---------------------------------------------------------------------
   const { execFileSync } = require("child_process");
-  const retryPath = ["api/routes/retry.py", "../api/routes/retry.py"]
+  const retryPath = ["modules/reviewer.py", "../modules/reviewer.py"]
     .find((f) => fs.existsSync(f));
-  t("the server's retry module is on disk", !!retryPath, retryPath);
+  t("the server's retry capability source is on disk", !!retryPath, retryPath);
 
   const AST_PROBE = `
 import ast, json, sys

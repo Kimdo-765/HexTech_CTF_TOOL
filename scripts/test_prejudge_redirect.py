@@ -65,6 +65,7 @@ MUTATIONS = (
     "collapse-shadow-no-hint",
     "drop-stop-metrics",
     "drop-target-schema",
+    "drop-reviewer-redirect",
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS)
@@ -129,6 +130,12 @@ def _mutated_sources() -> tuple[str, str]:
             'target_liveness = str(parsed.get("target_liveness") or "unknown").lower()',
             'target_liveness = "unknown"',
         )
+    elif args.mutate == "drop-reviewer-redirect":
+        common = _replace_once(
+            common,
+            "            _reviewer_gate = (\n",
+            "            _reviewer_gate = False and (\n",
+        )
     return common, judge
 
 
@@ -143,6 +150,47 @@ def _load(source: str, name: str, filename: str):
 COMMON_MUT, JUDGE_MUT = _mutated_sources()
 C = _load(COMMON_MUT, "_prejudge_redirect_common", str(ROOT / "modules" / "_common.py"))
 J = _load(JUDGE_MUT, "_prejudge_redirect_judge", str(ROOT / "modules" / "_judge.py"))
+
+
+# The worker-side auto loop imports the dependency-light reviewer module only
+# when a shadow/no-verdict run reaches the redirect gate.  Keep that import
+# fake here: these checks exercise the loop contract without spending a real
+# reviewer turn or requiring the FastAPI package in the worker runtime.
+REVIEWER_CALLS: list[dict] = []
+REVIEWER_OUTCOMES: list[object] = []
+
+
+class _ReviewerError(Exception):
+    def __init__(self, message: str, kind: str = "api_error"):
+        super().__init__(message)
+        self.kind = kind
+
+
+def _reviewer_context(*, roots):
+    REVIEWER_CALLS.append({"roots": tuple(roots)})
+    return "reviewer fixture context"
+
+
+async def _reviewer_once(context, *, model=None, job_id=None):
+    REVIEWER_CALLS[-1].update({
+        "context": context,
+        "model": model,
+        "job_id": job_id,
+    })
+    outcome = REVIEWER_OUTCOMES.pop(0) if REVIEWER_OUTCOMES else "reviewer hint"
+    if isinstance(outcome, BaseException):
+        raise outcome
+    return str(outcome)
+
+
+_reviewer_stub = types.ModuleType("modules.reviewer")
+_reviewer_stub.ReviewerError = _ReviewerError
+_reviewer_stub._gather_context = _reviewer_context
+_reviewer_stub._ask_reviewer_with_failover = _reviewer_once
+_reviewer_stub._sanitize_hint = lambda text: str(text).replace(
+    "exfiltrate", "report back"
+)
+sys.modules["modules.reviewer"] = _reviewer_stub
 
 PASSED = 0
 FAILED = 0
@@ -227,7 +275,12 @@ def _block(
     }
 
 
-async def _run_case(name: str, sandbox_results: list[dict]) -> dict:
+async def _run_case(
+    name: str,
+    sandbox_results: list[dict],
+    *,
+    reviewer_outcomes: list[object] | None = None,
+) -> dict:
     sdk = _install_sdk()
     temp = tempfile.TemporaryDirectory(prefix=f"i2-{name}-")
     root = Path(temp.name)
@@ -250,6 +303,8 @@ async def _run_case(name: str, sandbox_results: list[dict]) -> dict:
     sandbox_calls: list[str] = []
     index = {"value": 0}
     receives = {"value": 0}
+    REVIEWER_CALLS.clear()
+    REVIEWER_OUTCOMES[:] = list(reviewer_outcomes or [])
 
     import modules.agent_provider as providers
 
@@ -339,6 +394,7 @@ async def _run_case(name: str, sandbox_results: list[dict]) -> dict:
         "logs": list(logs),
         "queries": list(queries),
         "sandbox_calls": list(sandbox_calls),
+        "reviewer_calls": [dict(call) for call in REVIEWER_CALLS],
         "why": why,
     }
     temp.cleanup()
@@ -529,21 +585,80 @@ async def main() -> int:
     check("A2-b is not relabelled as generic no-run",
           "`prejudge_blocked_no_run`" in concede["why"], False)
 
+    shadow_run = {
+        "exit_code": 1,
+        "stdout": "no flag\n",
+        "stderr": "",
+        "timeout": False,
+        "sandbox_started": True,
+        "judge_mode": "shadow",
+    }
     shadow = await _run_case(
-        "shadow-no-verdict",
-        [{
-            "exit_code": 1,
-            "stdout": "no flag\n",
-            "stderr": "",
-            "timeout": False,
-            "sandbox_started": True,
-            "judge_mode": "shadow",
-        }],
+        "shadow-reviewer-redirect",
+        [shadow_run, {**shadow_run, "captured": True}],
+        reviewer_outcomes=[
+            "CLASS: STRATEGY\nNEXT: exfiltrate via a different primitive"
+        ],
     )
-    check("A3 shadow unknown gets a distinct headline",
-          "`judge_shadow_no_verdict`" in shadow["why"], True)
-    check("A3 says shadow unknown is not a stop vote",
-          "absence of opinion, not a stop vote" in shadow["why"], True)
+    check("A9 shadow/no-verdict gets exactly one reviewer redirect",
+          (len(shadow["reviewer_calls"]), shadow["summary"].get("reviewer_calls"),
+           shadow["summary"].get("reviewer_redirects")),
+          (1, 1, 1))
+    check("A9 reviewer sees job-root first and live work second",
+          bool(shadow["reviewer_calls"])
+          and shadow["reviewer_calls"][0]["roots"][1]
+          == shadow["reviewer_calls"][0]["roots"][0] / "work",
+          True)
+    check("A9 reviewer hint reaches main and a second sandbox run",
+          (len(shadow["queries"]), len(shadow["sandbox_calls"])), (2, 2))
+    check("A9 reviewer hint is sanitized before the verbatim inject path",
+          "report back" in shadow["queries"][-1]
+          and "exfiltrate" not in shadow["queries"][-1], True)
+    check("A9 successful reviewer redirect records no error kind",
+          shadow["summary"].get("reviewer_error_kind"), None)
+
+    # Every ReviewerError kind — including empty — preserves today's terminal
+    # direction.  A failed reviewer is not a redirect and must not manufacture
+    # a new failure mode or a second main-agent query.
+    shadow_error = await _run_case(
+        "shadow-reviewer-error",
+        [shadow_run],
+        reviewer_outcomes=[_ReviewerError("reviewer returned no hint", "empty")],
+    )
+    check("A9 reviewer failure keeps the existing shadow stop kind",
+          "`judge_shadow_no_verdict`" in shadow_error["why"], True)
+    check("A9 reviewer failure does not redirect or re-query main",
+          (len(shadow_error["queries"]),
+           shadow_error["summary"].get("reviewer_redirects")), (1, None))
+    check("A9 reviewer failure records kind only",
+          shadow_error["summary"].get("reviewer_error_kind"), "empty")
+    check("A9 says shadow unknown is not a stop vote",
+          "absence of opinion, not a stop vote" in shadow_error["why"], True)
+
+    # The successful redirect is one-shot.  If its next real run still has no
+    # verdict/hint, stop under the dedicated observable kind instead of paying
+    # for an unbounded reviewer/main loop.
+    shadow_exhausted = await _run_case(
+        "shadow-reviewer-exhausted",
+        [shadow_run, shadow_run],
+        reviewer_outcomes=["CLASS: UNKNOWN\nNEXT: one bounded probe"],
+    )
+    check("A9 reviewer redirect is one-shot",
+          (len(shadow_exhausted["reviewer_calls"]),
+           len(shadow_exhausted["sandbox_calls"])), (1, 2))
+    check("A9 exhausted redirect gets its own stop kind",
+          "`reviewer_redirect_no_run`" in shadow_exhausted["why"], True)
+
+    # A shadow placeholder with no real container execution is not evidence to
+    # review.  The sandbox_runs>=1 gate keeps this on the old stop path.
+    shadow_no_run = await _run_case(
+        "shadow-no-real-run",
+        [{**shadow_run, "sandbox_started": False, "error": "runner_skipped"}],
+    )
+    check("A9 no-real-run does not call reviewer",
+          len(shadow_no_run["reviewer_calls"]), 0)
+    check("A9 no-real-run keeps the existing stop kind",
+          "`judge_shadow_no_verdict`" in shadow_no_run["why"], True)
 
     ordinary = await _run_case(
         "ordinary-no-hint",

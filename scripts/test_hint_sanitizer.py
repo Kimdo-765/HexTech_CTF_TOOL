@@ -11,8 +11,8 @@ the subject and turned "REFUTED: outbound DNS is firewalled" into an assertion
 that the collector is reachable. The reviewer's whole value is its REFUTED
 list; a sanitizer that inverts refutations is worse than no sanitizer.
 
-These load the real _HINT_REPLACEMENTS out of api/routes/retry.py by source, so
-fastapi is not needed and the table under test is the shipped one.
+These load the real _HINT_REPLACEMENTS out of modules/reviewer.py by source, so
+FastAPI is not needed and the table under test is the shipped one.
 """
 
 import pathlib
@@ -20,7 +20,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SRC = (ROOT / "api/routes/retry.py").read_text()
+SRC = (ROOT / "modules/reviewer.py").read_text()
 
 checks = 0
 fails = 0

@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RETRY_PATH = ROOT / "api" / "routes" / "retry.py"
+RETRY_PATH = ROOT / "modules" / "reviewer.py"
 COMMON_PATH = ROOT / "modules" / "_common.py"
 RETRY_SOURCE = RETRY_PATH.read_text()
 COMMON_SOURCE = COMMON_PATH.read_text()

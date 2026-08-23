@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "api" / "routes" / "retry.py").read_text(encoding="utf-8")
+SOURCE = (ROOT / "modules" / "reviewer.py").read_text(encoding="utf-8")
 
 PASSED = 0
 FAILED = 0

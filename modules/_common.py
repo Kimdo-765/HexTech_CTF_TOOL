@@ -7183,6 +7183,10 @@ _STOP_KIND_HEADERS = {
     "judge_shadow_no_verdict": (
         "Judge shadow recorded evidence but supplied no gating verdict"
     ),
+    "reviewer_redirect_no_run": (
+        "The one-shot reviewer redirect produced another sandbox run without "
+        "a capture, live judge verdict, or further retry hint"
+    ),
     "policy_refusal": (
         "Main turn blocked by the server-side Usage-Policy classifier "
         "(AUP) — session context poisoned; halted without an in-place retry"
@@ -7723,6 +7727,20 @@ def write_why_stopped(
                 "facts, not the shadow placeholder, explain the failed attempt.",
                 "2. **Use `/retry` with a manual hint** if the output exposes an "
                 "actionable correction. Shadow mode cannot synthesize one live.",
+            ]
+        elif stop_kind == "reviewer_redirect_no_run":
+            out += [
+                "Judge mode was `shadow`, so the loop asked the routed reviewer "
+                "for one independent correction and delivered it to main. The "
+                "following real sandbox run still produced no capture, live "
+                "judge verdict, or further retry hint. The reviewer redirect is "
+                "one-shot, so the loop stops instead of alternating reviewers "
+                "and main turns without a bound. Options:",
+                "",
+                "1. **Inspect both sandbox outputs and the reviewer-directed "
+                "edit**; the second execution is the newest ground truth.",
+                "2. **Use `/retry` with a manual hint** only if you can name a "
+                "new primitive or test that neither run attempted.",
             ]
         elif stop_kind == "unsolvable_by_analysis":
             out += [
@@ -10361,13 +10379,100 @@ async def run_main_agent_session(
                     log_fn=log_fn,
                 )
                 return last_sandbox
+
+            # Modules outside judge-enforce scope used to stop after their first
+            # real sandbox failure: shadow deliberately supplies no live verdict,
+            # therefore there was no retry hint to feed back to main.  Spend one
+            # bounded reviewer turn here to challenge the failed branch using the
+            # same evidence bundle as manual /retry.  The four-part gate is the
+            # whole policy: no prose inspection and no module allowlist.
+            _reviewer_gate = (
+                not retry_hint
+                and (last_sandbox or {}).get("judge_mode") == "shadow"
+                and not judge_out
+                and int(summary.get("reviewer_redirects") or 0) == 0
+                and int(summary.get("sandbox_runs") or 0) >= 1
+            )
+            if _reviewer_gate:
+                try:
+                    from modules.reviewer import (
+                        ReviewerError,
+                        _ask_reviewer_with_failover,
+                        _gather_context,
+                        _sanitize_hint,
+                    )
+
+                    _reviewer_context = _gather_context(
+                        roots=(job_dir(job_id), work_dir)
+                    )
+                    if not _reviewer_context.strip():
+                        raise ReviewerError(
+                            "no job evidence was available to the reviewer",
+                            "no_context",
+                        )
+                    summary["reviewer_calls"] = (
+                        int(summary.get("reviewer_calls") or 0) + 1
+                    )
+                    _reviewer_raw_hint = await _ask_reviewer_with_failover(
+                        _reviewer_context,
+                        job_id=job_id,
+                    )
+                    _reviewer_hint = _sanitize_hint(_reviewer_raw_hint).strip()
+                    if not _reviewer_hint:
+                        raise ReviewerError(
+                            "reviewer hint became empty after sanitization",
+                            "empty",
+                        )
+                except Exception as _reviewer_exc:
+                    # ReviewerError.kind is the only persisted failure detail.
+                    # Raw provider text can contain secrets or policy payloads,
+                    # and every failure must retain today's fail-closed direction:
+                    # fall through to judge_shadow_no_verdict below.
+                    summary["reviewer_error_kind"] = (
+                        getattr(_reviewer_exc, "kind", None) or "unavailable"
+                    )
+                    log_fn(
+                        "[orchestrator] one-shot reviewer could not produce a "
+                        "redirect "
+                        f"(kind={summary['reviewer_error_kind']}) — preserving "
+                        "judge_shadow_no_verdict"
+                    )
+                else:
+                    summary["reviewer_redirects"] = (
+                        int(summary.get("reviewer_redirects") or 0) + 1
+                    )
+                    summary["reviewer_hint_chars"] = len(_reviewer_hint)
+                    last_sandbox = dict(last_sandbox or {})
+                    last_sandbox["judge"] = {
+                        "verdict": "reviewer_redirect",
+                        "next_action": "continue",
+                        "retry_hint": _reviewer_hint,
+                        "summary": (
+                            "one-shot reviewer challenged the failed shadow-mode "
+                            "branch"
+                        ),
+                    }
+                    judge_out = last_sandbox["judge"]
+                    retry_hint = _reviewer_hint
+                    verdict = judge_out["verdict"]
+                    next_action = judge_out["next_action"]
+                    log_fn(
+                        "[orchestrator] shadow judge supplied no live verdict — "
+                        "injecting one reviewer redirect before stopping "
+                        f"({len(_reviewer_hint)} chars)"
+                    )
             if not retry_hint:
                 _shadow_no_verdict = (
                     (last_sandbox or {}).get("judge_mode") == "shadow"
                     and not judge_out
                 )
                 _no_hint_kind = (
-                    "judge_shadow_no_verdict" if _shadow_no_verdict else "no_hint"
+                    "reviewer_redirect_no_run"
+                    if _shadow_no_verdict
+                    and int(summary.get("reviewer_redirects") or 0) >= 1
+                    else "judge_shadow_no_verdict"
+                    if _shadow_no_verdict
+                    else "no_hint"
                 )
                 _no_hint_out = judge_out
                 if _shadow_no_verdict:
@@ -10393,20 +10498,14 @@ async def run_main_agent_session(
                     summary=summary,
                     log_fn=log_fn,
                 )
-                if _shadow_no_verdict:
-                    write_why_stopped(
-                        work_dir,
-                        stop_kind="judge_shadow_no_verdict",
-                        **_no_hint_args,
-                    )
-                else:
-                    # Keep the original no-hint class for enforce/off and judge
-                    # failures; A3 only splits the intentional shadow absence.
-                    write_why_stopped(
-                        work_dir,
-                        stop_kind="no_hint",
-                        **_no_hint_args,
-                    )
+                # Keep the original no-hint class for enforce/off and judge
+                # failures; shadow absence and a spent reviewer redirect have
+                # their own observable stop kinds.
+                write_why_stopped(
+                    work_dir,
+                    stop_kind=_no_hint_kind,
+                    **_no_hint_args,
+                )
                 return last_sandbox
 
 
