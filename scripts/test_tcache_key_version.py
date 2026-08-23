@@ -73,6 +73,40 @@ chk("...and 2.28 still does NOT (the check does not exist there)",
     "key bypass" not in " ".join(
         clf._derive_features([2, 28]).get("recommended_techniques") or []).lower())
 
+# The flag must stay ADVISORY. `blacklisted_techniques` is consumed by
+# `scaffold.assert_techniques_match()`, which raises SystemExit(2) on a match —
+# so if flipping this gate ever started blacklisting something, a chain that
+# runs today on a 2.29-2.34 target would begin dying locally instead. It does
+# not: the only two blacklist entries are gated on hooks_alive and
+# str_finish_patched. Pin that, because "purely additive" is the property that
+# makes the runtime change safe.
+for ver in ((2, 28), (2, 31), (2, 34)):
+    bl = clf._derive_features(list(ver)).get("blacklisted_techniques") or []
+    chk("glibc %d.%d: tcache_key adds nothing to blacklisted_techniques"
+        % ver, not any("tcache" in b.lower() or "key" in b.lower() for b in bl), bl)
+
+# --------------------------------------------- the worked example must agree
+section("the profile example in the prompt matches the generator")
+
+# modules/_prompts.py shows an agent a full libc_profile.json for glibc 2.31 as
+# the answer to "what does the cached profile look like". It carried
+# `"tcache_key": false` — the wrong side of this very boundary — and a
+# preferred_fsop_chain the generator has never emitted for 2.31. A worked
+# example that disagrees with the code is a second source of truth, so compare
+# them field by field rather than fixing the one field that prompted this.
+_pp = (ROOT / "modules/_prompts.py").read_text(errors="replace")
+_i = _pp.index('"version_tuple": [2, 31]')
+_example = _pp[_i - 200:_i + 900]
+_truth = clf._derive_features([2, 31])
+for field in ("safe_linking", "tcache_key", "hooks_alive",
+              "io_str_jumps_finish_patched", "preferred_fsop_chain"):
+    val = _truth[field]
+    literal = ('"%s"' % val) if isinstance(val, str) else ("true" if val else "false")
+    chk("example's %s == what _derive_features emits for 2.31 (%s)"
+        % (field, literal),
+        ('"%s": %s' % (field, literal)) in _example,
+        [ln.strip() for ln in _example.splitlines() if field in ln])
+
 # ------------------------------------------------------- no file says 2.35
 section("no file still calls it a 2.35 feature")
 
@@ -83,6 +117,7 @@ SOURCES = (
     "modules/_common.py",
     "modules/_judge.py",
     "modules/pwn/prompts.py",
+    "modules/_prompts.py",
     "worker/chal_libc_fix.py",
     "scaffold/tcache_poison.py",
     "scaffold/heap_menu.py",

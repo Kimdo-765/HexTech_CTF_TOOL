@@ -630,9 +630,8 @@ Glibc version → which techniques still work
           its value. Pivot to: `__exit_funcs` (encoded with PTR_MANGLE
           — needs a stack/TLS leak), `_rtld_global._dl_rtld_lock_
           recursive`, or FSOP via `_IO_2_1_stdout_` / `_IO_list_all`.
-  2.35-2.36 No new heap check of its own; the 2.29 key bypass and the
-          2.32 safe-linking XOR both still apply.
-          `_IO_str_jumps` `__finish` path still usable.
+  2.35-2.36 The 2.29 key bypass and the 2.32 safe-linking XOR both still
+          apply. `_IO_str_jumps` `__finish` path still usable.
   ≥2.37   `_IO_str_jumps` `__finish` patched. FSOP path of choice
           becomes `_IO_wfile_jumps` overflow → `_IO_wdoallocbuf`
           → `__wide_data->_wide_vtable->__doallocate` = your gadget.

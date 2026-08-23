@@ -105,6 +105,16 @@ for text, gone in FIRES:
     out = sanitize(text)
     chk("%r is still rewritten" % gone, gone.lower() not in out.lower(), out)
 
+# --- rule ORDER is load-bearing, so pin it -----------------------------------
+# `the firewall` -> noun is deliberately placed AFTER `firewall bypass` -> "OOB
+# callback routing". Reversed, "the firewall bypass" would first become "the
+# worker's network restriction bypass" and the second rule could no longer
+# match, leaving the framing the table exists to remove. That ordering lived
+# only in a source comment until this check.
+out = sanitize("the firewall bypass worked on the first try")
+chk("'the firewall bypass' is consumed by the bypass rule, not the noun rule",
+    "OOB callback routing" in out and "network restriction bypass" not in out, out)
+
 # --- a rewrite may not change the VERB or the POLARITY of the sentence -------
 # The rules above only ever checked that the subject survived. They passed for
 # months while a second rule made the identical mistake on the other side of

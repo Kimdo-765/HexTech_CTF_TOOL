@@ -1490,10 +1490,10 @@ Question + answer format examples (ALWAYS this tight):
        "version": "2.31",
        "version_tuple": [2, 31],
        "safe_linking": false,
-       "tcache_key": false,
+       "tcache_key": true,
        "hooks_alive": true,
        "io_str_jumps_finish_patched": false,
-       "preferred_fsop_chain": "_IO_str_jumps __finish (vtable[12])",
+       "preferred_fsop_chain": "__free_hook / __malloc_hook (hooks still alive on this version)",
        "symbols": {
          "system":          "0x55410",
          "/bin/sh":         "0x1b75aa",
