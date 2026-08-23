@@ -189,6 +189,112 @@ def cleanup_loop() -> None:
         time.sleep(CLEANUP_INTERVAL_S)
 
 
+def _mem_aware_worker(Worker):
+    """Build the slot-memory-aware Worker subclass.
+
+    A factory rather than a module-level class because `Worker` is imported
+    inside `run_one_worker` on purpose (the child reimports so file descriptors
+    are not shared), and a module-level `class X(Worker)` would be a NameError
+    at import time.
+
+    WHY IT OVERRIDES `execute_job` AND NOT `perform_job`.
+    `execute_job` runs in this long-lived worker process: it prepares the
+    execution, forks the work horse, and waits for it. `perform_job` runs INSIDE
+    that horse. The distinction is the whole reason the restore below can be
+    trusted — an operator Stop reaches the horse as SIGKILL
+    (`rq.command` -> `Worker.kill_horse` -> `os.killpg(..., SIGKILL)`), so a
+    `finally` inside the horse never runs, while `monitor_work_horse` returns
+    normally after reaping it and a `finally` HERE does.
+
+    That is the belt. The braces are applying the desired cap at the START of
+    every job: if this process itself dies mid-job the restore is lost too, and
+    only the next job's start can heal the leftover.
+    """
+
+    class _MemAwareWorker(Worker):
+        def execute_job(self, job, queue):  # type: ignore[override]
+            from pathlib import Path
+
+            import modules.worker_mem as wm
+
+            job_id = None
+            module = None
+            try:
+                args = list(getattr(job, "args", ()) or ())
+                if args and isinstance(args[0], str):
+                    job_id = args[0]
+                # "modules.<module>.analyzer.run_job" / "...orchestrator.run_job"
+                parts = str(getattr(job, "func_name", "") or "").split(".")
+                if len(parts) > 1 and parts[0] == "modules":
+                    module = parts[1]
+            except Exception:
+                pass
+
+            def _log(msg: str) -> None:
+                if not job_id:
+                    return
+                try:
+                    from modules._common import log_line
+
+                    log_line(job_id, msg)
+                except Exception:
+                    pass
+
+            sampler = None
+            base = wm.base_cap_bytes()
+            try:
+                want = wm.desired_cap_bytes(module)
+                if want is not None:
+                    # Unconditional and idempotent. With the flag OFF this is
+                    # the base and it is a no-op on a healthy slot; its purpose
+                    # is to heal a slot some earlier run left raised.
+                    res = wm.apply_cap(want, log=_log)
+                    if not res.get("applied") and res.get("reason"):
+                        _log("[worker-mem] cap not applied: %s" % res["reason"])
+                if job_id:
+                    sampler = wm.JobSampler(
+                        job_id,
+                        Path("/data/jobs") / job_id / "worker_mem.jsonl",
+                        on_oom=lambda d: _log(
+                            "[worker-mem] cgroup oom_kill +%d in this slot" % d),
+                    ).start()
+            except Exception as e:
+                print("[worker-mem] pre-job setup failed: %s" % e, flush=True)
+
+            try:
+                return super().execute_job(job, queue)
+            finally:
+                # THREE SEPARATE try BLOCKS, NOT ONE.
+                # These were one block until a behavioural test caught what
+                # that costs: `write_meta` raised (the job directory was gone)
+                # and the exception carried straight past the cap restore, so
+                # the slot kept the raised cap forever — the exact leak this
+                # wiring exists to prevent. Bookkeeping must never be able to
+                # skip the restore, so the restore is second and owns its own
+                # handler, and recording the sample is last because it is the
+                # only one of the three that nothing depends on.
+                summary = None
+                try:
+                    if sampler is not None:
+                        summary = sampler.stop()
+                except Exception as e:
+                    print("[worker-mem] sampler stop failed: %s" % e, flush=True)
+                try:
+                    if base is not None:
+                        wm.apply_cap(base, log=_log)
+                except Exception as e:
+                    print("[worker-mem] cap restore FAILED: %s" % e, flush=True)
+                try:
+                    if summary is not None and job_id:
+                        from modules._common import write_meta
+
+                        write_meta(job_id, worker_mem=summary)
+                except Exception as e:
+                    print("[worker-mem] sample not recorded: %s" % e, flush=True)
+
+    return _MemAwareWorker
+
+
 def run_one_worker(idx: int, scheduler: bool) -> None:
     """Worker process target. Reimport everything inside the child so
     state isn't shared across processes (cleaner for the SDK + docker-py
@@ -200,7 +306,8 @@ def run_one_worker(idx: int, scheduler: bool) -> None:
     q = Queue("hextech_ctf_tool", connection=conn)
     name = _worker_name(idx)
     print(f"[worker] {name} starting (scheduler={scheduler})", flush=True)
-    Worker([q], connection=conn, name=name).work(with_scheduler=scheduler)
+    _mem_aware_worker(Worker)([q], connection=conn, name=name).work(
+        with_scheduler=scheduler)
 
 
 def _sweep_stale_workers() -> None:

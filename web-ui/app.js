@@ -1283,6 +1283,8 @@ async function loadSettings() {
   }
   // enable_exploit_library_hint default-False
   f.querySelector("[name=enable_exploit_library_hint]").checked = !!s.enable_exploit_library_hint;
+  // dynamic_worker_mem default-False
+  f.querySelector("[name=dynamic_worker_mem]").checked = !!s.dynamic_worker_mem;
 
   document.getElementById("key-status").textContent = s.anthropic_api_key_set
     ? `set (${s.anthropic_api_key_masked}) — leave blank to keep, type new to replace`
@@ -1374,6 +1376,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       continue;
     }
     if (k === "enable_exploit_library_hint") continue;  // handled explicitly below
+    if (k === "dynamic_worker_mem") continue;  // handled explicitly below
     if (k.startsWith("role_provider_")) continue;  // assembled into one map below
     if (k === "topology_preset") continue;  // a form shortcut, never a setting
     if (v === "") {
@@ -1408,6 +1411,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   }
   payload.agent_role_providers = routes;
   payload.enable_exploit_library_hint = !!e.target.querySelector("[name=enable_exploit_library_hint]").checked;
+  payload.dynamic_worker_mem = !!e.target.querySelector("[name=dynamic_worker_mem]").checked;
   // Radio always present; default claude if somehow missing.
   if (!payload.agent_provider) {
     payload.agent_provider = e.target.querySelector("[name=agent_provider]:checked")?.value || "claude";

@@ -76,6 +76,22 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # /data/settings.json is inert: lookups iterate SCHEMA, so a key that is not
     # here is never read and never shown.
     ("worker_slot_mem", "WORKER_SLOT_MEM", str, "4g"),
+    # Master switch for dynamic per-slot memory. Default OFF means the stack
+    # behaves EXACTLY as it does today: `worker_slot_mem` above is the only
+    # authority, and no code path changes a cgroup cap while a job runs.
+    #
+    # It is a separate key on purpose. Flipping this must NOT reinterpret
+    # `worker_slot_mem` — that key keeps meaning "the base cap for every slot",
+    # and the dynamic policy layers on top of it. The comment above records
+    # what happens when a memory key changes meaning under an operator: the
+    # worker_mem_limit -> worker_slot_mem rename existed because reusing the
+    # old key would have pushed one container's 8g onto EVERY slot.
+    #
+    # Deliberately not gating the sampler. The sampler is read-only
+    # (one /sys/fs/cgroup/memory.current read is ~0.007 ms) and it is what
+    # produces the data needed to choose a base and an expansion size. Gate it
+    # here and the day this flag is switched ON there is nothing to tune from.
+    ("dynamic_worker_mem", "DYNAMIC_WORKER_MEM", bool, False),
     # Remove the containers and networks a job created once it reaches a
     # terminal status. Default ON: agent-started containers have no other
     # owner, and containers from 2026-06 were still running in 2026-08, each
