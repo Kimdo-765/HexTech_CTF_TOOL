@@ -1,9 +1,14 @@
 # HexTech_CTF_TOOL
 
-Docker-based web UI toolset for CTF problem solving. Six modules covering Web, Pwn,
-Forensic, Misc, Crypto, and Reversing — each combines automated tooling with a
-Claude Code agent that reads the challenge, identifies the vulnerability or
-flag, and generates a runnable exploit/solver script.
+Docker-based web UI toolset for CTF problem solving. Six core modules covering
+Web, Pwn, Forensic, Misc, Crypto, and Reversing — each combines automated
+tooling with a Claude Code agent that reads the challenge, identifies the
+vulnerability or flag, and generates a runnable exploit/solver script. Three
+more ship alongside them and are advertised by `GET /api/modules`: **Web3 /
+Smart Contract**, a full loop module (retry, continue, `auto_run`, report
+phase); **Hybrid Chain**, a parent that fans out to two hidden children (see
+[Hybrid parent/child lifecycle](#hybrid-parentchild-lifecycle)); and
+**Live-fire Patch**.
 
 Seven Claude-driven roles split by responsibility:
 
@@ -47,8 +52,12 @@ Seven Claude-driven roles split by responsibility:
   phase pattern). No tools, no MCP server, minimal system_prompt.
   Converts main's `report.md` + `exploit.py`/`solver.py` prose into
   the module-specific `findings.json` schema once at job end.
-  Defaulted to `claude-sonnet-4-6` for cost — pure JSON transformation
-  doesn't need opus reasoning.
+  `REPORT_PHASE_MODEL` (`claude-sonnet-4-6`) was chosen for cost — pure JSON
+  transformation doesn't need opus reasoning — but it is only the fallback
+  for a caller that supplies no model, and no production path does: all five
+  analyzers pass the job's own model, so the report phase **follows main**
+  (opus by default). The stale comment above `modules/pwn/analyzer.py:2432`
+  says the opposite of the line beneath it.
 
 **Subagent isolation (default ON).** All four peer subagents
 (recon / triage / judge / debugger) run in their **own** `claude` CLI
@@ -127,9 +136,9 @@ Eight Claude-driven roles, each with its own context window:
 | **main worker** | `worker` container, one RQ process per concurrency slot | `Read` `Write` `Edit` `Bash` `Glob` `Grep` `mcp__team__spawn_subagent` | Runs the module pipeline; writes `exploit.py` / `solver.py` / `report.md` in a single `ClaudeSDKClient` session that auto-retries on postjudge feedback. Built-in `Agent` / `Task` tools are disallowed; delegation goes through the MCP tool only |
 | **recon** (peer subagent) | **own `claude` CLI subprocess** spawned via MCP, dies on return | `Read` `Bash` `Glob` `Grep` `WebSearch` `WebFetch` (read-only) | Static investigation: disasm walks, decomp triage, libc symbol lookup, ROPgadget / one_gadget filter, source-tree grep, web research. Returns ≤2 KB free-form summary |
 | **triage** (peer subagent) | own `claude` CLI subprocess spawned via MCP | `Read` `Bash` `Glob` `Grep` (read-only, verdict-only) | Independent re-verification of recon's candidate list. Re-reads each cited file:line; emits **strict JSON** `{verdicts:[{verdict, cite, severity, dup_of}], summary:{}}`. Severity is RE-DERIVED, never inherited |
-| **judge** (peer subagent + lifecycle gate) | own subprocess when invoked by main · separate orchestrator-owned session around every `auto_run` execution | `Read` `Bash` `Glob` `Grep` (no Write) | Pre-finalize hang/parse review when invoked by main · pre/post lifecycle around the runner sandbox (supervise not driven) · pinned to latest model |
+| **judge** (peer subagent + lifecycle gate) | own subprocess when invoked by main · separate orchestrator-owned session around every `auto_run` execution | `Read` `Bash` `Glob` `Grep` (no Write) | Pre-finalize hang/parse review when invoked by main · pre/post lifecycle around the runner sandbox (supervise not driven) · the subagent path is pinned to `LATEST_JUDGE_MODEL`; the orchestrator lifecycle path follows the job's main model via `resolve_judge_model` |
 | **debugger** (peer subagent) | own `claude` CLI subprocess spawned via MCP | `Read` `Write` `Edit` `Bash` `Glob` `Grep` | Dynamic analysis under gdb (GEF) / strace / ltrace / qemu-user. Auto-extracts the chal's libc + ld + NEEDED libs from the Dockerfile's base image via `chal-libc-fix`. Returns **strict JSON** `{observed, trace, conclusion, caveats}` |
-| **report phase** | terminal stateless `query()` after main finishes (no MCP, no tools, no system_prompt bloat) | `allowed_tools=[]` (pure transformation) | Converts main's `report.md` + `exploit.py`/`solver.py` prose into module-specific `findings.json` (pwn / web / crypto / rev each have their own schema). Defaulted to sonnet for cost — rote pattern-matching doesn't need opus |
+| **report phase** | terminal stateless `query()` after main finishes (no MCP, no tools, no system_prompt bloat) | `allowed_tools=[]` (pure transformation) | Converts main's `report.md` + `exploit.py`/`solver.py` prose into module-specific `findings.json` (pwn / web / crypto / rev each have their own schema). Runs on MAIN's model, per job — every analyzer passes `model=model` and `REPORT_PHASE_MODEL` (sonnet) is only the fallback for a caller that passes none, which no production path does. An active preset's `report` slot overrides it. |
 | **monitor** | `api` container, always-on supervisor (one background task per running job) | `allowed_tools=[]` (narration only) | Filters `run.log` to meaningful SIGNAL events and narrates "what just happened" in one line per configured language. Pinned to a cheap model (`MONITOR_MODEL`, default sonnet — NEVER the job's opus). Output → `<job>/monitor.jsonl` + Redis `job:<id>:monitor` for the live UI panel. See [MONITOR](#monitor-modules_monitorpy) |
 
 ```
@@ -166,7 +175,7 @@ Eight Claude-driven roles, each with its own context window:
    └──────────────────────────────────────────────────────┘
             │ after main exits
             ▼
-   ┌─report phase (stateless query, sonnet, no tools)─────┐
+   ┌─report phase (stateless query, no tools)─────────────┐
    │ report.md + exploit.py → strict findings.json schema │
    │ (pwn / web / crypto / rev each have their own shape) │
    └──────────────────────────────────────────────────────┘
@@ -248,6 +257,12 @@ conversation history.
   returns >3 candidates or before committing to a primitive based on
   recon's severity alone.
 - **judge** — Quality gate. Used by main pre-finalize for hang/parse
+  review, by the orchestrator around every `auto_run` execution. The two
+  paths take DIFFERENT models: the subagent main spawns is pinned to
+  `LATEST_JUDGE_MODEL` (`modules/_common.py:2711`), while the orchestrator
+  lifecycle stages call `resolve_judge_model(job_id)`, whose whole purpose is
+  to FOLLOW the job's main-agent model and never diverge from it
+  (`_common.py:3807-3818`). An active preset's `judge` slot overrides either.
   review, by the orchestrator around every `auto_run` execution.
   Defaults to `LATEST_JUDGE_MODEL`, overridden by an active preset's
   `judge` slot. Read-only; cannot cascade-spawn
@@ -309,9 +324,14 @@ subagents you spawn, which is the whole point of the design.
 > subagent's `pkill -9 -f "./prob"` matched its own claude CLI's
 > argv (the SDK passes the system_prompt via `--system-prompt`)
 > and SIGKILLed itself + sister subagents. The fix is comm-anchored
-> matching (`pkill -x prob`) in the debugger prompt; the OOM
-> defenses have been removed because they were responding to a
-> phantom failure mode.
+> matching (`pkill -x prob`) in the debugger prompt. The context guards
+> (`CONTEXT_COMPACTION_THRESHOLD` / `HARD_CEILING`) are gone for good and
+> `SUBAGENT_SPAWN_CAP` was never reimplemented — those really were answering
+> a phantom. **Cgroup `mem_limit` is back**, on different evidence and with a
+> different job: not a heap-OOM defense but a bound on a slot that can
+> otherwise take the VM down (a 15 GB `python3` once froze the whole WSL VM),
+> now with a per-job sampler and an optional governor on top. See
+> [Concurrency](#concurrency).
 
 **How isolation works** (`make_spawn_subagent_mcp` +
 `make_standalone_options` in `modules/_common.py`):
@@ -356,7 +376,17 @@ from the prior run. Net effect on a retry without
 `resume_session_id`: ~5 min of recon + ~10 s of chal-libc-fix become
 ~0 s, and main starts on the retry_hint immediately.
 
-**Spawn cap**. `SUBAGENT_SPAWN_CAP` (default `0` = unlimited) bounds
+**Spawn cap — not implemented.** `SUBAGENT_SPAWN_CAP` exists in `.env` and in
+the prompt text shown to the model, and nowhere else: a case-insensitive
+repo-wide search finds no code that reads it, and the guard the surrounding
+comments name (`_maybe_subagent_cap()`) has no definition. The counter
+`summary["subagent_spawns"]` still increments but is consumed only as a log
+index. Setting it to a positive int does nothing today. Delegation is
+unbounded in both the isolated and legacy paths; the intent was a runaway-cost
+guard, never an OOM defense.
+
+**Rollback**. Set `USE_ISOLATED_SUBAGENTS=0` in `.env` to revert
+to the legacy `agents={}` in-process path.
 the delegation count per run only as a runaway cost guard — not as
 an OOM defense. Set to a positive int (e.g. `30`) if you want to
 catch infinite-recursion model bugs; leave at 0 to allow free use,
@@ -370,9 +400,11 @@ applies if you've set `SUBAGENT_SPAWN_CAP` to a positive int.
 
 `decompiler` (Ghidra), `forensic` (TSK + qemu-img + Vol3), `misc`
 (binwalk + steghide + …), `runner` (exec exploit.py / solver.py),
-`sage` (optional Coppersmith / LLL). Built once via `--profile tools`,
-never started by `compose up`. The worker `docker run`s them per job
-and removes them when done.
+`sage` (optional Coppersmith / LLL). The first four are built once via
+`--profile tools`; `sage` is a different profile and a different verb — it is
+PULLED (`sagemath/sagemath:latest`) under `--profile tools-sage`, and only
+when `start.sh` is given `--with-sage`. None of them is started by
+`compose up`: the worker `docker run`s them per job and removes them when done.
 
 ### dev/run parity — the runner is NOT the worker
 
@@ -398,6 +430,8 @@ The last shape is the nastiest and worth internalizing: Debian's `gcc` only
 dies. The runner now installs **`build-essential`** (which also brings `g++`
 and `make`, both previously absent) plus `gdb qemu-user-static ltrace strace
 binutils`.
+
+**The gap re-widened after this was written.** `9a5f496` and `354a920` added about ten tools to the WORKER and none to the runner: chromium + chromium-driver, tshark, tcpdump, wabt (`wasm2wat`), ffuf, dirb (for its wordlist), gawk — now the default `awk`, so `strtonum` resolves — seccomp-tools, volatility3, scapy and keystone-engine. A solver that imports `scapy` or shells out to `wasm2wat` works when the agent tries it in `./work/` and fails when the runner executes it. `scripts/test_worker_slots.py` and `worker/solver_smoke.py` are where that class of drift gets caught; neither covers the new ten.
 
 **Smoke-test in the REAL runner before shipping** — the general defence,
 because the package list will always lag:
@@ -445,8 +479,12 @@ Model: the orchestrator stages (`resolve_judge_model`) derive a base from
 the job's main model and fold the preset `judge` slot over it; the judge
 SUBAGENT defaults to `LATEST_JUDGE_MODEL` and the same slot overrides it.
 Judge is a peer to recon: same read-only
-tool set (`Read` / `Bash` / `Glob` / `Grep`) plus `Agent` so it can
-delegate heavy investigation to recon. **No `Write` / `Edit`** —
+tool set (`Read` / `Bash` / `Glob` / `Grep`). On the DEFAULT path it does NOT
+get `Agent`: isolated subagents are on by default and an isolated judge cannot
+cascade-spawn (`modules/_common.py:2425-2429`), which is what the "no cascade"
+in the diagram below means. Only the legacy in-process `AgentDefinition` and
+the orchestrator-invoked judge session register recon as a delegate. **No
+`Write` / `Edit`** —
 judge cannot patch the script.
 
 **main ↔ peers** quintet (isolated subagent path, default ON):
@@ -616,7 +654,7 @@ Gates, all of which must hold:
 - there is an actionable `retry_hint` or `alternative_paths`;
 - the verdict is not `network_error` (a dead remote is not a method problem).
 
-Applies to the four loop modules (crypto / pwn / web / rev); `misc` and
+Applies to the five loop modules (crypto / pwn / web / rev / web3); `misc` and
 `forensic` are one-shot pipelines with no retry loop. The judge prompt lists
 explicit exclusions — success, a dead remote, environment limits, a proven
 true-negative, and "same method, tweaked" — so this stays a genuine change of
@@ -713,9 +751,10 @@ back, arm `COST_CAP_USD`.
 ### Fallback artifact safety net
 
 When something stops main mid-run before it produced an artifact —
-budget exhausted, SDK transport killed, cost cap — the
+budget exhausted, SDK transport killed, an agent exception classified
+`killed`/`timeout` — the
 orchestrator does **not** abort the job. Instead
-`write_fallback_artifacts(work_dir, log_fn)`
+`write_fallback_artifacts(work_dir, log_fn, module=None)`
 (in `modules/_common.py`) drops a probe-only `exploit.py` + a brief
 `report.md` into the work dir, then **continues into the sandbox +
 judge dispatch** as if main had finished normally. The job ends as
@@ -727,7 +766,8 @@ The fallback exploit.py:
 - loads `./.chal-libs/libc_profile.json` if present (so chal-libc-
   fix's structured glibc snapshot is preserved across the retry),
 - connects to the remote target if one was passed via `argv[1]`,
-- sends a single newline + reads back what the server prints,
+- sends the literal `help` and reads back what the server prints (both the
+  banner and the follow-up land in the log via `log.info`, not bare stdout),
 - writes the response to stdout so the runner captures it.
 
 It is intentionally **not** an exploit — it's a minimal scaffold
@@ -768,7 +808,7 @@ Workflow inside one debugger turn:
 2. **One of three gdb session shapes** (the prompt makes this
    explicit since the Bash tool is one-shot):
    - **Pattern A** — short `-ex` chain (≤5 commands).
-   - **Pattern B (recommended)** — `gdb -batch -x /tmp/probe.py`
+   - **Pattern B (recommended)** — `gdb -batch -x $TMPDIR/probe.py`
      where `probe.py` runs `gdb.execute(...)` in sequence, branches
      on `gdb.parse_and_eval("$reg")`, and uses GEF helpers
      (`heap chunks`, `vmmap`, `canary`, `pattern …`, `xinfo`). One
@@ -1116,13 +1156,13 @@ All knobs live in two places:
    | `WORKER_CONCURRENCY` | `3` | **legacy / ignored.** Parallel jobs is the number of `worker-N` services in `docker-compose.yml`; each slot runs exactly one. Kept only for a pre-split compose file. |
    | `JOB_TTL_DAYS` | `7` | auto-delete jobs older than N days (`0`=keep) |
    | `JOB_TIMEOUT` | `900` | **not a deadline** — only scales RQ's hard ceiling (`×4`, floor 24 h, cap 7 d). See [Timeouts](#timeouts) |
-   | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. |
+   | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. **Since `5570961` this is the BASE, not the last word**: every job start re-applies it via `docker update` (idempotent — it heals a slot an earlier run left raised), and with `dynamic_worker_mem` ON the governor may raise it for `rev`/`crypto`/`web` or after a cgroup OOM. See [Concurrency](#concurrency). |
    | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude`, `grok`, or `gpt`. See [Agent providers](#agent-providers) |
    | `GROK_MODEL` / `GROK_EFFORT` | `grok-build` / empty | model + reasoning effort used when `AGENT_PROVIDER=grok` |
    | `GPT_RUNTIME` | `codex` | `codex` = Codex CLI + ChatGPT OAuth; `responses` = direct Platform API-key billing |
    | `OPENAI_API_KEY` | empty | only used when `GPT_RUNTIME=responses`; never passed to the Codex OAuth subprocess |
    | `GPT_MODEL` / `GPT_EFFORT` | `gpt-5.6-sol` / `medium` | model + reasoning effort used by Codex CLI (or the optional Responses backend) |
-   | `HOST_CODEX_HOME` | `${HOME}/.codex-hextech` | HexTech-only Codex auth/session directory, bind-mounted rw into api + workers. `start.sh` bootstraps only OAuth from the host TUI's `~/.codex/auth.json`; keeping the homes separate prevents root containers from breaking the live TUI's `config.toml` ownership. |
+   | `HOST_CODEX_HOME` | `./data/codex-home` | HexTech-only Codex auth/session directory, bind-mounted rw into api + workers. `start.sh` bootstraps only OAuth from the host TUI's `~/.codex/auth.json`; keeping the homes separate prevents root containers from breaking the live TUI's `config.toml` ownership. |
    | `HOST_GROK_HOME` | `${HOME}/.grok` | host path of the Grok Build config, bind-mounted into api + worker. **Pin it explicitly.** A snap-confined `docker` CLI reports `HOME` as `~/snap/docker/<rev>`, so `docker compose up -d` through `/snap/bin/docker` resolves the default to an empty directory and silently mounts that — the worker then has no `grok` binary and no auth, with no error anywhere. (`docker compose restart` keeps the old mount, so only a *recreate* exposes it.) Same reason `HOST_CLAUDE_HOME` is pinned. |
    | `WEB_PORT` | `8000` | host port |
    | `GHIDRA_VERSION` / `GHIDRA_BUILD_DATE` | `12.0.4` / `20260303` | Ghidra release used by decompiler image |
@@ -1134,15 +1174,43 @@ All knobs live in two places:
    | `ENABLE_JUDGE` | `1` | legacy boolean behind `judge_mode`. When the effective mode gates, wraps an `auto_run` execution with **two** judge stages (pre / post) — the stall-detection stage is excluded and never runs. Gating is per module: `enforce` covers pwn and web; everything else records instead. Set to `0` to skip judge calls entirely. See [judge](#judge-modules_judgepy). |
    | `AUTO_RETRY_MAX` | `-1` | postjudge-driven inline retries within a single job. `0` disables the loop (legacy fire-and-forget). Positive int caps at exactly N retries on top of the initial run. `-1` / `inf` / `unlimited` lets the loop run until natural exit (success, no actionable hint, error, user Stop, timeout). See [auto-retry triangle](#auto-retry-triangle). |
    | `USE_ISOLATED_SUBAGENTS` | `1` | when `1` (default), main delegates via the MCP tool `mcp__team__spawn_subagent` — each subagent runs in its own `claude` CLI subprocess and only the final-text reply lands in main's history. Set to `0` for the legacy in-process `agents={}` path (kept as a fast rollback). See [Subagent isolation](#subagent-isolation-default-on). |
-   | `SUBAGENT_SPAWN_CAP` | `0` | runaway cost guard. `0` = unlimited (recommended — aggressive delegation is encouraged for context efficiency, and the orchestrator already auto-spawns a recon subagent before main's first turn). Set to a positive int to bound how many delegations one run can make. |
+   | `SUBAGENT_SPAWN_CAP` | `0` | **inert — nothing reads it.** The name appears in `.env` and in prompt text shown to the model (`modules/_prompts.py`), but no code path consults it: the guard the comments name, `_maybe_subagent_cap()`, has no definition in the repo. Setting a positive int changes nothing. Delegation is unbounded in practice — see [Spawn cap — not implemented](#subagent-isolation-default-on). |
    | `ENABLE_EXPLOIT_LIBRARY_HINT` | `0` | when `1`, every job's user prompt is prepended with a short paragraph listing same-module entries from the operator-curated [Exploit Library](#exploit-library) at `/data/exploits/`. OFF by default — flip on once the library has curated entries you trust. |
-   | `COST_CAP_USD` | `40` | total-spend circuit breaker (main + subagents). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). Generous by design — catches only a runaway tail. `0` disables. See [circuit breaker](#anti-anchoring-circuit-breaker). |
+   | `COST_CAP_USD` | `0` | total-spend circuit breaker (main + subagents). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). **Disabled by default** (`DEFAULT_COST_CAP_USD = 0.0`, `modules/_common.py:4862`; `.env.example` ships `0`). Set a positive number to arm it. See [circuit breaker](#anti-anchoring-circuit-breaker). |
    | `CONTRARIAN_MIN_COST_USD` | `6` | minimum total spend before a subagent dead-end signal can arm the one-shot contrarian-reframe user-turn (only on easy-/shortcut-framed jobs). See [circuit breaker](#anti-anchoring-circuit-breaker). |
    | `MONITOR_ENABLED` | `1` | live per-job [monitor](#monitor-modules_monitorpy) narration feed. `0` disables the always-on supervisor and all narration. |
    | `MONITOR_MODEL` | `claude-sonnet-4-6` | cheap model pinned for monitor narration — never the job's opus. |
    | `MONITOR_LANGS` | `ko,en` | comma-separated languages the monitor narrates each signal batch in (the UI picks which to show). |
+   | `DYNAMIC_WORKER_MEM` | `0` | lets the memory governor raise a slot's cgroup cap for `rev` / `crypto` / `web` jobs, and again after a real cgroup OOM. OFF by default; the per-job sampler runs either way. Normally set from Settings rather than here — the key ships in neither `.env` nor `.env.example`. See [Concurrency](#concurrency). |
 
-2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides `.env`
+2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides
+   `.env` without restart. Since `10e3208` it is **six sections behind a
+   vertical menu**, not one flat page: *Agent & routing* · *Providers &
+   models* · *Model presets* · *Judge & hints* · *Jobs, workers & spend* ·
+   *Access, callbacks & tunnel*. They are panes of ONE `<form>` with ONE Save,
+   shown and hidden by class — so a Save posts every section, including edits
+   in a pane that is off-screen. Per-pane dirty dots show which hidden section
+   holds unsaved edits; Reload asks for confirmation because it discards edits
+   in every section, not just the visible one; the form is `novalidate` with a
+   manual `checkValidity()` so an invalid control in a hidden pane cannot make
+   Save a silent no-op. The Save footer hides on *Model presets*, which has its
+   own Save writing `model_presets.json`. Two readouts refresh only when their
+   pane is opened (tunnel status on *Access*, live worker memory on *Jobs,
+   workers & spend*), so a stale number on a pane you have not visited is
+   expected, not a bug. The chosen section persists in `localStorage`. Oracle:
+   `scripts/test_settings_sections_ui.js`.
+
+   What it overrides: Anthropic API key, Claude model + effort, Auth token,
+   Job TTL, Job timeout, Callback URL, **Spend budget (USD)**, **Judge mode**
+   (`off` / `shadow` / `enforce` — the old **Enable judge** checkbox is gone;
+   the boolean is derived from the select on save), **Use Exploit Library
+   hints**, **Agent provider** (`claude` / `grok` / `gpt`) with its per-role
+   provider overrides and the Grok/GPT key + model + effort fields, **Worker
+   memory limit**, and **Dynamic per-slot memory** (see
+   [Concurrency](#concurrency)). **Worker concurrency is displayed read-only
+   and the input is `disabled`** — the worker forces it to 1 and logs that it
+   ignored the stored value; parallelism is the slot COUNT. The memory limit is
+   applied live via `docker update` — no restart.
    without restart for: Anthropic API key, Claude model, Auth token, Job TTL,
    Job timeout, Worker concurrency, Callback URL, **Spend budget (USD)**,
    **Enable judge**, **Use Exploit Library hints**, **Agent provider**
@@ -1243,8 +1311,41 @@ cookie-based). Empty = no auth (dev mode).
 
 The worker is **N containers, one per slot** (`worker-1`, `worker-2`, ...),
 each running a single RQ worker subscribed to the same Redis queue. Jobs
-distribute automatically. Add or remove a slot by copying a service block in
-`docker-compose.yml` — there is no runtime setting for it.
+distribute automatically. The Settings field is read-only, because
+`worker/runner.py` forces concurrency to 1 whenever `WORKER_SLOT` is set:
+parallelism IS the number of `worker-N` services in `docker-compose.yml`.
+
+**Change it with `scripts/worker-slots.sh`**, not by hand:
+
+```bash
+./scripts/worker-slots.sh              # current slots, caps, and what fits
+./scripts/worker-slots.sh set 3        # change and apply
+./scripts/worker-slots.sh set 3 --dry-run
+```
+
+Editing the file and running `docker compose up -d` yourself is the one path
+that can over-commit the VM, and it walks past four separate guards:
+
+- **the budget gate never runs.** The 70 % ceiling lives in `PUT /api/settings`
+  and gates `docker update`; compose sets `mem_limit` at container CREATE and
+  never reaches that code. On a 16 GB VM, 3 slots × 4g is 12 GiB against a
+  10.93 GiB ceiling — the state that froze WSL on 2026-07-29 and 08-01. The
+  script refuses by default and prints the cap that would fit.
+- **`start.sh` exports the home mounts.** A bare `up` leaves
+  `HOST_CODEX_HOME` / `HOST_CLAUDE_HOME` / `HOST_GROK_HOME` unset, which mounts
+  an empty Codex home and kills every GPT job on a missing login.
+- **`docker-compose.override.yml` grants `/dev/kvm`**, and `start.sh`
+  regenerates it from the worker services it finds. A hand-added slot silently
+  has none, and kernel-pwn jobs that land there lose KVM.
+- **shrinking leaves an ORPHAN.** `up -d` does not delete a vanished service:
+  the container keeps running, keeps its cgroup cap, and keeps an RQ
+  registration nobody sweeps, since each slot only sweeps its own
+  `htct-s<N>-w*` prefix. (The key does expire on its own — measured TTL 364 s —
+  but until it does, the UI and `restart.sh` both count a worker that is gone.)
+
+The script does each of those, then verifies: per-slot state, `WORKER_SLOT`,
+cap with `memswap` equal, Codex auth mounted, RQ registration, and that the
+container count matches the slot count with no orphan left.
 
 The UI header shows `<busy>/<total> workers · <queued>` in real time.
 
@@ -1268,8 +1369,54 @@ PID 1) reaps the orphans; slots stop a job from seeing a concurrent job's.
 challenge containers, which are SIBLING cgroups (`worker/docker_memguard.sh`,
 `CHAL_CONTAINER_MEM` = 2g each) and are *not* charged to any slot. On a 16 GB
 VM that is 2 slots × 4g. A single heavy pwn job peaked at 3222 MiB, so 4096
-clears it; an even 3-way split of 8g would not have. Settings enforces the
-total.
+clears it; an even 3-way split of 8g would not have. `memswap_limit` is pinned
+EQUAL to `mem_limit` at all three places the cap is set
+(`docker-compose.yml:130-131`, `api/routes/settings.py:236`,
+`modules/worker_mem.py:308`): with `mem` alone Docker permits swap up to 2× the
+cap, and slow swap thrash is the state that wedged the VM on 2026-07-29 and
+2026-08-01. A hand-rolled `docker update --memory` without `--memory-swap`
+reintroduces exactly that.
+
+**Per-slot memory is measured on every job and moved on none of them by
+default** (`modules/worker_mem.py`, wired at `worker/runner.py` by overriding
+`rq.Worker.execute_job` — the parent process, so the bracket survives the work
+horse being SIGKILLed).
+
+- A **sampler** runs unconditionally, flag or no flag. It polls the slot's own
+  cgroup every 5 s into `data/jobs/<id>/worker_mem.jsonl` and merges
+  `{peak_bytes, oom_kill_delta, cap_bytes}` into `meta.worker_mem` at the end.
+  That is the evidence to size `WORKER_SLOT_MEM` from — and it is the one
+  artifact the TTL sweep does NOT promote to `data/job-measurements/`
+  (`MEASUREMENT_ARTIFACTS`, `worker/runner.py:19`), so copy it out first.
+- Every job start also re-applies the slot's **base** cap via `docker update`,
+  flag or no flag. Idempotent; its job is to heal a slot an earlier run left
+  raised. So the worker now needs the docker socket and the `docker` SDK for a
+  normal start, and says `[worker-mem] cap not applied: …` when it has neither.
+- A **governor** changes the cap only when `dynamic_worker_mem` is ON (default
+  OFF). It wants `max(base, 8 GiB)` for `rev` / `crypto` / `web`. pwn is
+  deliberately absent: every pwn OOM in the 88-job census was the QEMU guest or
+  the target binary, neither of which lives in the slot's cgroup. Each change
+  is taken under one flock at `/data/.worker-memory.lock` and gated on
+  `sum(other slots' caps) + want ≤ 70 % of VM RAM` and on
+  `want ≥ unreclaimable × 1.5`.
+- **On this 15.62 GiB VM, flipping the switch only ever produces refusals.**
+  70 % is 10.93 GiB; the other slot's 4 GiB plus a wanted 8 GiB is 12.00 GiB.
+  So the feature does nothing except write refusal lines into `run.log` — for
+  exactly the three modules it targets. Stopping the other slot does not help:
+  the sum walks `containers.list(all=True)` and reads `HostConfig.Memory`,
+  which a stopped container keeps. The precondition is a bigger VM (raise
+  `memory=` in `.wslconfig`, then `wsl --shutdown`), not a workaround.
+- On a real cgroup OOM the escalator raises the cap 1.5×. Here it reaches
+  4g → 6g (10.00 GiB total, allowed) and stops: 6g → 9g is 13.00 GiB and is
+  refused. `MAX_ESCALATIONS = 2` is not the binding limit — the counter only
+  increments on an APPLIED change (`modules/worker_mem.py:409-411`), so a
+  refused step is simply retried on the next OOM. The reachable ceiling on
+  this host is **6g via one OOM**.
+- The end-of-job **restore** goes through the same shrink floor, so a slot
+  whose unreclaimable footprint is still large refuses to shrink and logs
+  `[worker-mem] cap NOT restored to base (…) — the next job's start will heal
+  it`. Between two jobs a slot can legitimately be bigger than you believe,
+  and that one line is the only symptom.
 
 ## Job lifecycle
 
@@ -1341,9 +1488,17 @@ continues to reject `module=hybrid`.
 | POST | `/api/modules/misc/analyze` | upload file → enqueue |
 | POST | `/api/modules/crypto/analyze` | upload zip → enqueue |
 | POST | `/api/modules/rev/analyze` | upload binary → enqueue |
+| POST | `/api/modules/web3/analyze` | upload contract sources → enqueue |
+| POST | `/api/modules/hybrid/analyze` | upload a chained challenge → enqueue one public parent + up to two `internal=true` children (see [Hybrid parent/child lifecycle](#hybrid-parentchild-lifecycle)) |
+| POST | `/api/modules/live-fire/analyze` | live-fire patch loop |
+| POST | `/api/modules/pwn/analyze` | upload binary → enqueue |
+| POST | `/api/modules/forensic/collect` | upload disk/memory image → enqueue |
+| POST | `/api/modules/misc/analyze` | upload file → enqueue |
+| POST | `/api/modules/crypto/analyze` | upload zip → enqueue |
+| POST | `/api/modules/rev/analyze` | upload binary → enqueue |
 | POST | `/api/jobs/{id}/run` | re-run produced exploit/solver in a fresh sandbox |
 | PATCH | `/api/jobs/{id}/target` | update only `target_url` (+ `target_urls`) on the job's meta — no retry, no resume, no new job. Body `{"target": "<new>"}` (newline/comma-separate for several; use `(none)` or `""` to clear). The next manual `/run` (and the default of any future `/retry`) picks up the new value. Audit-logged to `run.log`. |
-| POST | `/api/jobs/{id}/retry` | regenerate the job. JSON body fields all optional: `hint` (skip reviewer if present), `target` (override prior target_url; newline/comma-separate for several; sentinel `(none)` clears it). Empty body = auto reviewer + keep prior target. |
+| POST | `/api/jobs/{id}/retry` | regenerate the job. JSON body fields all optional: `hint` (skip reviewer if present), `target` (override prior target_url; newline/comma-separate for several; sentinel `(none)` clears it), `challenge_secret_key` + `challenge_secret_value`. Empty body = auto reviewer + keep prior target. Returns **409 `stop_ack_timeout`** if the source job's Codex turn has not released its lock — no successor job is created, so a retry that 409s has changed nothing. |
 | POST | `/api/jobs/{id}/retry/stream` | same as `/retry` but Server-Sent Events stream the reviewer text live |
 | POST | `/api/jobs/{id}/resume` | hard-stop a queued/running job, then enqueue a fresh one with the same body shape as `/retry`; `hint` required here. Carries `./work/` + forks the prior SDK session. |
 | POST | `/api/jobs/{id}/resume/stream` | SSE-streamed resume. With `{"hint":"…"}` works exactly like `/resume`. With an empty body, calls the reviewer to write the hint first. Both modes carry `./work/`, fork the prior session, and prepend the `[RESUMING]` preamble. |
@@ -1378,6 +1533,12 @@ HexTech_CTF_TOOL/
 │   ├── _common.py       # shared helpers (cost, paths, meta)
 │   ├── _runner.py       # sandbox container helper
 │   ├── settings_io.py   # /data/settings.json read/write + OAuth detection
+│   ├── worker_mem.py    # per-slot cgroup sampler + governor + OomEscalator
+│   ├── job_secrets.py   # challenge-credential store + exact-value redaction
+│   ├── codex_turn_guard.py  # inherited flock + stop fence for Codex turns
+│   ├── storage.py
+│   ├── hybrid/          # parent that fans out to two hidden children
+│   ├── web3/            # SYSTEM_PROMPT + analyzer.run_job (full loop module)
 │   ├── web/             # SYSTEM_PROMPT + analyzer.run_job
 │   ├── pwn/             # SYSTEM_PROMPT + decompile + analyzer
 │   ├── crypto/
@@ -1389,14 +1550,40 @@ HexTech_CTF_TOOL/
 ├── misc/                # binwalk + foremost + steghide + zsteg + ...
 ├── runner/              # Python + crypto libs + pwntools (sandbox)
 ├── web-ui/              # static HTML/CSS/JS
-├── scripts/             # one-off operator tools (e.g. job-status.sh)
+├── scaffold/            # /opt/scaffold/ exploit templates, baked into the
+│                        #   worker image
+├── scripts/             # operator tools (job-status.sh, sim_worker_mem.py)
+│                        #   AND the oracle suite — ~70 files, mostly
+│                        #   test_*.py / test_*.js
 └── data/                # job uploads + outputs (gitignored)
+    ├── .worker-memory.lock  # slot-wide flock; the memory budget is a
+    │                        #   VM-wide resource, so it cannot live in
+    │                        #   any one job's work dir
+    ├── job-secrets/<id>.json   # challenge credential, 0600 under a 0700
+    │                           #   dir — a SIBLING of jobs/, on purpose
+    ├── job-measurements/<id>/  # TTL-sweep promotion: events.jsonl,
+    │                           #   meta.json, run.log ONLY
+    ├── uploads/                # parent-job uploads (hybrid keeps its here)
     ├── jobs/<id>/
-    │   ├── meta.json    # status + tokens + cost
+    │   ├── meta.json    # status + tokens + cost (+ worker_mem,
+    │   │                #   operator_stop_audit)
     │   ├── run.log      # timestamped agent transcript
-    │   ├── result.json  # final summary (post-judge)
+    │   ├── result.json  # final summary (post-judge) — deliberately NOT a
+    │   │                #   flag-scan input
+    │   ├── worker_mem.jsonl  # one cgroup sample every 5 s, EVERY job,
+    │   │                     #   flag or no flag. Not in the measurement
+    │   │                     #   promotion list — copy it out before the
+    │   │                     #   TTL deletes the job dir.
     │   ├── bin/ src/    # upload (per module — zips auto-extracted)
     │   └── work/        # agent cwd — exploit.py, report.md, …
+    │       ├── .codex-turn.lock        # held for the Codex CLI's whole
+    │       │                           #   lifetime; the fd is inherited
+    │       │                           #   so killing the horse can't
+    │       │                           #   fake a release
+    │       ├── .codex-stop-requested   # fence. Durable on purpose — a
+    │       │                           #   stale one makes EVERY future
+    │       │                           #   Codex launch for this job
+    │       │                           #   raise. Only /continue clears it.
     │       └── tmp/     # per-job TMPDIR — `TMPDIR`/`TMP`/`TEMP`
     │                    #   are injected into every agent + sandbox
     │                    #   subprocess so concurrent jobs never share
@@ -1409,7 +1596,7 @@ HexTech_CTF_TOOL/
 
 ## Module-specific notes
 
-### 🐳 Docker challenge (opt-in: pwn / rev / crypto / misc / web3 / forensic)
+### 🐳 Docker challenge (opt-in: every module — web / pwn / rev / crypto / misc / forensic / web3, and per-stage on hybrid)
 
 Some challenges ship their own `Dockerfile` and only behave correctly inside
 it. Job `d8c717ba5b03` shipped one plus a README saying *"This binary must be
@@ -1444,13 +1631,23 @@ Ticking **🐳 Docker challenge** on any module form that offers it sets
    `/proc/net/route`, inspect with `docker exec` — is in the stanza, together
    with the three dead ends, because an agent told only the working route still
    tries `127.0.0.1` first;
-4. gates `reap_chal_containers` on the same flag at job start **and** in a
-   `finally`, so a container the agent spins up cannot orphan.
+4. arranges for `reap_chal_containers` to run at job start **and** in a
+   `finally`, so a container the agent spins up cannot orphan. Gating differs
+   by module and it is worth knowing which: **pwn** reaps only when the flag is
+   set (`modules/pwn/analyzer.py:2514`), while **web** reaps
+   unconditionally (`modules/web/analyzer.py:499`, `:551`) — its prompt can
+   start a container with the box unticked, so a flag-gated reap there would
+   leave exactly the orphan this exists to prevent. The reap itself also
+   consults the `reap_job_containers` setting (`modules/_common.py:1109`).
 
 Unticked, the helper returns `""` and nothing changes.
 
-`web` is excluded because its own prompt already has a RUN THE CHALLENGE
-LOCALLY section with real commands. **pwn used to be excluded on the same
+`web` used to be excluded, because its own prompt already has a RUN THE
+CHALLENGE LOCALLY section with real commands. It stopped being excluded in
+`51e732f` — the commit immediately before this README's last write, so this
+paragraph was stale the day it was written. Web keeps that always-available
+guidance when the box is off; ticking it makes BUILD + RUN mandatory, the same
+as everywhere else. **pwn used to be excluded on the same
 belief, and that belief was false** — pwn's Dockerfile guidance was almost
 entirely about READING one for sysctl / deploy context. It joined the opt-in on
 2026-08-09, and the reason is specific to pwn: `chal-libc-fix` stages the
@@ -1482,6 +1679,14 @@ probability model can rest on exactly that.
   web module can spin the challenge itself in a local sibling container
   (the worker has the docker socket) for full environment fidelity and a
   true end-to-end exploit run, tearing it down afterward.
+- Worker browser + discovery tooling (`9a5f496`): `chromium` with a
+  version-matched `chromium-driver` (so selenium needs no matching dance) —
+  **callers must pass `--no-sandbox`**, there is no user namespace in the
+  container — plus `ffuf` and `dirb`'s `/usr/share/dirb/wordlists/common.txt`.
+  `ffuf` and `seccomp-tools` are installed best-effort (WARN-masked), so a
+  build behind a blocked network ships WITHOUT them and still succeeds; the
+  build log (`ffuf OK …` vs `[WARN] ffuf unavailable`) is the only way to tell.
+  `wabt`/`wasm2wat` is there too, for the misc/rev wasm cases.
 
 ### Pwn
 - **Upload**: zip preferred (any zip / tar bundle containing the
@@ -1501,7 +1706,8 @@ probability model can rest on exactly that.
   with **GEF** auto-loaded (`/etc/gdb/gdbinit`; use `gdb -nx` to
   disable), `strace`, `ltrace`, `patchelf`, `cpio`, `ROPgadget`
   (`capstone>=5` so ARM64 gadget search returns hits), `one_gadget`,
-  `pwn checksec`.
+  `pwn checksec`, `seccomp-tools` (dump a filter instead of reading BPF by
+  hand) and `keystone-engine` (assemble at runtime without shelling to `as`).
 - **`gdb-clean`** — drop-in `gdb` wrapper that strips GEF's
   per-invocation banner (`X commands loaded and Y functions added`,
   `[!] To get gef-extras …`) and ANSI/readline escape codes from
@@ -1632,7 +1838,13 @@ probability model can rest on exactly that.
 ### Forensic
 - Auto-detects qcow2 / vmdk / vhd / vhdx / e01 / raw / memory / **log**.
 - E01 is converted to raw via `ewfexport`; vmdk/qcow2/vhd via `qemu-img`.
-- Memory dumps run a curated Volatility 3 plugin set per detected OS.
+- Memory dumps run a curated Volatility 3 plugin set per detected OS in the
+  `forensic` sibling image.
+- **The worker itself now carries network + memory tooling too** (`9a5f496`):
+  `tshark` and `tcpdump` (tshark's postinst is preseeded so a non-superuser
+  may NOT capture — read pcaps, don't sniff), `scapy`, and `volatility3`. So a
+  pcap or a memory dump that arrives as a plain misc/pwn upload can be worked
+  in-place without routing it through the forensic container.
 - **Image type `log`** is a fast path for raw log uploads: skip
   disk/memory analysis and run only the log-mining stage. Accepts a
   single text file (`.log`, `.txt`, …), a `.gz` of one, or any
@@ -1716,7 +1928,7 @@ probability model can rest on exactly that.
 ```bash
 docker compose up -d              # start core services
 docker compose down               # stop
-docker compose logs -f worker     # tail worker logs
+docker compose logs -f worker-1 worker-2   # tail worker logs (per-slot services)
 docker compose ps                 # status
 
 # Source-code changes — restart is enough (no rebuild) because api,
@@ -1751,12 +1963,26 @@ docker compose restart api        # api/routes/*, api/main.py changes
 # too old to --check modern JS; validate with a modern node image:
 docker run --rm -v "$PWD/web-ui":/w node:20-slim node --check /w/app.js
 
+# ...and if you changed app.js, re-stamp the `?v=` cache buster in
+# index.html BY HAND. `stamp-version.sh` does NOT do it, and a browser
+# serving the old app.js against new HTML is the usual "my deploy did
+# nothing" report. fc9bc79 moved it ad808f809 -> ab8e75f7e.
+
 # Image rebuilds — needed for Dockerfile, requirements.txt, or tool-image
 # (decompiler/forensic/misc/runner/sage) changes. deploy.sh does NOT do
 # this; see the rebuild guard below.
-docker compose build api worker
-docker compose --profile tools build            # all tool images
+docker compose build api worker-1 worker-2
+docker compose --profile tools build            # all 4 tool images
+docker compose --profile tools-sage pull sage   # sage is PULLED, not built
 docker compose --profile tools build runner     # just one
+
+# Per-slot memory: the cap-CHANGING half can only ever be REFUSED against the
+# real slots on this VM, so it is exercised in its own universe — the harness
+# builds its own network, redis, two containers and /data and runs a real RQ
+# worker inside them. Needs docker + the worker image; non-zero on any failure.
+# It ends by proving it leaked nothing: both production slots still 4 GiB,
+# /data/.worker-memory.lock never created, dynamic_worker_mem still false.
+python3 scripts/sim_worker_mem.py [--keep]
 
 # Wipe all jobs (UI also has a Bulk Delete button)
 curl -X DELETE 'http://localhost:8000/api/jobs?all=true'
@@ -1815,7 +2041,7 @@ docker compose --profile tools --profile tools-sage build --pull
 # 4. Recreate core services so they pick up the new images. The
 #    bind-mounted source (./api, ./worker, ./modules) stays in
 #    place — only the underlying image layer changes.
-docker compose up -d --force-recreate api worker redis
+docker compose up -d --force-recreate api worker-1 worker-2 redis
 
 # 5. Verify everything came back healthy.
 docker compose ps
@@ -1844,7 +2070,7 @@ the existing tag aliases until step 6's `prune` removes them.
 |---|---|---|
 | `api` | `./api:/app/api:ro`, `./modules:/app/modules:ro`, `./web-ui:/app/web-ui:ro` | hot-reload source on `restart api` |
 | `worker-N` | `./worker:/app/worker:ro`, `./modules:/app/modules:ro` | hot-reload source on a slot restart |
-| both | `./data:/data` (rw), `~/.claude:/root/.claude` (rw — session jsonl carry on /retry) | persistence |
+| both | `./data:/data` (rw), `~/.claude:/root/.claude` (rw — session jsonl carry on /retry), `/var/run/docker.sock` (sibling containers; also what the per-slot memory sampler needs at every job start), `${HOST_GROK_HOME:-~/.grok}`, `${HOST_CODEX_HOME:-./data/codex-home}` (rw) | persistence + auth |
 
 Without `./api:/app/api:ro` an `api/routes/*.py` edit silently has
 no effect until you `docker compose build api`. Concrete incident
@@ -1861,8 +2087,12 @@ ROPgadget dumps, …) and easily reaches 30+ MB; concurrent jobs also
 collide there. Two layers of defense:
 
 1. **Per-job isolation** — `make_standalone_options()` pre-sets
-   `$TMPDIR` to `./tmp/` (under the job's cwd) for every subagent's
-   env. Python `tempfile.*`, pwntools, etc. follow it. Each subagent
+   `$TMPDIR` to `./tmp/` (under the job's cwd) for every agent process's
+   env — main, subagents, AND pre-recon, in `agent_job_env()`
+   (`modules/_common.py:2576`). The consolidation is the point: main and
+   pre-recon used to lack it, and GPT pre-recon on job `6685e3e65add`
+   unpacked into container-global `/tmp` and analysed a `prob.ko` an earlier
+   job had left there. Python `tempfile.*`, pwntools, etc. follow it. Each subagent
    prompt (recon, debugger, judge, triage) has a "scratch path
    discipline" section reminding the agent to write
    `$TMPDIR/probe.py` in Bash rather than the absolute
@@ -1931,15 +2161,23 @@ Three flavors:
    an operator note, for the "agent solved it but was blocked on an
    EXTERNAL action" case. See below.
 
-Web / Pwn / Crypto / Rev jobs can be re-issued at any terminal status
-(`failed`, `no_flag`, `finished`, `stopped`) — and Stop&resume can also
-fire while the job is still `queued` / `running`. Buttons:
+**Retryable and continuable are not the same set.** `/retry` rebuilds the job
+from its inputs — Web / Pwn / Crypto / Rev / **Web3** / **Forensic**
+(`_RETRYABLE_MODULES`, `api/routes/retry.py:140`). `/continue` forks the prior
+conversation in place, which forensic cannot do, so it is Web / Pwn / Crypto /
+Rev / Web3 only (`_CONTINUABLE_MODULES`, `:169`). The two lists are written
+out rather than derived, so a module nobody has considered defaults to
+refused; parity is held by `scripts/test_flag_ready.py` and
+`scripts/test_dashboard_ui.js`. Any of them can be re-issued at any terminal
+status (`failed`, `no_flag`, `finished`, `stopped`) — and Stop&resume can also
+fire while the job is still `queued` / `running`. `module=hybrid` is still
+refused by the scalar retry API. Buttons:
 
 | Button | What happens |
 |---|---|
 | **↻ Retry with reviewer hint** | The routed reviewer reads the prior job's `run.log`, exploit/solver, stdout/stderr, and module-relevant source, then writes an evidence-labelled retry plan designed to avoid repeating the previous theory. That hint is appended to the original description as `[retry-hint] …` and a fresh job is enqueued. Reviewer output streams into the UI live (SSE). |
 | **✏ Retry with my hint** | Inline textarea. Whatever you type is appended as `[retry-hint]` — the reviewer is **not** called. |
-| **💬 Continue (operator note)** | `POST /api/jobs/{id}/continue {comment, target?}`. Re-runs the SAME job id (no new job, no new cwd) resuming the prior SDK session, with the operator note folded in as priority guidance under a "this is NOT a re-investigation — act on the note now; spend a one-shot resource on your COMPLETE exploit, don't probe" framing. Because the cwd is unchanged, the forked conversation's paths stay valid and there is no stale-path re-orientation. For when the agent fully solved the chal but waited on an external action (you restarted a one-shot DreamHack instance, the remote came back, a credential was handed over). The optional target updates `meta.target_url` (a restarted instance usually comes back on a new port — put it in the **New target** field, not the note). |
+| **💬 Continue (operator note)** | `POST /api/jobs/{id}/continue {comment?, target?, challenge_secret_key?, challenge_secret_value?}` — `comment` is no longer required if a challenge credential is supplied (a credential-only continuation gets a generated note). Not offered for **forensic**, which is retryable but not continuable: `/continue` forks the prior conversation in place and forensic has nothing to fork — `run_job` restarts at the collector regardless. Re-runs the SAME job id (no new job, no new cwd) resuming the prior SDK session, with the operator note folded in as priority guidance under a "this is NOT a re-investigation — act on the note now; spend a one-shot resource on your COMPLETE exploit, don't probe" framing. Because the cwd is unchanged, the forked conversation's paths stay valid and there is no stale-path re-orientation. For when the agent fully solved the chal but waited on an external action (you restarted a one-shot DreamHack instance, the remote came back, a credential was handed over). The optional target updates `meta.target_url` (a restarted instance usually comes back on a new port — put it in the **New target** field, not the note). |
 | **↻ Stop & resume with reviewer hint** | Only visible while the job is `queued`/`running`. Halts the in-flight job, asks the reviewer to write a diagnosis from the partial run, and submits the new job with that hint. SSE streams progress. |
 | **✋ Stop & resume with my hint** | Same as the reviewer variant but you write the hint yourself. |
 
@@ -1961,8 +2199,11 @@ exploit.
 - the previous job's `./work/` directory (partial `exploit.py` / `solver.py`
   / `report.md` / notes / decomp output) is copied into the new job, so
   the new agent literally sees the files the prior agent wrote.
-  `_carry_work_ignore` in `api/routes/retry.py` skips `tmp/` and
-  `__pycache__/` at every depth; `symlinks=True` preserves symlinks
+  `_CARRY_WORK_IGNORE_NAMES` in `api/routes/retry.py:1228` skips `tmp/`,
+  `__pycache__/`, `libsrc/` (re-staged deterministically each attempt, so
+  carrying it just bloats the retry tree) and `.codex-stop-requested` (carry
+  it and the child inherits a stop request it can never clear) at every depth;
+  `symlinks=True` preserves symlinks
   instead of dereferencing them. Without this filter, pwn jobs that
   extracted a Linux rootfs (cpio) into `./tmp/rootfs/` would hang
   copytree on the embedded `dev/console` character device or the
@@ -1986,9 +2227,11 @@ exploit.
 
 **Optional target override**: every retry/resume button accepts an optional
 new target. Reviewer-mode buttons prompt via `window.prompt()` (prefilled
-with the prior target); inline-form buttons add a one-line input under the
-hint textarea. Empty input keeps the prior target; the sentinel `(none)`
-clears it.
+with the prior target). Since `019e7a4` every retry/resume/continue form
+renders a MULTI-target row list (`+ add target` / `×`); rows are
+newline-joined and split server-side. The one surviving `window.prompt()` for
+a target is the **Run in sandbox** button. Empty input keeps the prior target;
+the sentinel `(none)` clears it.
 
 If the SDK can't locate the prior session for any reason, the new agent
 boots fresh — `./work/` + the priority-guidance hint are still sufficient
@@ -2010,6 +2253,17 @@ Errors from the reviewer (Claude API auth/rate-limit/credit failures,
 policy refusals, empty responses) are surfaced in the panel with a red
 "no new job created" header and the error body. The new job is **not**
 enqueued in that case.
+
+The other refusal is not the reviewer's. `/retry`, `/resume` and `/continue`
+all wait for the source job's Codex CLI to release its turn lock, and return
+**409 `{"kind": "stop_ack_timeout"}`** if it has not
+(`CODEX_STOP_ACK_TIMEOUT_S`, default 15 s; guard in
+`modules/codex_turn_guard.py`). The lock fd is inherited by the CLI, so
+killing the RQ work horse cannot make it look free while the real writer still
+holds the shared Codex thread store open. Operator consequence: **no successor
+job is created, but on the `/resume` path the source job is already marked
+`stopped`** — re-issue. Only GPT/Codex-provider jobs can hit this; a job with
+no turn-lock file passes immediately.
 
 ## Exploit Library
 
@@ -2112,9 +2366,21 @@ trusted.
    inside `exploit.py` before emitting the marker, so the trusted stdout
    carries the final plaintext flag, not a blob.
 2. **Trusted tier** — files produced by the actual runner / OOB
-   collector: `exploit.py.stdout`, `solver.py.stdout`,
-   `callbacks.jsonl`, `summary.json`, `result.json`. If ANY
+   collector: `exploit.py.stdout`, `exploit.py.stderr`, `solver.py.stdout`,
+   `solver.py.stderr`, `callbacks.jsonl`, `summary.json`
+   (`_TRUSTED_FLAG_SOURCES`, `modules/_common.py:1424`). If ANY
    non-placeholder flag appears here, return ONLY those.
+
+   That tuple is a floor, not the whole set: the trusted set is its UNION with
+   `meta.artifacts`, which is the only reason a crypto `solver.sage.stdout` is
+   trusted at all. **`result.json` is deliberately NOT a scan input**
+   (`_common.py:1649-1651`) — analyzers write it *after* their final scan and
+   include the flags they selected, so trusting it on a rescan would promote
+   the analyzer's own narrative decision to runner evidence. And when a turn
+   ends with `sandbox_started is False` plus an agent error, every
+   runner-owned name in the retry chain is REMOVED from the trusted set
+   (`_common.py:1763-1772`) — that is what stops a retry from inheriting its
+   parent's stale `*.stdout`.
 3. **Narrative tier** — `report.md`, `findings.json`. Consulted ONLY when
    the trusted/marker tiers are empty, and skipped entirely when the sandbox
    run was blocked/aborted. **`run.log` was REMOVED from this tier
@@ -2285,8 +2551,13 @@ real flag, so placeholder-only jobs never enter the curated set.
   no refetch.
 - **Stop button**. Halts a running/queued job WITHOUT deleting it — the
   status flips to `stopped` and the record + `./work/` are kept, so you
-  can inspect artifacts and then `/retry` or `/resume`. Distinct from
-  Delete (which removes the job) and from the soft-timeout kill.
+  can inspect artifacts and then `/retry` or `/resume`. Distinct from Delete
+  (which removes the job). It also fences future Codex launches for that job
+  before signalling RQ, and appends a bounded record to
+  `meta.operator_stop_audit` (last 16, `api/stop_audit.py`): what the status
+  was, whether the stop was sent, whether RQ cancelled, how many challenge
+  containers were found and killed, and whether termination was acknowledged.
+  That array is the first place to look when a Stop did not take.
 - **Version / last-patch badge**. The header shows the running commit +
   patch timestamp (stamped by `deploy.sh`) so an operator can confirm a
   redeploy actually took effect rather than serving stale code.
@@ -2357,7 +2628,29 @@ token. Treat the job_id as a secret if you care.
   could be disabled with `network_mode="none"` in `modules/_runner.py`.
 - The worker bind-mounts the host's `~/.claude` (rw, so OAuth tokens can
   refresh). Don't run untrusted code as the worker.
-- Only the `/api/health` route bypasses auth when an Auth Token is set.
+- **Seven** path prefixes bypass auth when an Auth Token is set, not one:
+  `/api/health`, `/api/version`, `/login`, `/static/`, `/favicon.ico`,
+  `/api/terminal/ws/` (the WebSocket authenticates inside the route) and
+  `/api/collector/` (`api/auth.py:16-22`, matched with `startswith`). This
+  matters because the tunnel exposes the whole api and the Auth Token is the
+  only mitigation offered above.
+- **Challenge credentials have their own ingress** (`modules/job_secrets.py`).
+  Every analyze form and every retry/resume/continue body takes
+  `challenge_secret_key` + `challenge_secret_value`; the value is stored at
+  `data/job-secrets/<id>.json` (0600 under a 0700 dir) — a SIBLING of
+  `data/jobs/`, deliberately outside it so hybrid parent-directory invariants
+  and the measurement archive cannot sweep it up. It is injected into every
+  agent process's environment, and struck out of `run.log`, `meta.json` and
+  every retry hint. Three things follow:
+  - redaction is **exact-value only**. The agent really does see the token in
+    its env; a token it base64s, splits, or re-encodes before printing is not
+    redacted.
+  - deleting a job directory by hand does **not** delete its credential (the
+    `DELETE /api/jobs/<id>` route does, `api/routes/jobs.py:698`), and any
+    `rsync` of `data/` carries it.
+  - with `job_ttl_days = 0` the cleanup loop returns early
+    (`worker/runner.py:178-184`), so `cleanup_orphaned_secrets` never runs at
+    all. "Retention = keep forever" silently means "credentials forever" too.
 
 ## Troubleshooting
 
