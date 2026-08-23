@@ -150,7 +150,7 @@ def safe_link(target_addr: int, chunk_addr: int) -> int:
 #    UAF / re-alloc to read main_arena.bins (libc leak).
 # 2. Pick a primitive matching profile['recommended_techniques']:
 #       - hooks_alive (glibc < 2.34): __free_hook overwrite is cheapest.
-#       - tcache_key (glibc >= 2.35): UAF over the key field first.
+#       - tcache_key (glibc >= 2.29): UAF over the key field first.
 #       - safe_linking (glibc >= 2.32): use safe_link() helper above.
 #       - FSOP chain: import scaffold/fsop_wfile.py.
 # 3. Trigger the primitive (free a chunk whose content is "/bin/sh\x00",

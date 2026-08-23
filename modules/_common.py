@@ -4799,7 +4799,7 @@ as HIGH severity when written from scratch:
 
   /opt/scaffold/tcache_poison.py
     — `safe_link()` auto-branches on libc_profile.json safe_linking.
-      `needs_key_bypass()` for glibc >= 2.35.
+      `key_bypass_needed()` for glibc >= 2.29.
 
   /opt/scaffold/aslr_retry.py
     — `aslr_retry(exploit_one, max_attempts=64)` for nibble-race
@@ -6758,12 +6758,17 @@ HEAP_FIX_HINTS: dict[str, str] = {
         "build_full_chain() leaves the vtable slot zeroed."
     ),
     "heap.tcache_key_not_bypassed": (
-        "FIX: glibc >= 2.35 adds a `key` field at offset +0x08 of "
-        "every tcache chunk. Double-free aborts with `free(): double "
-        "free detected in tcache 2`. Pattern: `free(victim); "
-        "edit(victim, p64(0))  # zero the key via UAF; "
-        "free(victim)`. The key-bypass check is helper-available in "
-        "/opt/scaffold/tcache_poison.py::needs_key_bypass(). After "
+        "FIX: glibc >= 2.29 adds a `key` field at offset +0x08 of "
+        "every tcache chunk (2.34 randomized the value it stores; the "
+        "check itself dates to 2.29 — see modules/pwn/libc_targets.py "
+        "\"tcache_key check added 2.29\"). Double-free aborts with "
+        "`free(): double free detected in tcache 2`. Pattern: "
+        "`free(victim); edit(victim, p64(0) * 2)  # zeroes fd AND the "
+        "key at +0x08 via UAF; free(victim)` — the write MUST reach "
+        "offset +0x08. A bare `p64(0)` clears only fd and the same "
+        "abort repeats byte-for-byte. The key-bypass check is "
+        "helper-available in "
+        "/opt/scaffold/tcache_poison.py::key_bypass_needed(). After "
         "that, normal tcache poison resumes."
     ),
     "heap.aslr_unstable": (
@@ -7393,11 +7398,26 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
             f"into the worker persists there and does NOT exist in the runner. "
             f"That `{mod}` imported cleanly while you were working proves "
             f"nothing about the sandbox.\n\n"
-            f"Rewrite the solver without `{mod}` (the standard library is "
-            f"present, and pure-Python integer/byte arithmetic is usually "
-            f"enough for GF(2^k) and modular work), or vendor the small part "
-            f"you need. Then verify the fix in the REAL sandbox before you "
-            f"finish:\n"
+            f"The runner is NOT stdlib-only. It ships pwntools, pycryptodome, "
+            f"gmpy2, sympy, z3-solver, pyboolector, cvc5, ecdsa, requests, "
+            f"httpx, numpy, web3/eth-abi/eth-account and the `scaffold` "
+            f"package (fpylll/cysignals are best-effort). Check that list "
+            f"first — `{mod}` may have a drop-in already present.\n\n"
+            f"If it genuinely is absent, VENDOR IT — do not hand-roll a "
+            f"replacement. From your work dir:\n"
+            f"    pip install --target ./.pydeps {mod}\n"
+            f"and make these the FIRST lines of the solver:\n"
+            f"    import os, sys\n"
+            f"    sys.path.insert(0, os.path.join(\n"
+            f"        os.path.dirname(os.path.abspath(__file__)), \".pydeps\"))\n"
+            f"The sandbox mounts this job dir at the SAME absolute path and "
+            f"both images share one Python base, so even compiled wheels load "
+            f"there. Derive the path from `__file__`, not from a relative "
+            f"\"./.pydeps\". Rewrite without `{mod}` only if vendoring "
+            f"actually fails — a pure-Python reimplementation of a numpy or "
+            f"sympy step is the usual way an import crash turns into a "
+            f"runner-timeout on the next attempt. Then verify the fix in the "
+            f"REAL sandbox before you finish:\n"
             f"    python3 -m worker.solver_smoke <script> [args] --timeout N\n"
             f"Do NOT re-ship until that reports exit_code 0."
         )

@@ -220,6 +220,23 @@ def main() -> int:
     chk("REGRESSION: the prompt names key_bypass_needed, the symbol that "
         "exists — `needs_key_bypass` never did",
         "key_bypass_needed" in psp and "needs_key_bypass" not in psp)
+    # SCOPE, not just the assertion. This check passed for months while two
+    # more copies of the wrong name sat in modules/_common.py (the
+    # HEAP_FIX_HINTS entry injected on a heap retry, and the scaffold nudge)
+    # plus both READMEs — because it only ever read _PW.SYSTEM_PROMPT. A name
+    # the agent is told to call has to be right in EVERY file that tells it.
+    _KEY_BYPASS_SOURCES = (
+        "modules/pwn/prompts.py", "modules/_common.py", "modules/_judge.py",
+        "scaffold/tcache_poison.py", "scaffold/heap_menu.py",
+        "scaffold/README.md", "README.md",
+    )
+    _stale = []
+    for _rel in _KEY_BYPASS_SOURCES:
+        _p = ROOT / _rel
+        if _p.is_file() and "needs_key_bypass" in _p.read_text(errors="replace"):
+            _stale.append(_rel)
+    chk("...in EVERY file that names it, not only the pwn system prompt",
+        not _stale, _stale)
     chk("...and that is what the scaffold actually defines",
         hasattr(importlib.import_module("scaffold.tcache_poison"),
                 "key_bypass_needed"))

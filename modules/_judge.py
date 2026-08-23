@@ -365,7 +365,7 @@ more targeted):
   heap.vtable_write_order_violated — FSOP vtable written before
                                      `_wide_data` / `_wide_vtable` /
                                      payload landed → SIGSEGV on next stdio.
-  heap.tcache_key_not_bypassed     — double-free into tcache on glibc>=2.35
+  heap.tcache_key_not_bypassed     — double-free into tcache on glibc>=2.29
                                      without zeroing the chunk key first
                                      (aborts with `double free detected in tcache 2`).
   heap.aslr_unstable               — chain depends on nibble matching

@@ -105,6 +105,49 @@ for text, gone in FIRES:
     out = sanitize(text)
     chk("%r is still rewritten" % gone, gone.lower() not in out.lower(), out)
 
+# --- a rewrite may not change the VERB or the POLARITY of the sentence -------
+# The rules above only ever checked that the subject survived. They passed for
+# months while a second rule made the identical mistake on the other side of
+# the verb: `(?:to )?bypass(?:es|ed|ing)? the firewall` was replaced by the
+# infinitive phrase "to use the job's OOB callback URL instead", which ate the
+# finite verb and inverted every negated sentence. Checking that "the firewall"
+# disappeared is exactly what failed to notice, so check the sentence instead.
+NEGATED = [
+    # a refutation must stay a refutation
+    ("There is no way to bypass the firewall from the worker.", "no way"),
+    ("The worker cannot bypass the firewall.", "cannot"),
+    ("Nothing the solver does bypasses the firewall.", "Nothing"),
+]
+for text, keeper in NEGATED:
+    out = sanitize(text)
+    chk("negation survives: %r" % text[:40], keeper.lower() in out.lower(), out)
+    # The OOB callback must not be described as available by a sentence that
+    # said the opposite. A NAT'd worker's only outbound channel is the
+    # collector; telling the agent it is unusable strands the whole run.
+    chk("...and it is not converted into an OOB-callback recommendation: %r"
+        % text[:40],
+        "oob callback url" not in out.lower(), out)
+
+FINITE_VERB = [
+    ("The exploit bypasses the firewall by using DNS.", "bypasses"),
+    ("The payload bypassed the firewall on the second try.", "bypassed"),
+]
+for text, verb in FINITE_VERB:
+    out = sanitize(text)
+    chk("finite verb %r is not replaced by an infinitive phrase" % verb,
+        verb in out, out)
+    chk("...leaving a grammatical sentence: %r" % text[:40],
+        not re.search(r"\b\w+ to (?:use|complete) the\b", out, re.I), out)
+
+# --- a rule must not assert infrastructure the job may not have -------------
+# settings_io.py defaults callback_url to "" and _runner.py exports
+# COLLECTOR_URL only `if cb:` — and only into the SANDBOX env. A hint that
+# says every restriction routes "to the orchestrator's collector" claims a
+# channel that pwn/rev/crypto/forensic main may never have been given.
+out = sanitize("REFUTED: outbound DNS is firewalled")
+chk("'is firewalled' does not assert a collector that may not be configured",
+    "collector" not in out.lower(), out)
+
 print("")
 print("%d checks, %d failed" % (checks, fails))
 sys.exit(1 if fails else 0)

@@ -610,20 +610,29 @@ Glibc version → which techniques still work
           unsorted bin attack writes libc value to target,
           `__malloc_hook` / `__free_hook` / `__realloc_hook` all
           live and writable.
-  2.27-2.31 tcache present, NO safe-linking, NO key. Tcache poison
+  2.27-2.28 tcache present, NO safe-linking, NO key. Tcache poison
           is a single-write primitive (no XOR, no dup-detect).
           `__free_hook` still alive — easiest win.
-  2.32-2.33 SAFE-LINKING introduced (fd XORed with `chunk_addr>>12`).
-          Still no `key` field → tcache double-free works. Hook is
+  2.29-2.31 `key` field added to tcache chunks at +0x08. A plain
+          double-free into tcache now aborts with `free(): double
+          free detected in tcache 2` unless you zero the key first
+          (UAF / large-bin overlap). Ubuntu 20.04 ships 2.31 and IS
+          affected. Still NO safe-linking, so the poisoned fd is
+          written raw. `__free_hook` still alive.
+  2.32-2.33 SAFE-LINKING introduced (fd XORed with `chunk_addr>>12`)
+          and `malloc(): unaligned tcache chunk detected` starts
+          firing. The 2.29 key check still applies. Hook is
           still alive on 2.33.
   2.34    `__free_hook` / `__malloc_hook` REMOVED. Forget them.
-          Pivot to: `__exit_funcs` (encoded with PTR_MANGLE — needs
-          a stack/TLS leak), `_rtld_global._dl_rtld_lock_recursive`,
-          or FSOP via `_IO_2_1_stdout_` / `_IO_list_all`.
-  2.35-2.36 `key` field added to tcache chunks → double-free into
-          tcache aborts unless you bypass the key check (overwrite
-          the key with arbitrary value via UAF or large-bin chunk
-          overlap). `_IO_str_jumps` `__finish` path still usable.
+          The tcache key also stops being the perthread pointer and
+          becomes a per-thread RANDOM `tcache_key` — zeroing it via
+          UAF still bypasses the check, but you can no longer PREDICT
+          its value. Pivot to: `__exit_funcs` (encoded with PTR_MANGLE
+          — needs a stack/TLS leak), `_rtld_global._dl_rtld_lock_
+          recursive`, or FSOP via `_IO_2_1_stdout_` / `_IO_list_all`.
+  2.35-2.36 No new heap check of its own; the 2.29 key bypass and the
+          2.32 safe-linking XOR both still apply.
+          `_IO_str_jumps` `__finish` path still usable.
   ≥2.37   `_IO_str_jumps` `__finish` patched. FSOP path of choice
           becomes `_IO_wfile_jumps` overflow → `_IO_wdoallocbuf`
           → `__wide_data->_wide_vtable->__doallocate` = your gadget.

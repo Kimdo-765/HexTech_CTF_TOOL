@@ -23,7 +23,7 @@ heap_menu.py       — menu wrappers (alloc/free/edit/show) + libc-base
 fsop_wfile.py      — _IO_FILE_plus / _IO_wide_data / _wide_vtable
                      builders. Encodes the "vtable LAST" invariant.
                      Import from your exploit.
-tcache_poison.py   — safe_link() + alignment_ok() + needs_key_bypass()
+tcache_poison.py   — safe_link() + alignment_ok() + key_bypass_needed()
                      that branch on libc_profile.json. Import from your
                      exploit.
 aslr_retry.py      — aslr_retry(exploit_one, ...) wrapper for the 1/16

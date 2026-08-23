@@ -1762,7 +1762,7 @@ probability model can rest on exactly that.
     vtable slot zeroed — caller flips the vtable pointer
     separately AFTER the rest of the chain is in place.
   - `tcache_poison.py` — `safe_link()` / `alignment_ok()` /
-    `needs_key_bypass()` / `assert_techniques_match()` — auto-
+    `key_bypass_needed()` / `assert_techniques_match()` — auto-
     branches on `safe_linking` / `tcache_key` from the profile.
   - `aslr_retry.py` — `aslr_retry(exploit_one, max_attempts=64)`
     + `expected_attempts_for(success_rate)` for nibble-race

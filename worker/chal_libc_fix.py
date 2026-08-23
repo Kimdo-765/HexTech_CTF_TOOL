@@ -648,7 +648,15 @@ def _derive_features(version_tuple: list[int] | None) -> dict:
     else:
         v_floor = f"{major}.{minor}"
     safe_linking = (major, minor) >= (2, 32)
-    tcache_key = (major, minor) >= (2, 35)
+    # 2.29, not 2.35. The `key` member of tcache_entry and the
+    # `free(): double free detected in tcache 2` abort both landed in
+    # glibc 2.29; 2.34 only randomized the value stored there. The gate
+    # read >= (2, 35) until 2026-08-24, which silently returned
+    # tcache_key=False for every 2.29-2.34 target — Ubuntu 20.04 (2.31)
+    # included — so `key_bypass_needed()` told the agent no bypass was
+    # required and the double-free aborted on the remote.
+    # modules/pwn/libc_targets.py:143 has said "added 2.29" all along.
+    tcache_key = (major, minor) >= (2, 29)
     tcache_present = (major, minor) >= (2, 26)
     hooks_alive = (major, minor) < (2, 34)
     str_finish_patched = (major, minor) >= (2, 37)

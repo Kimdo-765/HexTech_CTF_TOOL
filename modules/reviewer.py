@@ -1186,11 +1186,25 @@ _HINT_REPLACEMENTS: tuple[tuple[_re.Pattern, str], ...] = (
     # reachable, which is the opposite of what the reviewer observed. Matching
     # only "is firewalled" keeps whatever subject the reviewer wrote.
     (_re.compile(r"\bis firewalled\b", _re.IGNORECASE),
-     "is network-restricted to the orchestrator's collector"),
-    (_re.compile(r"\b(?:to )?bypass(?:es|ed|ing)? the firewall\b", _re.IGNORECASE),
-     "to use the job's OOB callback URL instead"),
+     "is network-restricted"),
     (_re.compile(r"\bfirewall(?:ed)? bypass\b", _re.IGNORECASE),
      "OOB callback routing"),
+    # The SAME predicate-eating bug as above lived here until 2026-08-24:
+    # `(?:to )?bypass(?:es|ed|ing)? the firewall` -> "to use the job's OOB
+    # callback URL instead" swapped a finite verb for an infinitive phrase and
+    # inverted polarity on any negated sentence:
+    #   "The exploit bypasses the firewall by using DNS."
+    #     -> "The exploit to use the job's OOB callback URL instead by using DNS."
+    #   "There is no way to bypass the firewall from the worker."
+    #     -> "There is no way to use the job's OOB callback URL instead from
+    #        the worker."
+    # The second one tells a NAT'd worker that its only outbound channel is
+    # unavailable — the exact opposite of the observation. Rewrite the NOUN and
+    # nothing else; whatever verb and polarity the reviewer wrote survive.
+    # Ordered AFTER `firewall bypass` so "the firewall bypass" is consumed by
+    # that rule first and does not become "…network restriction bypass".
+    (_re.compile(r"\bthe firewall\b", _re.IGNORECASE),
+     "the worker's network restriction"),
     # Covert / evasion framing → neutral. "reverse shell" is the
     # classifier-tripping framing; "spawned shell" is just a factual
     # description of a /bin/sh process and is left alone.

