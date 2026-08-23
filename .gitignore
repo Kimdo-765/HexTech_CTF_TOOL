@@ -14,3 +14,7 @@ docker-compose.override.yml
 
 # deploy.sh baseline stamp (machine-local, rewritten on every deploy)
 .last_deploy
+
+# Scratch from the dynamic-memory simulation work (flock race proof).
+# Kept on disk, never tracked: it contains a FIFO and per-run state.
+.flockproof/
