@@ -1914,6 +1914,30 @@ def _norm_chal(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s)
 
 
+# Names that identify a build artifact rather than a challenge. Matching on
+# these is worse than not matching: `_score` gives containment a point, so a
+# rev job whose binary is `main` scored against every stored `main` and filled
+# all twelve visible slots with unrelated entries -- measured on the real
+# corpus, the recency set went from 12 survivors to 1.
+#
+# Deliberately a SMALL EXPLICIT LIST rather than a derived rule, because every
+# data-driven alternative was tried against the real corpus and each one had a
+# counter-example:
+#   library frequency > 1  -- kept rev `server`, and blocked pwn's genuine
+#                             `qemu-system-x86_64` (2 real entries)
+#   length <= 4            -- kept `server`, blocked genuine `er` and `obf`
+#   Shannon entropy        -- `server` 1.918 > `obf` 1.585 > `er` 1.0, so the
+#                             ordering does not separate meaning at all
+# Add to this list only with a corpus measurement attached; a name that is
+# genuinely a challenge title must never appear here.
+_LIBRARY_STOP_NAMES = frozenset({
+    "main", "chal", "chall", "challenge", "prob", "problem", "task",
+    "server", "client", "app", "run", "test", "bin", "binary", "aout",
+    "program", "readme", "readmemd", "index", "flag", "vuln", "dockerfile",
+    "output", "source", "src", "file", "data", "target", "sample",
+})
+
+
 def _library_display_name(meta: dict) -> str:
     """What to CALL an entry in the hint.
 
@@ -1931,7 +1955,8 @@ def _library_display_name(meta: dict) -> str:
 
 
 def build_exploit_library_hint(module: str, *, max_entries: int = 12,
-                               chal_name: str = "") -> str:
+                               chal_name: str = "",
+                               stats: dict | None = None) -> str:
     """Return a short paragraph nudging the agent to consult
     `/data/exploits/` when stuck on technique / leak-vector choice, or
     `""` when the library is empty or the operator has turned the hint
@@ -1942,6 +1967,11 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
     on large libraries. The agent is expected to `ls /data/exploits/` + `cat`
     the relevant report.md itself — we just surface what's available and what
     each one solved.
+
+    Pass a dict as `stats` to receive the shadow counters for one call
+    (`query`, `query_generic`, `suppressed`) without adding state anywhere.
+    Nothing in the rendered hint changes; this exists so the stoplist
+    vocabulary can be tuned against real traffic rather than guessed at.
 
     Ranking is by RELEVANCE, not recency, and `chal_name` is what makes that
     possible. Job e601cd358ad6 is the worked example: an advanced version of a
@@ -1989,14 +2019,31 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
     # exactly the case this is for.
     want = _norm_chal(chal_name)
 
+    want_generic = want in _LIBRARY_STOP_NAMES
+    if stats is not None:
+        # Counted once here, NOT inside _score: the two stable sorts plus the
+        # render loop each call _score per entry, so incrementing there would
+        # report three times the real number.
+        stats["query"] = want
+        stats["query_generic"] = want_generic
+        stats["suppressed"] = sum(
+            1 for m in entries
+            if _norm_chal(m.get("chal_name") or "") in _LIBRARY_STOP_NAMES
+        )
+
     def _score(m: dict) -> int:
         """2 = same challenge name, 1 = one name contains the other, 0 = no
         relation. Substring counts because variants get suffixed ('protoss2',
-        'protoss-rev2')."""
-        if not want:
+        'protoss-rev2').
+
+        A build-artifact name on EITHER side scores 0. Both sides are needed:
+        suppressing only the query still lets a real name like `nsprobe`
+        contain a stored `prob`, which on the live corpus starred nine
+        unrelated entries alongside the one true match."""
+        if not want or want_generic:
             return 0
         got = _norm_chal(m.get("chal_name") or "")
-        if not got:
+        if not got or got in _LIBRARY_STOP_NAMES:
             return 0
         if got == want:
             return 2
@@ -2022,7 +2069,8 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
     for m in entries:
         eid = m.get("id") or "?"
         chal = _library_display_name(m)
-        same = _score(m) > 0
+        _rank = _score(m)
+        same = _rank > 0
         arch = m.get("arch") or "?"
         glibc = m.get("glibc_version") or "?"
         technique = m.get("technique_name") or "?"
@@ -2034,9 +2082,25 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
         tags_part = f" tags=[{tags}]" if tags else ""
         notes_part = f" — {notes}" if notes else ""
         bullet = "★" if same else "•"
-        flag = ("  <<< SAME CHALLENGE NAME as yours — read its report.md and "
-                "exploit.py FIRST, then re-derive for THIS variant"
-                if same else "")
+        # Two tiers, because `_score` returns 2 for an equal normalized name
+        # and 1 for mere containment, and calling BOTH "SAME CHALLENGE NAME as
+        # yours" is false at tier 1: `protoss` and `protoss2` are related, not
+        # the same challenge. The false version was load-bearing in the wrong
+        # direction -- a rev job whose binary is named `main` matched every
+        # stored `main` and got twelve unrelated exploits each captioned as its
+        # own challenge, with an imperative to read them first.
+        # The identity claim differs by tier; the ACTION does not. Both tiers
+        # still tell the agent to look before re-deriving, which is the whole
+        # point of the variant case the regression suite pins.
+        if _rank == 2:
+            flag = ("  <<< EXACT NORMALIZED NAME MATCH — read its report.md "
+                    "and exploit.py FIRST, then re-derive for THIS variant")
+        elif _rank == 1:
+            flag = ("  <<< RELATED NAME (one name contains the other; NOT "
+                    "necessarily the same challenge) — inspect before "
+                    "re-deriving")
+        else:
+            flag = ""
         lines.append(
             f"  {bullet} {eid}  chal={chal}  arch={arch}  glibc={glibc}  "
             f"bug={bug}  technique={technique}{tags_part}{notes_part}{flag}"
