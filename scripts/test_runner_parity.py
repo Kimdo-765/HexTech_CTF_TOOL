@@ -114,11 +114,50 @@ def main() -> int:
         ("dash, exec'd directly",      "sh: 1: gdb: not found\n"),
         ("dash, via shell=True",       "/bin/sh: 1: gdb: not found\n"),
         ("bash",                       "bash: line 1: gdb: command not found\n"),
-        ("subprocess with list argv",
+        ("ambiguous Python ENOENT",
          "FileNotFoundError: [Errno 2] No such file or directory: 'gdb'"),
     ):
         h2 = hint({"exit_code": 127, "stderr": err})
-        chk(f"  missing binary — {label}", bool(h2) and "gdb" in h2, h2[:70])
+        chk(f"  actionable crash hint — {label}", bool(h2) and "gdb" in h2, h2[:70])
+
+    # FileNotFoundError does not identify the failed operation: open(path) and
+    # subprocess([argv0]) have the same final exception text.  The deterministic
+    # producer must not invent a missing-tool provenance from that spelling.
+    for path in ("output.txt", "./helper.sh", "/home/worker/cache.bin"):
+        path_hint = hint({
+            "exit_code": 1,
+            "stderr": (
+                "Traceback (most recent call last):\n"
+                "  File 'solver.py', line 7, in <module>\n"
+                f"FileNotFoundError: [Errno 2] No such file or directory: '{path}'"
+            ),
+        })
+        chk(f"  ENOENT stays operation-neutral — {path}",
+            "does NOT distinguish an executable lookup from a missing data path"
+            in path_hint
+            and "runner sandbox has no" not in path_hint.lower(), path_hint[:240])
+
+    # Prefer the last matching failure.  Solvers routinely print a caught tool
+    # probe before a later, fatal data-file ENOENT.
+    multi_hint = hint({
+        "exit_code": 1,
+        "stderr": (
+            "FileNotFoundError: [Errno 2] No such file or directory: 'gdb'\n"
+            "fallback selected\n"
+            "FileNotFoundError: [Errno 2] No such file or directory: 'dump.bin'\n"
+        ),
+    })
+    chk("  the last ENOENT is the one diagnosed",
+        "`dump.bin`" in multi_hint and "ENOENT for `gdb`" not in multi_hint,
+        multi_hint[:240])
+
+    shell_hint = hint({"exit_code": 127, "stderr": "sh: 1: cast: not found\n"})
+    chk("  shell command lookup remains unambiguous",
+        "could not execute command/path `cast`" in shell_hint)
+    for tool in ("java", "forge/cast/anvil", "git", "curl"):
+        chk(f"  binary inventory includes runner tool {tool}", tool in shell_hint)
+    for tool in ("chromium", "tshark", "wasm2wat", "ffuf", "seccomp-tools"):
+        chk(f"  binary inventory identifies worker-only tool {tool}", tool in shell_hint)
 
     # ---------------------------------------------------------- must NOT fire
     section("it must stay OUT of the judge's territory")

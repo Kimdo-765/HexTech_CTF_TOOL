@@ -6941,7 +6941,12 @@ def _format_postjudge_user_turn(
             diagnosis_parts.append(
                 f"PINPOINT: {specific_diagnosis}"
             )
-        if alternative_paths:
+        # On a method-change conversion the same alternatives are already
+        # embedded below in the one-shot retry hint with the load-bearing
+        # instruction to pick one and rebuild.  Rendering them here as a
+        # deferred "try if the patch keeps failing" list duplicates them and
+        # gives the opposite urgency before the agent reaches that hint.
+        if alternative_paths and not method_change:
             diagnosis_parts.append(
                 "ALTERNATIVE PATHS (try if the patch keeps failing — "
                 "these were NOT exhausted by this run):"
@@ -7507,15 +7512,63 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
             f"Do NOT re-ship until that reports exit_code 0."
         )
 
-    m = _RUNNER_MISSING_BIN_RE.search(err)
+    # A solver may catch and print an early ENOENT, continue, then die on a
+    # different one.  The stderr tail is chronological; diagnose the last
+    # matching failure instead of reviving an already handled probe.
+    _bin_matches = list(_RUNNER_MISSING_BIN_RE.finditer(err))
+    m = _bin_matches[-1] if _bin_matches else None
     if m:
-        tool = m.group(1) or m.group(2)
+        enoent_name, shell_name = m.group(1), m.group(2)
+        name = shell_name or enoent_name
+        runner_tools = (
+            "gdb, qemu-*-static interpreters, ltrace, strace, "
+            "gcc/g++/make, cpp, "
+            "binutils, java, forge/cast/anvil, git and curl"
+        )
+        worker_only_tools = (
+            "chromium, tshark, wasm2wat, ffuf and seccomp-tools"
+        )
+        if shell_name:
+            # The shell itself identifies this as command lookup.  Unlike the
+            # FileNotFoundError spelling below, it cannot be a failed open().
+            return (
+                f"The runner shell could not execute command/path `{name}` "
+                f"(exit {sr.get('exit_code')}). The runner HAS {runner_tools}; "
+                f"the runner image omits the worker-only entries for "
+                f"{worker_only_tools}.\n\n"
+                f"If the command is meant to be a shipped helper, put it in "
+                f"the work tree and invoke its `__file__`-relative absolute "
+                f"path. Otherwise reimplement that step in-process or switch "
+                f"to an installed tool. Verify in the REAL sandbox before "
+                f"you finish:\n"
+                f"    python3 -m worker.solver_smoke <script> [args] --timeout N\n"
+                f"Do NOT re-ship until that reports exit_code 0."
+            )
+        # Python uses exactly the same ENOENT exception text for
+        # subprocess.run([argv0, ...]) and open(path).  Traceback frames may be
+        # truncated, and a stderr tail can contain more than one traceback, so
+        # the formatter cannot safely infer which operation failed.  State the
+        # ambiguity and give both mechanical discriminators instead of turning
+        # a data-path bug into a made-up missing-binary fact.
         return (
-            f"The RUNNER sandbox has no `{tool}` — your solver shelled out to a "
-            f"binary that exists in the worker but not in the sandbox that "
-            f"actually executes it (exit {sr.get('exit_code')}).\n\n"
-            f"Reimplement that step in-process, or switch to a tool the runner "
-            f"has. Verify in the REAL sandbox before you finish:\n"
+            f"The runner raised ENOENT for `{name}` (exit "
+            f"{sr.get('exit_code')}). That exception text alone does NOT "
+            f"distinguish an executable lookup from a missing data path. Read "
+            f"the exact failing source line and its final traceback before "
+            f"choosing a fix.\n\n"
+            f"(a) If the line launches a process (`subprocess`, `exec*`, or a "
+            f"tool wrapper), check the runner inventory first. It HAS "
+            f"{runner_tools}; the runner image omits the worker-only entries "
+            f"for {worker_only_tools}. For a helper you wrote, ship it in the work "
+            f"tree and invoke an absolute path derived from `__file__`.\n\n"
+            f"(b) If the line opens a file, this is a PATH/creation bug, not "
+            f"evidence that a package or tool is absent. The whole job dir is "
+            f"bind-mounted at the same `/data/jobs/<id>` path and cwd is "
+            f"`/data/jobs/<id>/work`; check for a worker-only absolute path, "
+            f"another job id, or a scratch/output file the shipped script "
+            f"never creates. Build paths from `__file__` and create parent "
+            f"directories and inputs before reading them.\n\n"
+            f"Verify the chosen fix in the REAL sandbox before you finish:\n"
             f"    python3 -m worker.solver_smoke <script> [args] --timeout N\n"
             f"Do NOT re-ship until that reports exit_code 0."
         )
@@ -7974,8 +8027,14 @@ def write_why_stopped(
             ]
         elif stop_kind == "cost_cap":
             out += [
-                "Cumulative spend (main + all subagents) reached the "
-                "`COST_CAP_USD` circuit breaker. This fires when a run keeps "
+                "Cumulative known spend from main's session total, the "
+                "subagent accumulator, and numeric `cost_usd` values on "
+                "`role=reviewer` rows in `usage.jsonl` reached the "
+                "`COST_CAP_USD` circuit breaker (default $40). "
+                "`role=judge` rows are not included, and reviewer rows without "
+                "a numeric dollar value contribute $0 to this breaker. Read "
+                "`usage.jsonl` by role/provider before attributing the spend. "
+                "This fires when a run keeps "
                 "spending without capturing a flag — often an anchored frame "
                 "that won't converge (the anti-AI false-negative class, where "
                 "the model mis-frames rather than hits a true dead-end). The "

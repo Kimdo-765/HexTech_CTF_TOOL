@@ -16,8 +16,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RETRY_PATH = ROOT / "modules" / "reviewer.py"
 COMMON_PATH = ROOT / "modules" / "_common.py"
+JUDGE_PATH = ROOT / "modules" / "_judge.py"
 RETRY_SOURCE = RETRY_PATH.read_text()
 COMMON_SOURCE = COMMON_PATH.read_text()
+JUDGE_SOURCE = JUDGE_PATH.read_text()
 
 PASSED = 0
 FAILED = 0
@@ -146,6 +148,23 @@ C = _extract(
     {"HEAP_FIX_HINTS": {}},
 )
 format_turn = C["_format_postjudge_user_turn"]
+J = _extract(
+    JUDGE_SOURCE,
+    {"_VALID_VERDICTS", "_VALID_HEAP_FAILURE_CODES", "_normalize_verdict"},
+    {},
+)
+for sentinel in ("prejudge_blocked", "runner_crash", "reviewer_redirect"):
+    check(
+        f"real postjudge cannot emit orchestrator sentinel {sentinel}",
+        J["_normalize_verdict"]({"verdict": sentinel})["verdict"] == "unknown",
+    )
+check(
+    "real postjudge verdicts retain their identity",
+    all(
+        J["_normalize_verdict"]({"verdict": verdict})["verdict"] == verdict
+        for verdict in J["_VALID_VERDICTS"]
+    ),
+)
 prejudge_turn = format_turn(
     attempt_idx=1,
     max_attempts=4,
@@ -173,6 +192,87 @@ check(
 check(
     "artifact deletion is a last concession, not the first correction",
     "final\n     concession only after" in prejudge_turn,
+)
+check(
+    "prejudge provenance is not laundered through postjudge",
+    "· prejudge verdict: prejudge_blocked" in prejudge_turn
+    and "from prejudge ship-block" in prejudge_turn
+    and "judge endorses this retry" not in prejudge_turn,
+    prejudge_turn,
+)
+
+for verdict, source, origin in (
+    ("runner_crash", "runner", "the runner's own stderr"),
+    ("reviewer_redirect", "reviewer", "the one-shot auto-reviewer"),
+    ("partial", "postjudge", "postjudge — apply this"),
+):
+    rendered = format_turn(
+        attempt_idx=2,
+        max_attempts=4,
+        script_filename="exploit.py",
+        sandbox_result={
+            "judge": {
+                "verdict": verdict,
+                "next_action": "continue",
+                "retry_hint": "probe",
+            }
+        },
+    )
+    check(
+        f"{verdict} renders its real provenance",
+        f"· {source} verdict: {verdict}" in rendered
+        and origin in rendered,
+        rendered,
+    )
+
+method_change_turn = format_turn(
+    attempt_idx=2,
+    max_attempts=-1,
+    script_filename="exploit.py",
+    sandbox_result={
+        "judge": {
+            "verdict": "partial",
+            "next_action": "continue",
+            "retry_hint": "replace method A",
+        }
+    },
+    method_change=True,
+)
+check(
+    "method-change conversion preserves the judge STOP provenance",
+    "judge voted STOP" in method_change_turn
+    and "do NOT keep iterating on this method" in method_change_turn
+    and "judge endorses this retry" not in method_change_turn,
+    method_change_turn,
+)
+
+# This suite intentionally execs only selected top-level definitions into a
+# tiny namespace.  Keep the lookup table local: hoisting it without extending
+# every extraction namespace turns a production formatter call into NameError.
+common_tree = ast.parse(COMMON_SOURCE)
+formatter_node = next(
+    node for node in common_tree.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_format_postjudge_user_turn"
+)
+top_level_names = {
+    target.id
+    for node in common_tree.body
+    if isinstance(node, ast.Assign)
+    for target in node.targets
+    if isinstance(target, ast.Name)
+}
+check(
+    "provenance table remains local to the independently extracted formatter",
+    "_hint_provenance" not in top_level_names
+    and any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_hint_provenance"
+            for target in node.targets
+        )
+        for node in ast.walk(formatter_node)
+    ),
 )
 
 runtime_turn = format_turn(

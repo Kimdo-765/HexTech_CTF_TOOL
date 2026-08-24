@@ -690,7 +690,10 @@ def _continue_in_place(
     except SecretIngressError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     clear_turn_stop(JOBS_DIR / job_id / "work")
-    hint = _CONTINUE_HINT_TMPL.format(comment=_sanitize_hint(comment).strip())
+    # The /continue comment is typed by the operator. Never rewrite it;
+    # `continue_comment` in the same meta.json already stores it verbatim,
+    # so a rewrite here made the two disagree with nothing logging why.
+    hint = _CONTINUE_HINT_TMPL.format(comment=comment.strip())
     # Strip any prior [retry-hint] block so repeated continues don't stack.
     description = (prev_meta.get("description") or "").strip()
     cut = description.find("[retry-hint]")
@@ -1076,7 +1079,8 @@ async def retry_with_hint(job_id: str, request: Request):
                 },
             ) from e
 
-    augmented = _retry_preamble(safe, hint, fresh=fresh_session)
+    augmented = _retry_preamble(safe, hint, fresh=fresh_session,
+                                operator_text=manual_hint is not None)
     new_id = _resubmit(
         prev_meta, augmented, jd,
         carry_work=True,
@@ -1181,7 +1185,9 @@ async def stop_and_resume(job_id: str, request: Request):
         await asyncio.to_thread(_halt_source_job, safe, prev_meta)
         if prev_status in ("queued", "running") else None
     )
-    augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session)
+    # /resume refuses without a manual hint, so this is always operator text.
+    augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session,
+                                      operator_text=True)
 
     new_id = _resubmit(
         prev_meta, augmented_hint, jd,
@@ -1346,7 +1352,8 @@ _RETRY_ANTI_OVERFIT_NOTE = (
     "primitive has produced its expected runtime signal.\n\n"
 )
 
-def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
+def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
+                    operator_text: bool = False) -> str:
     """Preamble for the standard retry path (failed / no_flag /
     finished). The new agent is launched with `resume=<prev_session>` +
     `fork_session=True`, so its conversation already holds the prior
@@ -1369,6 +1376,13 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
     under the OLD job's absolute paths, so the bare/relative-path rule
     matters regardless of whether a transcript was forked.
     """
+    # The operator's own words go through untouched. _sanitize_hint exists to
+    # keep MODEL-generated phrasing from tripping the prompt classifier; a human
+    # who typed "reverse shell to 127.0.0.1:4444" meant that, and silently
+    # rewriting it is the same class of defect as the provenance mislabelling
+    # fixed on 2026-08-24 — the reader is told something the author did not say.
+    _hint_text = hint if operator_text else _sanitize_hint(hint)
+
     if fresh:
         return (
             _CTF_CONTEXT_HEADER
@@ -1391,7 +1405,7 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
             "above.\n\n"
             + _CARRY_LIMITS_NOTE
             + _RETRY_ANTI_OVERFIT_NOTE
-            + f"{_sanitize_hint(hint)}"
+            + f"{_hint_text}"
         )
     return (
         _CTF_CONTEXT_HEADER
@@ -1410,11 +1424,12 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
         f"before applying the hint.\n\n"
         + _CARRY_LIMITS_NOTE
         + _RETRY_ANTI_OVERFIT_NOTE
-        + f"{_sanitize_hint(hint)}"
+        + f"{_hint_text}"
     )
 
 
-def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
+def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
+                     operator_text: bool = False) -> str:
     """Preamble for stop-and-resume. Same fork semantics as retry, but
     the prior session was halted MID-RUN by the user — so the agent
     should treat the work as in-flight ("pick up where you left off")
@@ -1429,6 +1444,13 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
     no prior transcript to "continue from", so reconstruct state from the
     carried ./work/ files + hint instead.
     """
+    # The operator's own words go through untouched. _sanitize_hint exists to
+    # keep MODEL-generated phrasing from tripping the prompt classifier; a human
+    # who typed "reverse shell to 127.0.0.1:4444" meant that, and silently
+    # rewriting it is the same class of defect as the provenance mislabelling
+    # fixed on 2026-08-24 — the reader is told something the author did not say.
+    _hint_text = hint if operator_text else _sanitize_hint(hint)
+
     if fresh:
         return (
             _CTF_CONTEXT_HEADER
@@ -1447,7 +1469,7 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
             "analysis from scratch. Every Write/Edit MUST use bare or "
             "`./`-relative paths per the rules above.\n\n"
             + _CARRY_LIMITS_NOTE
-            + f"{_sanitize_hint(hint)}"
+            + f"{_hint_text}"
         )
     return (
         _CTF_CONTEXT_HEADER
@@ -1465,7 +1487,7 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False) -> str:
         f"once and read whichever file matters before applying the "
         f"hint.\n\n"
         + _CARRY_LIMITS_NOTE
-            + f"{_sanitize_hint(hint)}"
+            + f"{_hint_text}"
     )
 
 

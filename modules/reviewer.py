@@ -1238,7 +1238,17 @@ def _sanitize_hint(hint: str) -> str:
 
     Intentionally narrow: standard CTF vocabulary stays. See
     `_HINT_REPLACEMENTS` for the rationale and the trigger incident.
-    Safe to call on both reviewer-generated and user-supplied hints.
+
+    FOR MODEL-GENERATED TEXT ONLY. The line that used to sit here — "Safe to
+    call on both reviewer-generated and user-supplied hints" — is what licensed
+    running the operator's own `/continue` comment and hand-typed `/retry`
+    hints through this table, silently rewriting what a human wrote while
+    `continue_comment` in the same meta.json kept the original, with nothing
+    logging the divergence. Operator text now bypasses this entirely
+    (`api/routes/retry.py`: `operator_text=`). Do not reintroduce the claim:
+    the classifier problem this table solves is a property of MODEL phrasing,
+    and a rewrite the author never sees is the same defect class as labelling a
+    hint with a source it did not come from.
     """
     if not hint:
         return hint

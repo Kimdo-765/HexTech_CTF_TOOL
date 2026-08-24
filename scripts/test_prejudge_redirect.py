@@ -66,6 +66,8 @@ MUTATIONS = (
     "drop-stop-metrics",
     "drop-target-schema",
     "drop-reviewer-redirect",
+    "repeat-method-alternatives",
+    "sticky-method-change",
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS)
@@ -135,6 +137,18 @@ def _mutated_sources() -> tuple[str, str]:
             common,
             "            _reviewer_gate = (\n",
             "            _reviewer_gate = False and (\n",
+        )
+    elif args.mutate == "repeat-method-alternatives":
+        common = _replace_once(
+            common,
+            "        if alternative_paths and not method_change:\n",
+            "        if alternative_paths:\n",
+        )
+    elif args.mutate == "sticky-method-change":
+        common = _replace_once(
+            common,
+            "                method_change=_method_change_convert,\n",
+            "                method_change=True,\n",
         )
     return common, judge
 
@@ -552,6 +566,63 @@ async def main() -> int:
           "prejudge_dead_target" in live["why"], False)
     check("A8-b reaches the real second execution", len(live["sandbox_calls"]), 2)
 
+    method_change = await _run_case(
+        "method-change-reset",
+        [
+            {
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "",
+                "sandbox_started": True,
+                "judge_mode": "enforce",
+                "judge": {
+                    "verdict": "partial",
+                    "next_action": "stop",
+                    "stop_reason": "method A is structurally blocked",
+                    "retry_hint": "replace method A",
+                    "alternative_paths": ["method B"],
+                    "retry_worthwhile": True,
+                },
+            },
+            {
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "",
+                "sandbox_started": True,
+                "judge_mode": "enforce",
+                "judge": {
+                    "verdict": "partial",
+                    "next_action": "continue",
+                    "retry_hint": "fix the ordinary implementation detail",
+                },
+            },
+            {
+                "exit_code": 0,
+                "stdout": "FLAG_CANDIDATE: DH{i2_fixture}\n",
+                "stderr": "",
+                "sandbox_started": True,
+                "judge_mode": "enforce",
+                "captured": True,
+                "judge": {"verdict": "success", "next_action": "stop"},
+            },
+        ],
+    )
+    first_retry, second_retry = method_change["queries"][1:3]
+    check("P2 method-change loop reaches two later iterations",
+          (method_change["escaped"], len(method_change["sandbox_calls"])),
+          (None, 3))
+    check("P2 charges exactly one method-change conversion",
+          method_change["summary"].get("method_change_retries"), 1)
+    check("P2 first retry preserves the judge STOP",
+          "do NOT keep iterating on this method" in first_retry, True)
+    check("P2 flag resets before the ordinary following retry",
+          "judge endorses this retry" in second_retry
+          and "do NOT keep iterating on this method" not in second_retry, True)
+    check("P2 alternatives render once, at immediate replacement urgency",
+          first_retry.count("method B") == 1
+          and "pick ONE and REBUILD" in first_retry
+          and "try if the patch keeps failing" not in first_retry, True)
+
     no_run = await _run_case(
         "two-blocks",
         [
@@ -673,6 +744,61 @@ async def main() -> int:
     )
     check("A3 preserves the existing ordinary no_hint class",
           "`no_hint`" in ordinary["why"], True)
+
+    # The longer deterministic crash hint is carried in files, not injected
+    # into the opening prompt.  Exercise both writers with a tail sentinel so
+    # a future cap reduction cannot silently remove the actionable half.
+    with tempfile.TemporaryDirectory(prefix="i2-carriers-") as td:
+        work = Path(td) / "work"
+        work.mkdir()
+        long_hint = "H" * 2700 + "TAIL_SENTINEL"
+        C.read_meta = lambda *_a, **_k: {}
+        resume = C.write_resume_state(
+            work,
+            job_id="",
+            summary={},
+            sandbox_result={"exit_code": 1},
+            judge_out={"verdict": "runner_crash", "retry_hint": long_hint},
+            attempt_idx=1,
+            reason="fixture",
+            log_fn=lambda *_a, **_k: None,
+        )
+        C.write_why_stopped(
+            work,
+            stop_kind="no_hint",
+            attempt_idx=1,
+            max_attempts=2,
+            judge_out={"verdict": "runner_crash", "retry_hint": long_hint},
+            sandbox_result={"exit_code": 1},
+            summary={},
+            log_fn=lambda *_a, **_k: None,
+        )
+        why = (work / "WHY_STOPPED.md").read_text()
+        check("3200-char RESUME_STATE carrier keeps the actionable tail",
+              "TAIL_SENTINEL" in resume, True)
+        check("3200-char WHY_STOPPED carrier keeps the actionable tail",
+              "TAIL_SENTINEL" in why, True)
+
+        C.write_why_stopped(
+            work,
+            stop_kind="cost_cap",
+            attempt_idx=1,
+            max_attempts=2,
+            judge_out={},
+            sandbox_result={},
+            summary={},
+            log_fn=lambda *_a, **_k: None,
+        )
+        cost_why = (work / "WHY_STOPPED.md").read_text()
+        check("cost-cap document names the exact three included sources",
+              all(term in cost_why for term in (
+                  "main's session total", "subagent accumulator",
+                  "`role=reviewer`",
+              )), True)
+        check("cost-cap document excludes judge and avoids provider guesses",
+              "`role=judge` rows are not included" in cost_why
+              and "claude-pinned" not in cost_why
+              and "gpt provider" not in cost_why, True)
 
     print(
         f"\n== summary: {PASSED} passed, {FAILED} failed; "
