@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "purpose": "offline labeled corpus for the concept-ranker question",
+  "production_use": "FORBIDDEN — this never reorders a live hint",
+  "roots": {
+    "d5bd07ce0865": "minecraft-region",
+    "1f681ea2b8e6": "zrq",
+    "5d4ba07beba7": "windows-pdf-driver",
+    "f94c35eb16a2": "maze-client"
+  },
+  "counts": {
+    "rows": 16,
+    "positives": 4,
+    "negatives": 12,
+    "positives_available_at_query": 0
+  },
+  "live_recall": "N/A",
+  "live_recall_basis": "no positive candidate existed when its query ran, so a live recall denominator cannot be formed; offline semantic scoring is still valid on these rows",
+  "rows": [
+    {
+      "query_root": "d5bd07ce0865",
+      "query_label": "minecraft-region",
+      "candidate_root": "d5bd07ce0865",
+      "candidate_label": "minecraft-region",
+      "candidate_job": "1a5cc3295d32",
+      "candidate_path": "data/jobs/1a5cc3295d32/work/report.md",
+      "candidate_bytes": 3709,
+      "candidate_produced_at": "2026-08-18T15:13:47.758608+00:00",
+      "label": "positive",
+      "label_basis": "same retry lineage, root d5bd07ce0865",
+      "available_at_query": false,
+      "query": {
+        "root": "d5bd07ce0865",
+        "label": "minecraft-region",
+        "filename": "r.0.0.mca",
+        "description": "Created in minecraft 1.21.10\r\nThere are README book in the chest.",
+        "started_at": "2026-08-18T13:41:34.045128+00:00",
+        "source": "data/jobs/d5bd07ce0865/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "d5bd07ce0865",
+      "query_label": "minecraft-region",
+      "candidate_root": "1f681ea2b8e6",
+      "candidate_label": "zrq",
+      "candidate_job": "f6c877c871bc",
+      "candidate_path": "data/jobs/f6c877c871bc/work/report.md",
+      "candidate_bytes": 6036,
+      "candidate_produced_at": "2026-08-20T13:58:43.048648+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: minecraft-region vs zrq",
+      "available_at_query": false,
+      "query": {
+        "root": "d5bd07ce0865",
+        "label": "minecraft-region",
+        "filename": "r.0.0.mca",
+        "description": "Created in minecraft 1.21.10\r\nThere are README book in the chest.",
+        "started_at": "2026-08-18T13:41:34.045128+00:00",
+        "source": "data/jobs/d5bd07ce0865/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "d5bd07ce0865",
+      "query_label": "minecraft-region",
+      "candidate_root": "5d4ba07beba7",
+      "candidate_label": "windows-pdf-driver",
+      "candidate_job": "4c96e913b6e6",
+      "candidate_path": "data/jobs/4c96e913b6e6/work/report.md",
+      "candidate_bytes": 7933,
+      "candidate_produced_at": "2026-08-20T06:39:56.961051+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: minecraft-region vs windows-pdf-driver",
+      "available_at_query": false,
+      "query": {
+        "root": "d5bd07ce0865",
+        "label": "minecraft-region",
+        "filename": "r.0.0.mca",
+        "description": "Created in minecraft 1.21.10\r\nThere are README book in the chest.",
+        "started_at": "2026-08-18T13:41:34.045128+00:00",
+        "source": "data/jobs/d5bd07ce0865/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "d5bd07ce0865",
+      "query_label": "minecraft-region",
+      "candidate_root": "f94c35eb16a2",
+      "candidate_label": "maze-client",
+      "candidate_job": "c918d057a4fc",
+      "candidate_path": "data/jobs/c918d057a4fc/work/findings.json",
+      "candidate_bytes": 2861,
+      "candidate_produced_at": "2026-08-21T08:42:15.992334+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: minecraft-region vs maze-client",
+      "available_at_query": false,
+      "query": {
+        "root": "d5bd07ce0865",
+        "label": "minecraft-region",
+        "filename": "r.0.0.mca",
+        "description": "Created in minecraft 1.21.10\r\nThere are README book in the chest.",
+        "started_at": "2026-08-18T13:41:34.045128+00:00",
+        "source": "data/jobs/d5bd07ce0865/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "1f681ea2b8e6",
+      "query_label": "zrq",
+      "candidate_root": "d5bd07ce0865",
+      "candidate_label": "minecraft-region",
+      "candidate_job": "1a5cc3295d32",
+      "candidate_path": "data/jobs/1a5cc3295d32/work/report.md",
+      "candidate_bytes": 3709,
+      "candidate_produced_at": "2026-08-18T15:13:47.758608+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: zrq vs minecraft-region",
+      "available_at_query": true,
+      "query": {
+        "root": "1f681ea2b8e6",
+        "label": "zrq",
+        "filename": "zrq",
+        "description": "네트워크 문제로 다운로드 도중 파일 뒷부분이 손실 됐어요. 파일을 복구하고 플래그를 출력해보세요.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `pokactf2024{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T06:59:43.976316+00:00",
+        "source": "data/jobs/1f681ea2b8e6/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "1f681ea2b8e6",
+      "query_label": "zrq",
+      "candidate_root": "1f681ea2b8e6",
+      "candidate_label": "zrq",
+      "candidate_job": "f6c877c871bc",
+      "candidate_path": "data/jobs/f6c877c871bc/work/report.md",
+      "candidate_bytes": 6036,
+      "candidate_produced_at": "2026-08-20T13:58:43.048648+00:00",
+      "label": "positive",
+      "label_basis": "same retry lineage, root 1f681ea2b8e6",
+      "available_at_query": false,
+      "query": {
+        "root": "1f681ea2b8e6",
+        "label": "zrq",
+        "filename": "zrq",
+        "description": "네트워크 문제로 다운로드 도중 파일 뒷부분이 손실 됐어요. 파일을 복구하고 플래그를 출력해보세요.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `pokactf2024{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T06:59:43.976316+00:00",
+        "source": "data/jobs/1f681ea2b8e6/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "1f681ea2b8e6",
+      "query_label": "zrq",
+      "candidate_root": "5d4ba07beba7",
+      "candidate_label": "windows-pdf-driver",
+      "candidate_job": "4c96e913b6e6",
+      "candidate_path": "data/jobs/4c96e913b6e6/work/report.md",
+      "candidate_bytes": 7933,
+      "candidate_produced_at": "2026-08-20T06:39:56.961051+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: zrq vs windows-pdf-driver",
+      "available_at_query": true,
+      "query": {
+        "root": "1f681ea2b8e6",
+        "label": "zrq",
+        "filename": "zrq",
+        "description": "네트워크 문제로 다운로드 도중 파일 뒷부분이 손실 됐어요. 파일을 복구하고 플래그를 출력해보세요.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `pokactf2024{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T06:59:43.976316+00:00",
+        "source": "data/jobs/1f681ea2b8e6/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "1f681ea2b8e6",
+      "query_label": "zrq",
+      "candidate_root": "f94c35eb16a2",
+      "candidate_label": "maze-client",
+      "candidate_job": "c918d057a4fc",
+      "candidate_path": "data/jobs/c918d057a4fc/work/findings.json",
+      "candidate_bytes": 2861,
+      "candidate_produced_at": "2026-08-21T08:42:15.992334+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: zrq vs maze-client",
+      "available_at_query": false,
+      "query": {
+        "root": "1f681ea2b8e6",
+        "label": "zrq",
+        "filename": "zrq",
+        "description": "네트워크 문제로 다운로드 도중 파일 뒷부분이 손실 됐어요. 파일을 복구하고 플래그를 출력해보세요.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `pokactf2024{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T06:59:43.976316+00:00",
+        "source": "data/jobs/1f681ea2b8e6/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "5d4ba07beba7",
+      "query_label": "windows-pdf-driver",
+      "candidate_root": "d5bd07ce0865",
+      "candidate_label": "minecraft-region",
+      "candidate_job": "1a5cc3295d32",
+      "candidate_path": "data/jobs/1a5cc3295d32/work/report.md",
+      "candidate_bytes": 3709,
+      "candidate_produced_at": "2026-08-18T15:13:47.758608+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: windows-pdf-driver vs minecraft-region",
+      "available_at_query": true,
+      "query": {
+        "root": "5d4ba07beba7",
+        "label": "windows-pdf-driver",
+        "filename": "CVE-2015-2291.exe",
+        "description": "It works on Windows 11 24H2 26100.6584.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `DH{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T01:03:48.656030+00:00",
+        "source": "data/jobs/5d4ba07beba7/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "5d4ba07beba7",
+      "query_label": "windows-pdf-driver",
+      "candidate_root": "1f681ea2b8e6",
+      "candidate_label": "zrq",
+      "candidate_job": "f6c877c871bc",
+      "candidate_path": "data/jobs/f6c877c871bc/work/report.md",
+      "candidate_bytes": 6036,
+      "candidate_produced_at": "2026-08-20T13:58:43.048648+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: windows-pdf-driver vs zrq",
+      "available_at_query": false,
+      "query": {
+        "root": "5d4ba07beba7",
+        "label": "windows-pdf-driver",
+        "filename": "CVE-2015-2291.exe",
+        "description": "It works on Windows 11 24H2 26100.6584.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `DH{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T01:03:48.656030+00:00",
+        "source": "data/jobs/5d4ba07beba7/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "5d4ba07beba7",
+      "query_label": "windows-pdf-driver",
+      "candidate_root": "5d4ba07beba7",
+      "candidate_label": "windows-pdf-driver",
+      "candidate_job": "4c96e913b6e6",
+      "candidate_path": "data/jobs/4c96e913b6e6/work/report.md",
+      "candidate_bytes": 7933,
+      "candidate_produced_at": "2026-08-20T06:39:56.961051+00:00",
+      "label": "positive",
+      "label_basis": "same retry lineage, root 5d4ba07beba7",
+      "available_at_query": false,
+      "query": {
+        "root": "5d4ba07beba7",
+        "label": "windows-pdf-driver",
+        "filename": "CVE-2015-2291.exe",
+        "description": "It works on Windows 11 24H2 26100.6584.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `DH{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T01:03:48.656030+00:00",
+        "source": "data/jobs/5d4ba07beba7/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "5d4ba07beba7",
+      "query_label": "windows-pdf-driver",
+      "candidate_root": "f94c35eb16a2",
+      "candidate_label": "maze-client",
+      "candidate_job": "c918d057a4fc",
+      "candidate_path": "data/jobs/c918d057a4fc/work/findings.json",
+      "candidate_bytes": 2861,
+      "candidate_produced_at": "2026-08-21T08:42:15.992334+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: windows-pdf-driver vs maze-client",
+      "available_at_query": false,
+      "query": {
+        "root": "5d4ba07beba7",
+        "label": "windows-pdf-driver",
+        "filename": "CVE-2015-2291.exe",
+        "description": "It works on Windows 11 24H2 26100.6584.\r\n\r\nFLAG FORMAT — the real flag for this challenge has the form `DH{...}`. Emit `FLAG_CANDIDATE: <flag>` ONLY for a flag of this exact format; for any local/test flag you plant, use a different format like `LOCAL{...}` so it is never mistaken for the real capture.",
+        "started_at": "2026-08-20T01:03:48.656030+00:00",
+        "source": "data/jobs/5d4ba07beba7/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "f94c35eb16a2",
+      "query_label": "maze-client",
+      "candidate_root": "d5bd07ce0865",
+      "candidate_label": "minecraft-region",
+      "candidate_job": "1a5cc3295d32",
+      "candidate_path": "data/jobs/1a5cc3295d32/work/report.md",
+      "candidate_bytes": 3709,
+      "candidate_produced_at": "2026-08-18T15:13:47.758608+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: maze-client vs minecraft-region",
+      "available_at_query": true,
+      "query": {
+        "root": "f94c35eb16a2",
+        "label": "maze-client",
+        "filename": "client_old",
+        "description": "capture remote flag — this job is ONLY successful if your exploit/solver captures the REAL flag from the remote target and prints it on its own line as `FLAG_CANDIDATE: <flag>`. Local-only validation, a planted test flag, or a banner-only smoke check do NOT count as success; keep iterating (reconnect/retry) until the genuine remote flag is captured.",
+        "started_at": "2026-08-21T08:10:43.671561+00:00",
+        "source": "data/jobs/f94c35eb16a2/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "f94c35eb16a2",
+      "query_label": "maze-client",
+      "candidate_root": "1f681ea2b8e6",
+      "candidate_label": "zrq",
+      "candidate_job": "f6c877c871bc",
+      "candidate_path": "data/jobs/f6c877c871bc/work/report.md",
+      "candidate_bytes": 6036,
+      "candidate_produced_at": "2026-08-20T13:58:43.048648+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: maze-client vs zrq",
+      "available_at_query": true,
+      "query": {
+        "root": "f94c35eb16a2",
+        "label": "maze-client",
+        "filename": "client_old",
+        "description": "capture remote flag — this job is ONLY successful if your exploit/solver captures the REAL flag from the remote target and prints it on its own line as `FLAG_CANDIDATE: <flag>`. Local-only validation, a planted test flag, or a banner-only smoke check do NOT count as success; keep iterating (reconnect/retry) until the genuine remote flag is captured.",
+        "started_at": "2026-08-21T08:10:43.671561+00:00",
+        "source": "data/jobs/f94c35eb16a2/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "f94c35eb16a2",
+      "query_label": "maze-client",
+      "candidate_root": "5d4ba07beba7",
+      "candidate_label": "windows-pdf-driver",
+      "candidate_job": "4c96e913b6e6",
+      "candidate_path": "data/jobs/4c96e913b6e6/work/report.md",
+      "candidate_bytes": 7933,
+      "candidate_produced_at": "2026-08-20T06:39:56.961051+00:00",
+      "label": "negative",
+      "label_basis": "different lineage: maze-client vs windows-pdf-driver",
+      "available_at_query": true,
+      "query": {
+        "root": "f94c35eb16a2",
+        "label": "maze-client",
+        "filename": "client_old",
+        "description": "capture remote flag — this job is ONLY successful if your exploit/solver captures the REAL flag from the remote target and prints it on its own line as `FLAG_CANDIDATE: <flag>`. Local-only validation, a planted test flag, or a banner-only smoke check do NOT count as success; keep iterating (reconnect/retry) until the genuine remote flag is captured.",
+        "started_at": "2026-08-21T08:10:43.671561+00:00",
+        "source": "data/jobs/f94c35eb16a2/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    },
+    {
+      "query_root": "f94c35eb16a2",
+      "query_label": "maze-client",
+      "candidate_root": "f94c35eb16a2",
+      "candidate_label": "maze-client",
+      "candidate_job": "c918d057a4fc",
+      "candidate_path": "data/jobs/c918d057a4fc/work/findings.json",
+      "candidate_bytes": 2861,
+      "candidate_produced_at": "2026-08-21T08:42:15.992334+00:00",
+      "label": "positive",
+      "label_basis": "same retry lineage, root f94c35eb16a2",
+      "available_at_query": false,
+      "query": {
+        "root": "f94c35eb16a2",
+        "label": "maze-client",
+        "filename": "client_old",
+        "description": "capture remote flag — this job is ONLY successful if your exploit/solver captures the REAL flag from the remote target and prints it on its own line as `FLAG_CANDIDATE: <flag>`. Local-only validation, a planted test flag, or a banner-only smoke check do NOT count as success; keep iterating (reconnect/retry) until the genuine remote flag is captured.",
+        "started_at": "2026-08-21T08:10:43.671561+00:00",
+        "source": "data/jobs/f94c35eb16a2/meta.json",
+        "fields_used": [
+          "description",
+          "filename"
+        ],
+        "leakage_guard": "pre-solve fields only — no report, findings or solver text on the query side"
+      }
+    }
+  ]
+}
