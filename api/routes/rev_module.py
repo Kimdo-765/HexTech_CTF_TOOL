@@ -28,7 +28,12 @@ def _first_binary_in(d: Path) -> Optional[Path]:
             candidates.append(p)
     if not candidates:
         return None
-    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    # Name breaks size ties. Sorting on size alone is stable, so an exact tie
+    # left the winner to rglob order -- i.e. the filesystem. Job f94c35eb16a2
+    # is a live example: `client` and `client_old` are both exactly 19208
+    # bytes, so which one became the challenge was decided by directory order.
+    # A picker two code paths are expected to agree on cannot be order-derived.
+    candidates.sort(key=lambda p: (-p.stat().st_size, p.name))
     return candidates[0]
 
 
@@ -48,7 +53,7 @@ def _largest_non_archive(d: Path) -> Optional[Path]:
     ]
     if not candidates:
         return None
-    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    candidates.sort(key=lambda p: (-p.stat().st_size, p.name))  # ties by name
     return candidates[0]
 
 

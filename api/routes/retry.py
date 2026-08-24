@@ -255,6 +255,45 @@ def _resolve_targets(
     return primary, (prior if len(prior) >= 2 else None)
 
 
+def _carry_binary_name(bin_dir: Path, prev_meta: dict) -> str | None:
+    """Which staged file is THIS challenge, on a retry.
+
+    This used to be `iterdir()`'s first regular file. Directory order is not
+    the challenge, and on the real corpus it disagreed with the identity the
+    original upload had chosen in 4 of 12 rev retries (4 of 7 once you look
+    only at multi-file jobs): `3a948819a443` was retried as `README.md`,
+    `d342333ffed3` and `4c96e913b6e6` as `output.pdf.enc`, `c918d057a4fc` as
+    `client_old` instead of `server`. That name is written straight into
+    `meta["filename"]` and handed to the analyzer, so a retry could re-enter
+    with a documentation file as its subject.
+
+    Order of preference:
+      1. the name the previous job already carried, if that file is staged --
+         a retry is the SAME challenge, so identity should not drift
+      2. the deterministic picker the direct upload used (largest ELF/PE, then
+         largest non-archive), imported rather than re-derived so the two
+         paths cannot fall out of step again
+      3. nothing, leaving the caller's own fallback in charge
+    """
+    prev_name = (prev_meta.get("filename") or "").strip()
+    if prev_name and (bin_dir / prev_name).is_file():
+        return prev_name
+
+    # Imported lazily: rev_module pulls in the upload/staging stack, and this
+    # is the only place in retry.py that needs it.
+    try:
+        from api.routes.rev_module import _first_binary_in, _largest_non_archive
+    except Exception:
+        picked = None
+    else:
+        picked = _first_binary_in(bin_dir) or _largest_non_archive(bin_dir)
+    if picked is not None:
+        return picked.name
+
+    files = sorted(p.name for p in bin_dir.iterdir() if p.is_file())
+    return files[0] if files else None
+
+
 def _resubmit(
     prev_meta: dict,
     hint: str,
@@ -574,7 +613,7 @@ def _resubmit(
             for f in prev_bin.iterdir():
                 if f.is_file():
                     shutil.copy2(f, new_bin / f.name)
-                    binary_name = binary_name or f.name
+            binary_name = _carry_binary_name(new_bin, prev_meta)
         meta["filename"] = binary_name or prev_meta.get("filename")
         meta["remote_only"] = binary_name is None
         write_job_meta(new_id, meta)
