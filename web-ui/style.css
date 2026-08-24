@@ -134,6 +134,17 @@ header {
   border-bottom: 1px solid var(--line);
 }
 header h1 { margin: 0 0 0.5rem 0; font-size: 1.25rem; }
+/* Product name + tagline on one line. The tagline is a <span> inside the <h1>
+   rather than a sibling so it cannot wrap away from the name in the flex hbar,
+   and so a screen reader still reads one heading. */
+header h1 .brand-sub {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
 nav { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .tab {
   background: var(--surface-2);

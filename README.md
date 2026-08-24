@@ -1,4 +1,14 @@
-# HexTech_CTF_TOOL
+# Ogamdo — cross AI view
+
+여러 AI의 시선을 교차시켜 푸는 CTF 자동화 플랫폼.
+
+The name is the design: no single model's reading of a challenge is trusted on
+its own. Roles are routed to different providers — `main`, `judge`, `reviewer`,
+`recon`, `debugger`, `triage`, `report` can each sit on Claude, GPT (Codex), or
+Grok — so the agent that writes an exploit is not the one that decides whether
+it is sound. The same principle runs above the pipeline: build and adversarial
+review are handed between models, and a finding only counts once a second
+viewpoint has tried to refute it against the code.
 
 Docker-based web UI toolset for CTF problem solving. Six core modules covering
 Web, Pwn, Forensic, Misc, Crypto, and Reversing — each combines automated
@@ -1161,7 +1171,7 @@ All knobs live in two places:
    | `GPT_RUNTIME` | `codex` | `codex` = Codex CLI + ChatGPT OAuth; `responses` = direct Platform API-key billing |
    | `OPENAI_API_KEY` | empty | only used when `GPT_RUNTIME=responses`; never passed to the Codex OAuth subprocess |
    | `GPT_MODEL` / `GPT_EFFORT` | `gpt-5.6-sol` / `medium` | model + reasoning effort used by Codex CLI (or the optional Responses backend) |
-   | `HOST_CODEX_HOME` | `./data/codex-home` | HexTech-only Codex auth/session directory, bind-mounted rw into api + workers. `start.sh` bootstraps only OAuth from the host TUI's `~/.codex/auth.json`; keeping the homes separate prevents root containers from breaking the live TUI's `config.toml` ownership. |
+   | `HOST_CODEX_HOME` | `./data/codex-home` | Ogamdo-only Codex auth/session directory, bind-mounted rw into api + workers. `start.sh` bootstraps only OAuth from the host TUI's `~/.codex/auth.json`; keeping the homes separate prevents root containers from breaking the live TUI's `config.toml` ownership. |
    | `HOST_GROK_HOME` | `${HOME}/.grok` | host path of the Grok Build config, bind-mounted into api + worker. **Pin it explicitly.** A snap-confined `docker` CLI reports `HOME` as `~/snap/docker/<rev>`, so `docker compose up -d` through `/snap/bin/docker` resolves the default to an empty directory and silently mounts that — the worker then has no `grok` binary and no auth, with no error anywhere. (`docker compose restart` keeps the old mount, so only a *recreate* exposes it.) Same reason `HOST_CLAUDE_HOME` is pinned. |
    | `WEB_PORT` | `8000` | host port |
    | `GHIDRA_VERSION` / `GHIDRA_BUILD_DATE` | `12.0.4` / `20260303` | Ghidra release used by decompiler image |
@@ -2574,7 +2584,7 @@ real flag, so placeholder-only jobs never enter the curated set.
 ## Out-of-band callbacks (XSS / SSRF / blind RCE)
 
 CTFs that exfiltrate via a remote bot need a publicly-reachable
-listener. HexTech_CTF_TOOL has a built-in collector that takes any HTTP
+listener. Ogamdo has a built-in collector that takes any HTTP
 request, logs it, and auto-extracts flag-shaped strings.
 
 Setup once:
