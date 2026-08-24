@@ -1134,8 +1134,15 @@ matrix, custom chal-author library auto-detection.
 
 ## Quick start
 
+The repository was renamed from `HexTech_CTF_TOOL` to `Ogamdo`. GitHub keeps a
+redirect, so an existing clone and its `origin` remote keep working — but the
+remote still prints the old path, so update it once:
+`git remote set-url origin git@github.com:Kimdo-765/Ogamdo.git`. An existing
+checkout directory does not need renaming; nothing reads the project name off
+the filesystem.
+
 ```bash
-git clone <this-repo> HexTech_CTF_TOOL && cd HexTech_CTF_TOOL
+git clone git@github.com:Kimdo-765/Ogamdo.git && cd Ogamdo
 cp .env.example .env
 
 # Edit .env: set HOST_DATA_DIR to absolute path of <repo>/data
@@ -1529,7 +1536,7 @@ continues to reject `module=hybrid`.
 ## File layout
 
 ```
-HexTech_CTF_TOOL/
+Ogamdo/
 ├── docker-compose.yml
 ├── .env  /  .env.example
 ├── api/                 # FastAPI app
