@@ -6,10 +6,11 @@ vs which has the tcache `key` field.
 Common pitfalls this module sidesteps:
   - Applying the safe-linking XOR on glibc <= 2.31 → fd points to garbage
   - Forgetting the XOR on glibc >= 2.32          → fd points to garbage
-  - Double-freeing into tcache on glibc >= 2.29 without bypassing the
-    `key` field → process aborts with `free(): double free detected
+  - Double-freeing into tcache on glibc >= 2.29 (or patched 2.28) without
+    bypassing the `key` field → process aborts with `free(): double free detected
     in tcache 2`. (2.34 randomized the stored value; the check has
-    existed since 2.29 — it is NOT a 2.35 feature.)
+    existed on master since 2.29 and was backported to 2.28 stable — it is
+    NOT a 2.35 feature.)
 
 Usage from your exploit:
 
@@ -71,9 +72,10 @@ def alignment_ok(target_addr: int) -> bool:
 
 
 def key_bypass_needed(profile: dict | None = None) -> bool:
-    """True on glibc >= 2.29: a `key` field was added to tcache chunks
-    so any double-free into tcache aborts unless you first overwrite
-    the key (via UAF / largebin overlap / direct edit). glibc 2.34
+    """True on glibc >= 2.29 and conservatively on 2.28: a `key` field was
+    added to tcache entries on master for 2.29 and backported to 2.28 stable,
+    so any double-free into an affected tcache aborts unless you first
+    overwrite the key (via UAF / largebin overlap / direct edit). glibc 2.34
     randomized the value stored there; the CHECK dates to 2.29, so a
     2.31 target (Ubuntu 20.04) needs this bypass too.
 

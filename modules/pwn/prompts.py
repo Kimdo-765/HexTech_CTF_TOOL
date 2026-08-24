@@ -610,10 +610,18 @@ Glibc version → which techniques still work
           unsorted bin attack writes libc value to target,
           `__malloc_hook` / `__free_hook` / `__realloc_hook` all
           live and writable.
-  2.27-2.28 tcache present, NO safe-linking, NO key. Tcache poison
-          is a single-write primitive (no XOR, no dup-detect).
-          `__free_hook` still alive — easiest win.
-  2.29-2.31 `key` field added to tcache chunks at +0x08. A plain
+  2.27    tcache present and NO safe-linking. Upstream started with NO
+          key, but vendor backports exist: Ubuntu 2.27-3ubuntu1.6 has
+          the key check. Trust libc_profile.json, which scans the actual libc
+          for the abort marker; when tcache_key=true clear +0x08 before
+          re-freeing. `__free_hook` is still alive.
+  2.28    upstream's initial release had no key, but the official 2.28
+          stable branch backported the key check. libc_profile.json scans
+          the exact libc first; marker absence/read failure falls back to
+          conservatively affected because builds can reword diagnostics.
+          Clear user-data +0x08 before a second free. Still NO safe-linking.
+  2.29-2.31 first mainline releases with the `key` field at freed-entry
+          user-data +0x08. A plain
           double-free into tcache now aborts with `free(): double
           free detected in tcache 2` unless you zero the key first
           (UAF / large-bin overlap). Ubuntu 20.04 ships 2.31 and IS

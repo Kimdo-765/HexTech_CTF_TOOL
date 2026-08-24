@@ -4799,7 +4799,7 @@ as HIGH severity when written from scratch:
 
   /opt/scaffold/tcache_poison.py
     — `safe_link()` auto-branches on libc_profile.json safe_linking.
-      `key_bypass_needed()` for glibc >= 2.29.
+      `key_bypass_needed()` for glibc >= 2.29 and patched 2.28.
 
   /opt/scaffold/aslr_retry.py
     — `aslr_retry(exploit_one, max_attempts=64)` for nibble-race
@@ -6758,10 +6758,11 @@ HEAP_FIX_HINTS: dict[str, str] = {
         "build_full_chain() leaves the vtable slot zeroed."
     ),
     "heap.tcache_key_not_bypassed": (
-        "FIX: glibc >= 2.29 adds a `key` field at offset +0x08 of "
-        "every tcache chunk (2.34 randomized the value it stores; the "
-        "check itself dates to 2.29 — see modules/pwn/libc_targets.py "
-        "\"tcache_key check added 2.29\"). Double-free aborts with "
+        "FIX: mainline glibc 2.29 adds a `key` field at offset +0x08 of "
+        "every freed tcache entry; the same change was officially backported "
+        "to the 2.28 stable branch, so libc_profile.json conservatively treats "
+        "2.28 as affected too. In 2.34 the stored value became random, but the "
+        "check is older. Double-free aborts with "
         "`free(): double free detected in tcache 2`. Pattern: "
         "`free(victim); edit(victim, p64(0) * 2)  # zeroes fd AND the "
         "key at +0x08 via UAF; free(victim)` — the write MUST reach "
@@ -6785,9 +6786,10 @@ HEAP_FIX_HINTS: dict[str, str] = {
         "FIX: tcache poison target MUST be 0x10-aligned on glibc "
         ">= 2.32 — otherwise `malloc(): unaligned tcache chunk "
         "detected` aborts. Either pick a 0x10-aligned offset within "
-        "the target struct, OR target the `key` field "
-        "(tcache_perthread_struct + 8 * slot) which IS aligned, OR "
-        "use a different primitive (large-bin / unsorted)."
+        "the target object, add a valid aligned fake chunk at that address, "
+        "OR use a different primitive (large-bin / unsorted). The freed "
+        "tcache_entry `key` is at user-data offset +0x08 and is therefore "
+        "NOT itself a valid aligned allocation target."
     ),
     "heap.whitespace_in_address": (
         "FIX: A critical address contains 0x09/0x0a/0x0b/0x0c/0x0d/"
@@ -7388,10 +7390,11 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
     m = _RUNNER_MISSING_MODULE_RE.search(err)
     if m:
         mod = m.group(1)
+        stdout_chars = len(str(sr.get("stdout") or ""))
         return (
             f"The RUNNER sandbox has no Python module `{mod}` — your solver "
-            f"died at import before executing any of the attack (exit "
-            f"{sr.get('exit_code')}, empty stdout).\n\n"
+            f"failed when Python tried to import it (exit "
+            f"{sr.get('exit_code')}, stdout {stdout_chars} characters).\n\n"
             f"The worker you developed in is a DIFFERENT container from the "
             f"runner your solver is executed in, and they are not guaranteed to "
             f"carry the same packages: anything an earlier job pip-installed "
@@ -7404,8 +7407,11 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
             f"package (fpylll/cysignals are best-effort). Check that list "
             f"first — `{mod}` may have a drop-in already present.\n\n"
             f"If it genuinely is absent, VENDOR IT — do not hand-roll a "
-            f"replacement. From your work dir:\n"
-            f"    pip install --target ./.pydeps {mod}\n"
+            f"replacement. First identify its PyPI DISTRIBUTION name (an "
+            f"import name is not necessarily a package name: `elftools` is "
+            f"provided by `pyelftools`, `PIL` by `Pillow`, and `Crypto` by "
+            f"`pycryptodome`). Then, from your work dir:\n"
+            f"    python3 -m pip install --target ./.pydeps <distribution-name>\n"
             f"and make these the FIRST lines of the solver:\n"
             f"    import os, sys\n"
             f"    sys.path.insert(0, os.path.join(\n"

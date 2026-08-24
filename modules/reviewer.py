@@ -1187,8 +1187,10 @@ _HINT_REPLACEMENTS: tuple[tuple[_re.Pattern, str], ...] = (
     # only "is firewalled" keeps whatever subject the reviewer wrote.
     (_re.compile(r"\bis firewalled\b", _re.IGNORECASE),
      "is network-restricted"),
-    (_re.compile(r"\bfirewall(?:ed)? bypass\b", _re.IGNORECASE),
-     "OOB callback routing"),
+    (_re.compile(r"\bfirewall(?:ed)?[ -]bypasses\b", _re.IGNORECASE),
+     "network callback routes"),
+    (_re.compile(r"\bfirewall(?:ed)?[ -]bypass\b", _re.IGNORECASE),
+     "network callback route"),
     # The SAME predicate-eating bug as above lived here until 2026-08-24:
     # `(?:to )?bypass(?:es|ed|ing)? the firewall` -> "to use the job's OOB
     # callback URL instead" swapped a finite verb for an infinitive phrase and
@@ -1203,17 +1205,29 @@ _HINT_REPLACEMENTS: tuple[tuple[_re.Pattern, str], ...] = (
     # nothing else; whatever verb and polarity the reviewer wrote survive.
     # Ordered AFTER `firewall bypass` so "the firewall bypass" is consumed by
     # that rule first and does not become "…network restriction bypass".
+    (_re.compile(r"\bthe firewall['’]s\b", _re.IGNORECASE),
+     "the worker's network restriction"),
     (_re.compile(r"\bthe firewall\b", _re.IGNORECASE),
      "the worker's network restriction"),
     # Covert / evasion framing → neutral. "reverse shell" is the
     # classifier-tripping framing; "spawned shell" is just a factual
     # description of a /bin/sh process and is left alone.
     (_re.compile(r"\bcovert channel\b", _re.IGNORECASE),
-     "OOB callback channel"),
+     "network callback channel"),
     (_re.compile(r"\breverse shell\b", _re.IGNORECASE),
-     "OOB callback"),
+     "network callback session"),
+    # Preserve the predicate's meaning and the surrounding polarity.  The old
+    # replacement, "complete the chain", changed "did not evade detection"
+    # into "did not complete the chain" — a detection finding became a false
+    # claim that the exploit itself failed.
+    (_re.compile(r"\bevading detection\b", _re.IGNORECASE),
+     "satisfying the challenge's detection constraint"),
+    (_re.compile(r"\bevaded detection\b", _re.IGNORECASE),
+     "satisfied the challenge's detection constraint"),
+    (_re.compile(r"\bevades detection\b", _re.IGNORECASE),
+     "satisfies the challenge's detection constraint"),
     (_re.compile(r"\bevade detection\b", _re.IGNORECASE),
-     "complete the chain"),
+     "satisfy the challenge's detection constraint"),
 )
 
 

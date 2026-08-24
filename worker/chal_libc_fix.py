@@ -625,17 +625,40 @@ def _extract_one_gadget(libc: Path) -> list[dict]:
     return gadgets
 
 
-def _derive_features(version_tuple: list[int] | None) -> dict:
-    """Map glibc (major, minor) → tcache/FSOP/hook feature flags.
+_TCACHE_KEY_ABORT_MARKER = b"free(): double free detected in tcache 2"
+
+
+def _libc_has_tcache_key_marker(libc: Path | None) -> bool | None:
+    """Return whether the exact libc contains the tcache-key abort marker.
+
+    A positive match is build-specific evidence and therefore overrides a
+    major.minor version boundary.  Absence is not proof: the file may be
+    unreadable or a vendor may have rebuilt the check with different wording.
+    Callers must retain a conservative version fallback for those cases.
+    """
+    if libc is None:
+        return None
+    try:
+        return _TCACHE_KEY_ABORT_MARKER in libc.read_bytes()
+    except OSError:
+        return None
+
+
+def _derive_features(
+    version_tuple: list[int] | None,
+    libc: Path | None = None,
+) -> dict:
+    """Map an exact libc build + version to tcache/FSOP/hook flags.
 
     All booleans default to None when the version couldn't be detected
     so the agent knows the answer is unknown and must verify manually.
     """
+    marker_present = _libc_has_tcache_key_marker(libc)
     if not version_tuple or len(version_tuple) < 2:
         return {
             "safe_linking": None,
-            "tcache_key": None,
-            "tcache_present": None,
+            "tcache_key": True if marker_present else None,
+            "tcache_present": True if marker_present else None,
             "hooks_alive": None,
             "io_str_jumps_finish_patched": None,
             "preferred_fsop_chain": "unknown — identify glibc version first",
@@ -648,16 +671,16 @@ def _derive_features(version_tuple: list[int] | None) -> dict:
     else:
         v_floor = f"{major}.{minor}"
     safe_linking = (major, minor) >= (2, 32)
-    # 2.29, not 2.35. The `key` member of tcache_entry and the
-    # `free(): double free detected in tcache 2` abort both landed in
-    # glibc 2.29; 2.34 only randomized the value stored there. The gate
-    # read >= (2, 35) until 2026-08-24, which silently returned
-    # tcache_key=False for every 2.29-2.34 target — Ubuntu 20.04 (2.31)
-    # included — so `key_bypass_needed()` told the agent no bypass was
-    # required and the double-free aborted on the remote.
-    # modules/pwn/libc_targets.py:143 has said "added 2.29" all along.
-    tcache_key = (major, minor) >= (2, 29)
-    tcache_present = (major, minor) >= (2, 26)
+    # The check landed on master for 2.29 and on the official release/2.28
+    # branch, but vendor backports reach still older major.minor versions:
+    # Ubuntu GLIBC 2.27-3ubuntu1.6 contains this marker and aborts a plain
+    # tcache double-free.  Prefer evidence from the exact staged libc.  A
+    # missing marker is not authoritative (unreadable file or diagnostic-
+    # reworded rebuild), so retain the conservative 2.28 version fallback.
+    # In 2.34 the stored value changed from the per-thread cache pointer to a
+    # random key; the check itself is older.
+    tcache_key = marker_present is True or (major, minor) >= (2, 28)
+    tcache_present = marker_present is True or (major, minor) >= (2, 26)
     hooks_alive = (major, minor) < (2, 34)
     str_finish_patched = (major, minor) >= (2, 37)
 
@@ -672,8 +695,8 @@ def _derive_features(version_tuple: list[int] | None) -> dict:
         ))
         if tcache_key:
             recommend.append(
-                "tcache key bypass — overwrite tcache_perthread_struct[i].key "
-                "via UAF / overlap before double-free"
+                "tcache key bypass — overwrite the freed tcache_entry key at "
+                "user-data offset +0x08 via UAF / overlap before double-free"
             )
     if hooks_alive:
         recommend.append("__free_hook / __malloc_hook overwrite (simplest win)")
@@ -776,7 +799,7 @@ def emit_profile(
     """
     try:
         v_tuple = _version_tuple(version)
-        features = _derive_features(v_tuple)
+        features = _derive_features(v_tuple, libc)
         symbols = _extract_symbols(libc)
         one_gadget = _extract_one_gadget(libc)
         how2heap = _how2heap_techniques(v_tuple)

@@ -88,6 +88,21 @@ def main() -> int:
     chk("it points at the parity checker", "worker.solver_smoke" in h)
     chk("...and forbids re-shipping before that passes", "Do NOT re-ship" in h)
 
+    # A ModuleNotFoundError can happen after partial output or inside a late
+    # import. The hint must report what the runner observed, not always claim
+    # that stdout was empty and none of the attack ran.
+    partial = hint({
+        "exit_code": 1,
+        "stdout": "partial attack output",
+        "stderr": "ModuleNotFoundError: No module named 'elftools'",
+    })
+    chk("non-empty stdout is measured instead of called empty",
+        "stdout 21 characters" in partial and "empty stdout" not in partial,
+        partial[:180])
+    chk("the import name is not blindly used as the PyPI package name",
+        "pip install --target ./.pydeps elftools" not in partial
+        and "elftools` is provided by `pyelftools" in partial, partial[-500:])
+
     # ------------------------------------------------------- other classes
     section("other mechanically-diagnosable crashes")
     # These four strings were CAPTURED from the runner image, not invented. Its
@@ -175,6 +190,37 @@ def main() -> int:
     chk("the chosen directory avoids the name this repo already overloads "
         "(_VENDOR_DIRS elects/skips 'vendor')",
         "./.pydeps" in base and "--target ./vendor" not in base)
+    chk("the shared prompt distinguishes import and distribution names",
+        "PyPI DISTRIBUTION name" in base and "elftools" in base
+        and "pyelftools" in base)
+
+    # Every package advertised by the deterministic hint is explicitly present
+    # in runner/Dockerfile; optional packages must also retain their masked
+    # installation semantics. This compares the shipped producer with the image
+    # definition instead of trusting two hand-written lists independently.
+    section("the advertised runner inventory matches the Dockerfile")
+    runner_df = (ROOT / "runner" / "Dockerfile").read_text()
+    inventory_hint = hint({"exit_code": 1, "stderr": NUMPY_ERR})
+    for package in (
+        "pwntools", "pycryptodome", "gmpy2", "sympy", "z3-solver",
+        "pyboolector", "cvc5", "ecdsa", "requests", "httpx", "numpy",
+        "web3", "eth-abi", "eth-account",
+    ):
+        chk(f"  {package} is both advertised and installed",
+            package in inventory_hint and package in runner_df)
+    chk("  scaffold is both advertised and copied into the image",
+        "`scaffold` package" in inventory_hint and "COPY scaffold /opt/scaffold" in runner_df)
+    fpy_block = runner_df.split("# fpylll + cysignals", 1)[1].split(
+        "# Heap-pwn scaffolds", 1)[0]
+    chk("  fpylll/cysignals are accurately labelled best-effort",
+        "fpylll/cysignals are best-effort" in inventory_hint
+        and "pip install --no-cache-dir cysignals fpylll" in fpy_block
+        and "|| true" in fpy_block)
+    worker_from = (ROOT / "worker" / "Dockerfile").read_text().splitlines()[0]
+    runner_from = runner_df.splitlines()[0]
+    chk("  compiled-wheel parity claim has the same Python base",
+        worker_from == runner_from == "FROM python:3.12-slim",
+        (worker_from, runner_from))
 
     failed = [r for r in _results if not r]
     print(f"\n{len(_results)} checks, {len(failed)} failed")

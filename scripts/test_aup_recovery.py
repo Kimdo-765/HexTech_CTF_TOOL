@@ -197,7 +197,9 @@ def main() -> int:
         "carries that hint into RESUME_STATE for its successor",
         _crash_at < _aup_at, (_crash_at, _aup_at))
     chk("the give-up still exists for the non-AUP case",
-        "stop_kind=\"no_hint\"" in src)
+        '_no_hint_kind = (' in src
+        and 'else "no_hint"' in src
+        and "stop_kind=_no_hint_kind" in src)
     chk("both AUP outcomes terminate the loop rather than falling through",
         src[_aup_at:_giveup_at].count("return last_sandbox") >= 1
         and "stop_kind=\"policy_refusal\"" in src[_aup_at:_giveup_at])

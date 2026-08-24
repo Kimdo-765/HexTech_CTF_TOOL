@@ -911,14 +911,16 @@ Job 06f3a326d453 skipped this: 61 turns of cryptanalysis produced a solver whose
 line 33 was `import numpy as np`, the sandbox had no numpy, and it died in two
 seconds having executed none of the attack.
 
-NEED A LIBRARY THAT IS NOT INSTALLED? Install it INTO YOUR WORK DIR.
-A plain `pip install <pkg>` is the wrong move twice over: the package lands in
+NEED A LIBRARY THAT IS NOT INSTALLED? Install it INTO YOUR WORK DIR. First map
+the IMPORT name to its PyPI DISTRIBUTION name — they can differ (`elftools` →
+`pyelftools`, `PIL` → `Pillow`, `Crypto` → `pycryptodome`).
+A plain `pip install <distribution-name>` is the wrong move twice over: it lands in
 this container only, so the sandbox that runs your solver still will not have
 it — and it PERSISTS here after your job ends, so the next job on this slot
 inherits a library the other slot lacks. That is not hypothetical; it is
 exactly how 06f3a326d453 came to believe numpy was available.
 
-    pip install --target ./.pydeps <pkg>        # from your work dir
+    python3 -m pip install --target ./.pydeps <distribution-name>
 
 and then, as the FIRST thing your solver does:
 

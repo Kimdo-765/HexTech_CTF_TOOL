@@ -11,7 +11,7 @@ on this version).
 
 Each entry is one candidate RCE end-of-chain, ordered easiest first.
 Version keys match by major.minor; lookup picks the largest catalog
-key ≤ detected version (so glibc 2.31 inherits 2.27 entries when
+key ≤ detected version (so glibc 2.31 inherits the 2.29 entry when
 no 2.31 entry exists).
 """
 
@@ -106,16 +106,17 @@ LIBC_RCE_PATHS: dict[str, list[dict[str, str]]] = {
     ],
     "2.27": [
         {
-            "target": "tcache poison → __free_hook = system",
+            "target": "tcache poison → __free_hook = system (profile key check)",
             "method": (
-                "double-free in tcache (no tcache_key check before "
-                "2.29); next two allocs of same size — first reads "
-                "back the poisoned fd, second lands at __free_hook"
+                "read libc_profile.json.tcache_key for the exact build; when "
+                "true, overwrite the freed tcache_entry key at user-data "
+                "+0x08 before re-freeing, then poison fd and allocate twice"
             ),
-            "prereq": "1× UAF or double-free; libc-base leak",
+            "prereq": "1× UAF or double-free; +0x08 UAF if key=true; libc leak",
             "notes": (
-                "EASIEST version. No fastbin 0x7f abuse needed because "
-                "tcache has no size check on alloc. Hooks still alive."
+                "Upstream 2.27 had no key check, but vendor backports exist: "
+                "Ubuntu 2.27-3ubuntu1.6 has it. The profile scans the actual "
+                "libc diagnostic marker; no safe-linking, hooks still alive."
             ),
         },
         {
@@ -128,19 +129,38 @@ LIBC_RCE_PATHS: dict[str, list[dict[str, str]]] = {
             ),
         },
     ],
+    "2.28": [
+        {
+            "target": "tcache poison → __free_hook (possible key bypass)",
+            "method": (
+                "the initial 2.28 release had no tcache key, but the official "
+                "stable branch backported it; libc_profile.json first scans "
+                "the actual libc, then conservatively falls back to key=true. "
+                "Overwrite freed-entry user-data +0x08 before re-freeing"
+            ),
+            "prereq": "tcache UAF reaching user-data +0x08; libc-base leak",
+            "notes": (
+                "Marker absence is not proof after a read failure or a rebuild "
+                "that removed/reworded diagnostics. Clearing +0x08 avoids a "
+                "false-negative."
+            ),
+        },
+    ],
     "2.29": [
         {
             "target": "tcache poison → __free_hook (tcache_key bypass)",
             "method": (
-                "tcache_key check requires the slot's key field to be "
-                "cleared before re-freeing — alloc one chunk from the "
-                "poisoned tcache slot to clear key, then re-free"
+                "overwrite the freed tcache_entry key at user-data +0x08 "
+                "via UAF / overlap, then re-free the same chunk"
             ),
             "prereq": (
                 "tcache UAF + ability to allocate 2× from same slot; "
                 "libc-base leak"
             ),
-            "notes": "tcache_key check added 2.29. Otherwise as 2.27.",
+            "notes": (
+                "First mainline release with the check; it was also "
+                "backported to the official 2.28 stable branch."
+            ),
         },
     ],
     "2.32": [

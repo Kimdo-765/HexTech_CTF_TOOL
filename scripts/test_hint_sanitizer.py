@@ -106,14 +106,51 @@ for text, gone in FIRES:
     chk("%r is still rewritten" % gone, gone.lower() not in out.lower(), out)
 
 # --- rule ORDER is load-bearing, so pin it -----------------------------------
-# `the firewall` -> noun is deliberately placed AFTER `firewall bypass` -> "OOB
-# callback routing". Reversed, "the firewall bypass" would first become "the
+# `the firewall` -> noun is deliberately placed AFTER `firewall bypass` ->
+# "network callback route". Reversed, "the firewall bypass" would first become "the
 # worker's network restriction bypass" and the second rule could no longer
 # match, leaving the framing the table exists to remove. That ordering lived
 # only in a source comment until this check.
 out = sanitize("the firewall bypass worked on the first try")
 chk("'the firewall bypass' is consumed by the bypass rule, not the noun rule",
-    "OOB callback routing" in out and "network restriction bypass" not in out, out)
+    "network callback route" in out and "network restriction bypass" not in out, out)
+
+# Determiners and hyphenation are common in prose. The previous replacement
+# made "a firewall bypass" into the ungrammatical "a OOB ...", while the noun
+# rule consumed only half of "firewall-bypass".
+for text in ("a firewall bypass worked", "the firewall-bypass failed"):
+    out = sanitize(text)
+    chk("firewall-bypass variant is consumed whole: %r" % text,
+        "network callback route" in out
+        and "network restriction-bypass" not in out
+        and "a OOB" not in out, out)
+
+# F10: sibling noun rewrites also sat after an indefinite article and produced
+# `a OOB ...`.  Replacements must start with a consonant and remain neutral.
+for text, expected in (
+    ("we need a covert channel", "a network callback channel"),
+    ("spawn a reverse shell", "a network callback session"),
+):
+    out = sanitize(text)
+    chk("indefinite article stays grammatical: %r" % text,
+        expected in out and "a OOB" not in out, out)
+
+# The three adjacent gaps reported with F10 are common grammatical variants,
+# and each currently either leaks the classifier phrase or creates a malformed
+# possessive.  Pin singular/plural, tense, and possessive separately.
+out = sanitize("the firewall bypasses both failed")
+chk("plural firewall bypasses are rewritten and keep plural agreement",
+    "network callback routes" in out and "firewall bypasses" not in out, out)
+
+out = sanitize("The payload evaded detection yesterday.")
+chk("past-tense detection wording is rewritten without breaking tense",
+    "satisfied the challenge's detection constraint" in out
+    and "evaded detection" not in out, out)
+
+out = sanitize("the firewall's rules blocked the callback")
+chk("possessive firewall wording does not produce a double possessive",
+    "the worker's network restriction rules" in out
+    and "restriction's rules" not in out, out)
 
 # --- a rewrite may not change the VERB or the POLARITY of the sentence -------
 # The rules above only ever checked that the subject survived. They passed for
@@ -148,6 +185,17 @@ for text, verb in FINITE_VERB:
         verb in out, out)
     chk("...leaving a grammatical sentence: %r" % text[:40],
         not re.search(r"\b\w+ to (?:use|complete) the\b", out, re.I), out)
+
+# A detection finding must not become a claim that the exploit chain failed.
+# The old "evade detection" -> "complete the chain" rule made exactly that
+# semantic substitution under negation.
+for text, keeper in (
+    ("The payload did not evade detection.", "did not satisfy"),
+    ("The payload can evade detection.", "can satisfy"),
+):
+    out = sanitize(text)
+    chk("detection predicate and polarity survive: %r" % text,
+        keeper in out and "complete the chain" not in out, out)
 
 # --- a rule must not assert infrastructure the job may not have -------------
 # settings_io.py defaults callback_url to "" and _runner.py exports
