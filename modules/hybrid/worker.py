@@ -219,36 +219,23 @@ def _stage_bundle(
 
 
 def _first_binary_in(directory: Path) -> Path | None:
-    """Match scalar rev ingest: prefer the largest recursive ELF/PE file."""
+    """Delegate to the one picker every ingest path shares.
 
-    candidates: list[Path] = []
-    for path in directory.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            magic = path.read_bytes()[:4]
-        except OSError:
-            continue
-        if magic.startswith(b"\x7fELF") or magic[:2] == b"MZ":
-            candidates.append(path)
-    if not candidates:
-        return None
-    candidates.sort(key=lambda path: path.stat().st_size, reverse=True)
-    return candidates[0]
+    These used to be local copies whose docstrings claimed to "match scalar rev
+    ingest". They stopped matching the moment the scalar side gained a
+    size-tie-break, and the two then chose different binaries out of the same
+    real bundle (f94c35eb16a2: `client` vs `client_old`, both 19208 bytes).
+    A copy that says it matches another copy is the defect, not the drift.
+    """
+    from modules._common import pick_challenge_binary
+    return pick_challenge_binary(directory)
 
 
 def _largest_non_archive(directory: Path) -> Path | None:
-    """Match scalar rev ingest's non-native fallback selection."""
-
-    candidates = [
-        path
-        for path in directory.rglob("*")
-        if path.is_file() and not path.name.lower().endswith(_ARCHIVE_EXTENSIONS)
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda path: path.stat().st_size, reverse=True)
-    return candidates[0]
+    """Kept as a name for callers; the shared picker already falls back to the
+    largest non-archive when a directory holds no ELF/PE."""
+    from modules._common import pick_challenge_binary
+    return pick_challenge_binary(directory)
 
 
 def _runner_for(module: str) -> Callable[..., Any]:

@@ -66,25 +66,26 @@ def _slice(path: pathlib.Path, names: set[str], ns: dict) -> dict:
     return ns
 
 
-# The real picker, exec'd rather than stubbed, so this exercises the shared
-# code both paths depend on.
-picker_ns = _slice(ROOT / "api/routes/rev_module.py",
-                   {"_first_binary_in", "_largest_non_archive", "_ARCHIVE_EXTS"},
-                   {"Path": pathlib.Path, "Optional": object})
+# The real shared picker, exec'd rather than stubbed, so this exercises the
+# code all three ingest paths now depend on.
+picker_ns = _slice(ROOT / "modules/_common.py",
+                   {"pick_challenge_binary", "_by_size_then_name",
+                    "_CHAL_ARCHIVE_EXTS"},
+                   {"Path": pathlib.Path})
 
-stub = types.ModuleType("api.routes.rev_module")
-stub._first_binary_in = picker_ns["_first_binary_in"]
-stub._largest_non_archive = picker_ns["_largest_non_archive"]
-api_pkg = types.ModuleType("api")
-api_pkg.__path__ = []
-routes_pkg = types.ModuleType("api.routes")
-routes_pkg.__path__ = []
-sys.modules.setdefault("api", api_pkg)
-sys.modules.setdefault("api.routes", routes_pkg)
-sys.modules["api.routes.rev_module"] = stub
+common_stub = types.ModuleType("modules._common")
+common_stub.pick_challenge_binary = picker_ns["pick_challenge_binary"]
+mod_pkg = types.ModuleType("modules")
+mod_pkg.__path__ = []
+sys.modules.setdefault("modules", mod_pkg)
+sys.modules["modules._common"] = common_stub
 
+# _carry_binary_name walks the retry chain via read_job_meta; feed it a fake
+# corpus so the chain logic is exercised rather than stubbed away.
+FAKE_METAS: dict = {}
 carry_ns = _slice(ROOT / "api/routes/retry.py", {"_carry_binary_name"},
-                  {"Path": pathlib.Path})
+                  {"Path": pathlib.Path,
+                   "read_job_meta": lambda jid: FAKE_METAS[str(jid)]})
 carry = carry_ns["_carry_binary_name"]
 
 ELF = b"\x7fELF" + b"\0" * 60
@@ -120,9 +121,47 @@ CASES = {
 section("a retry keeps the identity its parent recorded")
 for job, (files, parent_name, drifted_to) in CASES.items():
     d = make(files)
-    got = carry(d, {"filename": parent_name})
+    FAKE_METAS.clear()
+    FAKE_METAS["root"] = {"id": "root", "filename": parent_name, "retry_of": None}
+    got = carry(d, {"id": job, "filename": parent_name, "retry_of": "root"})
     chk("%s keeps %r" % (job, parent_name), got == parent_name, got)
     chk("%s does NOT drift to %r" % (job, drifted_to), got != drifted_to, got)
+
+section("a chain already polluted upstream is repaired, not perpetuated")
+# 4c96e913b6e6 is the case the previous version of this file claimed to cover
+# and did not: its comment said "four real bin directories" while CASES held
+# three. It inherited `output.pdf.enc` from d342333ffed3, which had itself
+# drifted from the root's CVE-2015-2291.exe. Trusting the immediate parent
+# keeps promoting a ciphertext as the challenge forever.
+pdf_bundle = {"CVE-2015-2291.exe": (2859008, PE), "kmdf1.sys": (16152, PE),
+              "output.pdf.enc": (132616, TXT)}
+d = make(pdf_bundle)
+FAKE_METAS.clear()
+FAKE_METAS["5d4ba07beba7"] = {"id": "5d4ba07beba7",
+                              "filename": "CVE-2015-2291.exe", "retry_of": None}
+FAKE_METAS["d342333ffed3"] = {"id": "d342333ffed3",
+                              "filename": "output.pdf.enc",
+                              "retry_of": "5d4ba07beba7"}
+polluted_parent = FAKE_METAS["d342333ffed3"]
+got = carry(d, polluted_parent)
+chk("4c96e913b6e6 does NOT inherit the polluted 'output.pdf.enc'",
+    got != "output.pdf.enc", got)
+chk("...it recovers the root identity 'CVE-2015-2291.exe'",
+    got == "CVE-2015-2291.exe", got)
+# and the immediate-parent rule still applies when there is no usable root
+FAKE_METAS.clear()
+FAKE_METAS["gone"] = {"id": "gone", "filename": "not-staged.bin",
+                      "retry_of": None}
+got2 = carry(d, {"id": "child", "filename": "kmdf1.sys", "retry_of": "gone"})
+chk("a root whose file is not staged falls through to the parent's name",
+    got2 == "kmdf1.sys", got2)
+# a cycle in retry_of must not hang
+FAKE_METAS.clear()
+FAKE_METAS["a"] = {"id": "a", "filename": "kmdf1.sys", "retry_of": "b"}
+FAKE_METAS["b"] = {"id": "b", "filename": "kmdf1.sys", "retry_of": "a"}
+chk("a cycle in retry_of terminates",
+    carry(d, FAKE_METAS["a"]) in ("kmdf1.sys", "CVE-2015-2291.exe"),
+    "did not hang")
 
 section("which mechanism is doing the work, per case")
 # Non-vacuity, stated precisely rather than hand-waved. The old rule read
@@ -164,6 +203,70 @@ d3 = make({})
 chk("an empty bin dir yields None", carry(d3, {}) is None, carry(d3, {}))
 chk("an empty bin dir with a recorded name still yields None",
     carry(d3, {"filename": "gone"}) is None)
+
+section("all three ingest paths share ONE picker")
+# The defect this replaces: hybrid kept private copies whose docstrings said
+# "Match scalar rev ingest", and they stopped matching the moment the scalar
+# side gained a tie-break. On f94c35eb16a2 (client and client_old both exactly
+# 19208 bytes) the two then chose different binaries.
+#
+# The canonical picker lives in modules/_common.py rather than beside the
+# upload route because the worker container does not mount `api/` -- a
+# `from api.routes...` inside modules/** dies at RQ load.
+import re as _re
+common_src = (ROOT / "modules/_common.py").read_text()
+rev_src = (ROOT / "api/routes/rev_module.py").read_text()
+hyb_src = (ROOT / "modules/hybrid/worker.py").read_text()
+retry_src2 = (ROOT / "api/routes/retry.py").read_text()
+
+chk("the canonical picker is defined in modules/_common.py",
+    "def pick_challenge_binary(" in common_src)
+for name, src in (("rev_module", rev_src), ("hybrid worker", hyb_src),
+                  ("retry", retry_src2)):
+    chk("%s calls the shared picker" % name,
+        "pick_challenge_binary" in src)
+    chk("%s no longer sorts candidates itself" % name,
+        "candidates.sort(" not in src, name)
+# Parse rather than grep: the sentence "a `from api.routes...` inside
+# modules/** dies at RQ load" appears in a COMMENT explaining this very rule,
+# and a substring search flagged it as a violation.
+def _imports_api(src: str) -> list[str]:
+    bad = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("api"):
+            bad.append("%s@%d" % (node.module, node.lineno))
+        elif isinstance(node, ast.Import):
+            bad += ["%s@%d" % (a.name, node.lineno) for a in node.names
+                    if a.name.startswith("api")]
+    return bad
+
+
+for name, src in (("modules/_common.py", common_src),
+                  ("modules/hybrid/worker.py", hyb_src)):
+    chk("%s imports nothing from api/" % name, _imports_api(src) == [],
+        _imports_api(src))
+
+# the real tie, run through the one picker: same answer every time
+tie_bundle = {"client": (19208, ELF), "client_diff": (832, TXT),
+              "client_old": (19208, ELF), "server": (12744, ELF)}
+pick = picker_ns["pick_challenge_binary"]
+answers = {pick(make(tie_bundle)).name for _ in range(6)}
+chk("the shared picker gives one answer on the real 19208-byte tie",
+    len(answers) == 1, answers)
+ties: list = []
+pick(make(tie_bundle), ties=ties)
+chk("...and it reports that the choice was arbitrary",
+    sorted(ties) == ["client", "client_old"], ties)
+chk("a bundle with no tie reports none",
+    (lambda t: (pick(make({"a": (10, ELF), "b": (20, ELF)}), ties=t), t == [])[1])([]))
+# and the retry path is NOT decided by that tie: it preserves the root name
+FAKE_METAS.clear()
+FAKE_METAS["f94c35eb16a2"] = {"id": "f94c35eb16a2", "filename": "client_old",
+                              "retry_of": None}
+chk("a retry of the tied bundle keeps the root's client_old, tie or not",
+    carry(make(tie_bundle),
+          {"id": "c918d057a4fc", "filename": "server",
+           "retry_of": "f94c35eb16a2"}) == "client_old")
 
 section("the caller no longer names the challenge after directory order")
 retry_src = (ROOT / "api/routes/retry.py").read_text()

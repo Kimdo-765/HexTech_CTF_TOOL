@@ -10,10 +10,18 @@ but nothing recorded WHICH TEXT reached main, so the rendered bytes were
 unrecoverable after the fact and the retry-hint audit could not be closed on
 evidence.
 
-The fix records `(attempt, verdict, chars, sha256)` per injection instead of
-the full 3.4 KB. `verdict` is the producer key the formatter maps to its origin
-label, so origin stays derivable without copying that table out of the function
-it is deliberately local to.
+The audit goal is ORIGIN, and that is now recorded outright: the formatter
+hands back the `hint_source` / `hint_origin` it chose, so the label is stored
+rather than re-derived from `verdict` against a second copy of a table that is
+deliberately local to that function.
+
+The digest is a COMMITMENT to the bytes, not a way to recover them. An earlier
+version of this file claimed the record let a later run "re-render the same
+inputs and compare"; it does not. The rendered body depends on
+`sandbox_result`, and the caller only keeps the LAST run's, so two injections
+can share attempt, verdict and length and still differ. `sha256` answers "was
+it this text?" and never "what was the text?" — the exact-bytes question stays
+open, by decision, rather than being claimed closed.
 
 Two things have to hold, and the SECOND is the one that actually bit:
 
@@ -116,6 +124,56 @@ for mod in ("misc", "forensic"):
     if p.is_file():
         chk("%s does not run the orchestrator loop (so nothing to persist)"
             % mod, "run_main_agent_session" not in p.read_text())
+
+section("the recorded label comes from the formatter, not a second copy")
+# The provenance table is deliberately local to _format_postjudge_user_turn
+# (the anti-overfit suite execs that function with almost nothing in scope), so
+# a caller that re-derived the label from `verdict` would be maintaining a
+# duplicate of it. The formatter hands the label out instead.
+chk("the formatter accepts a record out-dict",
+    "record: dict | None = None" in COMMON)
+fmt = ast.get_source_segment(COMMON, func("_format_postjudge_user_turn")) or ""
+chk("...and writes the label it actually chose into it",
+    'record["hint_source"] = hint_source' in fmt
+    and 'record["hint_origin"] = hint_origin' in fmt)
+chk("the injection site passes the record in", "record=_inject_record" in body)
+for field in ("hint_source", "hint_origin"):
+    chk("the persisted record carries %r" % field,
+        ('"%s": _inject_record.get' % field) in body)
+chk("the loop does not keep its own copy of the provenance table",
+    body.count("_hint_provenance") == 0)
+
+section("the digest is a commitment, not a reconstruction")
+# Codex's defect: two injections can share attempt, verdict AND length and
+# still be different text, because the rendered body depends on
+# `sandbox_result` and the caller only retains the last one. A record that
+# cannot regenerate the expected bytes cannot close an exact-text audit, and
+# the earlier docstring claimed it could.
+import hashlib as _h
+same_len_a = "verdict=reviewer_redirect\nrebuild the chain from the leak"
+same_len_b = "verdict=reviewer_redirect\nrebuild the chain from the heap"
+chk("the two fixtures really are the same length",
+    len(same_len_a) == len(same_len_b), (len(same_len_a), len(same_len_b)))
+rec_a = {"attempt": 1, "verdict": "reviewer_redirect", "chars": len(same_len_a),
+         "sha256": _h.sha256(same_len_a.encode()).hexdigest()[:16]}
+rec_b = {"attempt": 1, "verdict": "reviewer_redirect", "chars": len(same_len_b),
+         "sha256": _h.sha256(same_len_b.encode()).hexdigest()[:16]}
+chk("same attempt/verdict/chars, different digest",
+    (rec_a["attempt"], rec_a["verdict"], rec_a["chars"])
+    == (rec_b["attempt"], rec_b["verdict"], rec_b["chars"])
+    and rec_a["sha256"] != rec_b["sha256"], (rec_a, rec_b))
+chk("the record does NOT carry the inputs needed to re-render",
+    not any(k in rec_a for k in ("sandbox_result", "script_filename",
+                                 "max_attempts", "text")))
+# and the code must not claim otherwise
+chk("no comment claims the digest lets a later run re-render and compare",
+    "re-render the same inputs and compare" not in COMMON)
+# Comments wrap, so compare on text with comment markers and runs of
+# whitespace collapsed rather than on an exact substring.
+_flat = " ".join(COMMON.replace("#", " ").split())
+chk("the code says plainly what the digest can and cannot answer",
+    'it answers "was it this text?", never "what was the text?"' in _flat,
+    [s for s in _flat.split(". ") if "was it this text" in s][:1])
 
 section("behavioural: the digest identifies the text")
 # Re-rendering the same inputs must reproduce the stored digest; a different

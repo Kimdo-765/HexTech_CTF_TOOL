@@ -13,48 +13,23 @@ router = APIRouter()
 
 
 def _first_binary_in(d: Path) -> Optional[Path]:
-    """Find the first ELF / PE inside `d` (recursive). Prefers the
-    largest match so a small auxiliary binary doesn't beat the real
-    challenge. Used after unpacking a zip upload."""
-    candidates: list[Path] = []
-    for p in d.rglob("*"):
-        if not p.is_file():
-            continue
-        try:
-            magic = p.read_bytes()[:4]
-        except OSError:
-            continue
-        if magic.startswith(b"\x7fELF") or magic[:2] == b"MZ":
-            candidates.append(p)
-    if not candidates:
-        return None
-    # Name breaks size ties. Sorting on size alone is stable, so an exact tie
-    # left the winner to rglob order -- i.e. the filesystem. Job f94c35eb16a2
-    # is a live example: `client` and `client_old` are both exactly 19208
-    # bytes, so which one became the challenge was decided by directory order.
-    # A picker two code paths are expected to agree on cannot be order-derived.
-    candidates.sort(key=lambda p: (-p.stat().st_size, p.name))
-    return candidates[0]
+    """Delegate to the one picker every ingest path shares.
 
-
-_ARCHIVE_EXTS = (
-    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".7z", ".rar",
-)
+    This used to be a local implementation; the retry route and the hybrid
+    worker each had their own. Adding a size-tie-break here made the scalar
+    path disagree with hybrid on a real bundle, which is what a duplicated
+    "policy" always eventually does. The canonical one lives in
+    modules/_common.py because the worker container does not mount `api/`.
+    """
+    from modules._common import pick_challenge_binary
+    return pick_challenge_binary(d)
 
 
 def _largest_non_archive(d: Path) -> Optional[Path]:
-    """Largest regular file under `d` that is not itself an archive — the
-    fallback challenge target when a zip carries NO ELF/PE (Java .class/.jar,
-    Python .pyc, WASM, Android DEX, Lua bytecode, custom-VM blob, a script,
-    …). Lets rev proceed on non-native artifacts instead of hard-rejecting."""
-    candidates = [
-        p for p in d.rglob("*")
-        if p.is_file() and not p.name.lower().endswith(_ARCHIVE_EXTS)
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: (-p.stat().st_size, p.name))  # ties by name
-    return candidates[0]
+    """Kept as a name for callers; the shared picker already falls back to the
+    largest non-archive when a directory holds no ELF/PE."""
+    from modules._common import pick_challenge_binary
+    return pick_challenge_binary(d)
 
 
 @router.post("/analyze")

@@ -267,26 +267,62 @@ def _carry_binary_name(bin_dir: Path, prev_meta: dict) -> str | None:
     `meta["filename"]` and handed to the analyzer, so a retry could re-enter
     with a documentation file as its subject.
 
-    Order of preference:
-      1. the name the previous job already carried, if that file is staged --
-         a retry is the SAME challenge, so identity should not drift
-      2. the deterministic picker the direct upload used (largest ELF/PE, then
-         largest non-archive), imported rather than re-derived so the two
-         paths cannot fall out of step again
-      3. nothing, leaving the caller's own fallback in charge
-    """
-    prev_name = (prev_meta.get("filename") or "").strip()
-    if prev_name and (bin_dir / prev_name).is_file():
-        return prev_name
+    Preferring the IMMEDIATE parent's name is not enough, because the bug
+    propagates: `4c96e913b6e6` inherited `output.pdf.enc` from `d342333ffed3`,
+    which had itself drifted away from the root's `CVE-2015-2291.exe`. Trusting
+    the parent there would keep re-promoting a ciphertext as the challenge
+    forever.
 
-    # Imported lazily: rev_module pulls in the upload/staging stack, and this
-    # is the only place in retry.py that needs it.
+    So walk to the ROOT of the retry chain. The root is a direct upload, and it
+    is the only generation whose name was never produced by the broken retry
+    picker -- that is what makes it authoritative rather than merely older. On
+    the four recorded drift cases the root carries `main`,
+    `CVE-2015-2291.exe` (for both `d342333ffed3` and the chain that inherited
+    from it) and `client_old`, which is the right answer in every one.
+
+    Order of preference:
+      1. the ROOT of the retry chain, if that file is staged here
+      2. the immediate parent's name, if staged -- covers a chain whose root
+         meta is gone or whose bundle genuinely changed
+      3. the deterministic picker every ingest path shares
+      4. nothing, leaving the caller's own fallback in charge
+    """
+    def _staged(name: str | None) -> str | None:
+        name = (name or "").strip()
+        return name if name and (bin_dir / name).is_file() else None
+
+    # 1. root of the chain
+    seen: set[str] = set()
+    cur = prev_meta
+    root_name = None
+    while cur:
+        jid = str(cur.get("id") or "")
+        if jid in seen:
+            break              # defensive: a cycle in retry_of
+        seen.add(jid)
+        parent_id = cur.get("retry_of")
+        if not parent_id:
+            root_name = cur.get("filename")
+            break
+        try:
+            cur = read_job_meta(str(parent_id))
+        except Exception:
+            break
+    if _staged(root_name):
+        return _staged(root_name)
+
+    # 2. the immediate parent
+    if _staged(prev_meta.get("filename")):
+        return _staged(prev_meta.get("filename"))
+
+    # 3. the shared picker — same function the direct upload and the hybrid
+    #    worker use, so the three paths cannot disagree again.
     try:
-        from api.routes.rev_module import _first_binary_in, _largest_non_archive
+        from modules._common import pick_challenge_binary
     except Exception:
         picked = None
     else:
-        picked = _first_binary_in(bin_dir) or _largest_non_archive(bin_dir)
+        picked = pick_challenge_binary(bin_dir)
     if picked is not None:
         return picked.name
 

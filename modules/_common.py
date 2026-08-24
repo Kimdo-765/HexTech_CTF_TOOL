@@ -1914,6 +1914,78 @@ def _norm_chal(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s)
 
 
+# ---------------------------------------------------------------------------
+# Which staged file IS the challenge.
+#
+# Three code paths need this answer and must give the same one: the direct
+# upload (api/routes/rev_module.py), the retry (api/routes/retry.py) and the
+# hybrid worker (modules/hybrid/worker.py). Each had its own copy. The hybrid
+# copies even carry the docstring "Match scalar rev ingest" -- which stopped
+# being true the moment the scalar side gained a tie-break, and the two then
+# disagreed on a real bundle.
+#
+# It lives HERE, not next to the upload route, because the worker container
+# does not mount `api/` at all: a `from api.routes...` inside modules/** dies
+# at RQ load time. api/ may import modules/, never the reverse.
+_CHAL_ARCHIVE_EXTS = (
+    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".7z", ".rar",
+)
+
+
+def _by_size_then_name(paths: list) -> list:
+    """Largest first, ties broken by name.
+
+    Sorting on size alone is stable, so an exact tie left the winner to the
+    filesystem's traversal order. Job f94c35eb16a2 stages `client` and
+    `client_old` at exactly 19208 bytes each; which one became the challenge
+    was decided by directory order, and two paths reading the same directory
+    could disagree. Name order is not a claim that the alphabetically-first
+    file is the better challenge -- there is no evidence for that -- only that
+    the three paths must reach the SAME answer and that answer must be
+    reproducible.
+    """
+    return sorted(paths, key=lambda p: (-p.stat().st_size, p.name))
+
+
+def pick_challenge_binary(directory, *, ties: list | None = None):
+    """The largest ELF/PE under `directory`, else the largest non-archive.
+
+    Pass a list as `ties` to be told when the choice was arbitrary: the names
+    that matched the winner's size are appended, so a caller can log that the
+    bundle was ambiguous instead of silently picking one.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return None
+
+    native = []
+    for p in directory.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            magic = p.read_bytes()[:4]
+        except OSError:
+            continue
+        if magic.startswith(b"\x7fELF") or magic[:2] == b"MZ":
+            native.append(p)
+
+    pool = native or [
+        p for p in directory.rglob("*")
+        if p.is_file() and not p.name.lower().endswith(_CHAL_ARCHIVE_EXTS)
+    ]
+    if not pool:
+        return None
+
+    ranked = _by_size_then_name(pool)
+    winner = ranked[0]
+    if ties is not None:
+        size = winner.stat().st_size
+        tied = [p.name for p in ranked if p.stat().st_size == size]
+        if len(tied) > 1:
+            ties.extend(tied)
+    return winner
+
+
 # Names that identify a build artifact rather than a challenge. Matching on
 # these is worse than not matching: `_score` gives containment a point, so a
 # rev job whose binary is `main` scored against every stored `main` and filled
@@ -1935,7 +2007,26 @@ _LIBRARY_STOP_NAMES = frozenset({
     "server", "client", "app", "run", "test", "bin", "binary", "aout",
     "program", "readme", "readmemd", "index", "flag", "vuln", "dockerfile",
     "output", "source", "src", "file", "data", "target", "sample",
+    # Distribution wrappers. `for_user.zip` normalizes to `foruser` and is the
+    # single most common name in the corpus -- 10 pwn jobs upload it -- so it
+    # identifies the packaging convention of one CTF, never a challenge.
+    "foruser", "forusers", "handout", "handouts", "attachment", "attachments",
+    "release", "dist", "share", "public", "download", "upload", "archive",
 })
+
+# Containment needs a floor. `_score` gives one point when either name contains
+# the other, which is right for `protoss` -> `protoss2` and badly wrong for a
+# two-letter name: the genuine pwn entry `er` was reached by `foruser`,
+# `server`, `launcher`, `overflow`, and `ctypesispowerfulalsodangerous`.
+#
+# The floor applies to CONTAINMENT ONLY. An earlier proposal to drop short
+# names outright was refuted on this corpus because `er`, `obf` and `vm` are
+# real challenge names -- but they are real as EXACT matches, which this leaves
+# untouched. At 4 characters every recorded counter-example still resolves the
+# way it should, `piggybank` -> `piggybankraceconditiondreamhack` survives, and
+# 22 spurious pairs across pwn and rev disappear. The one arguable casualty is
+# `obf` -> `targetobf`; exact `obf` still scores 2.
+_MIN_CONTAINMENT_CHARS = 4
 
 
 def _library_display_name(meta: dict) -> str:
@@ -2011,6 +2102,16 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
         entries.append(meta)
 
     if not entries:
+        # The hint is empty for a module with no saved entries, but the CALL
+        # still happened and the shadow corpus needs to see it. Returning here
+        # without filling `stats` silently dropped every misc/forensic/web3
+        # query -- exactly the modules whose traffic we most need to observe,
+        # because they are the ones with nothing stored yet.
+        if stats is not None:
+            stats["query"] = _norm_chal(chal_name)
+            stats["query_generic"] = stats["query"] in _LIBRARY_STOP_NAMES
+            stats["suppressed"] = 0
+            stats["entries"] = 0
         return ""
 
     # Relevance first, recency only as a tiebreak. A same-name entry is the
@@ -2026,6 +2127,7 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
         # report three times the real number.
         stats["query"] = want
         stats["query_generic"] = want_generic
+        stats["entries"] = len(entries)
         stats["suppressed"] = sum(
             1 for m in entries
             if _norm_chal(m.get("chal_name") or "") in _LIBRARY_STOP_NAMES
@@ -2047,7 +2149,11 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
             return 0
         if got == want:
             return 2
-        return 1 if (got in want or want in got) else 0
+        if not (got in want or want in got):
+            return 0
+        # Containment only counts when the shorter side is long enough to mean
+        # something; see _MIN_CONTAINMENT_CHARS.
+        return 1 if min(len(got), len(want)) >= _MIN_CONTAINMENT_CHARS else 0
 
     # Two stable sorts: recency first, then score. The second preserves the
     # recency order within each score band.
@@ -6890,6 +6996,7 @@ def _format_postjudge_user_turn(
     script_filename: str,
     sandbox_result: dict,
     method_change: bool = False,
+    record: dict | None = None,
 ) -> str:
     """Compose the user-turn body that gets injected back into main's
     SDK session after a failed sandbox run or a prejudge ship-block.
@@ -6964,6 +7071,14 @@ def _format_postjudge_user_turn(
     hint_source, hint_origin = _hint_provenance.get(
         verdict, ("postjudge", "postjudge — apply this")
     )
+    if record is not None:
+        # Hand the caller the label this function CHOSE, rather than making it
+        # re-derive one from `verdict` against a copy of the table above. The
+        # table has to stay local (the anti-overfit suite execs this function
+        # with almost nothing in scope), so a copy elsewhere is exactly the
+        # kind of duplicated policy that drifts.
+        record["hint_source"] = hint_source
+        record["hint_origin"] = hint_origin
     prejudge_only = verdict == "prejudge_blocked"
     if prejudge_only:
         execution_notice = (
@@ -10790,30 +10905,38 @@ async def run_main_agent_session(
                     summary.get("method_change_retries", 0) + 1
                 )
             write_meta(job_id, stage=f"auto-retry-{attempt}")
+            _inject_record: dict = {}
             feedback = _format_postjudge_user_turn(
                 attempt_idx=attempt,
                 max_attempts=max_retries,
                 script_filename=picked,
                 sandbox_result=last_sandbox or {},
                 method_change=_method_change_convert,
+                record=_inject_record,
             )
             log_fn(
                 f"[orchestrator] injecting postjudge feedback as new user "
                 f"turn (attempt {attempt}/{max_retries}, verdict={verdict})"
             )
-            # Persist what was actually injected. The counters next to this
-            # (reviewer_redirects, prejudge_block_redirects) already say a
-            # producer fired, but nothing recorded WHICH TEXT reached main, so
-            # `579a216ed747` could be shown to have traversed the formatter
-            # while the rendered bytes were unrecoverable afterwards. Storing
-            # the digest rather than 3.4 KB per injection keeps meta small and
-            # still lets a later run re-render the same inputs and compare.
-            # `verdict` is the producer key `_format_postjudge_user_turn` maps
-            # to its origin label, so origin stays derivable without copying
-            # that table out of the function it is deliberately local to.
+            # Persist WHICH PRODUCER spoke and what label it rendered. The
+            # counters beside this (reviewer_redirects, prejudge_block_redirects)
+            # say that a producer fired; they do not say which wording main was
+            # given, and `579a216ed747` traversed the formatter with nothing on
+            # disk to show for it.
+            #
+            # `hint_source` / `hint_origin` come from the formatter itself, so
+            # the label is RECORDED rather than re-derived. The digest is a
+            # commitment to the exact bytes, not a way to recover them: the
+            # rendered text depends on `sandbox_result`, which the caller only
+            # keeps for the LAST run, so two injections can share attempt,
+            # verdict and length and still differ. Do not read this field as
+            # "we can reconstruct what was sent" -- it answers "was it this
+            # text?", never "what was the text?".
             summary.setdefault("injected_turns", []).append({
                 "attempt": attempt,
                 "verdict": verdict,
+                "hint_source": _inject_record.get("hint_source"),
+                "hint_origin": _inject_record.get("hint_origin"),
                 "chars": len(feedback),
                 "sha256": hashlib.sha256(feedback.encode()).hexdigest()[:16],
             })
