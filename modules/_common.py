@@ -6825,6 +6825,7 @@ def _format_postjudge_user_turn(
     max_attempts: int,
     script_filename: str,
     sandbox_result: dict,
+    method_change: bool = False,
 ) -> str:
     """Compose the user-turn body that gets injected back into main's
     SDK session after a failed sandbox run or a prejudge ship-block.
@@ -6869,6 +6870,36 @@ def _format_postjudge_user_turn(
             "  · supervise judge killed the container due to stalled output\n"
         )
     cap_str = "∞" if max_attempts < 0 else str(max_attempts)
+    # Provenance. FOUR producers reach this formatter and only one of them
+    # is a postjudge verdict: the prejudge ship-block redirect, the
+    # runner_crash_hint stderr regex (no model is involved at all) and the
+    # one-shot auto-reviewer each synthesize a judge dict whose
+    # next_action="continue" no judge ever voted for. None of those three
+    # sentinel verdicts is in modules._judge._VALID_VERDICTS, so `verdict`
+    # alone identifies the producer without extra plumbing. Labelling all
+    # four "from postjudge" corrupts step 2 below, which asks main to grade
+    # the hint's authority. Kept local to the function on purpose: the
+    # anti-overfit test execs this function source with only
+    # HEAP_FIX_HINTS in scope, so a module-level table would NameError.
+    _hint_provenance = {
+        "prejudge_blocked": (
+            "prejudge",
+            "prejudge ship-block, no sandbox run — apply this",
+        ),
+        "runner_crash": (
+            "runner",
+            "the runner's own stderr matched by regex, no model wrote it "
+            "— apply this",
+        ),
+        "reviewer_redirect": (
+            "reviewer",
+            "the one-shot auto-reviewer, not the judge; this job gets "
+            "exactly one — apply this",
+        ),
+    }
+    hint_source, hint_origin = _hint_provenance.get(
+        verdict, ("postjudge", "postjudge — apply this")
+    )
     prejudge_only = verdict == "prejudge_blocked"
     if prejudge_only:
         execution_notice = (
@@ -6928,24 +6959,41 @@ def _format_postjudge_user_turn(
         f"IMPLEMENTATION defect, modify ./{script_filename}; for a STRATEGY "
         f"or UNKNOWN failure, test materially different hypotheses and "
         f"replace the invalid chain rather than polishing it. "
-        f"Doing neither — returning without an edit — makes the "
-        f"orchestrator re-run the SAME unchanged script for a "
-        f"guaranteed-fail second sandbox spin (wasted ~$2-5 of "
-        f"cache_creation). The detection added 2026-05-25 will "
-        f"actually halt that case mid-flight, so just respond and edit.\n"
+        f"Doing neither — returning without an edit — does NOT buy you "
+        f"another attempt. The orchestrator recorded this script's SHA when "
+        f"it sent you this message; before the next ship it re-hashes the "
+        f"file, and if the bytes are identical there is no second sandbox "
+        f"spin at all — the job ENDS HERE with "
+        f"stop_kind=retry_hint_ignored, and WHY_STOPPED.md records it as "
+        f"'Script unchanged after the postjudge retry hint', a permanent "
+        f"diagnosis that /retry copies into the next job's work tree for "
+        f"the next agent to read. Edit ./{script_filename} or replace the "
+        f"chain before you end this turn.\n"
         f"\n"
         f"Runner/prejudge result for `{script_filename}`:\n"
         f"  · exit_code: {exit_code}\n"
-        f"  · postjudge verdict: {verdict}\n"
-        f"  · postjudge summary: {summary or '(empty)'}\n"
+        f"  · {hint_source} verdict: {verdict}\n"
+        f"  · {hint_source} summary: {summary or '(empty)'}\n"
         f"  · judge next_action: {next_action} "
-        f"(judge endorses this retry — keep iterating)\n"
+        + (
+            "(the judge voted STOP on this approach; the orchestrator "
+            "converted that into the ONE method-change retry — rebuild "
+            "the decisive step, do NOT keep iterating on this method)\n"
+            if method_change
+            else "(judge endorses this retry — keep iterating)\n"
+            if hint_source == "postjudge" and next_action == "continue"
+            else f"(no judge voted on this retry — the orchestrator "
+            f"synthesized it alongside the {hint_source} hint)\n"
+            if hint_source != "postjudge"
+            else "(the judge did not vote to continue; the orchestrator "
+            "is retrying anyway)\n"
+        )
         + (f"  · failure_code: {failure_code}\n" if failure_code else "")
         + f"{timeout_marker}"
         f"{fix_preamble}"
         f"{diagnosis_block}"
         f"\n"
-        f"=== retry hint (from postjudge — apply this) ===\n"
+        f"=== retry hint (from {hint_origin}) ===\n"
         f"{retry_hint or '(judge produced no actionable hint; debug from the tails below)'}\n"
         f"\n"
         f"=== stdout tail ===\n"
@@ -7308,8 +7356,23 @@ def write_resume_state(
             f"exit={sandbox_result.get('exit_code')} "
             f"— stdout/stderr are in the job dir")
     if judge_out and judge_out.get("retry_hint"):
-        lines += ["", "## The judge's last actionable hint", "",
-                  "> " + str(judge_out["retry_hint"])[:1200].replace("\n", "\n> ")]
+        # NOT "the judge's" — same provenance lie the postjudge wrapper carried
+        # until 2026-08-24, in a second place the audit missed. Three of the
+        # four producers that fill retry_hint are not the judge: the prejudge
+        # ship-block redirect, runner_crash_hint (a stderr regex, no model),
+        # and the one-shot auto-reviewer. The verdict names which one.
+        _src = {"prejudge_blocked": "prejudge ship-block",
+                "runner_crash": "the runner's own stderr",
+                "reviewer_redirect": "the one-shot reviewer"}.get(
+                    str(judge_out.get("verdict") or ""), "postjudge")
+        # 3200, not 1200. The module-missing hint is ~2800 chars and its
+        # actionable half — the runner's package inventory and the
+        # `pip install --target ./.pydeps` recipe — sits at the END, so a
+        # 1200-char cut carried NONE of it into the next job. This file is
+        # markdown on disk that an operator and the next agent read
+        # selectively, not a prompt injection, so the extra bytes are free.
+        lines += ["", f"## The last actionable hint (from {_src})", "",
+                  "> " + str(judge_out["retry_hint"])[:3200].replace("\n", "\n> ")]
     lines += [
         "",
         "## What to do",
@@ -7392,9 +7455,25 @@ def runner_crash_hint(sandbox_result: dict | None) -> str:
         mod = m.group(1)
         stdout_chars = len(str(sr.get("stdout") or ""))
         return (
-            f"The RUNNER sandbox has no Python module `{mod}` — your solver "
-            f"failed when Python tried to import it (exit "
-            f"{sr.get('exit_code')}, stdout {stdout_chars} characters).\n\n"
+            f"Your solver died at `import {mod}` (exit "
+            f"{sr.get('exit_code')}, stdout {stdout_chars} characters). FIRST "
+            f"decide which of these two it is — they need opposite fixes.\n\n"
+            f"(a) `{mod}` IS YOURS: a `{mod}.py` or `{mod}/` you wrote, or a "
+            f"`./.pydeps` you vendored. Then nothing is missing from the "
+            f"runner and installing a package fixes nothing. The sandbox runs "
+            f"`python3 /data/jobs/<id>/work/<script>` with cwd "
+            f"`/data/jobs/<id>/work`, so `sys.path[0]` is the SCRIPT'S OWN "
+            f"directory — not the work root, and not the directory you "
+            f"happened to be in when you tested it. Two shapes bite here: the "
+            f"script sits in a subdirectory while its helpers sit in work/, "
+            f"or the script was left at the jobroot instead of work/ — in "
+            f"that case the orchestrator copies THAT ONE FILE into work/ for "
+            f"the run and its siblings stay behind. Ship the script and "
+            f"everything it imports into the SAME directory, or insert that "
+            f"directory on sys.path derived from `__file__` (recipe below) "
+            f"before the import, and list the work tree to confirm.\n\n"
+            f"(b) `{mod}` is a third-party package you pip-installed into the "
+            f"worker. Only then does the rest of this apply.\n\n"
             f"The worker you developed in is a DIFFERENT container from the "
             f"runner your solver is executed in, and they are not guaranteed to "
             f"carry the same packages: anything an earlier job pip-installed "
@@ -7644,7 +7723,10 @@ def write_why_stopped(
                 "than auto-truth.",
                 "",
                 "```",
-                retry_hint[:2000],
+                # 3200 for the same reason as RESUME_STATE.md: the longest
+                # deterministic hint is ~2800 chars with its recipe last, and
+                # this is a file the operator reads, not a prompt.
+                retry_hint[:3200],
                 "```",
                 "",
             ]
@@ -7678,9 +7760,16 @@ def write_why_stopped(
                 "sometimes (esp. on novel chal-author tricks).",
                 "2. **`/retry` with a manual hint** that explicitly steers "
                 "to one of the *Alternative paths* above (or your own "
-                "new lead). The retry forks the prior SDK session so "
-                "main keeps its context, but starts with your hint as "
-                "the next user turn.",
+                "new lead). NOTE: this stop kind SHEDS the prior "
+                "conversation — the halt writes `judge_next_action=stop`, "
+                "and /retry reads that field to SKIP the SDK session fork "
+                "and boot a clean context. Make the hint SELF-CONTAINED: "
+                "the new agent inherits only the carried work tree "
+                "(`report.md`, `findings.json`, this file), not main's "
+                "reasoning. (Its preamble may still be stamped "
+                "`prior-session fork requested` — that banner is keyed on "
+                "the operator's 'fresh start' checkbox, not on the fork "
+                "that actually happened.)",
                 "3. **`/resume`** if you want to keep the work tree + "
                 "session AND let main re-think from where it was, "
                 "without injecting a new direction.",
@@ -7718,9 +7807,14 @@ def write_why_stopped(
         elif stop_kind == "prejudge_dead_target":
             out += [
                 "Prejudge supplied the structured observation "
-                "`target_liveness=dead` after a current direct probe. The "
-                "sandbox therefore never started and rewriting the same script "
-                "cannot repair the endpoint. Options:",
+                "`target_liveness=dead` after a current direct probe, so "
+                "THIS ship attempt was blocked before the sandbox started "
+                "and rewriting the same script cannot repair the endpoint. "
+                "The escalation reads `target_liveness` ONLY — it does not "
+                "check whether anything ran, so earlier attempts in this job "
+                "may well have executed. Read the `sandbox runs=` count in "
+                "the stop reason above and those runs' output before "
+                "concluding nothing ran. Options:",
                 "",
                 "1. **Re-provision/restart the challenge instance**, then update "
                 "the job's target URL(s) in the UI.",
@@ -7855,18 +7949,28 @@ def write_why_stopped(
                 "classifier (AUP). The block is on the ACCUMULATED "
                 "conversation, so retrying IN PLACE re-blocks "
                 "deterministically — the orchestrator therefore halted "
-                "without burning a re-block turn. Options:",
+                "without burning a re-block turn. It had already walked its "
+                "recovery ladder first (a fresh session, then the other "
+                "configured provider): this file is written ONLY once that "
+                "ladder is exhausted or could not start, so unless a rung "
+                "failed to START, a plain /retry on a clean context has "
+                "ALREADY been tried. Grep `run.log` "
+                "for `AUP-blocked — recovering via` to see which steps were "
+                "spent, and for `recovery could not start` for one that "
+                "never ran. Options:",
                 "",
-                "1. **`/retry`** — starts a FRESH SDK session against the "
-                "carried work tree. On a policy_refusal the fork is now "
-                "force-skipped automatically (no need to tick 'fresh start'): "
-                "the new agent boots on a clean context and reads the carried "
-                "`pre_recon_reply.txt` / `report.md` instead of re-inheriting "
-                "the blocked transcript, so it sheds the poison by default "
-                "(a fresh run of the same job has gone AUP-free afterward).",
-                "2. If it re-blocks every fresh attempt, the challenge class "
-                "(e.g. XSS-exfil / CSP-bypass) reliably trips the classifier "
-                "on main's own reasoning — not a code bug on our side.",
+                "1. **Treat the challenge class as the cause first** — a "
+                "repeat block on a CLEAN context means the CONTENT (e.g. "
+                "XSS-exfil / CSP-bypass), not the accumulated transcript, is "
+                "what the classifier objects to. Re-framing the task text is "
+                "the lever; re-running it unchanged is not.",
+                "2. **`/retry`** — still worth one run when the ladder step "
+                "failed to START rather than re-blocking, or when you attach "
+                "a hint that re-frames the objective. On a policy_refusal "
+                "the fork is force-skipped automatically (no need to tick "
+                "'fresh start'): the new agent boots on a clean context and "
+                "reads the carried `pre_recon_reply.txt` / `report.md` "
+                "instead of re-inheriting the blocked transcript.",
             ]
         elif stop_kind == "cost_cap":
             out += [
@@ -9991,8 +10095,13 @@ async def run_main_agent_session(
                     # (same object; the key exists because we're in the stop
                     # branch), so the downstream inject path reads the new hint.
                     judge_out["retry_hint"] = (
-                        "METHOD CHANGE REQUIRED (automated one-shot — you will NOT "
-                        "get another auto-retry). The judge ruled the CURRENT "
+                        "METHOD CHANGE REQUIRED (one-time conversion — the "
+                        "orchestrator converts a judge STOP into a retry only "
+                        "ONCE per job, and this attempt has spent it. Ordinary "
+                        "auto-retries can still follow while postjudge keeps "
+                        "voting continue, but the next postjudge STOP is "
+                        "terminal: there is no second conversion). "
+                        "The judge ruled the CURRENT "
                         "approach structurally cannot succeed within budget, but a "
                         "DIFFERENT method is viable. REPLACE the decisive step; do "
                         "NOT re-ship the same approach:\n\n" + _body
@@ -10241,6 +10350,18 @@ async def run_main_agent_session(
                         "feature, or convert to a leak-first design that reads "
                         "ground truth from the target."
                     )
+                    if _sandbox_runs == 0:
+                        retry_hint += (
+                            "\n\nBUDGET: this is the LAST automatic redirect "
+                            "unless a real sandbox execution happens first. "
+                            "prejudge has blocked this job's ship once and no "
+                            "sandbox run has completed yet; if it blocks again "
+                            "before one real execution, the orchestrator ends "
+                            "the job (stop_kind=prejudge_blocked_no_run) "
+                            "instead of redirecting. End this turn with a "
+                            "shipped script that clears the gate, not with "
+                            "another analysis round."
+                        )
                     # Synthesize a judge dict so the existing inject path
                     # (_format_postjudge_user_turn) carries this hint verbatim.
                     last_sandbox["judge"] = {
@@ -10551,6 +10672,7 @@ async def run_main_agent_session(
                 max_attempts=max_retries,
                 script_filename=picked,
                 sandbox_result=last_sandbox or {},
+                method_change=_method_change_convert,
             )
             log_fn(
                 f"[orchestrator] injecting postjudge feedback as new user "
