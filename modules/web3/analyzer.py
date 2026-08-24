@@ -166,8 +166,13 @@ async def _run_agent(
             )
 
     from modules._common import build_exploit_library_hint
+    # Was `chal_name`, which no job meta has ever carried: the key is 0/78
+    # across the corpus, so this call looked wired and ranked by recency like
+    # the ones that pass nothing at all. `filename` is what the upload route
+    # actually stores (api/routes/web3_module.py) and is the raw name, not a
+    # UUID.
     _lib_hint = build_exploit_library_hint(
-        "web3", chal_name=read_meta(job_id).get("chal_name") or "",
+        "web3", chal_name=read_meta(job_id).get("filename") or "",
     )
     if _lib_hint:
         user_prompt = _lib_hint + "\n\n" + user_prompt

@@ -179,7 +179,12 @@ async def _run_agent(
         )
 
     from modules._common import build_exploit_library_hint
-    _lib_hint = build_exploit_library_hint("rev")
+    # Same name this function already hands the library SAVER as
+    # `chal_name_hint` 40-odd lines below; it was simply never handed to the
+    # READER, so rev ranked 87 entries by recency alone. Build-artifact names
+    # (`main`, `prob`, …) are suppressed inside the scorer, so passing this is
+    # safe even though rev binaries are often generically named.
+    _lib_hint = build_exploit_library_hint("rev", chal_name=binary_name or "")
     if _lib_hint:
         user_prompt = _lib_hint + "\n\n" + user_prompt
 
