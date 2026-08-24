@@ -92,6 +92,38 @@ chk("retry_with_hint passes operator_text=manual_hint is not None",
     "operator_text=manual_hint is not None" in SRC)
 chk("/resume declares operator_text=True (the route refuses without a hint)",
     re.search(r"_resume_preamble\([^)]*operator_text=True", SRC, re.S) is not None)
+
+# The two checks above search the WHOLE file, so one correct call site makes
+# every other one pass. That hole shipped: the UI's manual retry and resume go
+# through the STREAMING endpoints (web-ui/app.js calls streamRetry), and both
+# streaming calls omitted operator_text entirely — defaulting to False and
+# rewriting the operator's sentence — while these string checks stayed green.
+# Census every call site instead of asking whether the string appears anywhere.
+CALLERS = ("_retry_preamble", "_resume_preamble")
+sites = []
+for node in ast.walk(tree):
+    if not isinstance(node, ast.Call):
+        continue
+    name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+    if name not in CALLERS:
+        continue
+    origin = None
+    for kw in node.keywords:
+        if kw.arg == "operator_text":
+            origin = ast.unparse(kw.value)
+    sites.append((node.lineno, name, origin))
+
+chk("all four preamble call sites are found",
+    len(sites) == 4, sorted(s[0] for s in sites))
+for lineno, name, origin in sorted(sites):
+    chk("%s@%d declares an explicit origin (not the False default)"
+        % (name, lineno), origin is not None, origin)
+# and the declaration must be the real condition, not a hardcoded lie
+for lineno, name, origin in sorted(sites):
+    if origin is None:
+        continue
+    chk("%s@%d declares a defensible origin" % (name, lineno),
+        origin in ("manual_hint is not None", "True"), origin)
 # the reviewer paths must NOT claim operator origin
 rev = ast.get_source_segment(SRC, func("retry_with_hint")) or ""
 chk("the reviewer branch still produces the hint it will sanitize",

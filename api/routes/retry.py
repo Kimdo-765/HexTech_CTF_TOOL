@@ -998,7 +998,12 @@ async def retry_with_hint_stream(job_id: str, request: Request):
                 return
 
         yield sse("stage", {"name": "submitting"})
-        augmented = _retry_preamble(safe, hint, fresh=fresh_session)
+        # The whole reviewer block above is inside `if manual_hint is None`, so
+        # a surviving manual_hint means these are the operator's own words. The
+        # UI's manual retry lands HERE, not on the direct route, so omitting
+        # this defaulted to False and rewrote a human's sentence.
+        augmented = _retry_preamble(safe, hint, fresh=fresh_session,
+                                    operator_text=manual_hint is not None)
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,
@@ -1585,7 +1590,11 @@ async def stop_and_resume_stream(job_id: str, request: Request):
         # 3) submit the new job with the same [RESUMING] preamble used
         #    by /resume + carry_work=True.
         yield sse("stage", {"name": "submitting"})
-        augmented = _resume_preamble(safe, hint, fresh=fresh_session)
+        # Same shape as the streaming retry above: the reviewer branch is
+        # guarded by `if manual_hint is None`, so a surviving manual_hint is
+        # operator text and must not be sanitized.
+        augmented = _resume_preamble(safe, hint, fresh=fresh_session,
+                                     operator_text=manual_hint is not None)
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,

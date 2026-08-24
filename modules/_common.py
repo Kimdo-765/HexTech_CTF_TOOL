@@ -10737,6 +10737,22 @@ async def run_main_agent_session(
                 f"[orchestrator] injecting postjudge feedback as new user "
                 f"turn (attempt {attempt}/{max_retries}, verdict={verdict})"
             )
+            # Persist what was actually injected. The counters next to this
+            # (reviewer_redirects, prejudge_block_redirects) already say a
+            # producer fired, but nothing recorded WHICH TEXT reached main, so
+            # `579a216ed747` could be shown to have traversed the formatter
+            # while the rendered bytes were unrecoverable afterwards. Storing
+            # the digest rather than 3.4 KB per injection keeps meta small and
+            # still lets a later run re-render the same inputs and compare.
+            # `verdict` is the producer key `_format_postjudge_user_turn` maps
+            # to its origin label, so origin stays derivable without copying
+            # that table out of the function it is deliberately local to.
+            summary.setdefault("injected_turns", []).append({
+                "attempt": attempt,
+                "verdict": verdict,
+                "chars": len(feedback),
+                "sha256": hashlib.sha256(feedback.encode()).hexdigest()[:16],
+            })
             await client.query(feedback)
             # Capture script SHA so the next iteration can detect
             # "main returned without applying the fix" and skip the
