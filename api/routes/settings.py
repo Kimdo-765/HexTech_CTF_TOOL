@@ -1,6 +1,7 @@
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -25,6 +26,11 @@ _WORKER_SERVICE_RE = re.compile(r"^worker(?:-\d+)?$")
 # SIBLING cgroups (worker/docker_memguard.sh caps each at CHAL_CONTAINER_MEM,
 # default 2g) and are therefore NOT charged to any slot.
 _TOTAL_BUDGET_FRACTION = 0.70
+
+# Same resolution api/routes/containers.py uses, kept local so this module does
+# not import another route module for one path.
+JOBS_DIR = Path(os.environ.get("JOBS_DIR")
+                or (Path(os.environ.get("DATA_DIR", "/data")) / "jobs"))
 
 
 def _host_mem_total() -> int:
@@ -180,6 +186,61 @@ def worker_mem_live() -> dict:
     }
 
 
+def _slot_number(label: str) -> str:
+    """`worker-2` / `hextech_ctf_tool-worker-2` -> `2`.
+
+    The two sides of the busy check name the same slot differently: `_slot_label`
+    returns the compose SERVICE (`worker-2`) and job meta stores the bare slot
+    NUMBER (`2`). Comparing them directly matched nothing, so every shrink went
+    through and the deferral was inert — caught by the first run of
+    scripts/test_settings_busy_slot.py rather than in production, which is the
+    whole reason that file drives the real function instead of asserting on
+    source.
+    """
+    m = re.search(r"(\d+)$", str(label or ""))
+    return m.group(1) if m else str(label or "")
+
+
+def _busy_slot_labels() -> set[str]:
+    """Slot NUMBERS that currently carry a job.
+
+    Read from job meta rather than from RQ, and DELIBERATELY inclusive: queued
+    counts as busy too. The two possible errors are not symmetric.
+
+      * A slot wrongly believed BUSY has its shrink deferred to the next job
+        start, which heals itself — `desired_cap_bytes` runs unconditionally at
+        the start of every job (worker/runner.py), so the new base lands on the
+        very next one.
+      * A slot wrongly believed IDLE has a live job's cap pulled out from under
+        it, below what that job was given.
+
+    So bias toward busy. (This is not the orphan-detection question, where meta
+    is the wrong source and rq_status + the worker heartbeat is the right one —
+    a stale `running` here costs one deferred shrink, not a wrong verdict.)
+    """
+    import json
+
+    busy: set[str] = set()
+    try:
+        entries = list(JOBS_DIR.iterdir())
+    except OSError:
+        return busy
+    for d in entries:
+        f = d / "meta.json"
+        if not f.is_file():
+            continue
+        try:
+            m = json.loads(f.read_text())
+        except Exception:
+            # Unreadable meta is not evidence the slot is free.
+            continue
+        if m.get("status") in ("running", "queued"):
+            slot = str(m.get("worker_slot") or "").strip()
+            if slot:
+                busy.add(slot)
+    return busy
+
+
 def _apply_worker_mem(value: str) -> dict:
     """Apply `value` as the PER-SLOT cap to every live worker cgroup.
 
@@ -240,7 +301,55 @@ def _apply_worker_mem(value: str) -> dict:
             _sampled = list(_ex.map(_slot_mem, cs))
     else:
         _sampled = [_slot_mem(c) for c in cs]
+
+    # --- do not pull a live job's cap out from under it ----------------------
+    # This write used to be unconditional across all twelve slots. With dynamic
+    # per-slot memory ON, a slot's cap is not the setting: rev/crypto start at
+    # base x2 and an OOM escalates by 1.5x, so a busy slot is routinely ABOVE
+    # the number being saved. Measured 2026-08-25T15:31:03Z — a Settings save
+    # dropped slots 2, 3 and 11 to 2048 MiB in the same second, and slot 2's
+    # job was live and had been escalated to 6144. Its own worker_mem.jsonl
+    # records the cap it saw as 4096 -> 6144 -> 2048 with the job still
+    # running: below even what it started with, and with one of its two
+    # escalations already spent.
+    #
+    # The headroom gate did not catch it because that gate asks whether the cap
+    # clears anon+slab x 1.5, and at that instant anon was a few hundred MiB.
+    # "Fits" is not the same question as "is this slot's to take back".
+    #
+    # GROWING a busy slot is still applied — more memory never hurts a running
+    # job, and refusing it would make raising the limit under load impossible.
+    # Only the shrink waits, and it waits for the next job on that slot:
+    # worker/runner.py calls desired_cap_bytes() unconditionally at the START of
+    # every job, so the new base lands there with no further action.
+    _busy = _busy_slot_labels()
+    _by_name = {getattr(c, "name", "?"): c for c in cs}
+    deferred, targets = [], []
     for s in _sampled:
+        name = s.get("name")
+        c = _by_name.get(name)
+        if c is None:
+            continue
+        cur = int(s.get("limit_bytes") or 0)
+        if _slot_number(s.get("slot")) in _busy and cur and want < cur:
+            deferred.append({"slot": _slot_number(s.get("slot")), "name": name,
+                             "current_bytes": cur})
+            continue
+        targets.append((c, s))
+
+    if not targets:
+        return {
+            "applied": False,
+            "limit_bytes": want,
+            "deferred_busy": deferred,
+            "reason": (
+                f"every slot is busy with a job whose cap is above {value}; "
+                f"the new base applies to each slot as its current job ends. "
+                f"Nothing was changed."
+            ),
+        }
+
+    for _c, s in targets:
         if not s.get("available"):
             continue
         floor = s.get("unreclaimable_bytes") or s.get("usage_bytes")
@@ -259,7 +368,7 @@ def _apply_worker_mem(value: str) -> dict:
             }
 
     applied, failed = [], []
-    for c in cs:
+    for c, _s in targets:
         try:
             # memswap == mem on purpose: with mem alone Docker allows swap up
             # to 2x the cap, and slow swap thrash is the state that wedged the
@@ -276,15 +385,29 @@ def _apply_worker_mem(value: str) -> dict:
             "applied": False,
             "limit_bytes": want,
             "applied_to": applied,
+            "deferred_busy": deferred,
             "reason": "; ".join(failed),
         }
-    return {
+    out = {
         "applied": True,
         "limit_bytes": want,
         "slot_count": len(applied),
+        # Counts the slots actually written. A deferred slot is NOT holding this
+        # value yet, and reporting it as though it were is how an operator ends
+        # up believing a budget that does not exist.
         "total_limit_bytes": want * len(applied),
         "applied_to": applied,
     }
+    if deferred:
+        out["deferred_busy"] = deferred
+        out["reason"] = (
+            "%d slot(s) are busy with a job whose cap is above %s and were "
+            "left alone: %s. Each takes the new base when its current job "
+            "ends. Growing a busy slot is applied immediately; only shrinking "
+            "waits." % (len(deferred), value,
+                        ", ".join(str(d["slot"]) for d in deferred))
+        )
+    return out
 
 
 @router.get("")
