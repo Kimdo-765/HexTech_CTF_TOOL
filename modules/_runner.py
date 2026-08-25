@@ -855,6 +855,14 @@ def run_in_sandbox(
         volumes={_host_path(job_id): {"bind": mount_root, "mode": "rw"}},
         working_dir=workdir,
         mem_limit=mem_limit,
+        # memswap == mem, the same way the slot sets it (worker_mem.apply_cap
+        # and compose both do). With mem_limit alone docker grants swap up to
+        # 2x the cap, and slow swap thrash is the state that wedged this VM
+        # twice -- an equal value buys a fast clean kill instead. Inheriting
+        # the parent's SIZE while dropping its SWAP POLICY was a half-inherit:
+        # observed live 2026-08-25, runners on a 4 GiB rev slot came up with
+        # `mem=4096MiB swap허용=8192MiB` while the parent had 4096/4096.
+        memswap_limit=mem_limit,
         nano_cpus=nano_cpus,
         network_mode=network,
         environment=env,

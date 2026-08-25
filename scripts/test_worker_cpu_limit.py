@@ -123,6 +123,13 @@ for node in ast.walk(tree):
 chk("containers.run is handed nano_cpus", "nano_cpus" in run_kwargs, run_kwargs)
 chk("...alongside mem_limit, so the two cannot drift apart",
     "mem_limit" in run_kwargs, run_kwargs)
+# Inheriting the parent's SIZE while dropping its SWAP POLICY is a half-inherit,
+# and it shipped that way: observed live 2026-08-25, runners on a 4 GiB rev slot
+# came up with mem=4096MiB and swap allowance 8192MiB while the parent slot had
+# 4096/4096. Docker grants 2x swap whenever memswap is omitted, and slow swap
+# thrash is the state that wedged this VM twice.
+chk("...and memswap_limit, so the runner cannot swap past its parent",
+    "memswap_limit" in run_kwargs, run_kwargs)
 
 # ------------------------------------------------- 3. the cgroup parser
 section("cpu.max is parsed correctly, uncapped included")
