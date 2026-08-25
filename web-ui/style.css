@@ -856,8 +856,15 @@ button[type="submit"], #refresh-jobs {
 .dash-mem-host { display: flex; align-items: center; gap: 1rem; }
 .dash-mem-caption strong { font-size: 0.95rem; }
 .dash-sub { font-size: 0.78rem; color: var(--fg-muted); }
+/* A GRID, not a wrapping flex row. With two slots the row was fine; at twelve
+   it became one long strip that pushed the tiles off-screen and made the set
+   unreadable at a glance. auto-fill + a fixed minimum means the tiles align in
+   real columns and the count per row follows the panel width, so 12 slots read
+   as a block you can scan rather than a queue you have to scroll. */
 .dash-rings {
-  display: flex; flex-wrap: wrap; gap: 1.25rem;
+  display: grid; gap: 1rem 1.25rem;
+  grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+  align-items: start;
   padding-left: 1.5rem; border-left: 1px solid var(--line); flex: 1 1 320px;
 }
 .dash-ring { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; width: 5.5rem; }
@@ -880,6 +887,23 @@ button[type="submit"], #refresh-jobs {
    wide caption where wrapping is correct. Tabular figures keep the tile from
    twitching as the digits change under the 15s poll. */
 .dash-ring .dash-sub { white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Which job is on this slot. A wall of identical `worker-N` tiles cannot
+   answer "where is my job running?", which is the question the dashboard gets
+   asked. Monospace + tabular figures so the 8-char ids line up down a column
+   and a changed slot is visible without reading. `idle` is deliberately muted
+   and unboxed: an empty slot is the normal state and must not draw the eye the
+   way a running job does. */
+.dash-ring-job {
+  font-size: 0.68rem; font-family: var(--mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+  padding: 0.05rem 0.35rem; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg);
+  color: var(--fg); white-space: nowrap;
+}
+.dash-ring-job.idle {
+  border-color: transparent; background: none; color: var(--fg-muted);
+  opacity: 0.65;
+}
 .dash-ring svg { display: block; }
 .dash-ring-track { stroke: var(--line); }
 /* The ring colour tracks HOW FULL it is, which is the one place in this UI

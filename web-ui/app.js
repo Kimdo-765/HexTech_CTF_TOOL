@@ -5521,7 +5521,7 @@ function _dashBytes(n) {
 
 /** A donut. `pct` null renders an empty track rather than a zero-length arc,
  *  so "we could not measure this" is visibly different from "this is at 0%". */
-function _dashRing(pct, label, value, size = 56) {
+function _dashRing(pct, label, value, size = 56, badge = "") {
   const r = (size - 8) / 2;
   const c = 2 * Math.PI * r;
   const known = Number.isFinite(pct);
@@ -5543,6 +5543,9 @@ function _dashRing(pct, label, value, size = 56) {
     <span class="dash-ring-label" title="${escapeHtml(label + (value ? " — " + value : ""))}"
       >${escapeHtml(label)}</span>
     ${value ? `<span class="dash-sub">${escapeHtml(value)}</span>` : ""}
+    ${badge ? `<span class="dash-ring-job${badge === "idle" ? " idle" : ""}"
+        title="${escapeHtml(badge === "idle" ? "no job on this slot" : "running job " + badge)}"
+      >${escapeHtml(badge)}</span>` : ""}
   </div>`;
 }
 
@@ -5578,12 +5581,45 @@ async function loadDashboard() {
   // Running only: a stopped container reports no memory_stats, so every ring
   // would be an unmeasurable "—" and drown the ones that mean something.
   const running = (data.containers || []).filter((c) => c.state === "running");
+
+  // Order: infrastructure first, then worker slots by NUMBER, then everything
+  // else. Docker returns its own order and the previous code kept it, which
+  // read fine at two slots and became worker-1, worker-10, worker-11,
+  // worker-12, worker-2 at twelve — a plain string sort of a numbered series.
+  const slotNo = (c) => {
+    const m = /^worker-(\d+)$/.exec(c.compose_service || "");
+    return m ? parseInt(m[1], 10) : null;
+  };
+  const rank = (c) => {
+    const svc = c.compose_service || "";
+    if (svc === "api") return 0;
+    if (svc === "redis") return 1;
+    return slotNo(c) !== null ? 2 : 3;
+  };
+  running.sort((a, b) => {
+    const ra = rank(a), rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    const na = slotNo(a), nb = slotNo(b);
+    if (na !== null && nb !== null) return na - nb;
+    return String(a.compose_service || a.name || "")
+      .localeCompare(String(b.compose_service || b.name || ""), undefined,
+                     { numeric: true });
+  });
+
   ringsEl.innerHTML = running.length
-    ? running.map((c) => _dashRing(
-        c.mem_pct,
-        c.job_id ? `${c.category}·${c.job_id.slice(0, 8)}` : (c.compose_service || c.name || "?"),
-        `${_dashBytes(c.mem_usage)} / ${fmtBytes(c.mem_limit)}`,
-      )).join("")
+    ? running.map((c) => {
+        // A worker slot never carries the job label — that rides the challenge
+        // containers the agent spawns — so `job_id` is null for slots and the
+        // API hands us `slot_job_id` instead. Show it: a wall of identical
+        // `worker-N` rings cannot answer "which slot is my job on?".
+        const busy = c.slot_job_id;
+        const label = c.job_id
+          ? `${c.category}·${c.job_id.slice(0, 8)}`
+          : (c.compose_service || c.name || "?");
+        const sub = `${_dashBytes(c.mem_usage)} / ${fmtBytes(c.mem_limit)}`;
+        return _dashRing(c.mem_pct, label, sub, 56,
+                         busy ? busy.slice(0, 8) : (slotNo(c) !== null ? "idle" : ""));
+      }).join("")
     : '<p class="dash-sub">no running containers</p>';
 }
 

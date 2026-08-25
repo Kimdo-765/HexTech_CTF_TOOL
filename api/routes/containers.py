@@ -317,6 +317,14 @@ def _list_sync(with_sizes: bool) -> dict:
         elif svc.startswith("worker") and _is_core_service(svc):
             on_slot = [j["id"] for j in jobs
                        if j["worker_slot"] and svc == f"worker-{j['worker_slot']}"]
+            # Expose the mapping, don't just narrate it. A worker slot carries
+            # no job LABEL (the label rides the challenge containers the agent
+            # spawns), so `job_id` above is null for every slot and the
+            # dashboard had no way to say which job a slot is busy with. The
+            # answer is already computed here for the warning; publishing it as
+            # a field beats making the UI re-derive slot->job from a second
+            # /api/jobs fetch and a string match on the service name.
+            item["slot_job_id"] = on_slot[0] if on_slot else None
             warn = (f"worker slot — currently running job {on_slot[0]}; "
                     f"deleting it kills that job"
                     if on_slot else
