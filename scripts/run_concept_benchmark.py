@@ -125,28 +125,83 @@ def main() -> int:
     for r in rows:
         by_query[r["query_root"]].append(r)
 
-    print("%-22s %6s %6s %14s" % ("scorer", "MRR", "P@1", "false-promotions"))
-    for name, fn in SCORERS.items():
+    def measure(fn, groups):
         cache: dict = {}
-        rr, hits, promoted = [], 0, 0
-        for _q, group in sorted(by_query.items()):
+        rr, hits, promoted, n = [], 0, 0, 0
+        for _q, group in sorted(groups):
+            pos = [r for r in group if r["label"] == "positive"]
+            if not pos:
+                continue
+            n += 1
             scored = sorted(group, key=lambda r: -fn(r, cache))
-            ranks = [i for i, r in enumerate(scored, 1)
-                     if r["label"] == "positive"]
-            rank = ranks[0] if ranks else 0
-            rr.append(1.0 / rank if rank else 0.0)
+            rank = next(i for i, r in enumerate(scored, 1)
+                        if r["label"] == "positive")
+            rr.append(1.0 / rank)
             hits += 1 if rank == 1 else 0
-            pos_score = next(fn(r, cache) for r in group
-                             if r["label"] == "positive")
+            pos_score = fn(pos[0], cache)
             promoted += sum(1 for r in group if r["label"] == "negative"
                             and fn(r, cache) > pos_score)
-        n = len(by_query)
-        print("%-22s %6.3f %6.3f %14d"
-              % (name, sum(rr) / n, hits / float(n), promoted))
+        if not n:
+            return None
+        return sum(rr) / n, hits / float(n), promoted, n
+
+    print("%-22s %6s %6s %10s %7s" %
+          ("scorer", "MRR", "P@1", "false-promo", "queries"))
+    for name, fn in SCORERS.items():
+        got = measure(fn, by_query.items())
+        if got:
+            print("%-22s %6.3f %6.3f %10d %7d" % ((name,) + got))
+
+    # Per module, because the whole finding is that the answer differs by
+    # module: rev stores a solver METHOD where pwn stores an attack name.
+    by_module = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in rows:
+        by_module[r["module"]][r["query_root"]].append(r)
+    print()
+    print("per module (%s):" % ", ".join(sorted(by_module)))
+    print("%-10s %-22s %6s %6s %10s %7s" %
+          ("module", "scorer", "MRR", "P@1", "false-promo", "queries"))
+    for mod in sorted(by_module):
+        for name, fn in SCORERS.items():
+            got = measure(fn, by_module[mod].items())
+            if got:
+                print("%-10s %-22s %6.3f %6.3f %10d %7d" % ((mod, name) + got))
+
+    # THE SUBSET THAT ACTUALLY ASKS THE QUESTION.
+    #
+    # A concept ranker exists to help when the NAME says nothing. If a query's
+    # positive is already an exact name match, the shipped ranker retrieves it
+    # and there is nothing for concepts to add — scoring those rows measures
+    # the name signal wearing a different hat. Split them out.
+    hard = {q: g for q, g in by_query.items()
+            if not any(r["label"] == "positive"
+                       and r.get("name_relation") == "exact" for r in g)}
+    easy = len(by_query) - len(hard)
+    print()
+    print("queries whose positive the NAME already retrieves: %d/%d"
+          % (easy, len(by_query)))
+    print("queries where the name says nothing — the concept question: %d"
+          % len(hard))
+    if hard:
+        print("%-22s %6s %6s %10s %7s" %
+              ("scorer", "MRR", "P@1", "false-promo", "queries"))
+        for name, fn in SCORERS.items():
+            got = measure(fn, hard.items())
+            if got:
+                print("%-22s %6.3f %6.3f %10d %7d" % ((name,) + got))
+    else:
+        print("  (none — this corpus cannot answer the concept question)")
+    print()
+    print("Read the split before the totals. The ground truth available here is")
+    print("'same retry lineage', and a lineage keeps its filename, so the name")
+    print("signal reproduces the labels almost exactly. That is a property of")
+    print("the LABELS, not evidence that names are sufficient in general.")
 
     print()
-    print("Reminder: this is a 4-query smoke test. Beating the baseline here is")
-    print("the first bar, not a licence to reorder the production hint.")
+    print("Beating the baseline here is the first bar, not a licence to")
+    print("reorder the production hint. Every positive in this corpus has")
+    print("available_at_query=false, so a win is a statement about semantic")
+    print("similarity and never about recall that was achievable live.")
     return 0
 
 

@@ -3177,6 +3177,7 @@ REPORT_SCHEMA_REV = """\
   ],
   "solver_strategy": {
     "approach": "static-emit | brute-force | constraint-solver | dynamic-trace | hash-reverse | symbolic-exec | unpack-first | …",
+    "technique_name": "<WHAT this challenge is, not how you solved it — the specific mechanism a future solver would search for. e.g. 'brainfuck-interpreter-vm', 'reed-solomon-decode', 'hamiltonian-path-check', 'minecraft-region-nbt', 'kmdf-ioctl-driver'. Free text, be specific; do NOT reuse an `approach` value here>",
     "libs": ["<pwntools | z3 | angr | unicorn | …>"],
     "steps": ["<ordered one-line steps>"],
     "expected_observable": "<printed flag / accepted serial / cracked password>"
