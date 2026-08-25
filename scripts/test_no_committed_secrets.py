@@ -31,10 +31,48 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# Files built from live job data, i.e. the ones that can inherit operator text.
+# Scan EVERY tracked text file, not a list of the ones I happened to think of.
+# The leak was in a file built from live job data, and naming that file would
+# only protect the case already known. A sweep of all 237 tracked files found
+# no other real credential -- the six other matches are digests and test
+# placeholders, listed below by exact value so a NEW one cannot hide behind a
+# path-level exemption.
 GENERATED = [
     "scripts/concept_benchmark.json",
 ]
+
+# Known-benign, allowlisted by VALUE rather than by file. A commit SHA and a
+# hash of the empty string are credential-shaped and are not credentials.
+ALLOWED_SUBSTRINGS = {
+    # docs/hardening-s1-baseline.json — provenance digests, each verified by
+    # reading the JSON key it sits under: base_commit, base_tree, two
+    # `sha256:`-prefixed file hashes, and manifest_sha256.
+    "b172d6d13461beb0d603ca170ae84822ab",
+    "6f952dfa5cd11f576f0ec0268d787395fc",
+    "59f979038dbc4a67f4625e6203e3ac937e",
+    "e52da33a2f8cd33901982baed5274179d2",
+    "ce8590edf720994c0a899298d163ef173c",
+    "e3b0c44298fc1c149afbf4c8996fb924",            # sha256 of the empty string
+    "da39a3ee5e6b4b0d3255bfef95601890",            # sha1 of the empty string
+    "sk-test-secret-value-123456789",              # explicit test placeholder
+    "0123456789abcdef",                            # synthetic fixture
+    "bb3cd526550f28ebc618d59e4bebcb6e",            # DH{...} flag fixture in a test
+    "bcdaad21d4635931d1bd3b54",                    # synthetic fixture
+}
+
+
+def _tracked_text_files():
+    import subprocess
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
+                         capture_output=True, text=True)
+    for rel in out.stdout.split():
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        try:
+            yield rel, p.read_text(errors="strict")
+        except (UnicodeDecodeError, OSError):
+            continue                               # binary
 
 PATTERNS = [
     ("vendor token", re.compile(
@@ -74,6 +112,22 @@ for rel in GENERATED:
         found = pat.findall(raw)
         chk("%s carries no %s" % (rel, name), not found,
             [f[:12] + "..." for f in found[:3]])
+
+print("")
+print("--- and NO tracked file carries an unrecognised one " + "-" * 7)
+unknown = []
+scanned = 0
+for rel, raw in _tracked_text_files():
+    scanned += 1
+    for name, pat in PATTERNS:
+        for m in pat.finditer(raw):
+            hit = m.group(0)
+            if any(a in hit for a in ALLOWED_SUBSTRINGS):
+                continue
+            unknown.append((rel, name, hit[:28]))
+chk("scanned a plausible number of tracked files", scanned > 100, scanned)
+chk("no unrecognised credential-shaped string in any tracked file",
+    not unknown, unknown[:5])
 
 print("")
 print("--- the builder scrubs, and is wired to do so " + "-" * 12)
