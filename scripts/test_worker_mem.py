@@ -84,14 +84,16 @@ finally:
 real, sio = _with_settings(worker_slot_mem="4g", dynamic_worker_mem=True)
 try:
     chk("flag ON: dynamic_enabled() is True", wm.dynamic_enabled() is True)
-    # Assert the RULE (base x factor), not a number that happens to match it.
-    # The previous version asserted "expands to 8 GiB" against a 4g base, which
-    # is 4 x 2 — it would have stayed green through a change to the factor and
-    # told us nothing.
+    # Pin the FACTOR to a literal. An earlier version asserted "expands to
+    # 8 GiB" against a 4g base — true by coincidence, since 4 x 2 = 8, so it
+    # would have survived a change to the factor. Replacing that with
+    # `base * wm.EXPANSION_FACTOR` was no better: comparing the code against
+    # itself passes for ANY value the constant takes. The constant is the thing
+    # under test, so it has to face a number nobody derived from it.
+    chk("EXPANSION_FACTOR is 2", wm.EXPANSION_FACTOR == 2, wm.EXPANSION_FACTOR)
     for mod in sorted(wm.EXPANSION_MODULES):
-        chk("flag ON: %s expands to base x %d" % (mod, wm.EXPANSION_FACTOR),
-            wm.desired_cap_bytes(mod) == 4 * GiB * wm.EXPANSION_FACTOR,
-            wm.desired_cap_bytes(mod))
+        chk("flag ON: %s expands from a 4g base to exactly 8 GiB" % mod,
+            wm.desired_cap_bytes(mod) == 8 * GiB, wm.desired_cap_bytes(mod))
     # web left EXPANSION_MODULES on 2026-08-25. It is listed explicitly here,
     # not just absent from the set, so removing it from the frozenset without
     # meaning to would fail rather than silently widen the expansion again.
@@ -283,8 +285,11 @@ try:
         _applied.clear()
         wm._read_int = lambda name: (6 * GiB if name == "memory.max" else 0)
         wm.OomEscalator()(1)
-        chk("an escalation over base x%d is CLAMPED to it" % wm.MAX_CAP_FACTOR,
-            _applied == [2 * GiB * wm.MAX_CAP_FACTOR], _applied)
+        # Literal, not `2 * GiB * wm.MAX_CAP_FACTOR` — the constant is what is
+        # under test, and comparing it against itself would pass at any value.
+        chk("MAX_CAP_FACTOR is 4", wm.MAX_CAP_FACTOR == 4, wm.MAX_CAP_FACTOR)
+        chk("6 GiB x 1.5 = 9 GiB is CLAMPED to the 8 GiB ceiling",
+            _applied == [8 * GiB], _applied)
 
         # already at the ceiling: do not escalate, and above all do not SHRINK
         # the slot that just ran out of memory.

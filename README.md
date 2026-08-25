@@ -1172,7 +1172,7 @@ All knobs live in two places:
    | `WORKER_CONCURRENCY` | `3` | **legacy / ignored.** Parallel jobs is the number of `worker-N` services in `docker-compose.yml`; each slot runs exactly one. Kept only for a pre-split compose file. |
    | `JOB_TTL_DAYS` | `7` | auto-delete jobs older than N days (`0`=keep) |
    | `JOB_TIMEOUT` | `900` | **not a deadline** — only scales RQ's hard ceiling (`×4`, floor 24 h, cap 7 d). See [Timeouts](#timeouts) |
-   | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. **Since `5570961` this is the BASE, not the last word**: every job start re-applies it via `docker update` (idempotent — it heals a slot an earlier run left raised), and with `dynamic_worker_mem` ON the governor may raise it for `rev`/`crypto`/`web` or after a cgroup OOM. See [Concurrency](#concurrency). |
+   | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. **Since `5570961` this is the BASE, not the last word**: every job start re-applies it via `docker update` (idempotent — it heals a slot an earlier run left raised), and with `dynamic_worker_mem` ON the governor may raise it to `base × 2` for `rev`/`crypto`, or after a cgroup OOM (1.5× per kill, at most twice, never past `base × 4`). See [Concurrency](#concurrency). |
    | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude`, `grok`, or `gpt`. See [Agent providers](#agent-providers) |
    | `GROK_MODEL` / `GROK_EFFORT` | `grok-build` / empty | model + reasoning effort used when `AGENT_PROVIDER=grok` |
    | `GPT_RUNTIME` | `codex` | `codex` = Codex CLI + ChatGPT OAuth; `responses` = direct Platform API-key billing |
@@ -1197,7 +1197,7 @@ All knobs live in two places:
    | `MONITOR_ENABLED` | `1` | live per-job [monitor](#monitor-modules_monitorpy) narration feed. `0` disables the always-on supervisor and all narration. |
    | `MONITOR_MODEL` | `claude-sonnet-4-6` | cheap model pinned for monitor narration — never the job's opus. |
    | `MONITOR_LANGS` | `ko,en` | comma-separated languages the monitor narrates each signal batch in (the UI picks which to show). |
-   | `DYNAMIC_WORKER_MEM` | `0` | lets the memory governor raise a slot's cgroup cap for `rev` / `crypto` / `web` jobs, and again after a real cgroup OOM. OFF by default; the per-job sampler runs either way. Normally set from Settings rather than here — the key ships in neither `.env` nor `.env.example`. See [Concurrency](#concurrency). |
+   | `DYNAMIC_WORKER_MEM` | `0` | lets the memory governor raise a slot's cgroup cap to `base × 2` for `rev` / `crypto` jobs, and again after a real cgroup OOM (1.5×, at most twice, capped at `base × 4`). OFF by default; the per-job sampler runs either way. Normally set from Settings rather than here — the key ships in neither `.env` nor `.env.example`. See [Concurrency](#concurrency). |
 
 2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides
    `.env` without restart. Since `10e3208` it is **six sections behind a
@@ -1413,25 +1413,37 @@ horse being SIGKILLed).
   raised. So the worker now needs the docker socket and the `docker` SDK for a
   normal start, and says `[worker-mem] cap not applied: …` when it has neither.
 - A **governor** changes the cap only when `dynamic_worker_mem` is ON (default
-  OFF). It wants `max(base, 8 GiB)` for `rev` / `crypto` / `web`. pwn is
-  deliberately absent: every pwn OOM in the 88-job census was the QEMU guest or
+  OFF). It wants `base × 2` for `rev` / `crypto` — a MULTIPLE of the operator's
+  setting, so lowering the base lowers the expansion with it. A fixed
+  `max(base, 8 GiB)` floor used to ignore the base entirely below 8 GiB, which
+  meant setting slots to 2g moved rev and crypto not at all. `web` was removed
+  from this list on 2026-08-25; it now starts at the base and can only reach
+  more through the OOM ladder, which needs BOTH escalations to pass 4 GiB from
+  a 2g base. pwn is deliberately absent: every pwn OOM in the 88-job census was the QEMU guest or
   the target binary, neither of which lives in the slot's cgroup. Each change
   is taken under one flock at `/data/.worker-memory.lock` and gated on
   `sum(other slots' caps) + want ≤ 70 % of VM RAM` and on
   `want ≥ unreclaimable × 1.5`.
-- **On this 15.62 GiB VM, flipping the switch only ever produces refusals.**
-  70 % is 10.93 GiB; the other slot's 4 GiB plus a wanted 8 GiB is 12.00 GiB.
-  So the feature does nothing except write refusal lines into `run.log` — for
-  exactly the three modules it targets. Stopping the other slot does not help:
-  the sum walks `containers.list(all=True)` and reads `HostConfig.Memory`,
-  which a stopped container keeps. The precondition is a bigger VM (raise
-  `memory=` in `.wslconfig`, then `wsl --shutdown`), not a workaround.
-- On a real cgroup OOM the escalator raises the cap 1.5×. Here it reaches
-  4g → 6g (10.00 GiB total, allowed) and stops: 6g → 9g is 13.00 GiB and is
-  refused. `MAX_ESCALATIONS = 2` is not the binding limit — the counter only
-  increments on an APPLIED change (`modules/worker_mem.py:409-411`), so a
-  refused step is simply retried on the next OOM. The reachable ceiling on
-  this host is **6g via one OOM**.
+- **That precondition is now met.** On the 16 GiB VM this feature could only
+  write refusals: 70 % was 10.93 GiB and the other slot's 4 GiB plus a wanted
+  8 GiB was 12.00 GiB, so it never applied anything. `.wslconfig` went to
+  `memory=80GB` on 2026-08-25 (the physical 96 GB was invisible until that
+  line changed), and the VM is 78.5 GiB with 12 slots. 70 % is 54.98 GiB;
+  twelve slots at a 2g base is 24 GiB, and expanding one to 4 GiB asks for
+  26 GiB. The gate now ALLOWS the common case rather than refusing it — even
+  all twelve at 4 GiB (48 GiB) fits. Note the sum walks
+  `containers.list(all=True)` and reads `HostConfig.Memory`, so a STOPPED slot
+  still counts against the budget.
+- On a real cgroup OOM the escalator raises the cap 1.5×, at most
+  `MAX_ESCALATIONS = 2` times, and **never past `base × MAX_CAP_FACTOR` (4)**.
+  That absolute ceiling exists because the step count does not bound the
+  maximum on its own: the ladder starts from the slot's CURRENT cap, and an
+  expansion module already starts at `base × 2`, so from a 2g base it ran
+  4 → 6 → 9 GiB — `base × 4.5`, a number nobody chose. It is clamped to 8 GiB
+  now. A non-expansion module (2 → 3 → 4.5) never reaches the ceiling. The
+  counter increments only on an APPLIED change
+  (`modules/worker_mem.py`), so a step refused by the budget gate is retried on
+  the next OOM rather than consuming the allowance.
 - The end-of-job **restore** goes through the same shrink floor, so a slot
   whose unreclaimable footprint is still large refuses to shrink and logs
   `[worker-mem] cap NOT restored to base (…) — the next job's start will heal

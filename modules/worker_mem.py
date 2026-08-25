@@ -84,10 +84,15 @@ SHRINK_HEADROOM = 1.5
 # slot's cgroup, so raising the slot cap would have changed nothing.
 #
 # web was here on that evidence (1 OOM) and the operator removed it on
-# 2026-08-25, narrowing the start-time expansion to rev and crypto. web is not
-# left unprotected: OomEscalator still raises its cap 1.5x on a REAL cgroup kill,
-# up to MAX_ESCALATIONS. The difference is that web now pays for the expansion
-# with one OOM instead of taking it up front on every job.
+# 2026-08-25, narrowing the start-time expansion to rev and crypto.
+#
+# Be precise about what web loses, because "one OOM buys it back" is NOT true.
+# From a 2g base the ladder is 2 -> 3 -> 4.5 GiB, so ONE escalation reaches
+# 3 GiB — still under the 4 GiB the sampled web jobs actually ran at. web needs
+# BOTH escalations to clear that, and it pays for each with a killed process.
+# That is the operator's tradeoff to make, not a cost to paper over: if web
+# starts OOMing at 2g, the fix is a larger base, not a comment claiming it is
+# covered.
 EXPANSION_MODULES = frozenset({"rev", "crypto"})
 
 # What an expansion module starts at: a MULTIPLE of the operator's base, not a
@@ -381,6 +386,12 @@ def desired_cap_bytes(module: str | None) -> Optional[int]:
     Flag OFF -> the base, always. Applying the base at job start is what heals
     a cap some earlier run left raised: the restore path can be skipped (a hard
     Stop SIGKILLs the work horse) but the next job's start cannot.
+
+    That healing is best-effort, not a guarantee, and it got weaker when the
+    expansion became a multiple. A want of `base * EXPANSION_FACTOR` can be
+    REFUSED by the total-budget gate on a busy stack, where the old fixed floor
+    could not exceed it as easily; a refused want leaves the cap where it was.
+    apply_cap logs the refusal, and the following job tries again.
 
     Flag ON -> `base * EXPANSION_FACTOR` for an EXPANSION_MODULES job, the base
     for everything else. This is what the slot WANTS; `apply_cap` decides what

@@ -1012,11 +1012,18 @@
             slot's cgroup while a job runs. ON lets a job raise its own slot for the run
             and hand it back afterwards. Usage sampling runs either way.
             <br />
-            <b>Leave this OFF until the host RAM upgrade lands.</b> The safety budget is
-            70% of the VM, so on a 16&nbsp;GB VM one slot at 8g is 12&nbsp;GiB against a
-            10.9&nbsp;GiB ceiling and the expansion is simply refused. Raise
-            <code>memory=</code> in <code>.wslconfig</code> first — at 80&nbsp;GB the
-            budget is 56&nbsp;GiB and it fits.
+            <b>rev</b> and <b>crypto</b> start at <b>base&nbsp;×&nbsp;2</b>; every other
+            module starts at the base. A real cgroup OOM raises the slot 1.5×, at most
+            twice, and never past <b>base&nbsp;×&nbsp;4</b>.
+            <br />
+            The expansion is a MULTIPLE of your per-slot setting, so lowering that
+            lowers the expansion with it — at a 2g base, rev gets 4&nbsp;GiB and the OOM
+            ceiling is 8&nbsp;GiB. <b>web</b> was removed from the expansion list on
+            2026-08-25 and now starts at the base.
+            <br />
+            The safety budget is 70% of the VM, and it counts SLOT caps only — the
+            runner and the challenge containers a job spawns are siblings charged to
+            the VM, not to the slot, so this gate will not warn you about them.
           </small>
         </div>
         <label>

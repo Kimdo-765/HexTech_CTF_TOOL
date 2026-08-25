@@ -224,7 +224,23 @@ def _apply_worker_mem(value: str) -> dict:
     # 1.5x headroom, not ">= floor". A cap set AT the current footprint passes a
     # bare `want < usage` test and then OOM-kills on the very next allocation —
     # the exact outcome this gate claims to prevent, while reporting success.
-    for s in (_slot_mem(c) for c in cs):
+    #
+    # Sampled concurrently, for the same reason worker_mem_live is: each
+    # `_slot_mem` spends 1-2 s inside `c.stats(stream=False)`. This is the
+    # SECOND such loop on the PUT path — parallelising only the other one left
+    # Save still blocking ~23 s, so the commit that claimed to fix the Save
+    # button had fixed half of it.
+    #
+    # The generator was lazy, so it stopped sampling at the first refusal; the
+    # list is eager and samples all 12. That costs one extra ~2 s round of
+    # already-parallel calls in the refusal case and saves ~21 s in every other
+    # case, including every successful save.
+    if len(cs) > 1:
+        with ThreadPoolExecutor(max_workers=min(16, len(cs))) as _ex:
+            _sampled = list(_ex.map(_slot_mem, cs))
+    else:
+        _sampled = [_slot_mem(c) for c in cs]
+    for s in _sampled:
         if not s.get("available"):
             continue
         floor = s.get("unreclaimable_bytes") or s.get("usage_bytes")
