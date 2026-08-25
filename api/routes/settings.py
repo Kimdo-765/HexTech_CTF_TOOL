@@ -1,5 +1,6 @@
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -144,7 +145,21 @@ def worker_mem_live() -> dict:
     cs = _worker_containers()
     if not cs:
         return {"available": False}
-    slots = [_slot_mem(c) for c in cs]
+    # Sample slots CONCURRENTLY. `_slot_mem` spends its time inside
+    # `c.stats(stream=False)`, which costs 1-2 s because the daemon takes two
+    # samples to compute a delta — so the serial version cost 1-2 s PER SLOT.
+    # At two slots that was ~4 s and merely annoying; at twelve it was 24 s,
+    # measured, and since this runs on both GET and PUT /api/settings the Save
+    # button sat there long enough to read as broken.
+    #
+    # These are independent daemon round-trips, so twelve of them take about as
+    # long as one. api/routes/containers.py already samples its stats this way;
+    # this is the same fix, applied to the module that missed it.
+    if len(cs) > 1:
+        with ThreadPoolExecutor(max_workers=min(16, len(cs))) as ex:
+            slots = list(ex.map(_slot_mem, cs))
+    else:
+        slots = [_slot_mem(c) for c in cs]
     ok = [s for s in slots if s.get("available")]
     if not ok:
         return {"available": False}
