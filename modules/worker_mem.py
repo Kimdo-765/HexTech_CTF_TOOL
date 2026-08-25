@@ -77,12 +77,30 @@ TOTAL_BUDGET_FRACTION = 0.70
 SHRINK_HEADROOM = 1.5
 
 # Modules whose work is a solver rather than a driver. Provisional: the sampler
-# exists precisely so this list and the size below can be replaced by measured
-# distributions instead of intuition. Today's evidence (88-job census) puts real
-# worker-side OOM at rev 2, web 1, pwn 0, crypto 0 — note that web is here and
-# that pwn is NOT, because every pwn OOM in that census was the QEMU guest or
-# the target binary, neither of which lives in the slot's cgroup.
-EXPANSION_MODULES = frozenset({"rev", "crypto", "web"})
+# exists precisely so this list and the factor below can be replaced by measured
+# distributions instead of intuition. The 88-job census put real worker-side OOM
+# at rev 2, web 1, pwn 0, crypto 0 — pwn is absent because every pwn OOM in that
+# census was the QEMU guest or the target binary, neither of which lives in the
+# slot's cgroup, so raising the slot cap would have changed nothing.
+#
+# web was here on that evidence (1 OOM) and the operator removed it on
+# 2026-08-25, narrowing the start-time expansion to rev and crypto. web is not
+# left unprotected: OomEscalator still raises its cap 1.5x on a REAL cgroup kill,
+# up to MAX_ESCALATIONS. The difference is that web now pays for the expansion
+# with one OOM instead of taking it up front on every job.
+EXPANSION_MODULES = frozenset({"rev", "crypto"})
+
+# What an expansion module starts at: a MULTIPLE of the operator's base, not a
+# fixed size. The previous `max(base, 8 GiB)` floor ignored the base entirely
+# below 8 GiB — setting the base to 2g moved rev/crypto not at all, which is
+# not what a per-slot setting should mean. Scaling keeps the operator's number
+# authoritative: base 2g gives rev 4g, base 4g gives 8g.
+#
+# Deliberately NOT clamped to the total budget here. `desired_cap_bytes` says
+# what this slot WANTS; `apply_cap` is the single place that decides what is
+# allowed, under the flock, against every other slot's current cap. Bounding it
+# twice would put the same policy in two places and let them disagree.
+EXPANSION_FACTOR = 2
 
 # Escalation on a real OOM, and the ceiling it may not pass. 1.5x is the
 # operator's number; the cap on the number of escalations is not — an unbounded
@@ -348,12 +366,19 @@ def desired_cap_bytes(module: str | None) -> Optional[int]:
     Flag OFF -> the base, always. Applying the base at job start is what heals
     a cap some earlier run left raised: the restore path can be skipped (a hard
     Stop SIGKILLs the work horse) but the next job's start cannot.
+
+    Flag ON -> `base * EXPANSION_FACTOR` for an EXPANSION_MODULES job, the base
+    for everything else. This is what the slot WANTS; `apply_cap` decides what
+    it gets, and a want over the total budget is refused there and logged.
     """
     base = base_cap_bytes()
     if base is None or not dynamic_enabled():
         return base
     if (module or "").lower() in EXPANSION_MODULES:
-        return max(base, 8 * 1024 ** 3)
+        # A multiple of the base, so the operator's setting still governs.
+        # `* EXPANSION_FACTOR` is always > base, so this can never LOWER a cap
+        # the way a fixed floor could once the base rose above it.
+        return int(base * EXPANSION_FACTOR)
     return base
 
 

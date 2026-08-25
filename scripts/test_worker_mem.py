@@ -84,10 +84,19 @@ finally:
 real, sio = _with_settings(worker_slot_mem="4g", dynamic_worker_mem=True)
 try:
     chk("flag ON: dynamic_enabled() is True", wm.dynamic_enabled() is True)
+    # Assert the RULE (base x factor), not a number that happens to match it.
+    # The previous version asserted "expands to 8 GiB" against a 4g base, which
+    # is 4 x 2 — it would have stayed green through a change to the factor and
+    # told us nothing.
     for mod in sorted(wm.EXPANSION_MODULES):
-        chk("flag ON: %s expands to 8 GiB" % mod,
-            wm.desired_cap_bytes(mod) == 8 * GiB, wm.desired_cap_bytes(mod))
-    for mod in ("pwn", "misc", "forensic", "web3", None):
+        chk("flag ON: %s expands to base x %d" % (mod, wm.EXPANSION_FACTOR),
+            wm.desired_cap_bytes(mod) == 4 * GiB * wm.EXPANSION_FACTOR,
+            wm.desired_cap_bytes(mod))
+    # web left EXPANSION_MODULES on 2026-08-25. It is listed explicitly here,
+    # not just absent from the set, so removing it from the frozenset without
+    # meaning to would fail rather than silently widen the expansion again.
+    chk("web is NOT an expansion module", "web" not in wm.EXPANSION_MODULES)
+    for mod in ("web", "pwn", "misc", "forensic", "web3", None):
         chk("flag ON: %s still gets the base" % mod,
             wm.desired_cap_bytes(mod) == 4 * GiB, wm.desired_cap_bytes(mod))
     # pwn is excluded on evidence, not oversight: every pwn OOM in the 88-job
@@ -99,8 +108,34 @@ finally:
 
 real, sio = _with_settings(worker_slot_mem="8g", dynamic_worker_mem=True)
 try:
-    chk("flag ON never LOWERS a base that is already above the expansion",
-        wm.desired_cap_bytes("rev") == 8 * GiB, wm.desired_cap_bytes("rev"))
+    # The expansion is a MULTIPLE now, not a fixed 8 GiB floor, so it scales
+    # with the base instead of being swallowed by it. Under the old floor an 8g
+    # base made the expansion a no-op — rev asked for exactly what every other
+    # module got — which is the case that motivated the change.
+    chk("the expansion scales with the base rather than flattening at 8 GiB",
+        wm.desired_cap_bytes("rev") == 8 * GiB * wm.EXPANSION_FACTOR,
+        wm.desired_cap_bytes("rev"))
+    chk("...and it never LOWERS the base",
+        wm.desired_cap_bytes("rev") > 8 * GiB, wm.desired_cap_bytes("rev"))
+    # A want this large will not survive `apply_cap`'s total-budget gate on a
+    # small VM. That is deliberate and is asserted where the gate lives: this
+    # function reports desire, not permission.
+finally:
+    _restore(real, sio)
+
+# A small base must still produce a small expansion — the property the fixed
+# 8 GiB floor did not have. This is the operator's actual configuration on
+# 2026-08-25 (base 2g), where the old code gave rev 8 GiB regardless.
+real, sio = _with_settings(worker_slot_mem="2g", dynamic_worker_mem=True)
+try:
+    chk("base 2g: rev expands to 4 GiB, not 8",
+        wm.desired_cap_bytes("rev") == 4 * GiB, wm.desired_cap_bytes("rev"))
+    chk("base 2g: crypto expands to 4 GiB",
+        wm.desired_cap_bytes("crypto") == 4 * GiB, wm.desired_cap_bytes("crypto"))
+    chk("base 2g: web stays at 2 GiB",
+        wm.desired_cap_bytes("web") == 2 * GiB, wm.desired_cap_bytes("web"))
+    chk("base 2g: pwn stays at 2 GiB",
+        wm.desired_cap_bytes("pwn") == 2 * GiB, wm.desired_cap_bytes("pwn"))
 finally:
     _restore(real, sio)
 
