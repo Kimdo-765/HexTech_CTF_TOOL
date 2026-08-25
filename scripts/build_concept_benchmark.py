@@ -160,11 +160,26 @@ def _name_relation(query_name: str, candidate_name: str) -> str:
     return "contain" if (q in c or c in q) else "unrelated"
 
 
-def _label_for(root: str, metas: dict) -> str:
-    if root in REV_SEED_ROOTS:
-        return REV_SEED_ROOTS[root]
+def _identity_for(root: str, metas: dict) -> str:
+    """What the NAME signal would see for this lineage: its real filename.
+
+    This used to return a hand-written alias for three of the four seed roots
+    (`CVE-2015-2291.exe` -> `windows-pdf-driver`, `r.0.0.mca` ->
+    `minecraft-region`, `client_old` -> `maze-client`) and the real filename for
+    the other 31. Those three substitutions WERE the "3 queries where the name
+    says nothing" subset -- the previous headline result. Renaming a candidate
+    and then observing that its name no longer matches measures the rename.
+
+    Names used for scoring are now always the real ones. A human-readable alias
+    is kept separately, for reading the manifest, and never reaches a scorer.
+    """
     name = ((metas.get(root) or {}).get("filename") or root).strip()
-    return name.rsplit("/", 1)[-1][:40] or root
+    return name.rsplit("/", 1)[-1][:60] or root
+
+
+def _display_for(root: str, metas: dict) -> str:
+    """A readable name for humans skimming the manifest. Never scored."""
+    return REV_SEED_ROOTS.get(root) or _identity_for(root, metas)
 
 
 def build(rev_only: bool = False) -> dict:
@@ -201,13 +216,14 @@ def build(rev_only: bool = False) -> dict:
             continue
         lineages[root] = {
             "module": module,
-            "label": _label_for(root, metas),
+            "identity": _identity_for(root, metas),
+            "label": _display_for(root, metas),
             "chain_len": len(members),
             "candidate": best,
             "query": {
                 "root": root,
                 "module": module,
-                "label": _label_for(root, metas),
+                "label": _display_for(root, metas),
                 "filename": rm.get("filename"),
                 "description": _scrub((rm.get("description") or "").strip(), root),
                 "started_at": rm.get("started_at"),
@@ -247,6 +263,7 @@ def build(rev_only: bool = False) -> dict:
                 "query_label": q["label"],
                 "candidate_root": c_root,
                 "candidate_label": lineages[c_root]["label"],
+                "candidate_identity": lineages[c_root]["identity"],
                 "candidate_job": cand["job"],
                 "candidate_path": cand["path"],
                 "candidate_bytes": cand["bytes"],
@@ -264,7 +281,7 @@ def build(rev_only: bool = False) -> dict:
                 # whose positive is name-exact cannot test it: the shipped
                 # ranker would already have retrieved that candidate.
                 "name_relation": _name_relation(
-                    q["query"].get("filename"), lineages[c_root]["label"]),
+                    q["query"].get("filename"), lineages[c_root]["identity"]),
                 "query": q["query"],
             })
 
@@ -286,7 +303,16 @@ def build(rev_only: bool = False) -> dict:
             "positives_available_at_query": live_den,
             "rows_by_module": dict(mods),
         },
-        "live_recall": "N/A" if live_den == 0 else None,
+        # Always N/A, and structurally so rather than by luck: a positive's
+        # candidate is drawn from the query root's OWN chain, and api/storage
+        # stamps meta.updated_at at or after started_at, so produced_at can
+        # never precede the query. The old `else None` branch was unreachable,
+        # and a None here would have printed a caveat claiming a denominator
+        # that does not exist. If the construction ever changes so that a
+        # positive predates its query, this must become a real number and the
+        # caveat must be rewritten -- it does not fall out correctly on its own.
+        "live_recall": "N/A",
+        "live_recall_unreachable_by_construction": True,
         "live_recall_basis": (
             "no positive candidate existed when its query ran, so a live recall "
             "denominator cannot be formed; offline semantic scoring is still "
@@ -301,7 +327,9 @@ def main() -> int:
     ap.add_argument("--write", action="store_true",
                     help="write scripts/concept_benchmark.json")
     ap.add_argument("--rev-only", action="store_true",
-                    help="restrict to rev, reproducing the original scope")
+                    help="restrict to rev lineages (11 queries / 121 rows). "
+                         "This does NOT reproduce the first four-root corpus: "
+                         "that had 16 rows and no longer exists in this tree.")
     args = ap.parse_args()
 
     manifest = build(rev_only=args.rev_only)

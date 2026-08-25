@@ -5,11 +5,16 @@ Run: python3 scripts/test_rev_technique_identity.py
 
 The library indexer had one field for "technique" and, for rev, filled it from
 `solver_strategy.approach`. That field enumerates solver METHODS -- static-emit,
-constraint-solver, dynamic-trace -- so the 87 stored rev entries collapse onto
-10 values. The median entry shares its technique with 13 others, which is MORE
-than the twelve the library hint can display, so matching on it narrows
-nothing. pwn, whose field is a specific attack name, has 52 distinct values
-across 65 entries and a median share of 1.
+constraint-solver, dynamic-trace. Of the 87 stored rev entries, 61 carry a
+technique at all, and those 61 collapse onto 10 values: the median one shares
+its technique with 13 others, MORE than the twelve the library hint can
+display, so matching on it narrows nothing. pwn, whose field is a specific
+attack name, has 52 distinct values across 65 entries and a median share of 1.
+
+(The other 26 rev entries carry no technique because their job produced no
+findings.json. They are a separate gap and say nothing about the vocabulary;
+an earlier version of this file folded them into the 87 and overstated the
+case by a third.)
 
 That is not a shortage of concepts in rev challenges. It is a schema recording
 a different kind of label, and the fallback in the indexer quietly presented
@@ -138,8 +143,20 @@ chk("nothing to index yields no technique",
 section("the fallback is documented as a fallback, not a synonym")
 chk("the code explains why approach is the wrong identity",
     "enumerates SOLVER METHODS" in EXPLOITS_SRC)
+# Comments wrap, so compare with comment markers and whitespace runs collapsed.
+# Matching an exact substring against wrapped prose has now failed twice.
+_FLAT = " ".join(EXPLOITS_SRC.replace("#", " ").split())
 chk("...with the number that makes it concrete",
-    "collapse onto 10 values" in EXPLOITS_SRC)
+    "collapse onto just 10 values" in _FLAT,
+    [s for s in _FLAT.split(". ") if "collapse onto" in s][:1])
+# The first version of this comment said all 87 entries collapse onto 10
+# values. 26 of the 87 carry no technique at all -- their job produced no
+# findings.json -- so they say nothing about the vocabulary either way.
+# Folding them in overstated the case by a third.
+chk("...and does not overstate it: the 61 filled are the population",
+    "61 carry a technique" in _FLAT)
+chk("...and the 26 empty ones are named as a separate gap",
+    "remaining 26 carry none" in _FLAT)
 chk("...and states that existing entries do not move",
     "nothing" in EXPLOITS_SRC and "already in the library changes" in EXPLOITS_SRC)
 

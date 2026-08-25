@@ -2168,9 +2168,17 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
         "PRIMITIVE NAME + version-specific gotcha. Do NOT blindly "
         "copy — re-derive that primitive in YOUR chal's context.",
         "",
+        # "most relevant first" has to mean the relevance sort ACTUALLY RAN.
+        # It keys on `want and not want_generic`, not on `want` alone: a
+        # build-artifact name is non-empty, so the old test passed while
+        # `_score` short-circuited to 0 for every entry, leaving pure recency
+        # under a header claiming relevance. Nine live rev jobs query a stop
+        # word (`main` x5, `prob` x2, `server`, `README.md`), and for each of
+        # them the twelve lines are byte-identical to the no-name rendering.
         f"Entries for module `{mod_norm}` "
         + (f"(most relevant first, {len(entries)} shown):"
-           if want else f"(newest first, {len(entries)} shown):"),
+           if (want and not want_generic)
+           else f"(newest first, {len(entries)} shown):"),
     ]
     for m in entries:
         eid = m.get("id") or "?"
@@ -10933,9 +10941,21 @@ async def run_main_agent_session(
             # verdict and length and still differ. Do not read this field as
             # "we can reconstruct what was sent" -- it answers "was it this
             # text?", never "what was the text?".
+            # Read the verdict back out of the sandbox result the formatter
+            # actually rendered from, NOT the `verdict` local. The prejudge and
+            # runner_crash branches synthesize `last_sandbox["judge"]` without
+            # reassigning that local, so it stays at whatever the real judge
+            # returned -- None for a prejudge block, since there was no judge.
+            # The record then said verdict=null beside hint_source="prejudge",
+            # contradicting the bytes it commits to, on 13 of 23 real
+            # injections in the corpus.
+            _rendered_verdict = (
+                ((last_sandbox or {}).get("judge") or {}).get("verdict")
+                or verdict
+            )
             summary.setdefault("injected_turns", []).append({
                 "attempt": attempt,
-                "verdict": verdict,
+                "verdict": _rendered_verdict,
                 "hint_source": _inject_record.get("hint_source"),
                 "hint_origin": _inject_record.get("hint_origin"),
                 "chars": len(feedback),
