@@ -117,6 +117,37 @@ _heal_stale_override() {
 }
 _heal_stale_override
 
+# --- if the CLI on PATH is blind, look for one that isn't --------------------
+# The comment above says we don't care WHICH binary, only that it sees our
+# containers — but nothing acted on that, so a shadowed PATH `docker` ended the
+# run even when a working CLI sat one directory away. In WSL that is the normal
+# state, not an edge case: Docker Desktop's integration puts a wrapper ahead of
+# snap's docker on PATH, the wrapper talks to a different (empty) daemon, and
+# every deploy stopped with a manual "pick one of these two fixes".
+#
+# Try the known alternates before giving up. Each candidate has to prove itself
+# with the same cli_sees_stack test the PATH one just failed, so this can only
+# ever select a CLI that actually drives THIS project's daemon.
+if ! cli_sees_stack; then
+  _path_docker="$(command -v docker || true)"
+  for _cand in /snap/bin/docker /usr/bin/docker /usr/local/bin/docker; do
+    [ -x "$_cand" ] || continue
+    [ "$_cand" = "$_path_docker" ] && continue        # that's the one that failed
+    # eval so the chosen path is baked in AT DEFINITION. A plain
+    # `docker() { command "$_cand" "$@"; }` would re-read $_cand at CALL time,
+    # and the loop reassigns it — the function would follow the loop variable
+    # instead of the binary it was validated with.
+    eval "docker() { command $_cand \"\$@\"; }"
+    if cli_sees_stack; then
+      warn "PATH docker cannot see ${PROJECT}; using ${_cand} for this run."
+      warn "To make it permanent: Docker Desktop -> Settings -> Resources ->"
+      warn "WSL Integration -> toggle this distro OFF."
+      break
+    fi
+    unset -f docker
+  done
+fi
+
 # --- diagnose the environment BEFORE touching anything -----------------------
 if ! cli_sees_stack; then
   if api_up; then
