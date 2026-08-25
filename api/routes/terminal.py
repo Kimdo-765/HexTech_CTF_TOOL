@@ -16,10 +16,15 @@ import docker
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from modules.settings_io import get_setting
+# Imported, not redeclared. This terminal exists to edit and re-run the very
+# script the sandbox executes, so a second copy of the image name here would
+# let the operator debug in one environment while the solver runs in another —
+# the same drift the single image was chosen to end, just moved somewhere less
+# visible.
+from modules._runner import RUNNER_IMAGE
 
 router = APIRouter()
 
-RUNNER_IMAGE = "hextech_ctf_tool-runner"
 DEFAULT_MEM = "2g"
 
 

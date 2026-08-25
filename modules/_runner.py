@@ -54,7 +54,32 @@ from modules import _judge
 from modules._events import emit_event
 from modules.settings_io import get_setting
 
-RUNNER_IMAGE = "hextech_ctf_tool-runner"
+# The solver executes in the SAME IMAGE the agent developed in.
+#
+# This was `hextech_ctf_tool-runner`, a separate 2.16 GB image maintained
+# alongside the 8.64 GB worker. Keeping two Dockerfiles (137 lines vs 556) in
+# tool-for-tool agreement by hand has now failed three times, each time as a
+# solver that worked in development and died at auto-run:
+#   * gcc present, libc6-dev absent  -> compilation failed in the runner only
+#   * gdb absent                     -> a rev solver's fixed-address oracle
+#                                       silently diverged
+#   * measured 2026-08-25            -> angr, ghiant, qemu-system-x86_64, wine,
+#                                       node, patchelf, nc, socat, unzip, xxd
+#                                       all present in the worker, absent here
+# One image cannot drift from itself, which is the only fix that stays fixed.
+#
+# Verified before switching: the worker image is a SUPERSET — it carries
+# /opt/scaffold, the web3/eth stack, cysignals/fpylll and cast, i.e. everything
+# the runner image provided. `/work` is the one path it lacks, and that is
+# irrelevant because run_in_sandbox passes `working_dir` explicitly. An angr
+# solver was executed through it under the runner's own seccomp profile.
+#
+# ISOLATION IS UNCHANGED, and that is the part worth being careful about. The
+# boundary that matters here was never image size: the runner gets NO
+# docker.sock (so the docker CLI this image carries is inert), the same
+# targeted seccomp profile, and none of the credential mounts — those ride on
+# the worker CONTAINER, not in the image.
+RUNNER_IMAGE = "hextech_ctf_tool-worker"
 SAGE_IMAGE = "sagemath/sagemath:latest"
 DEFAULT_TIMEOUT_S = 300
 # crypto `.sage` solvers legitimately run for many minutes: a Gröbner basis /
