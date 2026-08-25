@@ -372,6 +372,23 @@ def run_job(
     model_override: Optional[str] = None,
 ) -> dict:
     apply_to_env()
+    # A retry re-enqueues this job with passphrase=None, because the retry
+    # route rebuilds from meta.json and the passphrase is deliberately not in
+    # there. It IS on the job-secrets rail, and a retry child inherits its
+    # parent's secrets (prepare_job_secret(..., copy_from=...)), so recovering
+    # it here is what makes a misc retry a real retry rather than a rerun that
+    # cannot open the archive.
+    #
+    # The explicit argument still wins: on the FIRST run it is what the
+    # operator just typed, and this fallback must never override it.
+    if not passphrase:
+        try:
+            from modules.job_secrets import read_misc_passphrase
+            passphrase = read_misc_passphrase(job_id)
+            if passphrase:
+                _log(job_id, "passphrase recovered from the job's secret store")
+        except Exception as e:
+            _log(job_id, f"could not read stored passphrase ({type(e).__name__})")
     # 'Docker challenge' opt-in → the agent may `docker build`/`docker run` the
     # bundled Dockerfile. Sweep stale chal containers from a prior crashed run
     # of this id, then reap in finally so nothing orphans (hextech_job=<id>).

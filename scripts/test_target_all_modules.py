@@ -882,8 +882,20 @@ if have_node:
               _gate("forensic")["showChangeTarget"], True)
         check("misc: target accepted at create time",
               _gate("misc")["hasTarget"], True)
-        check("misc: Change target HIDDEN — no retry/resume/run would ever read it",
-              _gate("misc")["showChangeTarget"], False)
+        # Was pinned HIDDEN, and correctly so at the time: the gate is "does
+        # anything READ the value back", and misc had no retry, no resume and
+        # no sandbox run, so the button would have written meta and changed
+        # nothing — the decorative-field defect this whole section exists to
+        # catch. misc now has a retry, and modules/misc/orchestrator.py reads
+        # target_url from META rather than from a run_job argument precisely so
+        # a /retry or a PATCH /target reaches the agent. The consumer exists,
+        # so the button belongs. Inverted rather than deleted: "misc shows
+        # Change target" resting on nothing is how the defect comes back.
+        check("misc: Change target SHOWN — it is retryable and the "
+              "orchestrator re-reads target_url from meta",
+              _gate("misc")["showChangeTarget"], True)
+        check("misc: and it is retryable, which is what made that true",
+              _gate("misc")["canRetry"], True)
         check("live-fire: no target affordance at all",
               _gate("live-fire")["hasTarget"], False)
         check("hybrid: targets live on its per-stage inputs, not the job panel",

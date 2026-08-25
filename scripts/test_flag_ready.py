@@ -546,13 +546,65 @@ RETRYABLE = _RT._RETRYABLE_MODULES
 check("the retryable-module list is importable, not scraped", bool(RETRYABLE), True)
 check("forensic is in the list", "forensic" in RETRYABLE, True)
 check("web3 too", "web3" in RETRYABLE, True)
-check(
-    "REGRESSION: misc stays out — its run_job needs a passphrase only the "
-    "operator has, so a rebuilt job would fail in a way that looks like the "
-    "module's fault",
-    "misc" in RETRYABLE,
-    False,
+# misc used to be pinned OUT here, with the reason spelled out: its run_job
+# needs a passphrase only the operator has, the passphrase reached it only as
+# an RQ argument, and a rebuilt job would therefore have failed in a way that
+# reads as the module's fault. That was a true statement about the plumbing,
+# not a permanent property of misc, and the plumbing changed — so this check
+# is inverted rather than deleted, and the three below assert the mechanism
+# that made the inversion legitimate. Deleting it would have left "misc can be
+# retried" resting on nothing.
+check("misc is in the list now that its passphrase outlives the first run",
+      "misc" in RETRYABLE, True)
+
+from modules.job_secrets import (  # noqa: E402
+    read_misc_passphrase, store_misc_passphrase, prepare_job_secret,
 )
+
+_PARENT, _CHILD = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+# Seven characters on purpose: the operator-facing key/value ingress requires
+# 8..8192, which is a sensible floor for an API token and the wrong one for a
+# passphrase. A misc passphrase that the store silently rejected would fail the
+# retry in exactly the way this whole change exists to prevent.
+store_misc_passphrase(_PARENT, "hunter2")
+check("a short passphrase is storable — the 8-char token floor does not apply",
+      read_misc_passphrase(_PARENT), "hunter2")
+prepare_job_secret(_CHILD, "some description", copy_from=_PARENT)
+check("REGRESSION: the retry child inherits it through the SAME call the "
+      "route already makes, so the retry route needs no passphrase code",
+      read_misc_passphrase(_CHILD), "hunter2")
+check("a job with no stored passphrase reads back None, not an empty string",
+      read_misc_passphrase("cccccccccccc"), None)
+# The recovery has to happen where the argument is empty. Asserting the list
+# and the store without this would pass while run_job still ignored the store.
+_MISC_SRC = (ROOT / "modules/misc/orchestrator.py").read_text()
+check("...and run_job actually reads it back",
+      "read_misc_passphrase" in _MISC_SRC, True)
+check("...only when its own argument is empty, so the first run still wins",
+      "if not passphrase:" in _MISC_SRC, True)
+
+# Redaction is a plain substring replace, and admitting an unbounded-length
+# value to the secret store points that replace at ordinary English. A
+# passphrase of `cat` must not turn "concatenate" into a redaction marker in
+# every log line this job writes, nor shred the description it appears in.
+from modules.job_secrets import redact_job_value  # noqa: E402
+
+store_misc_passphrase("dddddddddddd", "cat")
+check("a sub-8 passphrase is still STORED — the retry needs it",
+      read_misc_passphrase("dddddddddddd"), "cat")
+check("...but is NOT used as a redaction needle on log payloads",
+      redact_job_value("dddddddddddd", "please concatenate the categories"),
+      "please concatenate the categories")
+_desc = prepare_job_secret("dddddddddddd", "the cat sat on the mat")
+check("...nor on the description", _desc, "the cat sat on the mat")
+
+# The floor must not weaken what was already being redacted. A CTFd token is 69
+# characters, so nothing that was masked before stops being masked.
+_LONG = "ctfd_" + "a" * 64
+store_misc_passphrase("eeeeeeeeeeee", _LONG)
+check("REGRESSION: a long secret is still redacted from log payloads",
+      redact_job_value("eeeeeeeeeeee", "token is " + _LONG),
+      "token is [REDACTED_JOB_SECRET]")
 
 
 def gate_status(module):
@@ -577,11 +629,19 @@ check(
     _refused,
     [],
 )
+# The negative case used to be `misc`, which is now retryable. Derived rather
+# than swapped for another literal: whatever is NOT in the list must still be
+# refused, and naming one module here is how this check quietly stops testing
+# anything the next time that module is admitted.
+_NOT_RETRYABLE = [m for m in ("hybrid", "live_fire", "__not_a_module__")
+                  if m not in RETRYABLE]
 check(
-    "  ...and still refuses one that is not in the list",
-    gate_status("misc"),
-    400,
+    "  ...and still refuses every module that is not in the list",
+    [gate_status(m) for m in _NOT_RETRYABLE],
+    [400] * len(_NOT_RETRYABLE),
 )
+check("  ...and that negative set is not empty, or the check above is vacuous",
+      bool(_NOT_RETRYABLE), True)
 
 
 def continue_dispatch(module):

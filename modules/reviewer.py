@@ -100,11 +100,16 @@ def _public_hint(job_id: str, hint: str) -> str:
 # the button and the route would have 400'd it anyway. The exclusion was never
 # a capability statement about forensic; it was the list not being revisited.
 #
-# `misc` is still out, and deliberately: its run_job takes a passphrase that
-# only the operator has, so a rebuilt job would re-run without it and fail in
-# a way that looks like a capability problem. Give it its own path when it is
-# wanted, rather than letting it in here and discovering that later.
-_RETRYABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3", "forensic")
+# `misc` was out for one concrete reason, and it has been removed rather than
+# waived: its run_job takes a passphrase that only the operator has, the
+# passphrase reached it only as an RQ argument, and a rebuilt job would
+# therefore have re-run without it and failed in a way that reads as a
+# capability problem. The passphrase now lives on the job-secrets rail
+# (modules/job_secrets.store_misc_passphrase), retry children already inherit
+# their parent's secrets via prepare_job_secret(copy_from=...), and the
+# orchestrator recovers it when its own argument is empty. The blocker is gone,
+# so misc is in.
+_RETRYABLE_MODULES = ("web", "pwn", "crypto", "rev", "web3", "forensic", "misc")
 
 # Retryable and continuable are NOT the same question, and conflating them cost
 # a round. /retry rebuilds the job from its inputs, which forensic supports —

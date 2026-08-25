@@ -640,6 +640,41 @@ def _resubmit(
             model,
             job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
         )
+    elif module == "misc":
+        # misc keeps its upload as a single file directly in the job dir, the
+        # way forensic does, so carry it the same way: hardlink first (a misc
+        # bundle can be a large archive and a retry must not duplicate the
+        # bytes), copy where the filesystem will not link.
+        upload_name = prev_meta.get("filename")
+        carried = None
+        if upload_name:
+            src = prev_jd / Path(upload_name).name
+            if src.is_file():
+                dst = new_jd / src.name
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copy2(src, dst)
+                carried = src.name
+        meta["filename"] = carried or upload_name
+        meta["skip_claude"] = bool(prev_meta.get("skip_claude"))
+        meta["remote_only"] = carried is None
+        write_job_meta(new_id, meta)
+        # passphrase=None ON PURPOSE. It is not in meta and must not be: the
+        # orchestrator reads it back from the job-secrets rail, which this
+        # child already inherited via prepare_job_secret(copy_from=...) above.
+        # Threading it through here would put a live credential in an RQ
+        # argument list and in this route's frame for no gain.
+        q.enqueue(
+            "modules.misc.orchestrator.run_job",
+            new_id,
+            carried or upload_name,
+            None,
+            description,
+            bool(prev_meta.get("skip_claude")),
+            model,
+            job_id=new_id, job_timeout=hard_timeout_for(job_timeout),
+        )
     else:  # pwn / rev
         prev_bin = prev_jd / "bin"
         binary_name = None

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-ALLOWED_SECRET_KEYS = frozenset({"CTFD_ACCESS_TOKEN"})
+ALLOWED_SECRET_KEYS = frozenset({"CTFD_ACCESS_TOKEN", "MISC_PASSPHRASE"})
 RESERVED_SECRET_KEYS = frozenset({
     "AUTH_TOKEN",
     "OPENAI_API_KEY",
@@ -24,6 +24,20 @@ RESERVED_SECRET_KEYS = frozenset({
     "CODEX_API_KEY",
 })
 REDACTION_MARKER = "[challenge credential moved to secret ingress]"
+
+# Redaction is a plain substring replace over descriptions and log payloads, so
+# a stored value that is also an ordinary word rewrites text that has nothing to
+# do with the secret: a misc passphrase of `cat` would turn every "concatenate"
+# in every log line into a redaction marker, and a passphrase of `the` would
+# shred the description. Storing such a value is still right — the retry needs
+# it — but using it as a search needle is not.
+#
+# 8 is chosen because it changes NOTHING that exists today: `_validate_explicit`
+# already refuses an operator-supplied secret shorter than 8, and a CTFd token
+# is 69 characters, so every value that was being redacted before is still
+# redacted. It only decides what happens to the new, deliberately-unbounded
+# passphrase.
+_MIN_REDACTABLE_LEN = 8
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 _CTFD_TOKEN_RE = re.compile(r"\bctfd_[0-9a-fA-F]{64}\b")
 _NAMED_CTFD_RE = re.compile(
@@ -137,11 +151,49 @@ def prepare_job_secret(
     redacted = _NAMED_CTFD_RE.sub(REDACTION_MARKER, text)
     redacted = _CTFD_TOKEN_RE.sub(REDACTION_MARKER, redacted)
     for value in secrets.values():
-        if value:
+        if value and len(value) >= _MIN_REDACTABLE_LEN:
             redacted = redacted.replace(value, REDACTION_MARKER)
     if secrets:
         _write_job_secrets(job_id, secrets)
     return redacted.strip() or None
+
+
+def store_misc_passphrase(job_id: str, value: str | None) -> None:
+    """Park the misc archive passphrase on the same rail as CTFd credentials.
+
+    WHY IT LIVES HERE AND NOT IN meta.json. The passphrase used to reach the
+    orchestrator only as an RQ argument, so nothing outlived the first run and
+    `misc` had to be excluded from _RETRYABLE_MODULES — a rebuilt job would
+    have re-run without it and failed in a way that reads as a capability
+    problem. Putting it here makes retry work by the mechanism that already
+    exists: `prepare_job_secret(new_id, ..., copy_from=prev_id)` carries a
+    job's secrets to its retry child, so nothing in the retry route has to know
+    what a passphrase is.
+
+    It also stops being a plaintext field the rest of the system can echo:
+    `redact_job_value` masks every registered secret, this file is 0600 inside
+    a 0700 directory, and it lives OUTSIDE `jobs/<id>` so archives and hybrid
+    parent-directory sweeps cannot pick it up.
+
+    NOT routed through `_validate_explicit`: that path is the operator-facing
+    key/value ingress and it requires 8..8192 characters, which is a sensible
+    floor for an API token and a wrong one for a passphrase — `hunter2` is
+    seven. The only bound that matters here is the upper one.
+    """
+    text = str(value or "")
+    if not text:
+        return
+    if len(text) > 8192:
+        raise SecretIngressError("misc passphrase must be at most 8192 characters")
+    secrets = read_job_secrets(job_id)
+    secrets["MISC_PASSPHRASE"] = text
+    _write_job_secrets(job_id, secrets)
+
+
+def read_misc_passphrase(job_id: str) -> str | None:
+    """The stored passphrase, or None. Read by the orchestrator when its own
+    argument is empty, which is exactly the retry case."""
+    return read_job_secrets(job_id).get("MISC_PASSPHRASE") or None
 
 
 def copy_job_secrets(source_job_id: str, destination_job_id: str) -> None:
@@ -184,7 +236,8 @@ def cleanup_orphaned_secrets(*, older_than_epoch: float) -> int:
 def redact_job_value(job_id: str, value: Any) -> Any:
     """Recursively replace exact stored secret values in log/event payloads."""
 
-    secrets = tuple(v for v in read_job_secrets(job_id).values() if v)
+    secrets = tuple(v for v in read_job_secrets(job_id).values()
+                    if v and len(v) >= _MIN_REDACTABLE_LEN)
     if not secrets:
         return value
     if isinstance(value, str):

@@ -3409,13 +3409,22 @@ async function renderJob(id, opts = {}) {
   }
 
   let resultBlock = liveFireOutcomeHtml(job, id) + hybridStageEvidenceHtml(job);
-  if (["finished", "running", "no_flag", "flag_ready"].includes(job.status)) {
+  if (["finished", "running", "no_flag", "flag_ready", "failed", "stopped"]
+      .includes(job.status)) {
     // The per-artifact link list is gone. It hard-coded one filename per
     // module (`exploit.py.stdout`, `solver.py.stdout`, …) while the runner
     // names artifacts after the script it actually ran — so a crypto Sage job
     // produced `solver.sage.stdout` and every stdout/stderr link 404'd on a
     // file that was sitting right there. Browsing the directory removes the
     // guess entirely: whatever the run wrote is what is listed.
+    //
+    // `failed` and `stopped` are here because they are the statuses where an
+    // operator most needs to look. A failed job had its retry button gated on
+    // the MODULE and its file browser gated on the STATUS, so a failed misc
+    // job (fd5bb1470319, 2026-08-25) rendered a panel with neither: no way to
+    // rerun it and no way to see what it had written before it died. Both
+    // halves of that were wrong independently. A job that failed still has a
+    // ./work/ tree, and it is the tree worth reading.
     resultBlock += `
       <div class="job-files" data-job="${escapeHtml(id)}">
         <div class="job-files-bar">
@@ -3621,7 +3630,12 @@ async function renderJob(id, opts = {}) {
   // answers are not the same set:
   //   canRetry  — can the backend rebuild this job? Mirrors _RETRYABLE_MODULES
   //               in api/routes/retry.py. web3 was supported there all along
-  //               and hidden here; forensic is supported as of this change.
+  //               and hidden here; forensic and misc are supported as of their
+  //               respective changes. misc was the last one out, and for a
+  //               real reason rather than an oversight: its passphrase reached
+  //               the orchestrator only as an RQ argument, so a rebuilt job
+  //               could not open the archive. The passphrase now lives on the
+  //               job-secrets rail and retry children inherit it.
   //   canContinue — can it fork the prior conversation in place? forensic can
   //               be rebuilt but has no session to fork, so this is narrower.
   //   hasTarget — does the module accept a target at all? Every module except
@@ -3630,7 +3644,7 @@ async function renderJob(id, opts = {}) {
   //               hybrid carries its targets on its per-stage inputs instead.
   // Keeping them separate is what stops the next module from inheriting a
   // gate that was never about it.
-  const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic"]
+  const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic", "misc"]
     .includes(job.module);
   //   canContinue — can the backend FORK this job's conversation in place?
   //               Not the same question as canRetry, and reusing canRetry for
@@ -3685,12 +3699,14 @@ async function renderJob(id, opts = {}) {
   const showStop = job.status === "queued" || job.status === "running";
   // "Change target" needs BOTH halves to be true, and they are no longer the
   // same set. PATCH /target has no module gate, so the request would succeed
-  // for misc — but misc is absent from _RETRYABLE_MODULES and has no resume
-  // and no sandbox run, so nothing would ever read the value back: the button
-  // would write meta and change behaviour not at all. That is exactly the
-  // decorative-field defect the web docker_challenge round was about, so gate
-  // on a consumer existing, not on the field existing. No-op for the modules
-  // that already had the button: {web,pwn,crypto,rev,web3} ⊂ canRetry's set.
+  // anywhere; the gate is whether anything READS the value back, because a
+  // button that writes meta and changes no behaviour is the decorative-field
+  // defect the web docker_challenge round was about.
+  // misc used to fail that test — no retry, no resume, no sandbox run — and
+  // now passes it: modules/misc/orchestrator.py:188 reads target_url from META
+  // rather than from a run_job argument precisely so a /retry or a PATCH
+  // /target reaches the agent, and misc has a retry as of this change. So misc
+  // gaining the button here is the gate working, not the gate leaking.
   // Visible at any status.
   const showChangeTarget = hasTarget && canRetry;
   if (

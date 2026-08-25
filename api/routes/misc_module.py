@@ -68,6 +68,13 @@ async def analyze_misc(
     description = prepare_job_description(
         job_id, description, challenge_secret_key, challenge_secret_value
     )
+    # Park the passphrase where a retry can find it. It is still passed to
+    # enqueue below, so the first run is unchanged; this is what lets the
+    # SECOND run exist at all. Before, the passphrase reached the orchestrator
+    # only as an RQ argument and died with the job, which is why misc was the
+    # one module with no retry.
+    from modules.job_secrets import store_misc_passphrase
+    store_misc_passphrase(job_id, passphrase)
 
     timeout = resolve_timeout(job_timeout)
     chosen_model = (model or "").strip() or None
