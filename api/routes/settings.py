@@ -196,13 +196,25 @@ def _slot_number(label: str) -> str:
     scripts/test_settings_busy_slot.py rather than in production, which is the
     whole reason that file drives the real function instead of asserting on
     source.
+
+    Returns "" for an UNNUMBERED service. `_WORKER_SERVICE_RE` accepts a bare
+    `worker` (the pre-split compose file), and returning the label itself there
+    produced a value that can never appear in the busy set — meta stores
+    digits — so every shrink on such a deployment went through unguarded, which
+    is the same defect one config away. The caller treats "" as "this slot's
+    identity is unknown" and falls back to "is ANY job live", the right answer
+    when there is only one slot.
     """
     m = re.search(r"(\d+)$", str(label or ""))
-    return m.group(1) if m else str(label or "")
+    return m.group(1) if m else ""
 
 
-def _busy_slot_labels() -> set[str]:
-    """Slot NUMBERS that currently carry a job.
+def _busy_slot_labels() -> tuple[set[str], bool]:
+    """(slot NUMBERS carrying a job, whether ANY job is live at all).
+
+    The second element exists for the unnumbered pre-split `worker` service,
+    where no slot number can be matched and "any job live" is the only
+    available answer — see `_slot_number`.
 
     Read from job meta rather than from RQ, and DELIBERATELY inclusive: queued
     counts as busy too. The two possible errors are not symmetric.
@@ -221,10 +233,11 @@ def _busy_slot_labels() -> set[str]:
     import json
 
     busy: set[str] = set()
+    any_live = False
     try:
         entries = list(JOBS_DIR.iterdir())
     except OSError:
-        return busy
+        return busy, any_live
     for d in entries:
         f = d / "meta.json"
         if not f.is_file():
@@ -235,10 +248,11 @@ def _busy_slot_labels() -> set[str]:
             # Unreadable meta is not evidence the slot is free.
             continue
         if m.get("status") in ("running", "queued"):
+            any_live = True
             slot = str(m.get("worker_slot") or "").strip()
             if slot:
                 busy.add(slot)
-    return busy
+    return busy, any_live
 
 
 def _apply_worker_mem(value: str) -> dict:
@@ -322,7 +336,7 @@ def _apply_worker_mem(value: str) -> dict:
     # Only the shrink waits, and it waits for the next job on that slot:
     # worker/runner.py calls desired_cap_bytes() unconditionally at the START of
     # every job, so the new base lands there with no further action.
-    _busy = _busy_slot_labels()
+    _busy, _any_live = _busy_slot_labels()
     _by_name = {getattr(c, "name", "?"): c for c in cs}
     deferred, targets = [], []
     for s in _sampled:
@@ -331,9 +345,13 @@ def _apply_worker_mem(value: str) -> dict:
         if c is None:
             continue
         cur = int(s.get("limit_bytes") or 0)
-        if _slot_number(s.get("slot")) in _busy and cur and want < cur:
-            deferred.append({"slot": _slot_number(s.get("slot")), "name": name,
-                             "current_bytes": cur})
+        num = _slot_number(s.get("slot"))
+        # An unnumbered service (pre-split `worker`) cannot be matched to a
+        # slot, so fall back to "is anything running" rather than to "no".
+        is_busy = (num in _busy) if num else _any_live
+        if is_busy and cur and want < cur:
+            deferred.append({"slot": num or str(s.get("slot") or "?"),
+                             "name": name, "current_bytes": cur})
             continue
         targets.append((c, s))
 

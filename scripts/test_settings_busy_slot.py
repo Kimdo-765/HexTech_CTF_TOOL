@@ -228,6 +228,39 @@ chk("a corrupt meta leaves the slot unprotected only because nothing else "
     len(res.get("applied_to") or []), 2)
 
 print("")
+print("--- a pre-split, UNNUMBERED `worker` service " + "-" * 12)
+# `_WORKER_SERVICE_RE` still accepts a bare `worker`. No slot number can be
+# parsed from it, meta stores digits, so a number-only busy check matched
+# nothing and every shrink went through unguarded — the same defect as the
+# worker-2/2 mismatch, one config away. There is exactly one slot on such a
+# deployment, so "any job live" is the correct fallback.
+
+
+class BareWorker(FakeContainer):
+    def __init__(self, cap: int):
+        super().__init__(1, cap)
+        self.name = "hextech_ctf_tool-worker-1"
+        self.labels = {"com.docker.compose.service": "worker"}
+        self.attrs["Config"]["Labels"] = dict(self.labels)
+
+
+for d in (DATA / "jobs").iterdir():
+    (d / "meta.json").unlink(missing_ok=True)
+_job("999999999999", 7, "running")   # a slot number that matches nothing
+cs = [BareWorker(6 * GiB)]
+res = run(cs)
+chk("REGRESSION: a bare `worker` service is protected while a job is live",
+    [d["slot"] for d in (res.get("deferred_busy") or [])], ["worker"])
+chk("...and nothing was written", [c.updates for c in cs], [[]])
+
+for d in (DATA / "jobs").iterdir():
+    (d / "meta.json").unlink(missing_ok=True)
+cs = [BareWorker(6 * GiB)]
+res = run(cs)
+chk("...while an IDLE bare worker is still shrunk",
+    len(res.get("applied_to") or []), 1)
+
+print("")
 print("--- the budget gate still refuses an impossible total " + "-" * 3)
 for d in (DATA / "jobs").iterdir():
     (d / "meta.json").unlink(missing_ok=True)
