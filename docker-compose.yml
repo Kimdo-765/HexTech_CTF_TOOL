@@ -34,20 +34,38 @@ name: hextech_ctf_tool
 # SIZING — 4 GiB per slot x 2 slots = 8 GiB, which is exactly the previously
 # validated whole-worker budget:
 #
-#     VM                       15,990 MiB
+#     VM                       80,425 MiB   (.wslconfig memory=80GB, 2026-08-25;
+#                                 it was 16GB, and the physical 96 GB was
+#                                 invisible until that line changed)
 #     - kernel/dockerd/WSL       ~1,500
 #     - api + redis + tunnel       ~400
 #     - challenge containers      2,048 each; these are SIBLING cgroups
 #                                 spawned by the agent (worker/docker_memguard.sh),
 #                                 NOT charged to any slot. One job commonly
 #                                 spawns 2.
-#     = for worker slots         ~9,994
+#     = for worker slots        ~78,525 gross
 #
-# A single heavy pwn job (fd844946db78) peaked at 3,222 MiB, so 4,096 clears
-# it with headroom while an even 3-way split of 8g (2,730) would not have.
-# Concurrency is therefore 2, down from 3. Adding a third slot needs either a
-# larger VM or accepting that the worker total exceeds the pool — which is the
-# condition that froze WSL on 2026-07-29 and again on 2026-08-01.
+# A single heavy pwn job (fd844946db78) peaked at 3,222 MiB, so 4,096 clears it
+# with headroom; that is why per-slot stays 4g rather than shrinking to fit more
+# slots. Slots are 12 as of 2026-08-25 (was 2 on the 16 GB VM).
+#
+# ⚠ 12 IS NOT WORST-CASE SAFE, AND THE 70% GATE DOES NOT CATCH IT.
+# The gate in api/routes/settings.py counts SLOTS ONLY: 12 x 4,096 = 49,152 is
+# under its 56,297 ceiling, so it passes. Real demand includes the sibling
+# challenge containers, which it does not count:
+#
+#     12 slots x 4,096          49,152
+#   + 12 jobs x 2 chal x 2,048  49,152
+#   + system                     1,900
+#   =                          100,204 MiB   > 80,425  OVER
+#
+#   ...at ONE challenge container per job:  75,628 MiB   fits
+#
+# So 12 holds only while concurrent 2-container jobs stay below ~9. Nine slots
+# (75,628 worst case) is the number that never overcommits. Overcommitting is
+# exactly the condition that froze WSL on 2026-07-29 and again on 2026-08-01,
+# so if you see swap thrash under load, drop slots or CHAL_CONTAINER_MEM before
+# assuming something else.
 #
 # memswap_limit == mem_limit deliberately: with mem_limit alone Docker allows
 # swap up to 2x the cap, and slow swap thrash is precisely the state that
@@ -312,6 +330,76 @@ services:
     environment:
       <<: *worker-environment
       WORKER_SLOT: "2"
+
+  worker-3:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-3
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "3"
+
+  worker-4:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-4
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "4"
+
+  worker-5:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-5
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "5"
+
+  worker-6:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-6
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "6"
+
+  worker-7:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-7
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "7"
+
+  worker-8:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-8
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "8"
+
+  worker-9:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-9
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "9"
+
+  worker-10:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-10
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "10"
+
+  worker-11:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-11
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "11"
+
+  worker-12:
+    <<: *worker-service
+    container_name: hextech_ctf_tool-worker-12
+    environment:
+      <<: *worker-environment
+      WORKER_SLOT: "12"
 
   # Built but not started by default. Worker spawns transient instances per job.
   decompiler:
