@@ -104,6 +104,44 @@ def _ts(value):
         return None
 
 
+# Job descriptions are free text an operator typed, and this file is committed.
+# One of them contained a live CTFd API token, which reached the repository and
+# was pushed before review caught it. Registered job secrets are handled by
+# modules.job_secrets.redact_job_value; a credential the operator merely TYPED
+# into the description was never registered, so nothing scrubbed it.
+#
+# Both layers now run. The pattern layer is deliberately broad: a false
+# redaction costs a few tokens of benchmark vocabulary, a missed one costs a
+# credential.
+_SECRET_PATTERNS = (
+    re.compile(r"\b(?:ctfd|ghp|gho|ghu|ghs|ghr|glpat|xox[baprs])_[A-Za-z0-9_\-]{10,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{12,}"),
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
+    # generic "<word that means credential> <sep> <long opaque blob>"
+    re.compile(r"(?i)\b(?:token|api[_-]?key|apikey|secret|passwd|password|bearer)"
+               r"\s*[:=]\s*['\"]?([A-Za-z0-9_\-\.]{20,})"),
+    re.compile(r"\b[A-Fa-f0-9]{40,}\b"),          # long hex blobs
+)
+
+
+def _scrub(text: str, job_id: str = "") -> str:
+    """Remove credentials from operator-authored text before it is committed."""
+    if not text:
+        return text
+    if job_id:
+        try:
+            from modules.job_secrets import redact_job_value
+            text = redact_job_value(job_id, text)
+        except Exception:
+            pass
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub(lambda m: (m.group(0)[: m.start(1) - m.start(0)]
+                                  + "[REDACTED]") if m.groups() else "[REDACTED]",
+                       text)
+    return text
+
+
 def _norm_name(s: str) -> str:
     s = (s or "").strip().lower().rsplit("/", 1)[-1]
     for e in (".tar.gz", ".tgz", ".tar", ".zip", ".gz", ".elf", ".bin", ".exe"):
@@ -171,7 +209,7 @@ def build(rev_only: bool = False) -> dict:
                 "module": module,
                 "label": _label_for(root, metas),
                 "filename": rm.get("filename"),
-                "description": (rm.get("description") or "").strip(),
+                "description": _scrub((rm.get("description") or "").strip(), root),
                 "started_at": rm.get("started_at"),
                 "source": "data/jobs/%s/meta.json" % root,
                 "fields_used": ["description", "filename"],
