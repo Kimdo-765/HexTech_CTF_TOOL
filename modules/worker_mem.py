@@ -108,6 +108,21 @@ EXPANSION_FACTOR = 2
 OOM_ESCALATION_FACTOR = 1.5
 MAX_ESCALATIONS = 2
 
+# The absolute ceiling any one slot may reach, as a multiple of the base.
+#
+# MAX_ESCALATIONS alone does NOT bound this, because the ladder starts from the
+# slot's CURRENT cap and an expansion module already starts at base x
+# EXPANSION_FACTOR. With base 2g that ladder runs 4 -> 6 -> 9 GiB, i.e. base x
+# 4.5, and the step count is the only thing that stopped it — raise
+# MAX_ESCALATIONS or EXPANSION_FACTOR and the reachable maximum moves with it,
+# silently. A ceiling expressed against the base is the bound that stays true
+# when those two change.
+#
+# It binds where the step count does not: rev at base 2g wants 4 -> 6 -> 9, and
+# the second step is clamped to 8. A non-expansion module (2 -> 3 -> 4.5) never
+# reaches it, so this costs nothing in the common case.
+MAX_CAP_FACTOR = 4
+
 
 # --------------------------------------------------------------------------
 # cgroup reads (in-container, read-only)
@@ -431,6 +446,30 @@ class OomEscalator:
                           "cap; not escalating")
                 return
             want = int(current * OOM_ESCALATION_FACTOR)
+
+            # Clamp to the absolute ceiling. Without this the reachable maximum
+            # is whatever MAX_ESCALATIONS x OOM_ESCALATION_FACTOR happens to
+            # multiply out to from an already-expanded start, which is a number
+            # nobody chose.
+            base = base_cap_bytes()
+            if base:
+                ceiling = int(base * MAX_CAP_FACTOR)
+                if current >= ceiling:
+                    # Never step DOWN on an OOM. Shrinking the slot that just
+                    # ran out of memory is the opposite of the intent, and the
+                    # shrink-headroom gate would refuse it anyway — silently,
+                    # since apply_cap only logs on success.
+                    self.count = MAX_ESCALATIONS + 1        # stop the ladder
+                    self._say("[worker-mem] OOM but this slot is already at the "
+                              "ceiling (%d B = base x %d); not raising further"
+                              % (ceiling, MAX_CAP_FACTOR))
+                    return
+                if want > ceiling:
+                    self._say("[worker-mem] OOM escalation clamped %d B -> %d B "
+                              "(ceiling = base x %d)"
+                              % (want, ceiling, MAX_CAP_FACTOR))
+                    want = ceiling
+
             res = apply_cap(want, log=self.log)
             if res.get("applied"):
                 self.count += 1

@@ -268,6 +268,109 @@ finally:
     wm.apply_cap = _real_apply
     wm._read_int = _real_readint
 
+# ----------------------------------------------- the absolute ceiling (base x4)
+# MAX_ESCALATIONS does NOT bound the reachable maximum on its own: the ladder
+# starts from the slot's CURRENT cap, and an expansion module already starts at
+# base x EXPANSION_FACTOR. At base 2g that runs 4 -> 6 -> 9 GiB (base x 4.5),
+# bounded only by the step count. These pin the ceiling against the BASE, so it
+# stays true if the factor or the step count changes.
+wm.apply_cap = _fake_apply
+_real_readint = wm._read_int
+try:
+    real, sio = _with_settings(worker_slot_mem="2g", dynamic_worker_mem=True)
+    try:
+        # rev's second OOM: 6 GiB x 1.5 = 9 GiB, over the 8 GiB ceiling.
+        _applied.clear()
+        wm._read_int = lambda name: (6 * GiB if name == "memory.max" else 0)
+        wm.OomEscalator()(1)
+        chk("an escalation over base x%d is CLAMPED to it" % wm.MAX_CAP_FACTOR,
+            _applied == [2 * GiB * wm.MAX_CAP_FACTOR], _applied)
+
+        # already at the ceiling: do not escalate, and above all do not SHRINK
+        # the slot that just ran out of memory.
+        _applied.clear()
+        wm._read_int = lambda name: (8 * GiB if name == "memory.max" else 0)
+        esc = wm.OomEscalator()
+        esc(1)
+        chk("at the ceiling: no escalation at all", _applied == [], _applied)
+        esc(2)
+        chk("...and the ladder stays stopped on a repeat OOM",
+            _applied == [], _applied)
+
+        # a non-expansion module never reaches the ceiling, so it must be
+        # untouched by it: 2 -> 3 GiB is a plain 1.5x.
+        _applied.clear()
+        wm._read_int = lambda name: (2 * GiB if name == "memory.max" else 0)
+        wm.OomEscalator()(1)
+        chk("below the ceiling the step is still a plain 1.5x",
+            _applied == [int(2 * GiB * 1.5)], _applied)
+
+        # the ceiling scales with the base, it is not a fixed byte count
+        _applied.clear()
+        wm._read_int = lambda name: (6 * GiB if name == "memory.max" else 0)
+        real2, sio2 = _with_settings(worker_slot_mem="4g", dynamic_worker_mem=True)
+        try:
+            wm.OomEscalator()(1)
+            chk("a 4g base lifts the ceiling to 16 GiB, so 9 GiB is unclamped",
+                _applied == [int(6 * GiB * 1.5)], _applied)
+        finally:
+            _restore(real2, sio2)
+    finally:
+        _restore(real, sio)
+finally:
+    wm.apply_cap = _real_apply
+    wm._read_int = _real_readint
+
+# --------------------------------------- the runner matches its parent slot
+# The runner is a SIBLING container: the daemon creates it outside the slot's
+# cgroup, so its memory is charged to the VM and never to the slot. A fixed
+# DEFAULT_MEM therefore drifted from the slot in both directions — slots at 8g
+# still OOM'd a solver at 2g, and slots at 2g held a runner that outweighed its
+# parent. Sliced from source: importing modules._runner drags in the docker SDK
+# and the whole module tree.
+import ast as _ast
+
+_runner_src = (ROOT / "modules/_runner.py").read_text()
+_rt = _ast.parse(_runner_src)
+_fn = next((n for n in _rt.body
+            if isinstance(n, _ast.FunctionDef) and n.name == "_parent_slot_mem"), None)
+chk("_parent_slot_mem exists in modules/_runner.py", _fn is not None)
+if _fn is not None:
+    import typing as _typing
+    _ns: dict = {"Optional": _typing.Optional}
+    exec(compile(_ast.Module(body=[_fn], type_ignores=[]), "<s>", "exec"), _ns)
+    _psm = _ns["_parent_slot_mem"]
+
+    _real_readint = wm._read_int
+    try:
+        wm._read_int = lambda name: (3 * GiB if name == "memory.max" else 0)
+        chk("the runner reads the slot's LIVE cap, not the setting",
+            _psm() == 3 * GiB, _psm())
+        # `memory.max` is the literal string `max` on an uncapped cgroup, which
+        # _read_int cannot int() — the caller must fall back, never hand docker
+        # an unlimited runner.
+        wm._read_int = lambda name: None
+        chk("an unreadable or uncapped cgroup yields None (caller falls back)",
+            _psm() is None, _psm())
+        wm._read_int = lambda name: 0
+        chk("a zero cap is not treated as a real limit", _psm() is None, _psm())
+    finally:
+        wm._read_int = _real_readint
+
+# and the wiring: the default must be None so the resolution above can happen,
+# while explicit callers keep their own number.
+chk("run_in_sandbox defaults mem_limit to None",
+    "mem_limit: str | int | None = None" in _runner_src)
+chk("...and resolves it from the parent slot when unset",
+    "_parent = _parent_slot_mem()" in _runner_src
+    and "mem_limit = _parent if _parent else DEFAULT_MEM" in _runner_src)
+for _mod, _const in (("forensic/orchestrator.py", "FORENSIC_MEM"),
+                     ("misc/orchestrator.py", "MISC_MEM"),
+                     ("pwn/decompile.py", "DECOMPILER_MEM")):
+    _src = (ROOT / "modules" / _mod).read_text()
+    chk("%s still sizes its own runner (%s)" % (_mod, _const),
+        "mem_limit=%s" % _const in _src)
+
 # ------------------------------------------------- lifecycle ordering (fake)
 # Prove the wrapper applies a cap BEFORE the job body and restores AFTER it,
 # and that the restore still happens when the body raises - the SIGKILL case

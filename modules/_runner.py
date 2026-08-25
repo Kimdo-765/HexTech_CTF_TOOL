@@ -85,6 +85,33 @@ CRYPTO_SAGE_REMOTE_TIMEOUT_S = 900
 WEB_TIMEOUT_S = 3000
 DEFAULT_MEM = "2g"
 
+
+def _parent_slot_mem() -> Optional[int]:
+    """This worker slot's OWN live cap, in bytes, or None if unreadable.
+
+    The runner is a SIBLING container, not a child: the daemon creates it
+    outside the slot's cgroup, so its memory is charged to the VM and never to
+    the slot. That is exactly why a fixed `DEFAULT_MEM` drifted from the slot —
+    the operator could set slots to 8g and the runner would still OOM a solver
+    at 2g, or set slots to 2g and the runner would quietly hold more than its
+    parent.
+
+    Reading `memory.max` rather than the setting is deliberate. The setting is
+    what the operator asked for; the cgroup is what this slot actually has right
+    now, including a dynamic expansion or an OOM escalation. Matching the live
+    value is what "same as the parent worker" means while the cap moves.
+
+    `memory.max` reads as the literal string `max` on an uncapped cgroup, which
+    `_read_int` returns None for — the caller then falls back to DEFAULT_MEM
+    rather than handing docker an unlimited runner.
+    """
+    try:
+        from modules.worker_mem import _read_int
+        v = _read_int("memory.max")
+    except Exception:
+        return None
+    return v if (v and v > 0) else None
+
 # S1-ENV scope is deliberately narrow.  Missing/unknown modules never widen
 # into the gate, and signatures are added only from observed production data.
 REMOTE_TARGET_GATE_MODULES: tuple[str, ...] = ("pwn", "rev")
@@ -607,7 +634,11 @@ def run_in_sandbox(
     args: list[str] | None = None,
     image: str = RUNNER_IMAGE,
     timeout_s: int = DEFAULT_TIMEOUT_S,
-    mem_limit: str = DEFAULT_MEM,
+    # None -> match the parent slot's LIVE cap (see _parent_slot_mem), falling
+    # back to DEFAULT_MEM when the cgroup is unreadable or uncapped. Callers
+    # that pass a value keep it: forensic, misc and the decompiler each size
+    # their runner deliberately and must not be dragged along by the slot.
+    mem_limit: str | int | None = None,
     network: str = "bridge",
     use_sage: bool = False,
     *,
@@ -643,6 +674,15 @@ def run_in_sandbox(
               timeout?, container_disappeared?, killed_by_supervise?, supervise?}.
     """
     args = args or []
+    if mem_limit is None:
+        _parent = _parent_slot_mem()
+        mem_limit = _parent if _parent else DEFAULT_MEM
+        if log_fn and _parent:
+            try:
+                log_fn("[runner] mem_limit %d B (matching this worker slot)"
+                       % _parent)
+            except Exception:
+                pass
     # Mount the host's jobroot at the SAME absolute path the worker uses,
     # then chdir into the work-tree. Anywhere PT_INTERP / DT_RPATH was
     # baked with `/data/jobs/<id>/work/…` now resolves identically in
