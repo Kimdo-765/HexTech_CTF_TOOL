@@ -77,16 +77,22 @@ def section(name):
 # ------------------------------------------------------- 1. single source
 section("the image name has exactly one definition")
 defs = []
-# Exclude nested worktrees RELATIVE to ROOT, not by substring: this suite is
-# itself usually run from inside .claude/worktrees/<name>, where a substring
-# test matches every file in the repo and the scan silently finds nothing.
-NESTED = ROOT / ".claude" / "worktrees"
-for p in sorted(ROOT.rglob("*.py")):
-    if NESTED in p.parents or p.parent.name == "scripts":
+# Scan TRACKED files only. `rglob("*.py")` walks data/jobs/** too — thousands of
+# agent-authored scripts, one of which contains null bytes and makes ast.parse
+# raise ValueError (not SyntaxError, so a narrow except let it escape). Those
+# files are job artifacts, not source, and cannot define this constant. This
+# also handles the nested-worktree case for free: a worktree's files are not
+# tracked in the tree that contains it.
+_tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "*.py"],
+                          capture_output=True, text=True)
+_files = [ROOT / f for f in _tracked.stdout.split()] if _tracked.returncode == 0 \
+    else sorted(ROOT.rglob("*.py"))
+for p in _files:
+    if not p.is_file() or p.parent.name == "scripts":
         continue
     try:
         tree = ast.parse(p.read_text(errors="replace"))
-    except SyntaxError:
+    except (SyntaxError, ValueError, OSError):
         continue
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(
