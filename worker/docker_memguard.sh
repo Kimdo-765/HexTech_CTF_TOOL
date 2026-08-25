@@ -28,16 +28,38 @@
 #     affected — and modules/_runner.py already sets its own mem_limit (2g).
 #     The reachable callers are the agent's Bash and worker/chal_libc_fix.py.
 #
-# TUNING: CHAL_CONTAINER_MEM (compose env, default 2g). Setting it to an empty
-# value or `0` disables injection entirely — an escape hatch that keeps the
-# shim transparent rather than making an operator hunt for it.
+# CPU LEAKS THE SAME WAY, and it went unbounded for as long as memory did.
+# 2026-08-25, job 0a22d7fa7919: an agent fanned its own search into 36
+# processes and took 2467% CPU on a 32-core host (load average 45.8) while
+# eight other slots crawled. Nothing misbehaved — there was simply no ceiling.
+# Worker slots and the runner are now capped at 8 CPUs each; a container the
+# AGENT starts is a sibling of both and is bounded here, or nowhere.
+#
+# --cpus is injected the same way --memory is, and for the same reason: a later
+# occurrence of the flag wins, so a caller's own --cpus (which necessarily
+# comes after ours) overrides it for free. VERIFIED, not assumed — docker
+# 29.6.1, `--cpus 1 --cpus 4` yields cpu.max 400000/100000 and `--cpus 8
+# --cpus 2` yields 200000/100000.
+#
+# TUNING: CHAL_CONTAINER_MEM (default 2g) and CHAL_CONTAINER_CPUS (default 8).
+# Each is disabled by setting it to an empty value or `0`. NOTE the change in
+# the escape hatch: CHAL_CONTAINER_MEM=0 alone no longer makes the shim fully
+# transparent, because the CPU cap is a separate guarantee. Set BOTH to 0 for
+# the old pass-through-everything behaviour.
 
 set -o pipefail
-REAL=/usr/bin/docker
+# Overridable ONLY so the guard can be tested by pointing it at a recorder that
+# prints its argv instead of starting a container. Production never sets it;
+# an unset variable keeps the previous hard-coded path exactly.
+REAL="${DOCKER_MEMGUARD_REAL:-/usr/bin/docker}"
 LIMIT="${CHAL_CONTAINER_MEM-2g}"
+CPUS="${CHAL_CONTAINER_CPUS-8}"
 
-# Disabled, or the real docker is missing → behave exactly like plain docker.
-if [ -z "$LIMIT" ] || [ "$LIMIT" = "0" ] || [ ! -x "$REAL" ]; then
+_off() { [ -z "$1" ] || [ "$1" = "0" ]; }
+
+# Both caps disabled, or the real docker is missing → behave exactly like
+# plain docker.
+if { _off "$LIMIT" && _off "$CPUS"; } || [ ! -x "$REAL" ]; then
     exec "$REAL" "$@"
 fi
 
@@ -115,17 +137,23 @@ esac
 # live on job 926773a15d8b). Omitted entirely when unset — an unlabelled
 # container is the status quo, whereas a label reading `=` would be a lie that
 # `_hard_stop_job` could match against the wrong thing.
-out=(); done_inject=0
+out=(); done_inject=0; applied=""
 for a in "$@"; do
     out+=("$a")
     if [ "$done_inject" -eq 0 ] && [ "$a" = "$sub" ]; then
-        out+=(--memory "$LIMIT")
+        if ! _off "$LIMIT"; then
+            out+=(--memory "$LIMIT"); applied="$applied --memory $LIMIT"
+        fi
+        if ! _off "$CPUS"; then
+            out+=(--cpus "$CPUS"); applied="$applied --cpus $CPUS"
+        fi
         [ -n "${JOB_ID:-}" ] && out+=(--label "hextech_ctf_tool_job_id=$JOB_ID")
         done_inject=1
     fi
 done
 
-echo "[docker-memguard] default --memory $LIMIT applied" \
+echo "[docker-memguard] defaults applied:${applied:- none}" \
      "${JOB_ID:+plus label hextech_ctf_tool_job_id=$JOB_ID }" \
-     "(pass --memory yourself to override, or set CHAL_CONTAINER_MEM=0)" >&2
+     "(pass the flag yourself to override, or set" \
+     "CHAL_CONTAINER_MEM=0 / CHAL_CONTAINER_CPUS=0)" >&2
 exec "$REAL" "${out[@]}"

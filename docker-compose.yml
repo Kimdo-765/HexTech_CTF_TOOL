@@ -95,6 +95,11 @@ x-worker-environment: &worker-environment
   # Default cap the docker shim injects into an agent-started container
   # that omits --memory (worker/docker_memguard.sh). Empty or 0 disables.
   CHAL_CONTAINER_MEM: ${CHAL_CONTAINER_MEM:-2g}
+  # Same shim, same reasoning, for CPU. A challenge container is a sibling of
+  # both the slot and the runner, so neither of their caps bounds it. Empty or
+  # 0 disables; note that disabling BOTH is now what makes the shim a complete
+  # pass-through, where CHAL_CONTAINER_MEM=0 alone used to be enough.
+  CHAL_CONTAINER_CPUS: ${CHAL_CONTAINER_CPUS:-8}
   # Tell the bundled `claude` CLI it is running in a sandbox so it allows
   # --dangerously-skip-permissions even though the container runs as root.
   IS_SANDBOX: "1"
@@ -151,6 +156,26 @@ x-worker-service: &worker-service
   init: true
   mem_limit: ${WORKER_SLOT_MEM:-4g}
   memswap_limit: ${WORKER_SLOT_MEM:-4g}
+  # RAM was capped per slot from the start; CPU was not, and the asymmetry has
+  # a cost. Measured 2026-08-25 under a 9-job batch: rev job 0a22d7fa7919 fanned
+  # a search out into 36 `evaluate_relation.py` processes and worker-3 took
+  # 2467% CPU on a 32-core host, load average 45.8, while eight other slots
+  # crawled. Nothing was misbehaving -- an agent parallelising its own brute
+  # force is the intended behaviour; there was simply no ceiling on it.
+  #
+  # `cpus` is a CPU-TIME cap, not a thread-count cap: the job may still spawn
+  # 36 processes, they just share 8 cores' worth of time. That is the property
+  # wanted here -- one job must not be able to starve the other eleven.
+  #
+  # 12 x 8 = 96 on 32 cores is deliberate oversubscription. CPU oversubscription
+  # degrades gracefully (the scheduler time-slices); RAM oversubscription is
+  # what wedged this VM twice, which is why that one is budgeted at 70% and this
+  # one is not budgeted at all.
+  #
+  # Like mem_limit, this is a container-CREATE property: `deploy.sh`'s restart
+  # will NOT change it, only `docker compose up -d worker-N` does. To move it on
+  # LIVE slots without a recreate: `docker update --cpus 8 <container>`.
+  cpus: ${WORKER_SLOT_CPUS:-8}
   env_file: .env
   volumes:
     - ./data:/data

@@ -21,11 +21,17 @@ from modules.settings_io import get_setting
 # let the operator debug in one environment while the solver runs in another —
 # the same drift the single image was chosen to end, just moved somewhere less
 # visible.
-from modules._runner import RUNNER_IMAGE
+from modules._runner import RUNNER_IMAGE, DEFAULT_CPUS
 
 router = APIRouter()
 
 DEFAULT_MEM = "2g"
+# The terminal is a runner by another name: same image, same job tree, and an
+# operator re-running exploit.py in it can fan out exactly like the agent that
+# took 2467% of a 32-core host on 2026-08-25. It is created by the API
+# container, which is not a worker slot and has no cap of its own to inherit,
+# so the default is used directly rather than read from a cgroup.
+DEFAULT_NANO_CPUS = DEFAULT_CPUS * 1_000_000_000
 
 
 def _host_path(job_id: str) -> str | None:
@@ -82,6 +88,7 @@ async def terminal_ws(ws: WebSocket, job_id: str):
             volumes={host_job: {"bind": "/work", "mode": "rw"}},
             working_dir="/work",
             mem_limit=DEFAULT_MEM,
+            nano_cpus=DEFAULT_NANO_CPUS,
             network_mode="bridge",
             environment={"TERM": "xterm-256color", "JOB_ID": safe_id},
             labels={

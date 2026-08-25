@@ -137,6 +137,45 @@ def _parent_slot_mem() -> Optional[int]:
         return None
     return v if (v and v > 0) else None
 
+
+DEFAULT_CPUS = 8
+
+
+def _parent_slot_cpus(cpu_max_path: str = "/sys/fs/cgroup/cpu.max") -> Optional[int]:
+    """This worker slot's OWN live CPU cap, in docker NanoCpus, or None.
+
+    Same reasoning as `_parent_slot_mem`: the runner is a SIBLING container, so
+    its CPU time is charged to the VM and never to the slot. A runner with no
+    cap can take every core on the host while its own parent is limited to
+    eight — which is the asymmetry the slot cap exists to remove, just moved
+    one container along.
+
+    cgroup v2 spells this `cpu.max` as two fields, `<quota> <period>`, both in
+    microseconds, where quota is the literal string `max` when uncapped. Cores
+    = quota / period; docker wants NanoCpus = cores * 1e9. `cpu.max` is NOT an
+    integer file, so `worker_mem._read_int` cannot read it — parsing it here is
+    deliberate, not a duplicate of that helper.
+
+    Returns None when uncapped or unreadable, and the caller then falls back to
+    DEFAULT_CPUS rather than handing docker an unlimited runner.
+
+    `cpu_max_path` exists so the parser can be tested against real cgroup
+    spellings without a container; production never passes it.
+    """
+    try:
+        raw = Path(cpu_max_path).read_text().split()
+    except Exception:
+        return None
+    if len(raw) != 2 or raw[0] == "max":
+        return None
+    try:
+        quota, period = int(raw[0]), int(raw[1])
+    except ValueError:
+        return None
+    if quota <= 0 or period <= 0:
+        return None
+    return int(quota / period * 1_000_000_000)
+
 # S1-ENV scope is deliberately narrow.  Missing/unknown modules never widen
 # into the gate, and signatures are added only from observed production data.
 REMOTE_TARGET_GATE_MODULES: tuple[str, ...] = ("pwn", "rev")
@@ -664,6 +703,10 @@ def run_in_sandbox(
     # that pass a value keep it: forensic, misc and the decompiler each size
     # their runner deliberately and must not be dragged along by the slot.
     mem_limit: str | int | None = None,
+    # None -> match the parent slot's LIVE CPU cap (see _parent_slot_cpus),
+    # falling back to DEFAULT_CPUS when the cgroup is unreadable or uncapped.
+    # Same contract as mem_limit: an explicit value from a caller wins.
+    nano_cpus: int | None = None,
     network: str = "bridge",
     use_sage: bool = False,
     *,
@@ -706,6 +749,17 @@ def run_in_sandbox(
             try:
                 log_fn("[runner] mem_limit %d B (matching this worker slot)"
                        % _parent)
+            except Exception:
+                pass
+    if nano_cpus is None:
+        _pcpu = _parent_slot_cpus()
+        nano_cpus = _pcpu if _pcpu else DEFAULT_CPUS * 1_000_000_000
+        if log_fn:
+            try:
+                log_fn("[runner] cpus %.2g (%s)"
+                       % (nano_cpus / 1e9,
+                          "matching this worker slot" if _pcpu
+                          else "slot cgroup uncapped/unreadable, using default"))
             except Exception:
                 pass
     # Mount the host's jobroot at the SAME absolute path the worker uses,
@@ -801,6 +855,7 @@ def run_in_sandbox(
         volumes={_host_path(job_id): {"bind": mount_root, "mode": "rw"}},
         working_dir=workdir,
         mem_limit=mem_limit,
+        nano_cpus=nano_cpus,
         network_mode=network,
         environment=env,
         stdout=True,
