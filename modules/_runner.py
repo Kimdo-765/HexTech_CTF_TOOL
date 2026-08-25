@@ -176,6 +176,24 @@ def _parent_slot_cpus(cpu_max_path: str = "/sys/fs/cgroup/cpu.max") -> Optional[
         return None
     return int(quota / period * 1_000_000_000)
 
+
+def runner_nano_cpus() -> int:
+    """The CPU cap any per-job sibling container should be created with.
+
+    Exported because run_in_sandbox is NOT the only place this project starts a
+    container. The Ghidra decompiler (modules/pwn/decompile.py, twice), the
+    forensic orchestrator and the misc orchestrator each call
+    `client.containers.run` directly with their own mem_limit, bypassing both
+    this module's sandbox path and the docker shim that caps what the AGENT
+    starts. They were the four holes left after the slot and the sandbox were
+    capped, and a decompiler is precisely the workload that fills them: Ghidra's
+    analysis is multi-threaded and will take every core it is offered.
+
+    Never returns None: an uncapped sibling is the condition being removed, so
+    an unreadable cgroup falls back to DEFAULT_CPUS rather than to no cap.
+    """
+    return _parent_slot_cpus() or DEFAULT_CPUS * 1_000_000_000
+
 # S1-ENV scope is deliberately narrow.  Missing/unknown modules never widen
 # into the gate, and signatures are added only from observed production data.
 REMOTE_TARGET_GATE_MODULES: tuple[str, ...] = ("pwn", "rev")

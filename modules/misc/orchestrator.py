@@ -38,6 +38,11 @@ from modules._common import (
     write_meta,
 )
 from modules.misc.prompts import SYSTEM_PROMPT, build_user_prompt
+# This orchestrator spawns its own analysis container, a SIBLING of the
+# worker slot that neither the slot's cap nor the docker shim bounds.
+# Imported rather than redeclared so it cannot drift from the sandbox cap.
+from modules._runner import runner_nano_cpus
+
 from modules.settings_io import apply_to_env, get_setting, has_claude_auth
 from modules.agent_provider import (
     active_provider,
@@ -131,6 +136,7 @@ def _spawn_misc(job_id: str, filename: str, passphrase: Optional[str]) -> str:
         command=cmd,
         volumes={_host_path(job_id): {"bind": "/job", "mode": "rw"}},
         mem_limit=MISC_MEM,
+        nano_cpus=runner_nano_cpus(),
         network_mode="none",
         detach=True,
         labels={"hextech_ctf_tool_job_id": job_id, "hextech_ctf_tool_role": "misc"},

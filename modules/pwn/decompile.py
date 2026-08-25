@@ -13,6 +13,11 @@ DECOMPILER_IMAGE = "hextech_ctf_tool-decompiler"
 DECOMPILER_TIMEOUT_S = 900  # 15 min — Ghidra auto-analysis can be slow
 DECOMPILER_XREFS_TIMEOUT_S = 300  # 5 min — xrefs reuses cached project
 DECOMPILER_MEM = "4g"
+# Ghidra's analysis is multi-threaded and takes every core it is offered. This
+# container is a SIBLING of the worker slot, so neither the slot's cap nor the
+# docker shim (which only sees the agent's CLI) bounds it. Imported rather than
+# redeclared so the decompiler cannot drift away from the sandbox's cap.
+from modules._runner import runner_nano_cpus
 
 
 def host_path_for(job_id: str) -> str:
@@ -47,6 +52,7 @@ def run_decompiler(job_id: str, binary_rel: str) -> tuple[Path, str]:
         command=[f"/job/{binary_rel}", "-o", "/job/decomp.zip"],
         volumes={host_job: {"bind": "/job", "mode": "rw"}},
         mem_limit=DECOMPILER_MEM,
+        nano_cpus=runner_nano_cpus(),
         network_mode="none",
         detach=True,
         labels={"hextech_ctf_tool_job_id": job_id, "hextech_ctf_tool_role": "decompiler"},
@@ -109,6 +115,7 @@ def run_decompiler_xrefs(
         ],
         volumes={host_job: {"bind": "/job", "mode": "rw"}},
         mem_limit=DECOMPILER_MEM,
+        nano_cpus=runner_nano_cpus(),
         network_mode="none",
         detach=True,
         labels={"hextech_ctf_tool_job_id": job_id, "hextech_ctf_tool_role": "decompiler"},

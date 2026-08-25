@@ -37,6 +37,11 @@ from modules._common import (
     write_meta,
 )
 from modules.forensic.prompts import SYSTEM_PROMPT, build_user_prompt
+# This orchestrator spawns its own analysis container, a SIBLING of the
+# worker slot that neither the slot's cap nor the docker shim bounds.
+# Imported rather than redeclared so it cannot drift from the sandbox cap.
+from modules._runner import runner_nano_cpus
+
 from modules.settings_io import apply_to_env, get_setting, has_claude_auth
 from modules.agent_provider import (
     active_provider,
@@ -137,6 +142,7 @@ def _spawn_collector(
         command=cmd,
         volumes={_host_path(job_id): {"bind": "/job", "mode": "rw"}},
         mem_limit=FORENSIC_MEM,
+        nano_cpus=runner_nano_cpus(),
         # network=bridge by default — needed so volatility3 can fetch PDB
         # symbols from microsoft for unknown windows builds.
         detach=True,

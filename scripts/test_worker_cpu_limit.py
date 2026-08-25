@@ -163,6 +163,40 @@ if _parent_slot_cpus is not None:
         chk("a missing cpu.max is None, not a crash",
             _parent_slot_cpus(os.path.join(td, "does-not-exist")) is None)
 
+# ------------------------------------ 3b. the OTHER sibling containers
+section("every per-job sibling container, not just the sandbox")
+
+# run_in_sandbox is not the only place this project starts a container. These
+# four call client.containers.run directly with their own mem_limit, so they
+# bypass both the sandbox path and the docker shim. They were uncapped after
+# the slot and the sandbox were capped, and a Ghidra run is exactly the
+# multi-threaded workload that fills such a hole.
+SIBLINGS = [
+    ("modules/pwn/decompile.py", 2),        # decompile + xrefs
+    ("modules/forensic/orchestrator.py", 1),
+    ("modules/misc/orchestrator.py", 1),
+]
+for rel, want_n in SIBLINGS:
+    src = (ROOT / rel).read_text()
+    t = ast.parse(src)
+    sites = []
+    for node in ast.walk(t):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "containers"):
+            sites.append([k.arg for k in node.keywords])
+    chk("%s has %d container site(s)" % (rel, want_n), len(sites) == want_n,
+        len(sites))
+    missing = [i for i, kw in enumerate(sites) if "nano_cpus" not in kw]
+    chk("...every one of them passes nano_cpus", not missing,
+        [sites[i] for i in missing])
+    # Redeclaring the number here is how the decompiler ends up capped at
+    # something the sandbox is not.
+    chk("...via the shared helper, not a local constant",
+        "from modules._runner import runner_nano_cpus" in src)
+
 # ------------------------------------------------------- 4. the web terminal
 section("the web terminal is a runner too")
 
