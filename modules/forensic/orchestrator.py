@@ -179,12 +179,11 @@ async def _claude_summary(
     _tmp_str = str(tmp_dir)
     prompt = build_user_prompt(target_os, kind, description)
     from modules._common import build_exploit_library_hint
-    # forensic takes target_os/kind rather than a filename, but the upload
-    # basename is on the job meta (api/routes/forensic_module.py stores it) and
-    # is a real name, not a UUID — live jobs show `p1probe.txt`. Library is
-    # empty today, so this is wiring rather than a behaviour change.
-    _lib_hint = build_exploit_library_hint(
-        "forensic", chal_name=read_meta(job_id).get("filename") or "")
+    # No chal_name: the name-relevance ranker was retired after it was
+    # measured on the live corpus (0 of 89 jobs saw a different SET of
+    # entries because of it). The hint is the twelve newest entries for
+    # this module, which is what it rendered in practice anyway.
+    _lib_hint = build_exploit_library_hint("forensic")
     if _lib_hint:
         prompt = _lib_hint + "\n\n" + prompt
     # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose and instruct

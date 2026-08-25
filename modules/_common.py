@@ -1903,17 +1903,6 @@ _UUIDISH = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
-def _norm_chal(s: str) -> str:
-    """Comparison form for a challenge identity: basename, no archive
-    extension, alphanumerics only."""
-    s = (s or "").strip().lower().rsplit("/", 1)[-1]
-    for ext in (".tar.gz", ".tgz", ".tar", ".zip", ".gz", ".elf", ".bin", ".exe"):
-        if s.endswith(ext):
-            s = s[: -len(ext)]
-            break
-    return re.sub(r"[^a-z0-9]+", "", s)
-
-
 # ---------------------------------------------------------------------------
 # Which staged file IS the challenge.
 #
@@ -1986,49 +1975,6 @@ def pick_challenge_binary(directory, *, ties: list | None = None):
     return winner
 
 
-# Names that identify a build artifact rather than a challenge. Matching on
-# these is worse than not matching: `_score` gives containment a point, so a
-# rev job whose binary is `main` scored against every stored `main` and filled
-# all twelve visible slots with unrelated entries -- measured on the real
-# corpus, the recency set went from 12 survivors to 1.
-#
-# Deliberately a SMALL EXPLICIT LIST rather than a derived rule, because every
-# data-driven alternative was tried against the real corpus and each one had a
-# counter-example:
-#   library frequency > 1  -- kept rev `server`, and blocked pwn's genuine
-#                             `qemu-system-x86_64` (2 real entries)
-#   length <= 4            -- kept `server`, blocked genuine `er` and `obf`
-#   Shannon entropy        -- `server` 1.918 > `obf` 1.585 > `er` 1.0, so the
-#                             ordering does not separate meaning at all
-# Add to this list only with a corpus measurement attached; a name that is
-# genuinely a challenge title must never appear here.
-_LIBRARY_STOP_NAMES = frozenset({
-    "main", "chal", "chall", "challenge", "prob", "problem", "task",
-    "server", "client", "app", "run", "test", "bin", "binary", "aout",
-    "program", "readme", "readmemd", "index", "flag", "vuln", "dockerfile",
-    "output", "source", "src", "file", "data", "target", "sample",
-    # Distribution wrappers. `for_user.zip` normalizes to `foruser` and is the
-    # single most common name in the corpus -- 10 pwn jobs upload it -- so it
-    # identifies the packaging convention of one CTF, never a challenge.
-    "foruser", "forusers", "handout", "handouts", "attachment", "attachments",
-    "release", "dist", "share", "public", "download", "upload", "archive",
-})
-
-# Containment needs a floor. `_score` gives one point when either name contains
-# the other, which is right for `protoss` -> `protoss2` and badly wrong for a
-# two-letter name: the genuine pwn entry `er` was reached by `foruser`,
-# `server`, `launcher`, `overflow`, and `ctypesispowerfulalsodangerous`.
-#
-# The floor applies to CONTAINMENT ONLY. An earlier proposal to drop short
-# names outright was refuted on this corpus because `er`, `obf` and `vm` are
-# real challenge names -- but they are real as EXACT matches, which this leaves
-# untouched. At 4 characters every recorded counter-example still resolves the
-# way it should, `piggybank` -> `piggybankraceconditiondreamhack` survives, and
-# 22 spurious pairs across pwn and rev disappear. The one arguable casualty is
-# `obf` -> `targetobf`; exact `obf` still scores 2.
-_MIN_CONTAINMENT_CHARS = 4
-
-
 def _library_display_name(meta: dict) -> str:
     """What to CALL an entry in the hint.
 
@@ -2045,34 +1991,41 @@ def _library_display_name(meta: dict) -> str:
     return "?" if not fn or _UUIDISH.match(fn) else fn
 
 
-def build_exploit_library_hint(module: str, *, max_entries: int = 12,
-                               chal_name: str = "",
-                               stats: dict | None = None) -> str:
+def build_exploit_library_hint(module: str, *, max_entries: int = 12) -> str:
     """Return a short paragraph nudging the agent to consult
     `/data/exploits/` when stuck on technique / leak-vector choice, or
     `""` when the library is empty or the operator has turned the hint
     off via `enable_exploit_library_hint`.
 
-    Filtering: same-module entries only (a pwn chal sees only pwn
-    exploits, etc.). Cap at `max_entries` entries so the prompt doesn't blow up
-    on large libraries. The agent is expected to `ls /data/exploits/` + `cat`
-    the relevant report.md itself — we just surface what's available and what
-    each one solved.
+    Same-module entries only (a pwn chal sees only pwn exploits), newest first,
+    capped at `max_entries` so the prompt does not blow up on a large library.
+    The agent is expected to `ls /data/exploits/` + `cat` the relevant report.md
+    itself — this surfaces what exists and what each one solved.
 
-    Pass a dict as `stats` to receive the shadow counters for one call
-    (`query`, `query_generic`, `suppressed`) without adding state anywhere.
-    Nothing in the rendered hint changes; this exists so the stoplist
-    vocabulary can be tuned against real traffic rather than guessed at.
+    THERE USED TO BE A RANKER HERE, AND IT IS GONE BECAUSE IT WAS MEASURED.
+    The function took the job's challenge name, scored every entry by name
+    equality or containment, hoisted matches above the recency order and
+    captioned them, and carried a stop-list so build-artifact names (`main`,
+    `prob`, `chall`, `for_user`) could not star twelve unrelated entries.
+    Rendered against the live corpus for all 89 jobs that have ever run, twice
+    each — as shipped, and with the name forced empty:
 
-    Ranking is by RELEVANCE, not recency, and `chal_name` is what makes that
-    possible. Job e601cd358ad6 is the worked example: an advanced version of a
-    protoss chal already in the library as pwn-506c22dd0b8d, with a 10 KB
-    report and a working 15 KB exploit. The agent re-derived the identical
-    primitive — unchecked `std::vector::operator[]` indexed by a DB primary key
-    into a forged std::string for an AAR — over 88 turns and $23.77. Recency
-    ordering would not have helped even with the hint enabled: with 147 entries
-    the match can sit anywhere, and every line rendered as an upload UUID so
-    there was nothing to match ON.
+        jobs where ranking changed WHICH entries are shown    0 / 89
+        jobs where it changed only the order within that set  6 / 89
+        jobs that got a starred line                          7 / 89
+           ...matching an entry the job's own retry lineage saved   6
+           ...matching a genuinely different job's entry            1
+
+    Twelve newest is what the agent saw with the ranker and what it sees
+    without one. The machinery only ever changed a header sentence and a
+    caption, and the stop-list existed to suppress false stars that existed
+    only because the ranker did.
+
+    `chal_name` is still STORED and still RENDERED. It is the only
+    human-readable identifier 199 of 227 entries carry, and dropping it from
+    display would render 127 of them as `?` and collapse six distinct pwn
+    challenges onto the single string `for_user.zip`. It simply no longer
+    decides order.
     """
     try:
         from modules.settings_io import get_setting
@@ -2102,63 +2055,9 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
         entries.append(meta)
 
     if not entries:
-        # The hint is empty for a module with no saved entries, but the CALL
-        # still happened and the shadow corpus needs to see it. Returning here
-        # without filling `stats` silently dropped every misc/forensic/web3
-        # query -- exactly the modules whose traffic we most need to observe,
-        # because they are the ones with nothing stored yet.
-        if stats is not None:
-            stats["query"] = _norm_chal(chal_name)
-            stats["query_generic"] = stats["query"] in _LIBRARY_STOP_NAMES
-            stats["suppressed"] = 0
-            stats["entries"] = 0
         return ""
 
-    # Relevance first, recency only as a tiebreak. A same-name entry is the
-    # strongest signal available here: an advanced/variant version of a chal
-    # keeps the name while the binary hash changes, so hashing would MISS
-    # exactly the case this is for.
-    want = _norm_chal(chal_name)
-
-    want_generic = want in _LIBRARY_STOP_NAMES
-    if stats is not None:
-        # Counted once here, NOT inside _score: the two stable sorts plus the
-        # render loop each call _score per entry, so incrementing there would
-        # report three times the real number.
-        stats["query"] = want
-        stats["query_generic"] = want_generic
-        stats["entries"] = len(entries)
-        stats["suppressed"] = sum(
-            1 for m in entries
-            if _norm_chal(m.get("chal_name") or "") in _LIBRARY_STOP_NAMES
-        )
-
-    def _score(m: dict) -> int:
-        """2 = same challenge name, 1 = one name contains the other, 0 = no
-        relation. Substring counts because variants get suffixed ('protoss2',
-        'protoss-rev2').
-
-        A build-artifact name on EITHER side scores 0. Both sides are needed:
-        suppressing only the query still lets a real name like `nsprobe`
-        contain a stored `prob`, which on the live corpus starred nine
-        unrelated entries alongside the one true match."""
-        if not want or want_generic:
-            return 0
-        got = _norm_chal(m.get("chal_name") or "")
-        if not got or got in _LIBRARY_STOP_NAMES:
-            return 0
-        if got == want:
-            return 2
-        if not (got in want or want in got):
-            return 0
-        # Containment only counts when the shorter side is long enough to mean
-        # something; see _MIN_CONTAINMENT_CHARS.
-        return 1 if min(len(got), len(want)) >= _MIN_CONTAINMENT_CHARS else 0
-
-    # Two stable sorts: recency first, then score. The second preserves the
-    # recency order within each score band.
     entries.sort(key=lambda m: m.get("saved_at") or "", reverse=True)
-    entries.sort(key=_score, reverse=True)
     entries = entries[:max_entries]
 
     lines = [
@@ -2168,23 +2067,11 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
         "PRIMITIVE NAME + version-specific gotcha. Do NOT blindly "
         "copy — re-derive that primitive in YOUR chal's context.",
         "",
-        # "most relevant first" has to mean the relevance sort ACTUALLY RAN.
-        # It keys on `want and not want_generic`, not on `want` alone: a
-        # build-artifact name is non-empty, so the old test passed while
-        # `_score` short-circuited to 0 for every entry, leaving pure recency
-        # under a header claiming relevance. Nine live rev jobs query a stop
-        # word (`main` x5, `prob` x2, `server`, `README.md`), and for each of
-        # them the twelve lines are byte-identical to the no-name rendering.
-        f"Entries for module `{mod_norm}` "
-        + (f"(most relevant first, {len(entries)} shown):"
-           if (want and not want_generic)
-           else f"(newest first, {len(entries)} shown):"),
+        f"Entries for module `{mod_norm}` (newest first, {len(entries)} shown):",
     ]
     for m in entries:
         eid = m.get("id") or "?"
         chal = _library_display_name(m)
-        _rank = _score(m)
-        same = _rank > 0
         arch = m.get("arch") or "?"
         glibc = m.get("glibc_version") or "?"
         technique = m.get("technique_name") or "?"
@@ -2195,29 +2082,9 @@ def build_exploit_library_hint(module: str, *, max_entries: int = 12,
             notes = notes[:117] + "..."
         tags_part = f" tags=[{tags}]" if tags else ""
         notes_part = f" — {notes}" if notes else ""
-        bullet = "★" if same else "•"
-        # Two tiers, because `_score` returns 2 for an equal normalized name
-        # and 1 for mere containment, and calling BOTH "SAME CHALLENGE NAME as
-        # yours" is false at tier 1: `protoss` and `protoss2` are related, not
-        # the same challenge. The false version was load-bearing in the wrong
-        # direction -- a rev job whose binary is named `main` matched every
-        # stored `main` and got twelve unrelated exploits each captioned as its
-        # own challenge, with an imperative to read them first.
-        # The identity claim differs by tier; the ACTION does not. Both tiers
-        # still tell the agent to look before re-deriving, which is the whole
-        # point of the variant case the regression suite pins.
-        if _rank == 2:
-            flag = ("  <<< EXACT NORMALIZED NAME MATCH — read its report.md "
-                    "and exploit.py FIRST, then re-derive for THIS variant")
-        elif _rank == 1:
-            flag = ("  <<< RELATED NAME (one name contains the other; NOT "
-                    "necessarily the same challenge) — inspect before "
-                    "re-deriving")
-        else:
-            flag = ""
         lines.append(
-            f"  {bullet} {eid}  chal={chal}  arch={arch}  glibc={glibc}  "
-            f"bug={bug}  technique={technique}{tags_part}{notes_part}{flag}"
+            f"  \u2022 {eid}  chal={chal}  arch={arch}  glibc={glibc}  "
+            f"bug={bug}  technique={technique}{tags_part}{notes_part}"
         )
     lines.append("")
     lines.append(

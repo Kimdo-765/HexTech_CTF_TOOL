@@ -171,12 +171,11 @@ async def _claude_summary(
         filename, description, flag_format=read_meta(job_id).get("flag_format")
     )
     from modules._common import build_exploit_library_hint
-    # `filename` is the ORIGINAL upload basename (api/routes/misc_module.py
-    # stores Path(file.filename).name), not the upload UUID that web/crypto
-    # carry — live jobs show `p1probe.txt`. The misc library is empty today so
-    # this changes no output yet; the wiring is here so the first saved entry
-    # is reachable by name instead of by recency.
-    _lib_hint = build_exploit_library_hint("misc", chal_name=filename or "")
+    # No chal_name: the name-relevance ranker was retired after it was
+    # measured on the live corpus (0 of 89 jobs saw a different SET of
+    # entries because of it). The hint is the twelve newest entries for
+    # this module, which is what it rendered in practice anyway.
+    _lib_hint = build_exploit_library_hint("misc")
     if _lib_hint:
         prompt = _lib_hint + "\n\n" + prompt
     # 'Docker challenge' opt-in: detect a bundled Dockerfile/compose and instruct

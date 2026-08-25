@@ -2378,11 +2378,11 @@ async def _run_agent(
         ) + user_prompt
 
     from modules._common import build_exploit_library_hint
-    # Pass the binary name so the library can rank a SAME-CHALLENGE entry to
-    # the top. Without it the hint is 12 newest entries in upload order, which
-    # on a 147-entry library will not surface the one that matters.
-    _lib_hint = build_exploit_library_hint(
-        "pwn", chal_name=effective_binary_name or "")
+    # No chal_name: the name-relevance ranker was retired after it was
+    # measured on the live corpus (0 of 89 jobs saw a different SET of
+    # entries because of it). The hint is the twelve newest entries for
+    # this module, which is what it rendered in practice anyway.
+    _lib_hint = build_exploit_library_hint("pwn")
     if _lib_hint:
         user_prompt = _lib_hint + "\n\n" + user_prompt
 
