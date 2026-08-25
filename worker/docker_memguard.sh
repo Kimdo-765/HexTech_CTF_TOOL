@@ -23,10 +23,13 @@
 # SCOPE — deliberately narrow:
 #   * `run` and `create` only. Every other subcommand is exec'd untouched.
 #   * If the caller already passed --memory / -m in any form, nothing changes.
-#   * The orchestrator's own sibling containers (decompiler / forensic / misc /
-#     runner) go through the docker-py SDK, not this CLI, so they are NOT
-#     affected — and modules/_runner.py already sets its own mem_limit (2g).
-#     The reachable callers are the agent's Bash and worker/chal_libc_fix.py.
+#   * The orchestrator's own sibling containers (runner / decompiler x2 /
+#     forensic / misc / misc_recarve / web terminal) go through the docker-py
+#     SDK, not this CLI, so this file does not bound them — each sets its own
+#     mem_limit, memswap_limit and nano_cpus at the call site, and
+#     scripts/test_worker_cpu_limit.py enumerates those sites by AST so a new
+#     one cannot be added uncapped. The callers that DO reach this shim are the
+#     agent's Bash and worker/chal_libc_fix.py.
 #
 # CPU LEAKS THE SAME WAY, and it went unbounded for as long as memory did.
 # 2026-08-25, job 0a22d7fa7919: an agent fanned its own search into 36
@@ -42,8 +45,11 @@
 # --cpus 2` yields 200000/100000.
 #
 # TUNING: CHAL_CONTAINER_MEM (default 2g) and CHAL_CONTAINER_CPUS (default 8).
-# Each is disabled by setting it to an empty value or `0`. NOTE the change in
-# the escape hatch: CHAL_CONTAINER_MEM=0 alone no longer makes the shim fully
+# Disable a cap with `0`. NOT by setting it empty: compose passes these through
+# `${VAR:-default}`, which substitutes the default for an EMPTY value as well as
+# an unset one, so an empty .env entry arrives here AS THE DEFAULT. `0` is the
+# only spelling that reaches this file as a disable.
+# NOTE also that CHAL_CONTAINER_MEM=0 alone no longer makes the shim fully
 # transparent, because the CPU cap is a separate guarantee. Set BOTH to 0 for
 # the old pass-through-everything behaviour.
 
@@ -103,10 +109,31 @@ if [ "$sub" = "network" ] && [ -n "${JOB_ID:-}" ]; then
     fi
 fi
 
-case "$sub" in
-    run|create) ;;
-    *) exec "$REAL" "$@" ;;
-esac
+# `docker container run` is the same operation as `docker run` and used to walk
+# straight past this guard: the first non-flag argument is `container`, which
+# matched neither arm, so the shim exec'd the real docker untouched. An agent
+# does not have to know that to hit it -- it is the spelling docker's own
+# reference pages use. Resolve the pair and inject after the real subcommand.
+inject_after="$sub"
+if [ "$sub" = "container" ]; then
+    csub=""; seen=0
+    for a in "$@"; do
+        case "$a" in
+            -*) ;;
+            container) [ "$seen" -eq 0 ] && seen=1 || { csub="$a"; break; } ;;
+            *) if [ "$seen" -eq 1 ]; then csub="$a"; break; fi ;;
+        esac
+    done
+    case "$csub" in
+        run|create) inject_after="$csub" ;;
+        *) exec "$REAL" "$@" ;;
+    esac
+else
+    case "$sub" in
+        run|create) ;;
+        *) exec "$REAL" "$@" ;;
+    esac
+fi
 
 # Inject unconditionally, immediately after the subcommand — do NOT try to
 # detect an existing --memory first. Verified against docker 28: when the flag
@@ -140,7 +167,7 @@ esac
 out=(); done_inject=0; applied=""
 for a in "$@"; do
     out+=("$a")
-    if [ "$done_inject" -eq 0 ] && [ "$a" = "$sub" ]; then
+    if [ "$done_inject" -eq 0 ] && [ "$a" = "$inject_after" ]; then
         if ! _off "$LIMIT"; then
             out+=(--memory "$LIMIT"); applied="$applied --memory $LIMIT"
         fi

@@ -37,9 +37,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # no other real credential -- the six other matches are digests and test
 # placeholders, listed below by exact value so a NEW one cannot hide behind a
 # path-level exemption.
-GENERATED = [
-    "scripts/concept_benchmark.json",
-]
+# Artefacts BUILT FROM LIVE JOB DATA and committed. Empty since the concept
+# benchmark was deleted with the ranker it scored — and that emptiness is
+# checked below, so this list going stale is visible rather than silent. Add a
+# file here the moment anything is generated from data/jobs and tracked.
+GENERATED: list[str] = []
 
 # Known-benign, allowlisted by VALUE rather than by file. A commit SHA and a
 # hash of the empty string are credential-shaped and are not credentials.
@@ -130,34 +132,31 @@ chk("no unrecognised credential-shaped string in any tracked file",
     not unknown, unknown[:5])
 
 print("")
-print("--- the builder scrubs, and is wired to do so " + "-" * 12)
-builder = (ROOT / "scripts/build_concept_benchmark.py").read_text()
-chk("the builder defines a scrubber", "def _scrub(" in builder)
-chk("...and applies it to the description it commits",
-    "_scrub((rm.get(\"description\")" in builder)
-chk("...and also asks job_secrets for registered secrets",
-    "redact_job_value" in builder)
-
-# behavioural: the scrubber actually removes a token of the shape that leaked
-sys.path.insert(0, str(ROOT / "scripts"))
-import importlib.util
-spec = importlib.util.spec_from_file_location(
-    "_bcb", ROOT / "scripts/build_concept_benchmark.py")
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-LEAKED_SHAPE = "ctfd_" + "a" * 60
-sample = "use the api, token : %s and then post" % LEAKED_SHAPE
-out = mod._scrub(sample)
-chk("the scrubber removes a ctfd-style token", LEAKED_SHAPE not in out, out)
-chk("...and leaves the surrounding sentence readable",
-    "use the api" in out and "and then post" in out, out)
-chk("a description with no credential is untouched",
-    mod._scrub("decode the region file and print the flag")
-    == "decode the region file and print the flag")
-for shape in ("sk-" + "b" * 30, "AKIA" + "C" * 16, "d" * 44):
-    chk("the scrubber removes %r" % (shape[:8] + "..."),
-        shape not in mod._scrub("key: " + shape))
+print("--- the generated-artefact list has not gone stale " + "-" * 6)
+# This half used to exercise scripts/build_concept_benchmark.py's `_scrub`.
+# That builder was the ONLY producer of a committed artefact made from live job
+# data, and it was deleted with the ranker its benchmark scored — so the
+# scrubber it defined has no subject and no caller. Reading it anyway is not a
+# stricter test; it is a FileNotFoundError that killed this file before it
+# printed a verdict, which is exactly how a security guard stops guarding
+# without anyone noticing.
+#
+# The sweep above is the part that would have caught the original incident, and
+# it does not depend on knowing which file was generated: it reads every
+# tracked file as bytes. What is left to assert is that GENERATED describes
+# reality, so that adding a new job-data-derived artefact cannot skip the
+# targeted checks by simply not being listed.
+for rel in GENERATED:
+    chk("listed generated artefact %s exists" % rel, (ROOT / rel).is_file())
+chk("no generated artefact is listed that does not exist",
+    all((ROOT / rel).is_file() for rel in GENERATED), GENERATED)
+_gone = [rel for rel in ("scripts/concept_benchmark.json",
+                         "scripts/build_concept_benchmark.py",
+                         "scripts/run_concept_benchmark.py")
+         if (ROOT / rel).exists()]
+chk("the deleted concept-benchmark files stayed deleted — if one returns it "
+    "is job-derived again and needs a GENERATED entry plus a scrubber",
+    not _gone, _gone)
 
 print("")
 print("%d checks, %d failed" % (checks, fails))

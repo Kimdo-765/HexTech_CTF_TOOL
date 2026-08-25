@@ -88,6 +88,10 @@ async def terminal_ws(ws: WebSocket, job_id: str):
             volumes={host_job: {"bind": "/work", "mode": "rw"}},
             working_dir="/work",
             mem_limit=DEFAULT_MEM,
+            # memswap == mem, as everywhere else. Inheriting a size while
+            # dropping the swap policy is the half-inherit 0dff12c fixed for
+            # the runner; the terminal runs the same image on the same tree.
+            memswap_limit=DEFAULT_MEM,
             nano_cpus=DEFAULT_NANO_CPUS,
             network_mode="bridge",
             environment={"TERM": "xterm-256color", "JOB_ID": safe_id},

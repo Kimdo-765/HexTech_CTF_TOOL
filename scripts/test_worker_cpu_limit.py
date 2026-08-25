@@ -16,12 +16,20 @@ Nothing was misbehaving. An agent parallelising its own brute force is the
 intended behaviour; there was simply no ceiling on it, so one job starved the
 other eight while the operator watched the dashboard.
 
-There are THREE containers per job that can each take every core, and a cap on
-only one of them is not a cap:
+A cap on one container is not a cap. This repo starts containers from three
+different places, and every one of them can take every core:
 
-    the worker slot        docker-compose.yml `cpus:`
-    the runner (sandbox)   modules/_runner.py, inherits the slot's live cap
-    the challenge container worker/docker_memguard.sh, a sibling of both
+    the worker slot         docker-compose.yml `cpus:`
+    the docker-py SDK       modules/_runner.py (the sandbox), the Ghidra
+                            decompiler x2, forensic, misc, worker/misc_recarve,
+                            and the web terminal — each a SIBLING of the slot,
+                            outside its cgroup, invisible to the CLI shim
+    the agent's own `docker run`   worker/docker_memguard.sh
+
+The SDK list is not written out below. An earlier version of this file named
+three of those files by hand and missed worker/misc_recarve.py while asserting
+the set was complete, so the omission read as a decision. The check enumerates
+every `containers.run` / `containers.create` call by AST instead.
 
 WHY THIS IS NOT A TAUTOLOGY
 
@@ -163,39 +171,85 @@ if _parent_slot_cpus is not None:
         chk("a missing cpu.max is None, not a crash",
             _parent_slot_cpus(os.path.join(td, "does-not-exist")) is None)
 
-# ------------------------------------ 3b. the OTHER sibling containers
-section("every per-job sibling container, not just the sandbox")
+# ------------------------------------ 3b. EVERY other container this repo starts
+section("every container this repo starts, enumerated not listed")
 
-# run_in_sandbox is not the only place this project starts a container. These
-# four call client.containers.run directly with their own mem_limit, so they
-# bypass both the sandbox path and the docker shim. They were uncapped after
-# the slot and the sandbox were capped, and a Ghidra run is exactly the
-# multi-threaded workload that fills such a hole.
-SIBLINGS = [
-    ("modules/pwn/decompile.py", 2),        # decompile + xrefs
-    ("modules/forensic/orchestrator.py", 1),
-    ("modules/misc/orchestrator.py", 1),
-]
-for rel, want_n in SIBLINGS:
-    src = (ROOT / rel).read_text()
-    t = ast.parse(src)
-    sites = []
+# This section used to name three files. It missed worker/misc_recarve.py — a
+# per-job container created straight through the SDK — and the docstring above
+# it claimed the set was complete, so the omission read as a decision. A
+# hand-written list cannot notice the site nobody thought of, so enumerate the
+# call sites instead and require every one of them to be either capped or
+# explicitly excused.
+#
+# EXCUSED, with the reason, because "capped or listed" is only a real gate if
+# the list is short and argued:
+#   api/routes/tunnel.py — cloudflared. Not per-job and not agent-driven: one
+#   operator-rolled tunnel process for the whole stack, started from Settings,
+#   with no restart policy. It cannot be multiplied by a job, which is the
+#   property everything else here is bounded for.
+UNCAPPED_BY_DESIGN = {"api/routes/tunnel.py"}
+
+# `git ls-files` is preferred because it skips data/jobs/**, which holds
+# thousands of agent-authored scripts (one with null bytes that makes ast.parse
+# raise ValueError, not SyntaxError). But it returns NOTHING when this suite
+# runs inside the worker image: a worktree's `.git` is a file pointing at a
+# path outside the mount. That produced an empty file list, which made every
+# check below pass over zero sites — a green sweep that had looked at nothing.
+# Fall back to a walk that excludes the same directories by name.
+_SKIP_DIRS = {"data", ".git", ".claude", "__pycache__", "node_modules", "venv"}
+_tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "*.py"],
+                          capture_output=True, text=True)
+_pyfiles = _tracked.stdout.split() if _tracked.returncode == 0 else []
+if not _pyfiles:
+    _pyfiles = [p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*.py")
+                if not _SKIP_DIRS & set(p.relative_to(ROOT).parts)]
+chk("the container-site sweep found python files to scan", len(_pyfiles) > 50,
+    len(_pyfiles))
+
+sites = []
+for rel in _pyfiles:
+    try:
+        t = ast.parse((ROOT / rel).read_text(errors="replace"))
+    except (SyntaxError, ValueError, OSError):
+        continue
     for node in ast.walk(t):
         if (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "run"
+                and node.func.attr in ("run", "create")
                 and isinstance(node.func.value, ast.Attribute)
                 and node.func.value.attr == "containers"):
-            sites.append([k.arg for k in node.keywords])
-    chk("%s has %d container site(s)" % (rel, want_n), len(sites) == want_n,
-        len(sites))
-    missing = [i for i, kw in enumerate(sites) if "nano_cpus" not in kw]
-    chk("...every one of them passes nano_cpus", not missing,
-        [sites[i] for i in missing])
-    # Redeclaring the number here is how the decompiler ends up capped at
-    # something the sandbox is not.
-    chk("...via the shared helper, not a local constant",
-        "from modules._runner import runner_nano_cpus" in src)
+            sites.append((rel, node.lineno, [k.arg for k in node.keywords]))
+
+chk("the sweep found every known container site (>=8)", len(sites) >= 8,
+    len(sites))
+
+_missing_cpu = [(r, l) for r, l, kw in sites
+                if "nano_cpus" not in kw and r not in UNCAPPED_BY_DESIGN]
+chk("every container site passes nano_cpus, or is excused by name",
+    not _missing_cpu, _missing_cpu)
+
+# Inheriting a memory SIZE while dropping the swap POLICY is the half-inherit
+# 0dff12c fixed for the runner. Docker grants 2x swap whenever memswap is
+# omitted, and slow swap thrash is what wedged this VM twice.
+_missing_swap = [(r, l) for r, l, kw in sites
+                 if "mem_limit" in kw and "memswap_limit" not in kw]
+chk("every site that sets mem_limit also sets memswap_limit", not _missing_swap,
+    _missing_swap)
+
+_excused_present = [r for r in UNCAPPED_BY_DESIGN
+                    if any(s[0] == r for s in sites)]
+chk("the excuse list has not gone stale — every excused file still starts a "
+    "container", sorted(_excused_present), sorted(UNCAPPED_BY_DESIGN))
+
+# The shared helper is what stops the decompiler being capped at something the
+# sandbox is not.
+for rel, _l, kw in sites:
+    if "nano_cpus" not in kw or rel in ("modules/_runner.py",
+                                        "api/routes/terminal.py"):
+        continue
+    src = (ROOT / rel).read_text()
+    chk("%s uses the shared helper, not a local constant" % rel,
+        "from modules._runner import runner_nano_cpus" in src, rel)
 
 # ------------------------------------------------------- 4. the web terminal
 section("the web terminal is a runner too")
@@ -264,6 +318,28 @@ if shim.is_file():
                              "CHAL_CONTAINER_CPUS": "0"})
             chk("both at 0 is a complete pass-through",
                 argv == ["run", "img", "cmd"], argv)
+
+            # `docker container run` is the same operation as `docker run`,
+            # and it used to walk straight past the guard: the first non-flag
+            # argument is `container`, which matched neither arm of the case.
+            argv = run_shim(["container", "run", "img", "cmd"],
+                            {"CHAL_CONTAINER_MEM": "2g",
+                             "CHAL_CONTAINER_CPUS": "8"})
+            chk("REGRESSION: `docker container run` is capped too",
+                "--cpus" in argv and "--memory" in argv, argv)
+            chk("  ...with the flags after `run`, not after `container`",
+                argv[:2] == ["container", "run"] and "--cpus" in argv[2:6],
+                argv[:8])
+            argv = run_shim(["container", "create", "img"],
+                            {"CHAL_CONTAINER_MEM": "2g",
+                             "CHAL_CONTAINER_CPUS": "8"})
+            chk("  ...and so is `docker container create`",
+                "--cpus" in argv and "--memory" in argv, argv)
+            argv = run_shim(["container", "ls"],
+                            {"CHAL_CONTAINER_MEM": "2g",
+                             "CHAL_CONTAINER_CPUS": "8"})
+            chk("  ...while `docker container ls` is passed through unchanged",
+                argv == ["container", "ls"], argv)
 
             # Subcommands other than run/create must be untouched, or the shim
             # starts corrupting `docker ps`.

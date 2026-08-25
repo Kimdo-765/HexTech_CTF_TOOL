@@ -31,6 +31,16 @@ import sys
 MISC_IMAGE = "hextech_ctf_tool-misc"
 
 
+def _nano_cpus() -> int:
+    """The shared per-job CPU ceiling, or the default when _runner is not
+    importable (this file is also runnable as a standalone CLI)."""
+    try:
+        from modules._runner import runner_nano_cpus
+        return runner_nano_cpus()
+    except Exception:
+        return 8 * 1_000_000_000
+
+
 def _usage(msg: str = "") -> int:
     if msg:
         print(f"[misc_recarve] {msg}", file=sys.stderr)
@@ -75,6 +85,15 @@ def main(argv: list[str]) -> int:
             volumes={host_job: {"bind": "/job", "mode": "rw"}},
             network_mode="none",
             mem_limit="2g",
+            # memswap == mem, and a CPU ceiling, for the same reason every other
+            # per-job sibling has them: this container is created by the worker
+            # but lives OUTSIDE its cgroup, so neither the slot's memory cap nor
+            # its CPU cap bounds it, and the docker shim never sees it (this is
+            # the SDK, not the CLI). It was the one site the first CPU sweep
+            # missed, which is why the test now enumerates every
+            # containers.run/create call by AST instead of naming files.
+            memswap_limit="2g",
+            nano_cpus=_nano_cpus(),
             # Label so the job STOP/DELETE reaper catches an orphan if the tool
             # hangs (mirrors the misc collector's labels — an unlabeled 2g
             # container would otherwise survive job teardown).

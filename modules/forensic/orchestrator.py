@@ -142,6 +142,9 @@ def _spawn_collector(
         command=cmd,
         volumes={_host_path(job_id): {"bind": "/job", "mode": "rw"}},
         mem_limit=FORENSIC_MEM,
+        # memswap == mem: with mem alone docker grants swap up to 2x the
+        # cap, and slow swap thrash is what wedged this VM twice.
+        memswap_limit=FORENSIC_MEM,
         nano_cpus=runner_nano_cpus(),
         # network=bridge by default — needed so volatility3 can fetch PDB
         # symbols from microsoft for unknown windows builds.

@@ -557,14 +557,18 @@ check("web3 too", "web3" in RETRYABLE, True)
 check("misc is in the list now that its passphrase outlives the first run",
       "misc" in RETRYABLE, True)
 
+import ast as _ast  # noqa: E402
+
 from modules.job_secrets import (  # noqa: E402
-    read_misc_passphrase, store_misc_passphrase, prepare_job_secret,
+    ALLOWED_SECRET_KEYS, SecretIngressError, prepare_job_secret,
+    read_job_secrets, read_misc_passphrase, redact_job_value,
+    store_misc_passphrase,
 )
 
 _PARENT, _CHILD = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
 # Seven characters on purpose: the operator-facing key/value ingress requires
 # 8..8192, which is a sensible floor for an API token and the wrong one for a
-# passphrase. A misc passphrase that the store silently rejected would fail the
+# passphrase. A misc passphrase the store silently rejected would fail the
 # retry in exactly the way this whole change exists to prevent.
 store_misc_passphrase(_PARENT, "hunter2")
 check("a short passphrase is storable — the 8-char token floor does not apply",
@@ -575,36 +579,129 @@ check("REGRESSION: the retry child inherits it through the SAME call the "
       read_misc_passphrase(_CHILD), "hunter2")
 check("a job with no stored passphrase reads back None, not an empty string",
       read_misc_passphrase("cccccccccccc"), None)
-# The recovery has to happen where the argument is empty. Asserting the list
-# and the store without this would pass while run_job still ignored the store.
-_MISC_SRC = (ROOT / "modules/misc/orchestrator.py").read_text()
-check("...and run_job actually reads it back",
-      "read_misc_passphrase" in _MISC_SRC, True)
-check("...only when its own argument is empty, so the first run still wins",
-      "if not passphrase:" in _MISC_SRC, True)
+# Two hops. A retry of a retry is the ordinary case once a job has been through
+# the loop twice, and it is the one a single copy_from test cannot see.
+prepare_job_secret("ffffffffffff", "d", copy_from=_CHILD)
+check("  ...and through a SECOND hop, so a retry of a retry still opens it",
+      read_misc_passphrase("ffffffffffff"), "hunter2")
 
-# Redaction is a plain substring replace, and admitting an unbounded-length
-# value to the secret store points that replace at ordinary English. A
-# passphrase of `cat` must not turn "concatenate" into a redaction marker in
-# every log line this job writes, nor shred the description it appears in.
-from modules.job_secrets import redact_job_value  # noqa: E402
+# ---- the three roles of the key allowlist ---------------------------------
+# One frozenset used to answer three different questions, and adding
+# MISC_PASSPHRASE for the storage answer silently changed the other two. Both
+# regressions below were REPRODUCED before the split existed; neither is
+# hypothetical.
+_TOK = "ctfd_" + "ab" * 32
+_VICTIM = "1234567890ab"
+from modules.job_secrets import _write_job_secrets  # noqa: E402
+_write_job_secrets(_VICTIM, {"CTFD_ACCESS_TOKEN": _TOK})
+_ingress_refused = False
+try:
+    prepare_job_secret(_VICTIM, "d", secret_key="MISC_PASSPHRASE",
+                       secret_value="zipPassword1")
+except SecretIngressError:
+    _ingress_refused = True
+check("REGRESSION: the operator key/value ingress REFUSES MISC_PASSPHRASE — "
+      "it has its own typed entry point",
+      _ingress_refused, True)
+check("  ...so a real CTFd token cannot be overwritten by that request",
+      read_job_secrets(_VICTIM).get("CTFD_ACCESS_TOKEN"), _TOK)
+check("  ...while the key is still readable/storable, which is what misc needs",
+      "MISC_PASSPHRASE" in ALLOWED_SECRET_KEYS, True)
 
-store_misc_passphrase("dddddddddddd", "cat")
-check("a sub-8 passphrase is still STORED — the retry needs it",
-      read_misc_passphrase("dddddddddddd"), "cat")
-check("...but is NOT used as a redaction needle on log payloads",
-      redact_job_value("dddddddddddd", "please concatenate the categories"),
-      "please concatenate the categories")
-_desc = prepare_job_secret("dddddddddddd", "the cat sat on the mat")
-check("...nor on the description", _desc, "the cat sat on the mat")
+# `prepare_job_secret` used to discard the key `_validate_explicit` had just
+# validated and write a hardcoded CTFD_ACCESS_TOKEN. With the ingress narrowed
+# to one key those two are indistinguishable, so exercise the property the
+# narrowing depends on: widen the ingress for one call and check the value
+# lands under the key that was ASKED FOR. Without this, restoring the literal
+# is an equivalent mutant today and a token-clobbering bug the day the
+# allowlist grows.
+import modules.job_secrets as _JS  # noqa: E402
+_KEYED = "2233445566aa"
+_orig_ingress = _JS._OPERATOR_INGRESS_KEYS
+_JS._OPERATOR_INGRESS_KEYS = frozenset({"CTFD_ACCESS_TOKEN", "MISC_PASSPHRASE"})
+try:
+    _JS.prepare_job_secret(_KEYED, "d", secret_key="MISC_PASSPHRASE",
+                           secret_value="zipPassword1")
+finally:
+    _JS._OPERATOR_INGRESS_KEYS = _orig_ingress
+check("REGRESSION: an ingress value is stored under the key it validated, "
+      "not under a hardcoded CTFD_ACCESS_TOKEN",
+      read_job_secrets(_KEYED), {"MISC_PASSPHRASE": "zipPassword1"})
 
-# The floor must not weaken what was already being redacted. A CTFd token is 69
-# characters, so nothing that was masked before stops being masked.
-_LONG = "ctfd_" + "a" * 64
-store_misc_passphrase("eeeeeeeeeeee", _LONG)
-check("REGRESSION: a long secret is still redacted from log payloads",
-      redact_job_value("eeeeeeeeeeee", "token is " + _LONG),
+# Redaction is a plain substring replace over descriptions, log payloads AND
+# meta.json. Pointing it at a passphrase turns the job's own metadata into
+# collateral: `hunter2024` rewrote meta['filename'] to
+# "[REDACTED_JOB_SECRET]_challenge.zip", and the misc retry rebuilds from
+# meta['filename'] — the feature destroyed its own input.
+_MJ = "dddddddddddd"
+store_misc_passphrase(_MJ, "hunter2024")
+_meta = {"filename": "hunter2024_challenge.zip",
+         "description": "archive password is hunter2024"}
+_red = redact_job_value(_MJ, _meta)
+check("REGRESSION: the passphrase is NOT a redaction needle over meta — "
+      "the retry reads meta['filename'] to find its input",
+      _red["filename"], "hunter2024_challenge.zip")
+check("  ...nor over log payloads",
+      redact_job_value(_MJ, "please concatenate hunter2024"),
+      "please concatenate hunter2024")
+check("  ...nor over the description on the way in",
+      prepare_job_secret(_MJ, "the pass is hunter2024"),
+      "the pass is hunter2024")
+
+# The scoping must not weaken what was already being redacted.
+_TJ = "eeeeeeeeeeee"
+_write_job_secrets(_TJ, {"CTFD_ACCESS_TOKEN": _TOK})
+check("REGRESSION: a CTFd token is still redacted from log payloads",
+      redact_job_value(_TJ, "token is " + _TOK),
       "token is [REDACTED_JOB_SECRET]")
+check("  ...and still scrubbed from a description",
+      _TOK not in (prepare_job_secret(_TJ, "token is " + _TOK) or ""), True)
+
+# ---- the orchestrator's recovery, structurally ----------------------------
+# A substring grep for "read_misc_passphrase" and one for "if not passphrase:"
+# both pass on a file where the recovery assigns to the wrong name, or sits in
+# an unrelated branch. Walk the AST instead: the call must be the value of an
+# assignment TO `passphrase`, inside an `if not passphrase` test, inside
+# run_job. (misc.orchestrator is not imported here on purpose — it pulls anyio
+# and claude_agent_sdk, which the host running this file need not have.)
+_MISC_AST = _ast.parse((ROOT / "modules/misc/orchestrator.py").read_text())
+_run_job = next((n for n in _ast.walk(_MISC_AST)
+                 if isinstance(n, _ast.FunctionDef) and n.name == "run_job"), None)
+check("misc.orchestrator defines run_job", _run_job is not None, True)
+_recovery = False
+if _run_job is not None:
+    for node in _ast.walk(_run_job):
+        if not (isinstance(node, _ast.If)
+                and isinstance(node.test, _ast.UnaryOp)
+                and isinstance(node.test.op, _ast.Not)
+                and getattr(node.test.operand, "id", "") == "passphrase"):
+            continue
+        for inner in _ast.walk(node):
+            if (isinstance(inner, _ast.Assign)
+                    and any(getattr(t, "id", "") == "passphrase" for t in inner.targets)
+                    and isinstance(inner.value, _ast.Call)
+                    and getattr(inner.value.func, "id", "") == "read_misc_passphrase"):
+                _recovery = True
+check("REGRESSION: run_job assigns read_misc_passphrase() TO `passphrase`, "
+      "and only under `if not passphrase` — a no-op recovery fails this",
+      _recovery, True)
+
+# ---- the create route actually stores it ----------------------------------
+# "the child inherits it" is worth nothing if nothing ever put it there. The
+# call has to be in the handler's body, not merely somewhere in the file.
+_MM_AST = _ast.parse((ROOT / "api/routes/misc_module.py").read_text())
+_stores = [
+    n for fn in _ast.walk(_MM_AST)
+    if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+    for n in _ast.walk(fn)
+    if isinstance(n, _ast.Call)
+    and getattr(n.func, "id", "") == "store_misc_passphrase"
+]
+check("REGRESSION: the misc create route stores the passphrase in its handler",
+      len(_stores) >= 1, len(_stores))
+check("  ...passing the job id and the passphrase, not a placeholder",
+      [getattr(a, "id", None) for a in _stores[0].args] if _stores else None,
+      ["job_id", "passphrase"])
 
 
 def gate_status(module):
@@ -633,15 +730,20 @@ check(
 # than swapped for another literal: whatever is NOT in the list must still be
 # refused, and naming one module here is how this check quietly stops testing
 # anything the next time that module is admitted.
-_NOT_RETRYABLE = [m for m in ("hybrid", "live_fire", "__not_a_module__")
+_REAL_MODULES = ("hybrid", "live_fire")
+_NOT_RETRYABLE = [m for m in _REAL_MODULES + ("__not_a_module__",)
                   if m not in RETRYABLE]
 check(
     "  ...and still refuses every module that is not in the list",
     [gate_status(m) for m in _NOT_RETRYABLE],
     [400] * len(_NOT_RETRYABLE),
 )
-check("  ...and that negative set is not empty, or the check above is vacuous",
-      bool(_NOT_RETRYABLE), True)
+# `__not_a_module__` can never be in the list, so "the negative set is
+# non-empty" was a tautology: it stayed true even if every REAL module were
+# admitted and only the synthetic remained. Require a real one.
+check("  ...and at least one REAL module is still refused, so the check above "
+      "is not carried by the synthetic name alone",
+      [m for m in _REAL_MODULES if m not in RETRYABLE] != [], True)
 
 
 def continue_dispatch(module):
@@ -902,6 +1004,106 @@ def _child_inherits(parent_rejected):
     finally:
         RT.get_queue = _real
     return (C.read_meta(new_id) or {}).get("flag_rejected")
+
+
+def _resubmit_dispatch(module, upload=None, **meta):
+    """Run the REAL _resubmit and report (enqueued_func, child_id, args).
+
+    _resubmit's module dispatch is a chain ending in `else:  # pwn / rev`, so a
+    module WITHOUT its own branch does not fail — it is silently rebuilt as a
+    rev job, with rev's argument list, against an input rev never staged. The
+    only thing that notices is a test that reads what was enqueued. Every
+    branch in that chain deserves this; misc is the one added last.
+    """
+    parent = make_job("resub-" + module, module=module, status="no_flag",
+                      description="d", **meta)
+    pj = DATA / "jobs" / parent
+    if upload:
+        (pj / upload).write_bytes(b"PK\\x03\\x04payload")
+
+    class _Q:
+        def __init__(self):
+            self.calls = []
+
+        def enqueue(self, *a, **k):
+            self.calls.append(a)
+            return None
+
+    q = _Q()
+    _real = RT.get_queue
+    RT.get_queue = lambda: q
+    try:
+        new_id = RT._resubmit(C.read_meta(parent), "hint", pj)
+    except Exception as exc:
+        # Report, never propagate. A raise here kills the interpreter before
+        # the summary line, and a suite that dies mid-run looks identical to
+        # one that was never invoked — the same pathology that hid a broken
+        # committed-secrets guard behind a FileNotFoundError.
+        return "RAISED:%s: %s" % (type(exc).__name__, exc), None, [], parent
+    finally:
+        RT.get_queue = _real
+    func = q.calls[0][0] if q.calls else None
+    args = list(q.calls[0][1:]) if q.calls else []
+    return func, new_id, args, parent
+
+
+_f, _cid, _args, _parent = _resubmit_dispatch(
+    "misc", upload="chal.zip", filename="chal.zip")
+check("REGRESSION: a misc retry is enqueued to MISC's orchestrator — without "
+      "its own branch it falls through to `else: # pwn / rev` and is silently "
+      "rebuilt as a rev job",
+      _f, "modules.misc.orchestrator.run_job")
+check("  ...carrying the uploaded file into the child job dir",
+      bool(_cid) and (DATA / "jobs" / _cid / "chal.zip").is_file(), True)
+check("  ...and recording it as the child's filename",
+      (C.read_meta(_cid) or {}).get("filename") if _cid else "NO CHILD",
+      "chal.zip")
+# run_job(job_id, filename, passphrase, description, skip_claude, model), so
+# _args (which drops the func name) is [child_id, filename, passphrase, ...].
+check("  ...passing the carried filename as the second argument",
+      _args[1] if len(_args) > 1 else "MISSING", "chal.zip")
+check("  ...and passphrase=None as the third, so no live credential rides in "
+      "an RQ argument list",
+      _args[2] if len(_args) > 2 else "MISSING", None)
+
+# The passphrase reaches the child through the secret rail, not the queue. This
+# is the end-to-end version of the copy_from check above: a real parent job, a
+# real _resubmit, and the child read back from disk.
+store_misc_passphrase(_parent, "hunter2")
+_f2, _cid2, _args2, _ = _resubmit_dispatch(
+    "misc", upload="chal.zip", filename="chal.zip")
+_p3 = make_job("resub-misc-secret", module="misc", status="no_flag",
+               description="d", filename="chal.zip")
+(DATA / "jobs" / _p3 / "chal.zip").write_bytes(b"PK\\x03\\x04")
+store_misc_passphrase(_p3, "hunter2")
+
+
+class _Q3:
+    def enqueue(self, *a, **k):
+        return None
+
+
+_real3 = RT.get_queue
+RT.get_queue = lambda: _Q3()
+try:
+    _child3 = RT._resubmit(C.read_meta(_p3), "hint", DATA / "jobs" / _p3)
+except Exception as _e3:
+    _child3 = None
+finally:
+    RT.get_queue = _real3
+check("REGRESSION: the child of a REAL _resubmit can open the archive",
+      read_misc_passphrase(_child3) if _child3 else "NO CHILD", "hunter2")
+
+# The sibling branches must still dispatch to themselves — this is the check
+# that notices if the new elif was inserted in the wrong place in the chain.
+for _m, _want in (("rev", "modules.rev.analyzer.run_job"),
+                  ("pwn", "modules.pwn.analyzer.run_job"),
+                  ("web", "modules.web.analyzer.run_job"),
+                  ("crypto", "modules.crypto.analyzer.run_job"),
+                  ("web3", "modules.web3.analyzer.run_job"),
+                  ("forensic", "modules.forensic.orchestrator.run_job")):
+    _mf, _, _, _ = _resubmit_dispatch(_m, upload="chal.bin", filename="chal.bin")
+    check("  ...and %s still dispatches to its own analyzer" % _m, _mf, _want)
 
 
 check(

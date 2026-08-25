@@ -57,7 +57,7 @@ MUTATIONS = (
     "clobber-forensic-retry-target",# module branch patches meta after the literal
     "typo-misc-data-field",         # form points at a param the route lacks
     "drop-form-extraction",         # typed target never reaches FormData
-    "ungate-change-target",         # inert Change Target button returns for misc
+    "ungate-change-target",         # showChangeTarget stops depending on canRetry
     "keep-rejected-job-dir",        # 400 leaves an orphan data/jobs/<id>/
     "pwn-data-field-description",   # bound to another VALID param, not `target`
     "misc-primary-off-by-one",      # early IndexError in primary selection (CRASH)
@@ -300,9 +300,20 @@ elif M == "keep-rejected-job-dir":
         TEXT[_k] = TEXT[_k].replace(
             "reject_job(job_id, 400,", "_keep_and_raise(job_id, 400,")
 elif M == "ungate-change-target":
+    # This used to delete `&& canRetry` and expect a panel to change. It no
+    # longer bites, and the reason is worth keeping: `hasTarget` and `canRetry`
+    # now list the SAME seven modules, so the conjunct has no discriminating
+    # case left to exercise in the hiding direction. misc was the last module
+    # in one set and not the other, and giving misc a retry closed that gap.
+    #
+    # The conjunct is still load-bearing in the OTHER direction — the button
+    # must APPEAR only where something reads the value back — so the mutant now
+    # removes a module from canRetry and the oracle is that module losing its
+    # button. That keeps `showChangeTarget` provably dependent on canRetry
+    # instead of provably dependent on nothing.
     TEXT["app_js"] = TEXT["app_js"].replace(
-        "const showChangeTarget = hasTarget && canRetry;",
-        "const showChangeTarget = hasTarget;", 1)
+        'const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic", "misc"]',
+        'const canRetry = ["web", "pwn", "crypto", "rev", "web3", "forensic"]', 1)
 elif M == "pwn-data-field-description":
     # Codex's semantic mutation: bind the target list to another VALID Form
     # param (`description`). The AST "is it a real Form param" check accepts it;

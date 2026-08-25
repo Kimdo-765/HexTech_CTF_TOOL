@@ -136,6 +136,9 @@ def _spawn_misc(job_id: str, filename: str, passphrase: Optional[str]) -> str:
         command=cmd,
         volumes={_host_path(job_id): {"bind": "/job", "mode": "rw"}},
         mem_limit=MISC_MEM,
+        # memswap == mem: with mem alone docker grants swap up to 2x the
+        # cap, and slow swap thrash is what wedged this VM twice.
+        memswap_limit=MISC_MEM,
         nano_cpus=runner_nano_cpus(),
         network_mode="none",
         detach=True,

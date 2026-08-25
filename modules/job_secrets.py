@@ -15,7 +15,42 @@ from pathlib import Path
 from typing import Any
 
 
+# THREE DIFFERENT QUESTIONS, AND THEY ARE NOT THE SAME SET.
+#
+# One frozenset used to answer all three, and adding MISC_PASSPHRASE to it for
+# the first answer silently changed the other two. Both regressions were
+# reproduced before this split existed:
+#
+#   * `_validate_explicit` gates the operator's key/value ingress on the list,
+#     so the new key became accepted there — and `prepare_job_secret` threw the
+#     validated key away and hardcoded CTFD_ACCESS_TOKEN, so a request with
+#     secret_key=MISC_PASSPHRASE OVERWROTE a real CTFd token with the
+#     passphrase. Measured: a job holding `ctfd_<64hex>` came back holding
+#     `zipPassword1`, and the passphrase was not stored under its own key
+#     either. Reachable from every module's /analyze and from /continue, which
+#     rewrites the job's own file in place with no retry lineage involved.
+#
+#   * redaction is a plain substring replace over descriptions, log payloads
+#     AND meta.json, so the passphrase became a needle over the job's own
+#     metadata. Measured: passphrase `hunter2024` turned
+#     meta['filename'] = "hunter2024_challenge.zip" into
+#     "[REDACTED_JOB_SECRET]_challenge.zip" — and the misc retry rebuilds from
+#     meta['filename'], so the feature destroyed its own input.
+#
+# Storage/read is the only one MISC_PASSPHRASE belongs in.
 ALLOWED_SECRET_KEYS = frozenset({"CTFD_ACCESS_TOKEN", "MISC_PASSPHRASE"})
+
+# What the operator-facing key/value form may set. The passphrase has its own
+# typed entry point (`store_misc_passphrase`) and must not be reachable here.
+_OPERATOR_INGRESS_KEYS = frozenset({"CTFD_ACCESS_TOKEN"})
+
+# What may be used as a search-and-replace NEEDLE over free text and metadata.
+# A credential the agent must not see belongs here; a passphrase the agent is
+# handed anyway (it is exported into the sandbox with every other stored key,
+# and passed to the misc container on its command line) buys nothing by being
+# masked and costs the metadata it collides with. This set is exactly what was
+# redacted before MISC_PASSPHRASE existed, so redaction behaviour is unchanged.
+_REDACTABLE_KEYS = frozenset({"CTFD_ACCESS_TOKEN"})
 RESERVED_SECRET_KEYS = frozenset({
     "AUTH_TOKEN",
     "OPENAI_API_KEY",
@@ -24,20 +59,6 @@ RESERVED_SECRET_KEYS = frozenset({
     "CODEX_API_KEY",
 })
 REDACTION_MARKER = "[challenge credential moved to secret ingress]"
-
-# Redaction is a plain substring replace over descriptions and log payloads, so
-# a stored value that is also an ordinary word rewrites text that has nothing to
-# do with the secret: a misc passphrase of `cat` would turn every "concatenate"
-# in every log line into a redaction marker, and a passphrase of `the` would
-# shred the description. Storing such a value is still right — the retry needs
-# it — but using it as a search needle is not.
-#
-# 8 is chosen because it changes NOTHING that exists today: `_validate_explicit`
-# already refuses an operator-supplied secret shorter than 8, and a CTFd token
-# is 69 characters, so every value that was being redacted before is still
-# redacted. It only decides what happens to the new, deliberately-unbounded
-# passphrase.
-_MIN_REDACTABLE_LEN = 8
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 _CTFD_TOKEN_RE = re.compile(r"\bctfd_[0-9a-fA-F]{64}\b")
 _NAMED_CTFD_RE = re.compile(
@@ -108,7 +129,7 @@ def _validate_explicit(key: str | None, value: str | None) -> tuple[str, str] | 
         raise SecretIngressError(
             f"reserved secret key {normalized}; use CTFD_ACCESS_TOKEN"
         )
-    if normalized not in ALLOWED_SECRET_KEYS:
+    if normalized not in _OPERATOR_INGRESS_KEYS:
         raise SecretIngressError("unsupported challenge secret key")
     if not 8 <= len(raw_value) <= 8192:
         raise SecretIngressError("challenge secret value must be 8..8192 characters")
@@ -134,8 +155,9 @@ def prepare_job_secret(
     secrets = read_job_secrets(copy_from) if copy_from else read_job_secrets(job_id)
     candidates: list[str] = []
     explicit = _validate_explicit(secret_key, secret_value)
+    explicit_key = None
     if explicit is not None:
-        _, candidate = explicit
+        explicit_key, candidate = explicit
         candidates.append(candidate)
     candidates.extend(match.group(1) for match in _NAMED_CTFD_RE.finditer(text))
     candidates.extend(_CTFD_TOKEN_RE.findall(text))
@@ -146,12 +168,18 @@ def prepare_job_secret(
         candidate = unique[0]
         if not 8 <= len(candidate) <= 8192:
             raise SecretIngressError("challenge secret value must be 8..8192 characters")
-        secrets["CTFD_ACCESS_TOKEN"] = candidate
+        # Store under the key that was VALIDATED, not under a hardcoded one.
+        # The literal here discarded `explicit_key` entirely, which is what
+        # turned "the ingress accepts one more key name" into "the ingress
+        # overwrites the CTFd token". Harmless while the ingress admits exactly
+        # one key — and this is the line that makes that a design property
+        # instead of a coincidence.
+        secrets[explicit_key or "CTFD_ACCESS_TOKEN"] = candidate
 
     redacted = _NAMED_CTFD_RE.sub(REDACTION_MARKER, text)
     redacted = _CTFD_TOKEN_RE.sub(REDACTION_MARKER, redacted)
-    for value in secrets.values():
-        if value and len(value) >= _MIN_REDACTABLE_LEN:
+    for key, value in secrets.items():
+        if value and key in _REDACTABLE_KEYS:
             redacted = redacted.replace(value, REDACTION_MARKER)
     if secrets:
         _write_job_secrets(job_id, secrets)
@@ -170,15 +198,26 @@ def store_misc_passphrase(job_id: str, value: str | None) -> None:
     job's secrets to its retry child, so nothing in the retry route has to know
     what a passphrase is.
 
-    It also stops being a plaintext field the rest of the system can echo:
-    `redact_job_value` masks every registered secret, this file is 0600 inside
-    a 0700 directory, and it lives OUTSIDE `jobs/<id>` so archives and hybrid
-    parent-directory sweeps cannot pick it up.
+    IT IS NOT REDACTED, DELIBERATELY. `_REDACTABLE_KEYS` excludes it, so it is
+    never used as a search-and-replace needle over descriptions, logs or
+    meta.json. Masking it would buy nothing — every stored key is exported into
+    the sandbox (`env.update(read_job_secrets(job_id))` in modules/_runner.py
+    and modules/_common.py) and the value is on the misc container's command
+    line either way — and it costs whatever text it collides with. Measured:
+    with the passphrase as a needle, `hunter2024` rewrote
+    meta['filename'] = "hunter2024_challenge.zip" to
+    "[REDACTED_JOB_SECRET]_challenge.zip", and the retry rebuilds from
+    meta['filename'].
 
-    NOT routed through `_validate_explicit`: that path is the operator-facing
-    key/value ingress and it requires 8..8192 characters, which is a sensible
-    floor for an API token and a wrong one for a passphrase — `hunter2` is
-    seven. The only bound that matters here is the upper one.
+    What it does get is the storage discipline: 0600 inside a 0700 directory,
+    OUTSIDE `jobs/<id>` so archives and hybrid parent-directory sweeps cannot
+    pick it up, and deleted with the job.
+
+    NOT routed through `_validate_explicit`: that is the OPERATOR-facing
+    key/value ingress, whose allowlist (`_OPERATOR_INGRESS_KEYS`) deliberately
+    does not include this key, and which requires 8..8192 characters — a
+    sensible floor for an API token and a wrong one for a passphrase
+    (`hunter2` is seven). The only bound that matters here is the upper one.
     """
     text = str(value or "")
     if not text:
@@ -236,8 +275,8 @@ def cleanup_orphaned_secrets(*, older_than_epoch: float) -> int:
 def redact_job_value(job_id: str, value: Any) -> Any:
     """Recursively replace exact stored secret values in log/event payloads."""
 
-    secrets = tuple(v for v in read_job_secrets(job_id).values()
-                    if v and len(v) >= _MIN_REDACTABLE_LEN)
+    secrets = tuple(v for k, v in read_job_secrets(job_id).items()
+                    if v and k in _REDACTABLE_KEYS)
     if not secrets:
         return value
     if isinstance(value, str):

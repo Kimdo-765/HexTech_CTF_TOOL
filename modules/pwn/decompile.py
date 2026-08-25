@@ -52,6 +52,9 @@ def run_decompiler(job_id: str, binary_rel: str) -> tuple[Path, str]:
         command=[f"/job/{binary_rel}", "-o", "/job/decomp.zip"],
         volumes={host_job: {"bind": "/job", "mode": "rw"}},
         mem_limit=DECOMPILER_MEM,
+        # memswap == mem: with mem alone docker grants swap up to 2x the
+        # cap, and slow swap thrash is what wedged this VM twice.
+        memswap_limit=DECOMPILER_MEM,
         nano_cpus=runner_nano_cpus(),
         network_mode="none",
         detach=True,
@@ -115,6 +118,9 @@ def run_decompiler_xrefs(
         ],
         volumes={host_job: {"bind": "/job", "mode": "rw"}},
         mem_limit=DECOMPILER_MEM,
+        # memswap == mem: with mem alone docker grants swap up to 2x the
+        # cap, and slow swap thrash is what wedged this VM twice.
+        memswap_limit=DECOMPILER_MEM,
         nano_cpus=runner_nano_cpus(),
         network_mode="none",
         detach=True,
