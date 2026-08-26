@@ -2282,7 +2282,29 @@ exploit.
   buried under the original challenge description;
 - module / target / model / timeout / source-or-binary upload / auto_run
   are inherited automatically. The retry chain is recorded as
-  `meta.retry_of`; resume additionally records `meta.resumed_from`.
+  `meta.retry_of`; resume additionally records `meta.resumed_from`;
+- **what the lineage already tried.** Two fields accumulate down the chain in
+  the same child-meta literal (`api/routes/retry.py`). `meta.flag_rejected`
+  carries every candidate a prior attempt submitted and had refused.
+  `meta.technique_history` carries one entry per prior attempt: the mechanism
+  that attempt declared, and whether it actually got to test it. History is
+  bounded at 12 entries — the same visible window the exploit-library hint
+  uses — and both carries are pinned by regressions that read the child meta
+  back off disk, because a source check passes on a carry that a later
+  statement silently drops.
+
+  The mechanism is read from `chain.technique_name` /
+  `solver_strategy.technique_name`, deliberately NOT from
+  `solver_strategy.approach`. Across the 18 attempts in the corpus, 16
+  recorded an `approach` at all and 15 of those said `static-emit` — it does
+  not discriminate.
+
+  An attempt cut off before it could test its idea — timeout, OOM, policy
+  refusal, transport failure, rate limit, auth failure, an unusable target, an
+  operator stop — carries `looked: false` and renders as
+  `NOT TESTED — cut off by <kind>`, with the block saying in words that this
+  is not evidence against the mechanism. A generic `agent_error` is NOT a
+  truncation: that run happened.
 
 **Optional target override**: every retry/resume button accepts an optional
 new target. Reviewer-mode buttons prompt via `window.prompt()` (prefilled
@@ -2323,6 +2345,57 @@ holds the shared Codex thread store open. Operator consequence: **no successor
 job is created, but on the `/resume` path the source job is already marked
 `stopped`** — re-issue. Only GPT/Codex-provider jobs can hit this; a job with
 no turn-lock file passes immediately.
+
+### Why the history never says "don't repeat"
+
+The obvious rule — do not try a technique the lineage already named — is
+refuted by the corpus it would have been built from. Every attempt of every
+2026-08-25 retry lineage was read (findings, solver, report, run.log) and its
+mechanism written down independently of the `technique_name` string it
+carried; each pair was then labelled same/different and an independent
+skeptic re-judged all of them.
+
+    instagram.exe   7 attempts · 6 distinct strings
+    r.0.0.mca       5 attempts · 3 distinct strings
+    34 possible pairs · 33 eligible · 1 excluded as unobserved
+    27 same / 6 different / 0 undecided / 0 disputed
+    excluding the 4 byte-identical pairs: 23 of 29 (79%) name the SAME
+    mechanism despite differing strings
+
+The strings overstate conceptual variety about four to one. And r.0.0.mca is
+the counterexample that kills the rule outright: one mechanism across all five
+attempts, going no_flag → no_flag → finished → finished → finished. Attempt 1
+had the mechanism right and failed to *execute* it. What must be prevented is
+not repetition — it is reading an execution failure as a hypothesis failure.
+So the carried block asks the agent to DECLARE which it is doing
+(RE-EXECUTING / REFUTING) and never tells it to avoid a name; a regression
+pins that the block contains neither "do not repeat" nor "avoid".
+
+The corpus ships as two artefacts. `scripts/lineage_equivalence_seed.json`
+keeps its labels **empty on purpose** — filling them from a reading of the
+strings is how an earlier round's headline got manufactured, and a benchmark
+labelled that way scores the labeller. `byte_identical` is recorded as a fact
+and must be excluded when scoring, or the score measures string equality.
+`scripts/lineage_equivalence_labelled.json` holds the labels plus the
+refutation pass, which disputed 0 of 33 — recorded, not celebrated: this
+project has a case where a "default to refuting" prompt killed 36 of 36 real
+findings, and unanimity in either direction deserves the same suspicion.
+
+The excluded pair is not `undecided`. Both forensic attempts were cut off
+before naming a mechanism, so the question had no input on either side; it is
+recorded as its own unit, `excluded_unobserved`, and the coverage assertion is
+the invariant `possible == eligible + excluded` rather than a remembered 34.
+
+`scripts/test_lineage_equivalence_coverage.py` binds the seed to the **live**
+retry graph: it rebuilds every multi-attempt lineage from
+`data/jobs/*/meta.json` by walking `retry_of || resumed_from`, scopes it to the
+seed's own `built` date, and requires exact equality of roots AND ordered
+attempts. Without that binding the seed could drift from disk and every test
+would stay green. Note the resolver tries four candidates in order —
+`$HEXTECH_LIVE_JOBS`, `/data/jobs`, `<root>/data/jobs`, and the main checkout
+reached through a worktree's `.git` file — and SKIPs only when none resolves.
+A skipped run is green at 19 checks where a bound run is 21, so a checker
+reading only the exit code cannot tell the binding went untested.
 
 ## Exploit Library
 
@@ -2710,6 +2783,33 @@ token. Treat the job_id as a secret if you care.
   - with `job_ttl_days = 0` the cleanup loop returns early
     (`worker/runner.py:178-184`), so `cleanup_orphaned_secrets` never runs at
     all. "Retention = keep forever" silently means "credentials forever" too.
+- **Nothing generated from job data may be committed without running
+  `scripts/test_no_committed_secrets.py` first.** It exists because of two
+  incidents. A live CTFd API token typed into a job description was copied
+  verbatim into a committed artefact — `redact_job_value` did not help,
+  because it only replaces secrets REGISTERED through the upload form, and a
+  credential merely typed into free text was never registered. Later, three
+  ACCEPTED flags sat inside the retry-equivalence artefact and were found only
+  when the guard was finally run; the read-only eyeball scan that ran instead
+  had searched for `DH{` alone and reported "no real flags" while a
+  `pokactf2024{...}` capture sat in the same file.
+
+  So the guard does not match on shape. It reads every accepted value out of
+  the live `meta.flags` / `result.flags` and looks for those literal strings
+  in every tracked file, prefix-agnostic — the corpus holds seven prefixes
+  (AKA, DH, GoN, WaPR, YISF, cce2026, pokactf2024) and a regex over any one of
+  them was never going to be the oracle. Failures report a sha256 digest,
+  never the value, so the guard cannot leak what it guards.
+
+  Two limits worth knowing. The oracle is built from the jobs still on disk,
+  so deleting a job tree silently drops its flag out of the oracle and a
+  committed file carrying that value would then pass; the corpus is a moving
+  target, not a fixed one. And `GENERATED` must list every committed artefact
+  built from job data — an artefact that is not listed skips the targeted
+  checks by simply not being there.
+
+  Stage with an explicit path list. `git add -A` sweeps up untracked scratch
+  belonging to a parallel session.
 
 ## Troubleshooting
 
