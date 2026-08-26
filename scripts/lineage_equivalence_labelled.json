@@ -1,0 +1,419 @@
+{
+  "labels": [
+    {
+      "lineage_root": "6f53a1fc2dc0",
+      "filename": "zrq",
+      "attempts_read": [
+        {
+          "job_id": "6f53a1fc2dc0",
+          "artifacts_present": "findings.json, solver.py (15854 B), solver.py.stdout, report.md, run.log (233 KB, 31 agent narration lines), result.json, decomp/ + decomp.zip (140 functions), judge_shadow.jsonl, meta.json (status=no_flag, started 2026-08-25T12:44:20Z)",
+          "what_it_did": "Attempt 1 reconstructed the entire multi-layer container format from scratch (211 agent messages, 188 tool calls, ~108 min). It found that zrq is a stripped amd64 PIE relying on obsolete glibc malloc/free hooks, so it segfaults on the worker's modern libc; it therefore built an Ubuntu 18.04 Docker fixture and used known-good encodings of its own sample inputs as an oracle throughout. Working outward from the damaged artifact: quiz.zrq is 89,124 bytes = 4,244 records of 21 bytes with a 21,548-byte zero suffix after offset 67,575. It established that the writer weaves a flat buffer with wire[k*N+r] = flat[21*r + ((5*k) mod 21)] (an index permutation by 5 mod 21), and that after undoing the weave each codeword is 15 systematic symbols plus 6 Reed-Solomon/GF(256) parity symbols over polynomial 0x11d, with the coefficient matrix at 0x20b660 and exp/log tables at 0x20b060/0x20b260. It solved small overdetermined Gaussian systems in GF(256) to recover the erased suffix, yielding 63,660 pre-FEC bytes (11 trailing 0xff pad). Note it initially got the layout wrong twice (simple stripe hypothesis, then a 'globally transposed 21 symbol planes' model) and corrected each via runtime index/buffer traces. Next layer: a Huffman container whose header is 255 merge pairs (right_representative, left_representative) plus a repeated final representative; because codes were emitted walking leaf-to-root, decoding requires reversing the whole meaningful bitstream and then reversing the decoded symbol sequence, with the 8 possible zero-bit paddings enumerated because the format stores no pad count. Beneath that: 35,611 fixed-width LZW tokens that are NOT in logical order — they were stored in heap nodes and emitted in the allocator VM's linked-list traversal order. The small-fixture permutation failed to extrapolate once glibc crossed its large-bin layout, so it built an exact-size oracle: generate a large input in Ubuntu 18.04 that encodes to exactly 35,611 codes, align emitted order against known LZW codes, and read off the permutation (two independent inputs agreed; packed mapping SHA-256 74bc7a6348024964...(truncated)), embedded in the solver as 412 Base85 chars of uint16 deltas. Applying the inverse permutation, standard LZW decode, and the format's final byte reversal gave a 90,989-byte directory image (SHA-256 4704e1a350205026...(truncated)). Final step: it parsed that image as a serialized filesystem traversal of records 'token NUL uint64_le(size) data', where slash components are queued SIBLING directories rather than parents, and replayed the traversal as a FIFO queue (collections.deque, popleft) using Docker strace controls to fix the path grammar, reconstructing 1,501 files and 501 directories, then ran the recovered root flag.py (top-down os.walk, reverse-sorted dir and file names, concatenate, SHA-256) to get pokactf2024{<flag redacted — live CTF>}. Sandbox exit 0 and it self-reported exploit_status 'flag-captured', but result.json has flags: [] and meta status is no_flag - the digest was rejected, which is why a retry exists."
+        },
+        {
+          "job_id": "9d2e4099d5ba",
+          "artifacts_present": "findings.json, solver.py (15815 B), solver.py.stdout, report.md, run.log (47 KB), result.json (flags: [pokactf2024{b42bce96...}]), judge_shadow.jsonl, meta.json (status=finished, retry_of=6f53a1fc2dc0, started 2026-08-25T14:37:56Z). No decomp/ dir - it inherited the prior analysis rather than redoing it.",
+          "what_it_did": "Attempt 2 inherited attempt 1's entire pipeline unchanged and re-opened exactly one question: the directory-traversal policy in the final step. It was far shorter (61 messages, 49 tool calls, ~25 min vs 108). Its report.md is byte-for-byte the same as attempt 1's through the erasure-recovery and Huffman/LZW sections - same 4,244x21 records, same weave formula, same 15+6 GF(256) parity with 0x11d, same reversed-Huffman merge-pair header, same allocator-order LZW token permutation with the SAME embedded mapping hash 74bc7a63...b4b2, same 90,989-byte directory image with the SAME SHA-256 4704e1a3...ce0f. It did add one strengthening check on the inherited permutation (two very different directory fixtures - 1 dir/short names vs 97 dirs/180-byte names - both produced exactly 35,611 nodes and byte-identical mappings despite a 0x240 address gap among the usual 0x120 strides). The real work was refuting the FIFO reading: statically, the list code inserts a new 0x30 node BEFORE the old head and later removes that same head (head-insert/head-pop); dynamically, in a Docker control tree whose raw getdents order was d1, f1, d2, zrq opened d2 before d1. So the pending-directory container is a LIFO stack, not a FIFO queue. It swapped the traversal accordingly and got pokactf2024{<flag redacted — live CTF>}, which was accepted (status finished, flags populated). It also noted that byte-for-byte re-encoding comparison was confounded by host getdents order (LIFO reconstruction matched through byte 1,081 then diverged at the next directory's enumeration), so it rested the LIFO conclusion on the two-dir control and the list call sites rather than on re-encoding."
+        }
+      ],
+      "pairs": [
+        {
+          "a_job": "6f53a1fc2dc0",
+          "b_job": "9d2e4099d5ba",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "NOT byte-identical (A: 'GF(256)-erasure-recovery with reversed Huffman, allocator-order permutation, and LZW directory reconstruction'; B: 'erasure-coded filesystem image with reversed Huffman, allocator-order LZW, and LIFO directory reconstruction'), so this pair is live for scoring rather than a trivial pass. The decisive evidence is not the word overlap but the artifacts. (1) diff of the two solver.py files is 68 lines and the ONLY functional change is collections.deque/popleft -> list/pop in directory_flag, plus the matching comment and error-message rewording; every other stage - the weave undo, the GF(256) Gaussian erasure recovery, huffman_candidates, restore_token_list, lzw_decode - is byte-identical code. (2) Both attempts land on the identical intermediate hashes: allocator permutation SHA-256 74bc7a6348024964...(truncated) and directory image SHA-256 4704e1a350205026...(truncated), and both report the same 4,244x21 records, same wire[k*N+r]=flat[21*r+((5*k) mod 21)] weave, same 15+6 GF(256) parity over 0x11d, same 35,611 LZW tokens, same 90,989-byte image, same 1,501 files / 501 dirs. Identical intermediates through five of six stages is not describable as two mechanisms. (3) Attempt 2 self-identifies as the same mechanism with one step corrected: its report.md says 'The earlier FIFO interpretation is therefore refuted; it produced the grader-rejected 81dec4... digest', and its run.log narration says the prior flag failed because of the FIFO assumption and it is replacing only that with the verified LIFO sibling-directory grammar. On the one genuine divergence: the attempts really do disagree about the pending-directory policy (FIFO queue vs LIFO stack), and that disagreement is what separated the rejected digest 81dec4... from the accepted b42bce.... But that is a parameter WITHIN the final reconstruction step, not a different mechanism - and the strings do not even contradict each other, because A's string asserts no ordering at all ('LZW directory reconstruction'); B's is strictly more specific by adding 'LIFO'. Likewise 'GF(256)-erasure-recovery' and 'erasure-coded filesystem image' name the same erasure-coding layer at different specificity. A future solver searching for either string would be pointed at the same challenge: a layered container of Reed-Solomon/GF(256) erasure code over weave-permuted 21-byte records, reversed Huffman, allocator-linked-list-order-permuted LZW, and a serialized directory-tree image."
+        }
+      ]
+    },
+    {
+      "lineage_root": "567f6aee878e",
+      "filename": "CVE-2015-2291.exe",
+      "attempts_read": [
+        {
+          "job_id": "567f6aee878e",
+          "artifacts_present": "findings.json, solver.py (13.8 KB), solver.py.stdout/.stderr, report.md, run.log (1461 lines), WHY_STOPPED.md, result.json, meta.json, decomp/ + decomp.zip, judge_shadow.jsonl. started_at 2026-08-25T12:36:46Z, status no_flag, module rev, retry_of null (lineage root).",
+          "what_it_did": "Reversed the bundled EXE as a TheCruZ/kdmapper-lineage manual mapper that abuses the embedded vulnerable Intel iqvw64e.sys (\\\\.\\Nal, IOCTL 0x80862007) to manually map kmdf1.sys, then reversed the mapped driver's payload. It established that the driver's client routine at kmdf1.sys:0x1400022b0 takes DriverEntry's SECOND argument (RDX, conventionally RegistryPath — not PDRIVER_OBJECT) and builds an AES-128 key as LE64(RDX) || LE64(fmix64(RDX)) at 0x14000231f/0x14000232c, reads \\??\\C:\\Temp\\input.pdf, zero-pads it to a block boundary, encrypts with standard AES-128-ECB, prepends the eight bytes POLYBITS, and XORs every little-endian qword (prefix included) with a reversible 64-bit LCG stream seeded from RDTSC. Because the prefix is known the wrapper inverts exactly: it recovered state0=0xa393b283de0ea80f, rdtsc=0x000000fe71b5de1d, first AES block 35996125d908bdec4cbfd6c61de5ddbb, 132608 AES bytes. It then attacked the one unknown, the runtime RDX, by exhausting bounded candidate families against a PDF-structure oracle (%PDF-, startxref, %%EOF, trailing zero padding): the bundled mapper's own RDX=0 plus eight artifact-derived qwords (wrapper state0, recovered TSC, prefix qword, file sizes, driver image base), every RDX below 2^24 via an AES-NI helper first validated on a planted RDX=0x12345, 147k-408k PE/string-structured qwords, and 544k aligned embedded 16-byte constants tested directly as keys in four byte layouts. All returned zero header hits. Its conclusion: the failure is an artifact/provenance mismatch, not a missing cipher inversion — output.pdf.enc was not produced by the bundled mapper's default path, and finishing needs the producing Windows run's RDX, the 16 key bytes, or a kernel memory/trace snapshot at kmdf1.sys+0x22b0. Solver exits with code 2 and refuses to print a fabricated flag."
+        },
+        {
+          "job_id": "90947a87cb2b",
+          "artifacts_present": "findings.json, solver.py (28.6 KB), solver.py.stdout/.stderr, report.md (A1's report verbatim + 2 appended sections), run.log (2499 lines), WHY_STOPPED.md, result.json, meta.json (retry_of=567f6aee878e, description carries '[retry of job 567f6aee878e — prior-session fork requested]'), judge_shadow.jsonl. started_at 2026-08-25T13:47:41Z, status no_flag.",
+          "what_it_did": "Pursued the identical mechanism — DriverEntry-RDX-derived AES-128 key (LE64(RDX) || LE64(fmix64(RDX))) at kmdf1.sys:0x1400022b0/0x14000231f, AES-128-ECB body under a POLYBITS + 64-bit-LCG qword mask — and carried A1's decoder forward unchanged, reproducing the same state0=0xa393b283de0ea80f and rdtsc=0x000000fe71b5de1d. Its new work was attacking two assumptions rather than the mechanism. (i) Wrapper scope: Unicorn emulated the real kmdf1.sys client worker from RVA 0x22b0 through key derivation, AES key expansion/encryption, the qword mask loop at 0x2579..0x25d8 and the write path with RDX=0x12345 and a fixed RDTSC; feeding those emulated output bytes back into solver.unwrap/key_from_rdx/decrypt round-tripped byte-for-byte, refuting prefix-exclusion, pre-advanced-LCG and offset-AES-body hypotheses. (ii) Oracle breadth: it replaced PDF-header-only acceptance with header-independent tests — a trailing-zero-padding oracle (validated on a planted five-zero plaintext) and a generic printable-byte / distinct-byte ranker with format-specific container validation (ZIP/PNG/ELF/GIF/SQLite) — plus an unaligned whole-artifact direct-key sweep over every 16-byte window of the 2.86 MB EXE and driver in four layouts, closing A1's aligned-only gap (validated on a key planted at unaligned offset 13). It also ran a full EXE call census confirming the single MapDriver call at 0x140202005 and the single trampoline call at 0x1401777c5 both carry RDX=0. Every real-artifact result sat at random-noise level (best P=142/256, min U=134, zero validated containers, zero validated DH{...}). Same blocker recorded: missing-runtime-RDX, artifact-provenance-mismatch, plus kernel-environment-required."
+        }
+      ],
+      "pairs": [
+        {
+          "a_job": "567f6aee878e",
+          "b_job": "90947a87cb2b",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, established from artifacts before looking at the strings. Both findings.json K-01 state the identical key construction at the identical address — 'The AES-128 key is LE64(RDX) concatenated with LE64(fmix64(RDX))' at kmdf1.sys:0x14000231f, built by the client routine at kmdf1.sys:0x1400022b0 from DriverEntry's second argument. Both describe the same container: zero-padded input PDF, standard AES-128-ECB, an eight-byte POLYBITS prefix, every little-endian qword XOR-masked with a reversible 64-bit LCG seeded from RDTSC. Both recover the identical wrapper state from the ciphertext (state0=0xa393b283de0ea80f, rdtsc=0x000000fe71b5de1d) and reject the same eight artifact-derived RDX candidates with byte-identical first16 decryptions. Both locate the same blocker — the bundled mapper at CVE-2015-2291.exe:0x140202005 passes RDX=0, so the producing run's RDX is absent — and both carry the caveats missing-runtime-RDX / artifact-provenance-mismatch / no-genuine-flag-captured. Corroborating: the shared solver core (fmix64, unwrap, key_from_rdx, decrypt, looks_like_pdf_block, pdf_extent, flag_candidates, structured_rdx_candidates, embedded_key_hits, low_rdx_hit) is byte-identical; B only appends oracle functions (low_rdx_padding_hits, valid_container, generic_structure, low_rdx_structure_hits, direct_variant, whole_artifact_key_hits). IMPORTANT CAVEAT ON THAT CORROBORATION: this overlap is inheritance, not convergence — B's meta.description carries '[retry of job 567f6aee878e — prior-session fork requested]' and B's report.md is A's report verbatim plus two appended sections (diff is only 134a135,188 and 152c206), so B forked A's file rather than independently rediscovering the mechanism. The label stands regardless; same mechanism is same mechanism. SCORING NOTE, not the basis of the label: byte_identical is FALSE but only barely — spaces became hyphens and B dropped the word 'PDF'. B dropped it because it broadened the acceptance oracle past PDF headers to generic-plaintext/container scoring, and B's approach field flipped to dynamic-trace because it added Unicorn emulation of the driver at RVA 0x22b0; both are changes to how a candidate key is TESTED, not to what the challenge IS. Because the two strings are near-identical, this pair is a weak discriminator for any string-similarity scorer and should be flagged as such even though it is not literally byte-identical. Separately: job 5d4ba07beba7 has the same filename but started_at 2026-08-20, outside this lineage's 2026-08-25 window, so it is excluded from attempts and generates no pair."
+        }
+      ]
+    },
+    {
+      "lineage_root": "b7c25bb93d13",
+      "filename": "0f7ebda5-b300-4a04-922f-7e113482ceb2.zip",
+      "attempts_read": [
+        {
+          "job_id": "b7c25bb93d13",
+          "artifacts_present": "findings.json ABSENT (verified: `find -name 'findings*.json'` and `grep -ril technique_name` over the whole job dir both return nothing; meta.json has no solver_strategy key). No solver.py / exploit.py at job root. PRESENT: meta.json, result.json, summary.json, log_findings.json (0 files scanned), report.md (3.7 KB working draft), run.log (11.7 KB), gpt-events.jsonl (1.34 MB), worker_mem.jsonl, volatility/ (empty), the 254-byte pointer zip, and a very large tmp/ that is the real evidence trail: extract_ewf_groups.py (hand-written EWF v1 table-section parser), ACSC2025.sparse.E01 (exactly 12,840,429,761 B), ACSC2025.partial.raw (exactly 64,424,509,440 B = 60 GiB logical), e01chunk.1/2/6 (802,526,861 B each), MFT (131 MB), fls.txt (exactly 158,972 lines), bodyfile, timeline.csv (104 MB), UsnJrnl.J, LogFile, RDPClient.evtx + RDPClient.xml, Default.rdp, NetBScanner.exe + NetBScanner.cfg, svchosts.exe (30,021,832 B), DLL_LOADER.pf, carve_evtx.0-5, Cache0001.first.bin + bmc-tools/bmc-out/bmc-w16, plum.sqlite + plumwal.blocks2-4 (12,288 B fragment), Credential_DFBE70A7E5CC19A398EBF1B96859CE5D.",
+          "what_it_did": "Established first that the upload is not evidence at all: the 254-byte zip holds one 84-byte APT-213.txt containing a Google Drive folder URL. The collector had mislabeled it kind=memory; Volatility identified no OS and log_findings scanned 0 files. The agent resolved the Drive folder to ACSC2025.E01 (12,840,429,761 bytes, a 60 GiB Windows VMware disk image). Direct download hit Google's quota interstitial, so it found a public Drive endpoint that honors HTTP Range and pulled selected byte ranges in bounded parallel chunks (three contiguous ~802 MB chunks covering roughly 802 MB-2.407 GB, plus a range near 4.8 GB). The core mechanism it pursued: hand-build a SPARSE EWF container so libewf/TSK can resolve chunk tables without the missing ranges. This is artifact-backed, not prose -- extract_ewf_groups.py really does parse EWF v1 table sections, zlib-decompress compressed chunks and strip Adler-32 off stored ones, and the resulting sparse E01 and 60 GiB raw are on disk at exact expected sizes. It then mounted the NTFS Basic Data partition at sector 239616 and recovered the $MFT and 158,972 paths (fls.txt is exactly that many lines). From MFT + Prefetch + EVTX it built an intrusion timeline: NetBScanner.exe in C:\\Users\\Public\\Documents scanning 192.168.72.0-255 at 12:43:12, outbound RDP (mstsc) to 192.168.72.128 at 12:45:33 via TerminalServices-RDPClient Operational events 1024/1102, svchosts.exe at 12:46:09, DLL_LOADER.EXE prefetch at 12:59:19. Late in the run it pivoted to Sticky Notes plum.sqlite-wal as the credential source and to the RDP bitmap cache (bmc-tools) for a literal flag3 marker, and correctly ruled out a swFlag3 string as a benign Windows MdmDiagnostics.dll TPM symbol. IMPORTANT PROVENANCE CAVEAT: its headline Security-log claim -- first successful Event 4624 from 213.180.180.154 at 2025-05-30 12:41:04.292196 UTC after 27,416 failures -- is agent-asserted only. That IP occurs exactly ONCE in the entire 1.34 MB transcript and that occurrence is the agent's own narrative sentence; no Security.evtx exists in tmp/, and the carved EVTX windows contain zero occurrences of it. The 12:41 window itself is timeline-backed via TSTHEME/RDPCLIP Prefetch, but the event/IP/failure-count is not. Also note report.md was written at 13:06 UTC, 40 minutes before the run ended, so it is a stale draft. Two cgroup OOM kills escalated the worker cap 2 GiB -> 3 GiB -> 4.5 GiB. TERMINAL STATE: the Codex turn was killed by the hard 3600s timeout with the four-component flag unassembled; result is_error=true, flags []. The findings-emitting stage never ran, so no solver_strategy.technique_name was ever produced -- there is nothing to pair on."
+        },
+        {
+          "job_id": "56b4d47d5b4c",
+          "artifacts_present": "findings.json ABSENT (same two verifications; meta.json has no solver_strategy key). PRESENT: meta.json (11.8 KB, retry_of=b7c25bb93d13), result.json, summary.json, log_findings.json (0 files scanned), report.md (3.3 KB working draft), run.log (16 KB), gpt-events.jsonl (1.23 MB), solver.py (11.8 KB), .pydeps/ (vendored pure-Python Dissect stack), __pycache__/, ACSC2025.E01.part (sparse, 12,840,429,761 B declared), worker_mem.jsonl, volatility/ (empty), the 254-byte pointer zip, and tmp/ containing download_e01_ranges.sh, Disk_Parser/, bmc-tools/ + bmc-cache1/, chunk_test_16.bin (one genuine 16 MiB range), recovered_notes/ (plum.sqlite-wal 271,952 B + -shm + plum.sqlite), recovered_usn_loader.bin (32,768 B), recovered_mft_loader.bin (4,096 B). Notably most tmp/e01_block8_*.bin files are 2,009 bytes -- Google's quota interstitial HTML, i.e. failed fetches -- and even ACSC2025.E01.txt and APT-213.png came back as 2,009-byte quota pages here, where attempt 1 had fetched the real 987-byte manifest and 1,220,462-byte PNG.",
+          "what_it_did": "Started from a fresh workspace that did NOT carry attempt 1's evidence products, explicitly classified the failure as ENVIRONMENT, and refused to elevate attempt 1's prose claims (the 4624/213.180.180.154 timestamp, the 158,972 paths) without byte evidence -- an in-corpus contradiction that my own provenance check confirms was the right call. It re-resolved the same Drive pointer and independently re-derived the same acquisition mechanism: unbounded GETs return the quota page, explicitly bounded Range requests return authentic EWF bytes (it verified the EVF signature on the first bytes). It rebuilt a resumable ranged acquisition -- 8 MiB destination blocks wrapped in varied bounded ranges with exact per-chunk length checks -- after catching and correcting its own wrapper defect (a missing set -e let a failed size assertion still rename the file and emit a false 'acquisition_complete'). It also wrote solver.py: a strictly streaming, low-memory analyzer on a vendored pure-Python Dissect stack that opens the E01 directly without materializing the 60 GiB logical disk. That solver globs a fixed candidate list (Security.evtx, RDPClient Operational, Amcache.hve, SYSTEM/SOFTWARE hives, MSTSC/NETBSCANNER/LOADER/B4CKD00R prefetch, Default.rdp, Sticky Notes LocalState, Terminal Server Client bitmap Cache, Public\\Documents), extracts them, parses the earliest remote Event 4624 and renders it in both UTC and host-local time, mines Amcache SHA-1 for loader/backdoor entries, streams ASCII+UTF-16LE keyword scans, reads plum.sqlite, and carves embedded PEs out of the loader by MZ/PE header walking to MD5 them. It hard-aborts unless the image is exactly 12,840,429,761 bytes, so with only a partial file it never ran end to end. When the range source throttled, it mined attempt 1's preserved read-only Codex session transcript for the prior sparse-E01 scripts and MFT record numbers rather than re-downloading 12.8 GB. Its one genuinely new and genuinely byte-verified result -- and the place it truly advanced past attempt 1 -- is replaying the Sticky Notes WAL: tmp/recovered_notes/plum.sqlite-wal is the full 271,952-byte WAL (attempt 1 had only a 12,288-byte 3-block fragment), and the transcript carries decoded frame content as tool output, yielding a note with 192.168.190.128 / admin / FunnyMonkey!@ in C:\\Users\\ethan\\AppData\\Local\\Packages\\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\\LocalState\\plum.sqlite-wal. That password string appears 0 times in attempt 1's transcript and 6 times here. It also pinned dll_loader.exe to MFT 107361 sequence 7, created 12:59:07.170962 UTC, a record later reused as sequence 8 -- which explains why ordinary current-MFT extraction missed it. Its report.md is likewise stale, written at 13:53 UTC minutes into a run that lasted to 14:51, so it predates the 14:37 Sticky Notes win. TERMINAL STATE: identical to attempt 1 -- the Codex turn was killed by the hard 3600s timeout, is_error=true, flags [], the findings-emitting stage never ran, so no solver_strategy.technique_name exists here either."
+        }
+      ],
+      "pairs": []
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "attempts_read": [
+        {
+          "job_id": "c7eed3b759ae",
+          "artifacts_present": "findings.json, solver.py (1071B), report.md, run.log (57.8KB), result.json, meta.json, judge_shadow.jsonl, decomp/ + decomp.zip, work/ with feed_snapshot_round0..40.txt",
+          "what_it_did": "Attempt 1 (n=1, started 12:43:47Z). Found a unique embedded 32-byte constant at VA 0x1401d7058, 'DH{}R3vrse_1ntagmd0fuilywbhp24co', and concluded the flag IS that literal string with its closing brace relocated from index 3 to the end. solver.py is a pure static string extraction: one regex `DH\\{\\}([A-Za-z0-9_]{28})` over the raw PE bytes, assert exactly one match, emit `DH{` + payload + `}`. No decode, no replay, no execution of the program's transform. It DID observe the permutation routine (report describes FUN_140035560 copying both 16-byte halves into a 64-byte hash context and FUN_140031e40 applying prefix reversals/swap per ranked record, folding into an fmix64 'stability_token'), but explicitly dismissed it: 'it is not a cryptographic decode and no alternative flag string is printed', and 'The obfuscation is the placement of the closing brace directly after the opening brace.' It treated the runtime token 773b32c4d1778843 only as evidence the runtime path was genuine. Mechanism pursued: plaintext-hidden-in-binary with a displaced delimiter. This answer was later grader-rejected."
+        },
+        {
+          "job_id": "2d6797a7fafb",
+          "artifacts_present": "findings.json, solver.py (2562B), report.md, run.log (42.6KB), result.json, meta.json (has retry_of=c7eed3b759ae), judge_shadow.jsonl, work/ with feed snapshots",
+          "what_it_did": "Attempt 2 (n=2, 13:09:21Z). Explicitly reclassified attempt 1 as a 'strategy failure' — the seed is retained only as a shared primitive, now read as a MUTABLE ALPHABET rather than plaintext. Ran the PE under Wine/GDB, breakpointed the selected-byte load at 0x140031f77, and observed exactly 30 hits during the round-0 `export`. Recorded the per-record parameters as four hardcoded 30-entry tables (PIVOT, ROTATE, PREFIX, TAKE) and replayed them offline in Python over the regex-extracted seed: rotate state left by ROTATE[k], swap state[PIVOT[k]] with state[(PIVOT[k]+11)&31], reverse the first PREFIX[k] bytes, append state[TAKE[k]]. Yields the 30-byte stream 'DH{R3v3rse_1nstagra4gm0pdodRsi'; validates only that it starts with `DH{` and contains no `}`, then appends `}` by convention. Also refuted a batch of alternatives (composite permutation orbit has order 15; all 31 forward states, inverse, 4608 rotation/reversal variants; hidden-command probes). Mechanism pursued: replay of a per-ranked-record state permutation over an embedded seed, harvesting one selected byte per record. NOTE: its findings prose transcribes the seed as 'DH{}R3v3rse_1ntagmd0fuilywbhp24co' (33 chars) — a typo; the solver extracts by regex so the real 32-byte seed is what runs."
+        },
+        {
+          "job_id": "0eca8554c3f9",
+          "artifacts_present": "findings.json, solver.py (2583B), report.md (4491B), run.log (22.7KB), result.json, meta.json (retry_of=2d6797a7fafb), judge_shadow.jsonl, work/",
+          "what_it_did": "Attempt 3 (n=3, 13:34:18Z). Same mechanism and the same four PIVOT/ROTATE/PREFIX/TAKE tables as attempt 2, same output 'DH{R3v3rse_1nstagra4gm0pdodRsi' + appended `}`. The solver is NOT byte-identical to attempt 2's: it adds `EXPECTED_TRANSCRIPT` and replaces the loose prefix check with a strict full-transcript equality assert (diff is 3 lines). The real new work is evidential, not mechanistic: a cross-round discriminator that traced rounds 0, 1, 2 and 10 in the same Wine/GDB process and showed only round 0 produces a framed, readable stream (round 1 = 'nr{gborpbtp3oDpvgylpiscHp_biyp', round 2 and 10 likewise unframed), each matching its exported stability_token; plus a full .rdata/.data table audit finding no referenced 28/30/32-element decode permutation. Mechanism pursued: identical to attempt 2."
+        },
+        {
+          "job_id": "c82f712e6afa",
+          "artifacts_present": "findings.json, solver.py (2533B), report.md, run.log (25.6KB), result.json, meta.json (retry_of=0eca8554c3f9), judge_shadow.jsonl, work/",
+          "what_it_did": "Attempt 4 (n=4, 13:51:44Z). Same state-permutation replay as attempts 2/3, driven by the same first 30 table entries, but extended to 35 entries. Its complaint about the predecessor was that the trailing `}` had been appended by convention rather than observed. Under a debugger it forced five extra record steps by cycling the ranked-record pointer from the validated last record back to the validated first (report tabulates hits 31-35 with pivot/rotate/prefix/take and the bytes s, b, y, n, }), producing the fully in-stream 'DH{R3v3rse_1nstagra4gm0pdodRsisbyn}'. It acknowledged statically that the vector holds exactly 30 records (30*0x40 = 0x780, length == capacity, no sentinel) and argued the cyclic continuation avoided out-of-bounds reads. Mechanism pursued: identical replay to 2/3, differing only in how far the transcript is continued past the native 30 records."
+        },
+        {
+          "job_id": "fb6bd6a807eb",
+          "artifacts_present": "findings.json, solver.py (2484B), report.md, run.log (18.5KB), result.json, meta.json (retry_of=c82f712e6afa), judge_shadow.jsonl, work/",
+          "what_it_did": "Attempt 5 (n=5, 14:10:37Z). Retracted attempt 4's continuation: 'The unmodified program never executes hits 31-35 ... those five fabricated rows have been deleted from solver.py.' Reverted to exactly the 30-entry tables of attempts 2/3 and the same four-op loop, asserting the full 30-byte native transcript 'DH{R3v3rse_1nstagra4gm0pdodRsi', then taking the closing `}` from the seed's own index 3 rather than inventing it. New supporting work: a checksum-consumer audit proving the fmix64 accumulator is output-only (sole caller at 0x1400356ed discards the returned byte; the final hash at 0x140035746 feeds only the hex formatter at 0x1400357b0 — no gate anywhere), and a native index-map test showing the 30 take indices are not a permutation (only 21 of 32 slots visited; take=30 yields H/s/g, take=24 yields v/r/p), so chronological order is the only readable extraction. Mechanism pursued: identical to 2/3, with attempt 4's extension refuted."
+        },
+        {
+          "job_id": "bf61557b04f7",
+          "artifacts_present": "findings.json, solver.py (3772B), report.md, run.log (81.2KB, largest in lineage), result.json, meta.json (retry_of=fb6bd6a807eb), judge_shadow.jsonl, work/ including runtime_gdb_trace.txt (49KB), runtime_ranked_vector.bin, runtime_source_vector.bin",
+          "what_it_did": "Attempt 6 (n=6, 14:23:31Z). The breakthrough attempt. Instead of hardcoding a captured trace, it DERIVED the per-record parameters from the ranked-record fields, recovering the closed form: a = floor(score*1000)&31; b = floor(score*100000)%100; perturb = a^13^old_rank^new_rank; pivot = ((post_id>>3)^5^a^old_rank)&31; rotate = (pivot^cursor)&31; prefix_len = (old_rank&7)+5; take = (cursor+perturb+b)&31; cursor updated as (take+cursor+pivot+3)&31. The loop body it replays is the SAME four operations on the SAME regex-extracted seed as attempts 2-5. Its actual discovery is a precision boundary: the score builder at 0x14003633f-0x14003636b constructs nominal five-decimal values, the snapshot writer at 0x1400358d2-0x14003590d prints them at fixed precision 5, and the in-memory IEEE-754 double disagrees with the printed decimal under floor(score*100000) — first at rank 20, post 71429 (native f64 100.3172099999999887 -> bucket 20 -> take 12 -> '4', vs exported decimal 100.31721 -> bucket 21 -> take 13 -> 'm'), after which the cursor difference cascades. Replaying the 30 exported decimal score STRINGS with decimal.Decimal produces the readable leetspeak 'DH{R3v3rse_1nstagram_1nstead_0' where the native-float path produced attempts 2-5's garbled tail. Its report names the two streams side by side and labels attempts 2-5's result 'native f64'. Completed the flag with 'f}' taken from seed indices 19 and 3, conceding this is a template inference since the native vector ends at 30 records."
+        },
+        {
+          "job_id": "b7009466d190",
+          "artifacts_present": "findings.json, solver.py (3803B), report.md (4964B), run.log (32KB), result.json, meta.json (retry_of=bf61557b04f7), judge_shadow.jsonl, work/ including runtime_gdb_trace.txt, runtime_ranked_vector.bin, runtime_source_vector.bin",
+          "what_it_did": "Attempt 7 (n=7, 15:04:00Z). Mechanically the same solver as attempt 6 — identical SOURCE_POST_IDS, identical ROUND0_ROWS decimal strings, identical derivation of a/b/perturb/pivot/rotate/prefix_len/take, identical Decimal replay, identical asserted prefix. The only diff (7 lines) is the suffix: it removed attempt 6's invented 'f' as 'an overfit to the phrase' and appends only the seed's displaced `}` at index 3, giving 'DH{R3v3rse_1nstagram_1nstead_0}'. New evidence rather than new mechanism: replayed all 41 exported rounds (0-40) under all 32 possible initial cursors and found exactly one stream beginning `DH{` (round 0, cursor 0); static xrefs found no post-loop read of seed indices 19 or 3; a bounded full session produced no exit-state file or second exporter that could supply a suffix. Mechanism pursued: identical to attempt 6."
+        }
+      ],
+      "pairs": [
+        {
+          "a_job": "c7eed3b759ae",
+          "b_job": "2d6797a7fafb",
+          "same_concept": false,
+          "confidence": "high",
+          "why": "Different mechanisms. Attempt 1's solver is a regex over the raw PE that lifts the literal seed and relocates its brace; its report states outright 'it is not a cryptographic decode' and 'The obfuscation is the placement of the closing brace directly after the opening brace.' Attempt 2 rejects exactly that reading — it calls attempt 1 'a strategy failure', reclassifies the same seed from plaintext to a 'mutable alphabet', and recovers the flag by replaying 30 per-record state permutations (rotate / swap pivot with (pivot+11)&31 / prefix-reverse / select state[take]) traced at 0x140031f77. The two share a primitive (the same extraction regex, the same 32-byte seed) but disagree about what the challenge is: a hidden string vs a state-machine-emitted byte stream. They also produce unrelated answers, DH{R3vrse_1ntagmd0fuilywbhp24co} vs DH{R3v3rse_1nstagra4gm0pdodRsi}."
+        },
+        {
+          "a_job": "c7eed3b759ae",
+          "b_job": "0eca8554c3f9",
+          "same_concept": false,
+          "confidence": "high",
+          "why": "Same reasoning as attempt 1 vs 2. Attempt 3 runs the identical permutation-replay solver as attempt 2 (plus a strict transcript assert) and its report repeats verbatim that attempt 1's brace relocation 'was only a grammar-based guess' and a strategy failure. Attempt 1 asserts no decode occurs; attempt 3 asserts the flag is the 30 bytes the program selects at 0x140031f77 and further discriminates rounds 0/1/2/10 to show only round 0 is framed. Shared seed-extraction primitive, different mechanism."
+        },
+        {
+          "a_job": "c7eed3b759ae",
+          "b_job": "c82f712e6afa",
+          "same_concept": false,
+          "confidence": "high",
+          "why": "Attempt 1 names static string extraction with a displaced delimiter and explicitly denies any decode. Attempt 4 replays 35 per-record state transformations (30 native plus 5 debugger-forced cyclic steps, tabulated hit-by-hit with pivot/rotate/prefix/take) to obtain every flag byte including a selected `}` from the machine itself. Attempt 4's own report lists 'Relocating the seed's early brace was grader-rejected' among refuted hypotheses — the lineage itself treats attempt 1's mechanism as a distinct and discarded one."
+        },
+        {
+          "a_job": "c7eed3b759ae",
+          "b_job": "fb6bd6a807eb",
+          "same_concept": false,
+          "confidence": "high",
+          "why": "Attempt 5 replays the 30-round permutation state machine and audits the fmix64 accumulator to prove it is output-only; its report states 'The earlier seed-with-relocated-brace candidate was grader-rejected. The verified seed primitive remains useful only as a mutable alphabet.' That is a direct statement that attempt 1's mechanism (seed as plaintext) is not this one (seed as a permuted alphabet). Both happen to use the seed's index-3 `}`, but attempt 1 uses it as the whole answer's delimiter for a literal payload while attempt 5 uses it to close a machine-generated transcript."
+        },
+        {
+          "a_job": "c7eed3b759ae",
+          "b_job": "bf61557b04f7",
+          "same_concept": false,
+          "confidence": "high",
+          "why": "Attempt 6's mechanism is a score-driven state machine: parameters derived from post_id/old_rank/new_rank/score, replayed with Decimal because the exported five-decimal score and the in-memory IEEE-754 double disagree at rank 20. Attempt 1 has no state machine at all — it greps the PE and moves a brace, and denies a decode exists. Attempt 6 lists 'Moving only the seed brace produced DH{R3vrse_1ntagmd0fuilywbhp24co}, which the grader rejected' under 'Refuted branches'. Shared seed-extraction primitive, different mechanism."
+        },
+        {
+          "a_job": "c7eed3b759ae",
+          "b_job": "b7009466d190",
+          "same_concept": false,
+          "confidence": "high",
+          "why": "Same as attempt 1 vs 6. Attempt 7 recovers the flag by replaying 30 ranked records through the seed-permutation state machine using the exported decimal score strings, and independently refutes attempt 1's route ('Moving only the seed brace produced DH{R3vrse_1ntagmd0fuilywbhp24co}, which the grader rejected'). Attempt 1 claims the flag is a literal embedded string; attempt 7 claims it is emitted one byte per ranked record. Different mechanisms sharing only the seed-extraction regex."
+        },
+        {
+          "a_job": "2d6797a7fafb",
+          "b_job": "0eca8554c3f9",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "BYTE-IDENTICAL TECHNIQUE STRING: both are 'mutable-alphabet permutation replay' — this pair is trivially true and MUST BE EXCLUDED when scoring, or the score measures string equality. For the record the artifacts confirm it independently: the two solvers carry the same four 30-entry PIVOT/ROTATE/PREFIX/TAKE tables and the same loop body, and produce the same transcript. (The solvers are NOT byte-identical — 2583B vs 2562B, a 3-line diff where attempt 3 adds EXPECTED_TRANSCRIPT and a strict equality assert in place of attempt 2's loose prefix check — and attempt 3 adds a cross-round discriminator, but neither changes the mechanism.)"
+        },
+        {
+          "a_job": "2d6797a7fafb",
+          "b_job": "c82f712e6afa",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Attempt 4's solver is attempt 2's solver with the four parameter tables lengthened from 30 to 35 entries; the loop body is character-for-character the same (rotate, swap pivot with (pivot+11)&31, reverse prefix, select state[take]) over the same regex-extracted seed, and the first 30 entries of every table are identical. Both name the challenge as replaying the per-record state permutation to harvest a selected-byte transcript. The only difference is extent: attempt 4 continues the machine five cyclic steps past the native 30 records to observe a `}` instead of appending one. 'mutable-alphabet permutation replay' and 'state-permutation transcript recovery' are two vocabularies for the same object — attempt 4's string is the most generic in the lineage, which is why it is also the nearest B-cluster string to attempts 6/7."
+        },
+        {
+          "a_job": "2d6797a7fafb",
+          "b_job": "fb6bd6a807eb",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Attempt 5's solver carries the identical PIVOT/ROTATE/PREFIX/TAKE tables and the identical four-operation loop as attempt 2, over the same seed extracted by the same regex, and asserts the same 30-byte transcript 'DH{R3v3rse_1nstagra4gm0pdodRsi'. The strings differ only by attempt 5's 'native-' qualifier, which was added to contrast with attempt 4's debugger-forced continuation, not to name a different mechanism."
+        },
+        {
+          "a_job": "2d6797a7fafb",
+          "b_job": "bf61557b04f7",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism at different resolution — and attempt 6's own artifacts say so. Both solvers extract the same 32-byte seed at 0x1401d7058 with a character-identical regex and run the same four operations per record (rotate-left, swap pivot with (pivot+11)&31, reverse prefix, select state[take]) through FUN_140031e40. The sole difference is where the round parameters come from: attempt 2 hardcodes a Wine/GDB trace of the native run, attempt 6 derives them from the record fields and score. Attempt 6's report explicitly identifies attempt 2's output as the same machine run at the wrong precision, tabulating rank 20 (native f64 100.3172099999999887 -> take 12 -> '4' vs exported decimal 100.31721 -> take 13 -> 'm') and printing both streams side by side under the labels 'native f64' and 'exported decimal'. The two agree byte-for-byte on the first 19 characters, 'DH{R3v3rse_1nstagra'. A wrong parameterization of a machine is not a different machine. The strings are unrelated in wording ('mutable-alphabet permutation replay' vs 'floating-point-sensitive serialized-score state-machine replay') and attempt 6's names a load-bearing detail attempt 2 never found, but they name the same mechanism."
+        },
+        {
+          "a_job": "2d6797a7fafb",
+          "b_job": "b7009466d190",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, same evidence as attempt 2 vs 6 — attempt 7's solver is attempt 6's with only a 7-line suffix change, and it reproduces the same 'native f64 vs exported decimal' table naming attempt 2's stream as the full-precision variant of its own. Both replay the same seed-permutation state machine at 0x140031e62-0x140031ff5; attempt 2 sources the round parameters from a native trace, attempt 7 derives them from the exported five-decimal scores. Note this is the widest naming gap in the lineage: 'mutable-alphabet permutation replay' foregrounds the permuted state and says nothing about scores, while 'decimal-score serialization replay' foregrounds the serialization and says nothing about the permutation. Different halves of one mechanism, not two mechanisms."
+        },
+        {
+          "a_job": "0eca8554c3f9",
+          "b_job": "c82f712e6afa",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Attempt 4's solver is attempt 3's with the four tables extended from 30 to 35 entries and the transcript assert lengthened accordingly; the first 30 table entries and the entire loop body are identical, over the same seed. Both recover the flag as the chronological selected-byte stream from the per-record state permutation. Attempt 4 differs only in continuing the machine five cyclic steps to observe a terminating `}` rather than appending one by convention."
+        },
+        {
+          "a_job": "0eca8554c3f9",
+          "b_job": "fb6bd6a807eb",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, and effectively the same implementation. Attempt 5's solver has the identical PIVOT/ROTATE/PREFIX/TAKE tables, the identical loop, and the identical EXPECTED_TRANSCRIPT assert as attempt 3; it differs only in taking the closing `}` from the seed's index 3 instead of appending a literal. Attempt 5's 'native-' qualifier was added to reject attempt 4's debugger continuation, not to name a different mechanism than attempt 3's."
+        },
+        {
+          "a_job": "0eca8554c3f9",
+          "b_job": "bf61557b04f7",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism at different resolution. Both extract the same seed at 0x1401d7058 with the same regex and replay the same four operations per ranked record through FUN_140031e40; attempt 3 hardcodes the parameters observed in a Wine/GDB trace, attempt 6 derives them from post_id/old_rank/new_rank/score. Attempt 6's report names attempt 3's exact transcript 'DH{R3v3rse_1nstagra4gm0pdodRsi' as the 'native f64' rendering of its own decode and locates the single divergence at rank 20, with the first 19 bytes agreeing. Same machine, wrong parameterization on attempt 3's side."
+        },
+        {
+          "a_job": "0eca8554c3f9",
+          "b_job": "b7009466d190",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism at different resolution, same evidence as attempt 3 vs 6: attempt 7 runs attempt 6's solver with a changed suffix and reproduces the table identifying attempt 3's stream as the full-precision run of the same state machine. The technique strings share no vocabulary — 'mutable-alphabet permutation replay' vs 'decimal-score serialization replay' — but both name the replay of the ranked-record-driven permutation of the embedded 32-byte seed."
+        },
+        {
+          "a_job": "c82f712e6afa",
+          "b_job": "fb6bd6a807eb",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Attempt 5 is attempt 4 with the five debugger-forced cyclic steps deleted: 'Those five fabricated rows have been deleted from solver.py.' The remaining 30 table entries and the loop body are identical between the two solvers, over the same seed. The disagreement is about how far the machine legitimately runs (attempt 4 cycles the record pointer to reach a selected `}`; attempt 5 argues the vector holds exactly 30 records so hits 31-35 are unreachable), which is a dispute about the transcript's extent, not about what the mechanism is."
+        },
+        {
+          "a_job": "c82f712e6afa",
+          "b_job": "bf61557b04f7",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Both replay the per-record transformation of the embedded 32-byte seed through FUN_140031e40 — the same rotate / swap pivot with (pivot+11)&31 / prefix-reverse / select state[take] loop — and read the flag off the selected-byte stream. Attempt 4 drives it from a captured native trace and pads it with five cyclic steps; attempt 6 derives the parameters from the record fields and replays the exported decimal scores. Attempt 6 explicitly places attempt 4's stream in its 'native f64' row and refutes the padding separately. Attempt 4's string, 'state-permutation transcript recovery', is the most generic in this lineage — it carries no 'native' qualifier and no score marker — so it sits closest to attempt 6's naming even though both attempts are in different evidential clusters."
+        },
+        {
+          "a_job": "c82f712e6afa",
+          "b_job": "b7009466d190",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, same reasoning as attempt 4 vs 6. Both name the replay of the seed-permutation state machine driven by the 30 ranked records; attempt 4 sources parameters from a debugger trace (plus a five-step continuation attempt 7's predecessor refuted), attempt 7 derives them from the exported five-decimal scores. Attempt 7's report reproduces attempt 4's underlying 30-byte stream as the 'native f64' variant of its own decode and separately rules out any continuation ('No round produced a 32-byte frame or a continuation beginning f}')."
+        },
+        {
+          "a_job": "fb6bd6a807eb",
+          "b_job": "bf61557b04f7",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Attempt 5's and attempt 6's solvers extract the same seed with the same regex and execute the same four-operation body per record; attempt 5 supplies rotate/pivot/prefix/take from a native GDB trace while attempt 6 computes them from a=floor(score*1000)&31, b=floor(score*100000)%100, perturb, cursor. Attempt 6's report puts attempt 5's asserted transcript 'DH{R3v3rse_1nstagra4gm0pdodRsi' verbatim in its 'native f64' row and attributes the divergence to a single bucket flip at rank 20. Both also close the flag with the seed's index-3 `}`. Same machine; attempt 6 found the precision detail attempt 5 lacked."
+        },
+        {
+          "a_job": "fb6bd6a807eb",
+          "b_job": "b7009466d190",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, and this is the pair whose strings look most unrelated: 'native-state-permutation transcript replay' vs 'decimal-score serialization replay'. The artifacts settle it — both solvers extract the same 32-byte seed at 0x1401d7058 with a character-identical regex and run the same loop (rotate-left, swap pivot with (pivot+11)&31, reverse prefix, select state[take]) over the same 30 ranked records of FUN_140031e40, and both append the seed's index-3 `}`. Attempt 7's report prints attempt 5's exact stream as the 'native f64' line directly above its own 'exported decimal' line, with the first 19 bytes identical and one bucket flip at rank 20 explaining the rest. Attempt 5 names the state machine and omits the score driver; attempt 7 names the score driver and omits the state machine. Two vocabularies for one mechanism, not two mechanisms."
+        },
+        {
+          "a_job": "bf61557b04f7",
+          "b_job": "b7009466d190",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, nearly the same file. The two solvers are identical except for a 7-line suffix block: attempt 6 appends 'f}' from seed indices 19 and 3, attempt 7 removes the 'f' as 'an overfit to the phrase' and appends only `}`. Same SOURCE_POST_IDS, same 30 ROUND0_ROWS decimal strings, same a/b/perturb/pivot/rotate/prefix_len/take derivation, same Decimal replay, same asserted 30-byte prefix 'DH{R3v3rse_1nstagram_1nstead_0', and the two reports share the 'Why decimal precision matters' section verbatim. The strings differ in emphasis ('floating-point-sensitive serialized-score state-machine replay' vs 'decimal-score serialization replay') but not in referent. Not byte-identical strings, so this pair is legitimately scorable."
+        }
+      ]
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "attempts_read": [
+        {
+          "job_id": "27a014a786bc",
+          "what_it_did": "Attempt 1 of 5, started 2026-08-25T12:46:34Z, status no_flag. Worked the challenge from scratch. Identified r.0.0.mca as a Minecraft Anvil region that completes the bundled 'The Antikythera' 1.21.10 world (the world is missing exactly this region; `file` misreports it as Itanium COFF). Found a README book in the NBT at (108,-59,52), in Korean and English: eight iron swords in item frames are dials, the BLADE direction (not the handle) selects a character, the machine's output is eight water streams, and flag = DH{MD5(password)} lowercase. Booted a real vanilla 1.21.10 server on a disposable copy of the world and drove it over RCON, rotating the eight frames and reading the piston/water outputs (work/tmp/minecraft-dynamic-mine/ with server.jar, oracle_collect.py, probes_1459.jsonl, powers_1459.jsonl). Live probing showed one dial affects several outputs at once, so it abandoned per-character lookup and treated the machine as a coupled 8-variable constraint system; it first tried GF(2)/XOR affine models (work/tmp/xor_model.py, gf2_solve.py, sweep_perm.cpp), then discovered its readings were corrupted because Minecraft's `tick sprint` returns before the ticks finish, fixed the oracle to poll game time across full 2000-tick reset and evaluation windows, and with clean data settled on the model A*(ItemRotation+1) == target (mod 8) - an 8x8 linear system over Z/8Z, matched by all 120 clock-confirmed samples. Modular Gaussian elimination using only odd (invertible) pivots gave the unique rotations [1,2,5,3,7,4,6,0], confirmed live (all eight sticky pistons active, mask 255, water replaced by diamond blocks). Mapped each rotation to one of the eight signs ringing its frame -> password 2G$6JE3A -> DH{<flag redacted — live CTF>}. The 8x8 matrix and the target vector are HARDCODED in this solver. Several judge rounds then hardened the MCA/NBT parser against decompression bombs.",
+          "artifacts_present": "findings.json, report.md, solver.py (11844 B, sha256 591f0357...), result.json (sandbox stdout with FLAG_CANDIDATE, flags: []), run.log 3811 lines, work/tmp holding a full Minecraft server plus the RCON oracle and GF(2)/permutation-sweep scratch"
+        },
+        {
+          "job_id": "a8be2b4f6e69",
+          "what_it_did": "Attempt 2 of 5, started 2026-08-25T14:09:12Z, status no_flag. Confirmation-only; it did NO new mechanism work. Its solver.py and report.md are BYTE-IDENTICAL to attempt 1's (sha256 591f0357... and 85b2a0a1...), and even solver.py.stdout is byte-identical. 21 messages / 10 tool calls / 397 s total: it declared in its first turn that the carried evidence showed no implementation or strategy failure and treated the job as delivery-confirmation, re-ran the inherited solver in this job's own runner (same password/rotations/flag), dumped the exact UTF-8 bytes of the eight selected signs (324724364a453341) to rule out hidden or whitespace characters, and twice tried to POST the flag to CALLBACK_URL (curl exit 6, host unresolved - a DNS block, not a rejection). It also noted the retry tree carries no entities/ region, so item-frame facing could not be re-derived here. The only genuinely new file is findings.json, written by the report phase over the unchanged report.md + solver.py.",
+          "artifacts_present": "findings.json (new), report.md + solver.py + solver.py.stdout byte-identical to attempt 1, result.json (flags: [] - the stale-stdout guard), run.log 145 lines, work/ containing only bin/ and tmp/codex-agents"
+        },
+        {
+          "job_id": "d12c1e2f9a3e",
+          "what_it_did": "Attempt 3 of 5, started 2026-08-25T14:16:52Z, status finished (solved). Same mechanism, made reproducible from the artifact alone. It first re-established delivery was environmentally blocked (DNS unresolved across four curl attempts, http_code 000), then traced every selected character back to its exact sign NBT in this MCA: all eight are north-facing oak wall signs and a census showed all 70 non-empty labels in the region use front_text, none back_text - correcting an overstatement in attempt 1's report. It then attacked the real reproducibility gap: the 8x8 matrix and target were hardcoded, so the solver was not deriving them. It replaced them with static extraction from block geometry - three runtime-independent probes per coefficient cell (redstone wire east=side/none at (x+7,y,90), north-facing compare-mode comparator at (x+6,y,104), gold block at (x,y,91)) coding the values 0..7, plus one diamond-block injector per row at (p,y,125) whose residue is 38-p, deliberately ignoring snapshot-dependent power/powered/OutputSignal properties. Same Z/8Z Gaussian elimination downstream, same rotations [1,2,5,3,7,4,6,0], same password 2G$6JE3A, same flag. It verified afterwards that no hardcoded matrix/target or stale job path remained.",
+          "artifacts_present": "findings.json, report.md (4305 B, extends attempt 1's with the probe-encoding table), solver.py (16250 B, sha256 5627be78..., ~100 new lines of extract_redstone_system/redstone_probe_positions), result.json (flags: [DH{ae1334dd...}]), run.log 522 lines"
+        },
+        {
+          "job_id": "90bd949f3c34",
+          "what_it_did": "Attempt 4 of 5, started 2026-08-25T15:05:37Z, status finished (solved). Confirmation-only, exactly as attempt 2 was for attempt 1. Its solver.py and report.md are BYTE-IDENTICAL to attempt 3's (sha256 5627be78... and 6f1cf4cc...), and solver.py.stdout is byte-identical too. 11 messages / 4 tool calls / 194 s: it verified the artifact's SHA-256 matched, grepped to prove neither the password nor the solved matrix/target appears as a literal in the solver (password_literal=absent, matrix_target_literals=absent), ran the smoke test in the real runner (same output in 2.38 s), and sent the file to the judge. It stated outright: 'No defect is evidenced, so I am preserving the carried solver and report unchanged.' The only genuinely new file is findings.json, written by the report phase over the unchanged report.md + solver.py; its K-03 happens to phrase the answer as signal values [2,3,6,4,0,5,7,1], which is just rotations+1 mod 8.",
+          "artifacts_present": "findings.json (new), report.md + solver.py + solver.py.stdout byte-identical to attempt 3, result.json (flags: [DH{ae1334dd...}]), run.log 87 lines"
+        },
+        {
+          "job_id": "f52c4049fec9",
+          "what_it_did": "Attempt 5 of 5, started 2026-08-25T15:19:16Z, status finished (solved). Same mechanism through the solve; it corrected only the final read-out. Told that the operator had rejected 2G$6JE3A, it classified this as a strategy failure localised to the rotation->character stage and enumerated candidate conventions against the actual sign rings: five rotation/offset baselines (old offset table, blade-NE clockwise, blade-NE counter-clockwise, signal-as-rotation, opposite-tip) crossed with x-ascending versus visual left-to-right reading order, printing all ten passwords and digests. Two errors fell out: on a north-facing panel screen-right is world -x, so the old offset table had labelled world (+x,+y) as NE when it is screen NW; and the matrix columns run in increasing world x while the password is read visually left-to-right, i.e. reversed. It also re-read the README book (both language versions) to confirm 'blade direction, not handle', and had two independent sub-reviews agree. The solver diff versus attempt 3 is exactly two hunks: the offsets tuple flipped in x, and password = ''.join(reversed(password_chars)). Everything upstream - MCA/NBT parsing, the block-probe matrix/target extraction, the Z/8Z Gaussian elimination, the rotations [1,2,5,3,7,4,6,0] - is unchanged. New password C1GJ6?E8 -> DH{<flag redacted — live CTF>}. Callback still DNS-blocked, giving no acceptance signal either way.",
+          "artifacts_present": "findings.json, report.md (4524 B, identical to attempt 3's except the read-out paragraph and an injector-range typo fix 30->31), solver.py (16478 B, sha256 962b4341...), result.json (flags: [DH{75ad58f5...}]), run.log 201 lines"
+        }
+      ],
+      "pairs": [
+        {
+          "a_job": "27a014a786bc",
+          "b_job": "a8be2b4f6e69",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "TRIVIAL PAIR - EXCLUDE WHEN SCORING (not byte-identical strings, but one artifact set paraphrased twice): attempt 2's solver.py and report.md are byte-identical to attempt 1's (sha256 591f0357... / 85b2a0a1...), and its findings.json was written by the report phase over those very files (run.log: `[report] ... sources=['report.md','solver.py']`). These are not two independent descriptions converging. On the merits they are still plainly the same mechanism: 'linear-system' and 'comparator-system' are two names for the one 8x8 solve over Z/8Z that both findings files spell out - attempt 1 says 'Eight comparator rows form a linear system over Z/8Z', attempt 2 says 'Solve the comparator matrix over Z/8Z' with 'modular Gaussian elimination over Z/8Z' - and both land on rotations [1,2,5,3,7,4,6,0], password 2G$6JE3A and DH{ae1334dd...}."
+        },
+        {
+          "a_job": "27a014a786bc",
+          "b_job": "d12c1e2f9a3e",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "BYTE-IDENTICAL technique strings ('minecraft-region-nbt-redstone-linear-system') - trivially true, EXCLUDE WHEN SCORING. Independently of the strings, the artifacts agree: attempt 3 kept attempt 1's whole pipeline (MCA/NBT parse -> A*(ItemRotation+1) == target mod 8 -> modular Gaussian elimination with odd pivots -> rotations [1,2,5,3,7,4,6,0] -> ring signs -> MD5) and changed only where the matrix and target come from, replacing attempt 1's hardcoded tables with static block probes at (x+7,y,90)/(x+6,y,104)/(x,y,91) and the diamond injectors at (p,y,125). Same password, same flag. Attempt 3's report.md is attempt 1's with the probe-encoding section inserted."
+        },
+        {
+          "a_job": "27a014a786bc",
+          "b_job": "90bd949f3c34",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. 'matrix-decode' and 'linear-system' name the identical object: attempt 4's own findings step 3 reads 'Solve the 8x8 linear system over Z/8Z' and its K-02 states 'The redstone computation is linear over Z/8Z and evaluates A * (ItemRotation + 1) modulo 8' - verbatim attempt 1's model. Attempt 4 shipped attempt 3's solver unchanged, and attempt 3's solver is attempt 1's pipeline with the matrix sourced from the region instead of hardcoded. Both attempts print the same rotations [1,2,5,3,7,4,6,0], password 2G$6JE3A and DH{ae1334dd...}."
+        },
+        {
+          "a_job": "27a014a786bc",
+          "b_job": "f52c4049fec9",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "BYTE-IDENTICAL technique strings ('minecraft-region-nbt-redstone-linear-system') - trivially true, EXCLUDE WHEN SCORING. Worth recording that they are genuinely the same mechanism anyway, because this is the one pair in the lineage where the two attempts reach DIFFERENT ANSWERS (2G$6JE3A/DH{ae1334dd...} versus C1GJ6?E8/DH{75ad58f5...}). That divergence is entirely downstream of the mechanism: the solver diff is two hunks, the rotation->sign offset tuple flipped in x and a reversed() on the character list, both in the final read-out. The comparator rows, the Z/8Z model A*(ItemRotation+1) == target, the Gaussian elimination and the recovered rotations [1,2,5,3,7,4,6,0] are identical in both. A future solver searching for this challenge would need the same mechanism either way."
+        },
+        {
+          "a_job": "a8be2b4f6e69",
+          "b_job": "d12c1e2f9a3e",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism, and this is one of the few non-trivial pairs here. 'comparator-system' versus 'linear-system' describe the same 8x8 solve: attempt 2's findings has 'Modular Gaussian elimination over Z/8Z recovers rotations [1,2,5,3,7,4,6,0]' and attempt 3's has the same elimination over the same system with the same result. The difference between the two jobs is provenance of the coefficients (attempt 2 ran the inherited solver with them hardcoded, attempt 3 extracts them from block geometry), not what the challenge is. Both end at password 2G$6JE3A and DH{ae1334dd...}."
+        },
+        {
+          "a_job": "a8be2b4f6e69",
+          "b_job": "90bd949f3c34",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Both jobs were confirmation-only re-runs (attempt 2 of attempt 1's solver, attempt 4 of attempt 3's), and the two solvers they ran differ only in whether the matrix is hardcoded or probed out of the region. 'comparator-system' and 'matrix-decode' both name the 8x8 comparator matrix solved modulo 8: attempt 2's steps say 'Solve the comparator matrix over Z/8Z', attempt 4's say 'Solve the 8x8 linear system over Z/8Z'. Both report rotations [1,2,5,3,7,4,6,0], password 2G$6JE3A and DH{ae1334dd...}."
+        },
+        {
+          "a_job": "a8be2b4f6e69",
+          "b_job": "f52c4049fec9",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism despite different final answers. Attempt 2 ran the inherited hardcoded-matrix solver; attempt 5 runs the probe-extracted-matrix solver with a corrected read-out. Both findings describe the same object - attempt 2: 'The redstone computation is modeled as A * (ItemRotation + 1) modulo 8' with modular Gaussian elimination; attempt 5: 'Eight redstone comparator rows encode an 8x8 linear system over Z/8Z' with 'modular Gaussian elimination using odd invertible pivots' - and both recover the identical rotation vector [1,2,5,3,7,4,6,0]. They diverge only at rotation->character mapping (attempt 5 flipped the offset table in x and reversed the reading order), giving C1GJ6?E8 rather than 2G$6JE3A. That is a read-out correction, not a different mechanism."
+        },
+        {
+          "a_job": "d12c1e2f9a3e",
+          "b_job": "90bd949f3c34",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "TRIVIAL PAIR - EXCLUDE WHEN SCORING (not byte-identical strings, but one artifact set paraphrased twice): attempt 4's solver.py and report.md are byte-identical to attempt 3's (sha256 5627be78... / 6f1cf4cc...), its run.log says outright 'I am preserving the carried solver and report unchanged', and its findings.json was written by the report phase over those same two unchanged files. Not two independent descriptions converging. On the merits, 'linear-system' and 'matrix-decode' name the same thing - attempt 4's own step 3 is 'Solve the 8x8 linear system over Z/8Z' and its steps 1-2 repeat attempt 3's coefficient-cell and diamond-injector extraction verbatim in substance."
+        },
+        {
+          "a_job": "d12c1e2f9a3e",
+          "b_job": "f52c4049fec9",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "BYTE-IDENTICAL technique strings ('minecraft-region-nbt-redstone-linear-system') - trivially true, EXCLUDE WHEN SCORING. The artifacts make this the cleanest possible demonstration anyway: a unified diff of the two solver.py files is exactly two hunks, both in the final read-out (the offsets tuple flipped from (+1,..) to (-1,..) and a reversed() applied to the character list, ~15 lines total out of 16k+ bytes). Every mechanism-bearing line - MCA header/chunk parsing, the redstone probe positions, extract_redstone_system, solve_mod8 - is byte-for-byte the same, and both recover rotations [1,2,5,3,7,4,6,0]. Only the password differs (2G$6JE3A vs C1GJ6?E8)."
+        },
+        {
+          "a_job": "90bd949f3c34",
+          "b_job": "f52c4049fec9",
+          "same_concept": true,
+          "confidence": "high",
+          "why": "Same mechanism. Attempt 4 shipped attempt 3's solver untouched; attempt 5 took that same solver and changed only the two read-out hunks. So the whole mechanism-bearing body of code is common to both jobs, and both findings describe it identically - attempt 4's K-02 'linear over Z/8Z and evaluates A * (ItemRotation + 1) modulo 8' against attempt 5's K-02 'Eight redstone comparator rows encode an 8x8 linear system over Z/8Z', with both quoting the same recovered rotations [1,2,5,3,7,4,6,0] and attempt 5 printing the same decoded matrix A that attempt 4's solver produces. 'matrix-decode' and 'linear-system' are the same 8x8 mod-8 solve under two names; the differing passwords come from the offset/ordering fix downstream of it."
+        }
+      ]
+    }
+  ],
+  "refutations": [
+    {
+      "lineage_root": "6f53a1fc2dc0",
+      "disagreements": [],
+      "agreed_count": 1
+    },
+    {
+      "lineage_root": "567f6aee878e",
+      "agreed_count": 1,
+      "disagreements": []
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "agreed_count": 10,
+      "disagreements": []
+    },
+    {
+      "lineage_root": "b7c25bb93d13",
+      "agreed_count": 0,
+      "disagreements": []
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "agreed_count": 21,
+      "disagreements": []
+    }
+  ],
+  "totals": {
+    "coverage_note": "`possible_pairs` is the denominator: the sum of C(n,2) over every lineage in the seed. `eligible_pairs` is how many of those had a technique observation on BOTH sides and could therefore be labelled at all. The gap is `excluded_unobserved`, itemised below. Reading `pairs`/`undecided` alone made 33/0 read as a verdict on all 34. These three numbers are DERIVED from the seed, not typed in, and scripts/test_lineage_equivalence_coverage.py recomputes them and fails if possible != eligible + excluded_unobserved.",
+    "possible_pairs": 34,
+    "eligible_pairs": 33,
+    "excluded_unobserved": 1,
+    "excluded": [
+      {
+        "lineage_root": "b7c25bb93d13",
+        "module": "forensic",
+        "filename": "0f7ebda5-b300-4a04-922f-7e113482ceb2.zip",
+        "a_job": "b7c25bb93d13",
+        "a_n": 1,
+        "a_status": "failed",
+        "a_technique": null,
+        "b_job": "56b4d47d5b4c",
+        "b_n": 2,
+        "b_status": "failed",
+        "b_technique": null,
+        "reason": "unobserved",
+        "why": "Neither attempt recorded a technique_name. Both runs were cut off before naming a mechanism — neither job tree has a findings.json at all, and both run.logs end on `[Codex CLI turn timed out after 3600s]`. The same/different question therefore has no input on either side, so the pair is outside the labelling population. This is NOT `undecided`: undecided means the question was asked of real observations and could not be answered. It is the exact object K1-c calls unobserved."
+      }
+    ],
+    "pairs": 33,
+    "same": 27,
+    "different": 6,
+    "undecided": 0,
+    "disputed": 0
+  }
+}

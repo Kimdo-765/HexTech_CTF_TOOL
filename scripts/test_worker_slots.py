@@ -725,12 +725,18 @@ def test_carry_limits_note() -> None:
     want = {
         "_CARRY_LIMITS_NOTE", "_RETRY_ANTI_OVERFIT_NOTE",
         "_retry_preamble", "_resume_preamble",
+        # _retry_preamble renders the lineage's technique history, so the
+        # slice needs the renderer too. Stubbing it here instead would let
+        # this suite pass while the real preamble NameErrors, which is what
+        # it did the moment the helper was added.
+        "_technique_history_block",
     }
     nodes = [n for n in tree.body
              if (isinstance(n, _ast.Assign)
                  and any(getattr(t, "id", "") in want for t in n.targets))
              or (isinstance(n, _ast.FunctionDef) and n.name in want)]
-    chk("both preamble builders and both notes were found", len(nodes) == 4, len(nodes))
+    chk("both preamble builders, both notes and the history renderer were found",
+        len(nodes) == 5, len(nodes))
     ns = {"_CTF_CONTEXT_HEADER": "[HDR]",
           "_STALE_PATH_WARNING_TMPL": "[STALE {prev_id}]",
           "_sanitize_hint": lambda h: f"[HINT:{h}]"}

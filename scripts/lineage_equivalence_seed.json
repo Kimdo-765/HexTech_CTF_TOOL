@@ -1,0 +1,618 @@
+{
+  "built": "2026-08-25",
+  "question": "within one retry lineage, do attempt N and attempt M name the same mechanism?",
+  "why_this_is_not_0947s_question": "0947 asked whether two DIFFERENT challenges share a concept, and its ground truth (same lineage) was definitionally the name signal, so no query tested anything. Here the lineage is a GIVEN, not the label; the label is whether two strings for the SAME challenge mean the same thing, which the strings themselves do not settle.",
+  "labelling_protocol": "same_concept must be set by a human or by an agent that has read the two jobs' findings.json and solver, NOT by string similarity. Record who set it in labelled_by. byte_identical pairs are trivially true and must be EXCLUDED when scoring, or the score measures string equality.",
+  "lineages": [
+    {
+      "root": "c7eed3b759ae",
+      "module": "rev",
+      "filename": "instagram.exe",
+      "attempts": [
+        {
+          "job_id": "c7eed3b759ae",
+          "n": 1,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "displaced-brace flag-seed extraction from PE binary",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "2d6797a7fafb",
+          "n": 2,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "mutable-alphabet permutation replay",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "0eca8554c3f9",
+          "n": 3,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "mutable-alphabet permutation replay",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "c82f712e6afa",
+          "n": 4,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "state-permutation transcript recovery",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "fb6bd6a807eb",
+          "n": 5,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "native-state-permutation transcript replay",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "bf61557b04f7",
+          "n": 6,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "floating-point-sensitive serialized-score state-machine replay",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "b7009466d190",
+          "n": 7,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "decimal-score serialization replay",
+          "approach": "static-emit"
+        }
+      ]
+    },
+    {
+      "root": "27a014a786bc",
+      "module": "rev",
+      "filename": "r.0.0.mca",
+      "attempts": [
+        {
+          "job_id": "27a014a786bc",
+          "n": 1,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "minecraft-region-nbt-redstone-linear-system",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "a8be2b4f6e69",
+          "n": 2,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "minecraft-region-nbt-redstone-comparator-system",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "d12c1e2f9a3e",
+          "n": 3,
+          "status": "finished",
+          "solved": true,
+          "technique_name": "minecraft-region-nbt-redstone-linear-system",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "90bd949f3c34",
+          "n": 4,
+          "status": "finished",
+          "solved": true,
+          "technique_name": "minecraft-region-nbt-redstone-matrix-decode",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "f52c4049fec9",
+          "n": 5,
+          "status": "finished",
+          "solved": true,
+          "technique_name": "minecraft-region-nbt-redstone-linear-system",
+          "approach": "static-emit"
+        }
+      ]
+    },
+    {
+      "root": "567f6aee878e",
+      "module": "rev",
+      "filename": "CVE-2015-2291.exe",
+      "attempts": [
+        {
+          "job_id": "567f6aee878e",
+          "n": 1,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "runtime-RDX-derived AES-ECB PDF decryption",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "90947a87cb2b",
+          "n": 2,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "runtime-RDX-derived-AES-ECB-decryption",
+          "approach": "dynamic-trace"
+        }
+      ]
+    },
+    {
+      "root": "b7c25bb93d13",
+      "module": "forensic",
+      "filename": "0f7ebda5-b300-4a04-922f-7e113482ceb2.zip",
+      "attempts": [
+        {
+          "job_id": "b7c25bb93d13",
+          "n": 1,
+          "status": "failed",
+          "solved": false,
+          "technique_name": null,
+          "approach": null
+        },
+        {
+          "job_id": "56b4d47d5b4c",
+          "n": 2,
+          "status": "failed",
+          "solved": false,
+          "technique_name": null,
+          "approach": null
+        }
+      ]
+    },
+    {
+      "root": "6f53a1fc2dc0",
+      "module": "rev",
+      "filename": "zrq",
+      "attempts": [
+        {
+          "job_id": "6f53a1fc2dc0",
+          "n": 1,
+          "status": "no_flag",
+          "solved": false,
+          "technique_name": "GF(256)-erasure-recovery with reversed Huffman, allocator-order permutation, and LZW directory reconstruction",
+          "approach": "static-emit"
+        },
+        {
+          "job_id": "9d2e4099d5ba",
+          "n": 2,
+          "status": "finished",
+          "solved": true,
+          "technique_name": "erasure-coded filesystem image with reversed Huffman, allocator-order LZW, and LIFO directory reconstruction",
+          "approach": "static-emit"
+        }
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c7eed3b759ae",
+      "a_n": 1,
+      "a_technique": "displaced-brace flag-seed extraction from PE binary",
+      "b_job": "2d6797a7fafb",
+      "b_n": 2,
+      "b_technique": "mutable-alphabet permutation replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c7eed3b759ae",
+      "a_n": 1,
+      "a_technique": "displaced-brace flag-seed extraction from PE binary",
+      "b_job": "0eca8554c3f9",
+      "b_n": 3,
+      "b_technique": "mutable-alphabet permutation replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c7eed3b759ae",
+      "a_n": 1,
+      "a_technique": "displaced-brace flag-seed extraction from PE binary",
+      "b_job": "c82f712e6afa",
+      "b_n": 4,
+      "b_technique": "state-permutation transcript recovery",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c7eed3b759ae",
+      "a_n": 1,
+      "a_technique": "displaced-brace flag-seed extraction from PE binary",
+      "b_job": "fb6bd6a807eb",
+      "b_n": 5,
+      "b_technique": "native-state-permutation transcript replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c7eed3b759ae",
+      "a_n": 1,
+      "a_technique": "displaced-brace flag-seed extraction from PE binary",
+      "b_job": "bf61557b04f7",
+      "b_n": 6,
+      "b_technique": "floating-point-sensitive serialized-score state-machine replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c7eed3b759ae",
+      "a_n": 1,
+      "a_technique": "displaced-brace flag-seed extraction from PE binary",
+      "b_job": "b7009466d190",
+      "b_n": 7,
+      "b_technique": "decimal-score serialization replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "2d6797a7fafb",
+      "a_n": 2,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "0eca8554c3f9",
+      "b_n": 3,
+      "b_technique": "mutable-alphabet permutation replay",
+      "byte_identical": true,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "2d6797a7fafb",
+      "a_n": 2,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "c82f712e6afa",
+      "b_n": 4,
+      "b_technique": "state-permutation transcript recovery",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "2d6797a7fafb",
+      "a_n": 2,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "fb6bd6a807eb",
+      "b_n": 5,
+      "b_technique": "native-state-permutation transcript replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "2d6797a7fafb",
+      "a_n": 2,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "bf61557b04f7",
+      "b_n": 6,
+      "b_technique": "floating-point-sensitive serialized-score state-machine replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "2d6797a7fafb",
+      "a_n": 2,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "b7009466d190",
+      "b_n": 7,
+      "b_technique": "decimal-score serialization replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "0eca8554c3f9",
+      "a_n": 3,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "c82f712e6afa",
+      "b_n": 4,
+      "b_technique": "state-permutation transcript recovery",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "0eca8554c3f9",
+      "a_n": 3,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "fb6bd6a807eb",
+      "b_n": 5,
+      "b_technique": "native-state-permutation transcript replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "0eca8554c3f9",
+      "a_n": 3,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "bf61557b04f7",
+      "b_n": 6,
+      "b_technique": "floating-point-sensitive serialized-score state-machine replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "0eca8554c3f9",
+      "a_n": 3,
+      "a_technique": "mutable-alphabet permutation replay",
+      "b_job": "b7009466d190",
+      "b_n": 7,
+      "b_technique": "decimal-score serialization replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c82f712e6afa",
+      "a_n": 4,
+      "a_technique": "state-permutation transcript recovery",
+      "b_job": "fb6bd6a807eb",
+      "b_n": 5,
+      "b_technique": "native-state-permutation transcript replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c82f712e6afa",
+      "a_n": 4,
+      "a_technique": "state-permutation transcript recovery",
+      "b_job": "bf61557b04f7",
+      "b_n": 6,
+      "b_technique": "floating-point-sensitive serialized-score state-machine replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "c82f712e6afa",
+      "a_n": 4,
+      "a_technique": "state-permutation transcript recovery",
+      "b_job": "b7009466d190",
+      "b_n": 7,
+      "b_technique": "decimal-score serialization replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "fb6bd6a807eb",
+      "a_n": 5,
+      "a_technique": "native-state-permutation transcript replay",
+      "b_job": "bf61557b04f7",
+      "b_n": 6,
+      "b_technique": "floating-point-sensitive serialized-score state-machine replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "fb6bd6a807eb",
+      "a_n": 5,
+      "a_technique": "native-state-permutation transcript replay",
+      "b_job": "b7009466d190",
+      "b_n": 7,
+      "b_technique": "decimal-score serialization replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "c7eed3b759ae",
+      "filename": "instagram.exe",
+      "a_job": "bf61557b04f7",
+      "a_n": 6,
+      "a_technique": "floating-point-sensitive serialized-score state-machine replay",
+      "b_job": "b7009466d190",
+      "b_n": 7,
+      "b_technique": "decimal-score serialization replay",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "27a014a786bc",
+      "a_n": 1,
+      "a_technique": "minecraft-region-nbt-redstone-linear-system",
+      "b_job": "a8be2b4f6e69",
+      "b_n": 2,
+      "b_technique": "minecraft-region-nbt-redstone-comparator-system",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "27a014a786bc",
+      "a_n": 1,
+      "a_technique": "minecraft-region-nbt-redstone-linear-system",
+      "b_job": "d12c1e2f9a3e",
+      "b_n": 3,
+      "b_technique": "minecraft-region-nbt-redstone-linear-system",
+      "byte_identical": true,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "27a014a786bc",
+      "a_n": 1,
+      "a_technique": "minecraft-region-nbt-redstone-linear-system",
+      "b_job": "90bd949f3c34",
+      "b_n": 4,
+      "b_technique": "minecraft-region-nbt-redstone-matrix-decode",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "27a014a786bc",
+      "a_n": 1,
+      "a_technique": "minecraft-region-nbt-redstone-linear-system",
+      "b_job": "f52c4049fec9",
+      "b_n": 5,
+      "b_technique": "minecraft-region-nbt-redstone-linear-system",
+      "byte_identical": true,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "a8be2b4f6e69",
+      "a_n": 2,
+      "a_technique": "minecraft-region-nbt-redstone-comparator-system",
+      "b_job": "d12c1e2f9a3e",
+      "b_n": 3,
+      "b_technique": "minecraft-region-nbt-redstone-linear-system",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "a8be2b4f6e69",
+      "a_n": 2,
+      "a_technique": "minecraft-region-nbt-redstone-comparator-system",
+      "b_job": "90bd949f3c34",
+      "b_n": 4,
+      "b_technique": "minecraft-region-nbt-redstone-matrix-decode",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "a8be2b4f6e69",
+      "a_n": 2,
+      "a_technique": "minecraft-region-nbt-redstone-comparator-system",
+      "b_job": "f52c4049fec9",
+      "b_n": 5,
+      "b_technique": "minecraft-region-nbt-redstone-linear-system",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "d12c1e2f9a3e",
+      "a_n": 3,
+      "a_technique": "minecraft-region-nbt-redstone-linear-system",
+      "b_job": "90bd949f3c34",
+      "b_n": 4,
+      "b_technique": "minecraft-region-nbt-redstone-matrix-decode",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "d12c1e2f9a3e",
+      "a_n": 3,
+      "a_technique": "minecraft-region-nbt-redstone-linear-system",
+      "b_job": "f52c4049fec9",
+      "b_n": 5,
+      "b_technique": "minecraft-region-nbt-redstone-linear-system",
+      "byte_identical": true,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "27a014a786bc",
+      "filename": "r.0.0.mca",
+      "a_job": "90bd949f3c34",
+      "a_n": 4,
+      "a_technique": "minecraft-region-nbt-redstone-matrix-decode",
+      "b_job": "f52c4049fec9",
+      "b_n": 5,
+      "b_technique": "minecraft-region-nbt-redstone-linear-system",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "567f6aee878e",
+      "filename": "CVE-2015-2291.exe",
+      "a_job": "567f6aee878e",
+      "a_n": 1,
+      "a_technique": "runtime-RDX-derived AES-ECB PDF decryption",
+      "b_job": "90947a87cb2b",
+      "b_n": 2,
+      "b_technique": "runtime-RDX-derived-AES-ECB-decryption",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    },
+    {
+      "lineage_root": "6f53a1fc2dc0",
+      "filename": "zrq",
+      "a_job": "6f53a1fc2dc0",
+      "a_n": 1,
+      "a_technique": "GF(256)-erasure-recovery with reversed Huffman, allocator-order permutation, and LZW directory reconstruction",
+      "b_job": "9d2e4099d5ba",
+      "b_n": 2,
+      "b_technique": "erasure-coded filesystem image with reversed Huffman, allocator-order LZW, and LIFO directory reconstruction",
+      "byte_identical": false,
+      "same_concept": null,
+      "labelled_by": null
+    }
+  ]
+}

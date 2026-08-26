@@ -535,6 +535,13 @@ def _resubmit(
         # is this one, started because the parent's answer was wrong. Dropping
         # it here made the record forget precisely where it mattered most.
         "flag_rejected": [r for r in (prev_meta.get("flag_rejected") or []) if r],
+        # Same reasoning as flag_rejected, for mechanisms rather than answers.
+        # A retry that re-derives a mechanism the lineage already named is not
+        # necessarily wrong — r.0.0.mca was solved that way three times — but it
+        # should know it is doing so. Entries carry whether the attempt actually
+        # got to test the mechanism (K1-c): a run cut off by a timeout is not
+        # evidence against it.
+        "technique_history": _carry_technique_history(prev_meta, prev_jd),
         "resumed_from": prev_meta.get("id") if mark_resumed else None,
         # Pass the prior Claude SDK session_id along so the new agent
         # can resume + fork the conversation rather than start fresh.
@@ -1112,8 +1119,10 @@ async def retry_with_hint_stream(job_id: str, request: Request):
         # a surviving manual_hint means these are the operator's own words. The
         # UI's manual retry lands HERE, not on the direct route, so omitting
         # this defaulted to False and rewrote a human's sentence.
-        augmented = _retry_preamble(safe, hint, fresh=fresh_session,
-                                    operator_text=manual_hint is not None)
+        augmented = _retry_preamble(
+            safe, hint, fresh=fresh_session,
+            operator_text=manual_hint is not None,
+            history=_carry_technique_history(prev_meta, jd))
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,
@@ -1194,8 +1203,10 @@ async def retry_with_hint(job_id: str, request: Request):
                 },
             ) from e
 
-    augmented = _retry_preamble(safe, hint, fresh=fresh_session,
-                                operator_text=manual_hint is not None)
+    augmented = _retry_preamble(
+        safe, hint, fresh=fresh_session,
+        operator_text=manual_hint is not None,
+        history=_carry_technique_history(prev_meta, jd))
     new_id = _resubmit(
         prev_meta, augmented, jd,
         carry_work=True,
@@ -1302,7 +1313,8 @@ async def stop_and_resume(job_id: str, request: Request):
     )
     # /resume refuses without a manual hint, so this is always operator text.
     augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session,
-                                      operator_text=True)
+                                      operator_text=True,
+                                      history=_carry_technique_history(prev_meta, jd))
 
     new_id = _resubmit(
         prev_meta, augmented_hint, jd,
@@ -1467,8 +1479,180 @@ _RETRY_ANTI_OVERFIT_NOTE = (
     "primitive has produced its expected runtime signal.\n\n"
 )
 
+# Truncation kinds: the attempt stopped before its hypothesis was tested.
+#
+# The vocabulary is the ORCHESTRATOR'S, not a second opinion about what a
+# timeout is. The first version of this set said so in a comment and then got
+# a member wrong anyway: it listed `budget`, which no producer ever writes —
+# `modules/_common.py:9259` writes `budget_fallback`. A dead token silently
+# rates a truncation as `looked: true`, which is the exact misreading K1-c
+# exists to prevent, so both directions are now pinned by a census regression
+# (`scripts/test_lineage_technique_carry.py`): every member here must be
+# producible, and every producible kind must be classified in exactly one of
+# these two sets.
+#
+# The split is "did this attempt get to find out?", not "was it our fault".
+_TRUNCATED_KINDS = frozenset({
+    "timeout",               # classify_agent_error / _STOP_REASON_KIND
+    "killed",                # _common.py:9342 (SIGKILL / OOM)
+    "policy_refusal",        # AUP block — the run never started
+    "transport_error",       # _STOP_REASON_KIND: process_error / EOF
+    "transport_unavailable",  # live_fire_job.py:48
+    "budget_fallback",       # _common.py:9259 — tool budget cut the turn short
+    "rate_limit",            # classify_agent_error — provider refused to serve
+    "auth",                  # classify_agent_error — never authenticated
+    "cli_infra_error",       # bundled CLI failed to start (glibc pollution)
+    "target_unusable",       # _runner.py:1147 — remote target never answered
+    "stopped_for_resume",    # retry.py:1362 — operator halted it mid-flight
+})
+
+# Kinds where the run DID happen and failed on its own terms. These are real
+# evidence about the mechanism, so they carry `looked: true`. `agent_error` is
+# here deliberately: a generic agent failure is not a truncation. NB until the
+# peer's `classify_stop_reason` work lands, misc/forensic flatten a Codex CLI
+# turn timeout into `agent_error` (measured: b7c25bb93d13, 56b4d47d5b4c,
+# fd5bb1470319 all carry `[Codex CLI turn timed out after 3600s]` in run.log
+# and `error_kind=agent_error` in meta), so those three read as `looked: true`
+# here until that fix merges. That is a producer defect, not a reason to widen
+# this set — widening it would rate every genuine agent failure as untested.
+_RAN_KINDS = frozenset({
+    "agent_error",
+    "agent_exception",
+    "import_error",
+    "unknown",
+})
+
+
+def _technique_of(job_dir: Path) -> str | None:
+    """The mechanism a finished attempt said its challenge WAS.
+
+    `chain.technique_name` for pwn/web/crypto, `solver_strategy.technique_name`
+    for rev. Deliberately NOT `solver_strategy.approach`: measured on 2026-08-25,
+    approach was `static-emit` in 16 of the 18 findings that had a strategy at
+    all, so carrying it forward would carry no information.
+    """
+    try:
+        data = json.loads((job_dir / "findings.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    chain = data.get("chain") if isinstance(data.get("chain"), dict) else {}
+    strategy = (data.get("solver_strategy")
+                if isinstance(data.get("solver_strategy"), dict) else {})
+    name = chain.get("technique_name") or strategy.get("technique_name")
+    name = str(name or "").strip()
+    return name or None
+
+
+def _carry_technique_history(prev_meta: dict, prev_jd: Path) -> list[dict]:
+    """The lineage's mechanisms, oldest first, with the parent appended.
+
+    Mirrors `flag_rejected`: accumulate down the chain rather than recomputing,
+    so a grandchild sees what the grandparent tried without walking the tree.
+
+    Each entry says whether the attempt actually TESTED its mechanism.
+    `looked` is false when the run was cut off — a timeout is not evidence the
+    mechanism was wrong, and three of 2026-08-25's jobs died that way with the
+    operator's job_timeout set to 9999999.
+
+    An entry survives with NO technique when the attempt was truncated: a run
+    that was cut off before it wrote findings.json named nothing, and dropping
+    it would hide the cut-off itself. Both of the forensic attempts the K2
+    corpus excluded (`b7c25bb93d13`, `56b4d47d5b4c`) are that shape — no
+    findings.json at all — so without this the child of a truncated attempt
+    would see a history that says the attempt never happened.
+    """
+    history = [
+        h for h in (prev_meta.get("technique_history") or [])
+        # A truncated entry has no technique to carry and must still survive the
+        # next hop; keying the filter on `technique` alone dropped exactly the
+        # entries K1-c adds.
+        if isinstance(h, dict) and (h.get("technique") or h.get("looked") is False)
+    ]
+    technique = _technique_of(prev_jd)
+    # The key is `error_kind`. meta.json has never held `agent_error_kind` —
+    # that is the RESPONSE field name (`api/routes/jobs.py:1461` renames it on
+    # the way out) and the result.json field name. Counted over every job tree
+    # on disk, 95 of them:
+    #
+    #     error_kind        key present on 86, absent on 9
+    #                       of the 86: null 74, non-null 12
+    #                       (stopped_for_resume 4, agent_error 3,
+    #                        transport_error 2, unknown 2, timeout 1)
+    #     agent_error_kind  present on 0
+    #
+    # An earlier version of this comment said 96 trees and 22 present. Both
+    # were wrong and the second was wrong by a factor of four — it appears to
+    # have counted something other than the key. Reading the wrong KEY is the
+    # defect that mattered: it made `looked` unconditionally true, so K1-c was
+    # inert in production while its suite passed on a fabricated key.
+    kind = str(prev_meta.get("error_kind") or "").strip().lower()
+    truncated = kind in _TRUNCATED_KINDS
+    if technique or truncated:
+        history = history + [{
+            "job_id": prev_meta.get("id"),
+            "technique": technique,
+            "status": prev_meta.get("status"),
+            # K1-c. False means "this attempt did not get to find out", which is
+            # a different fact from "this mechanism did not work".
+            "looked": not truncated,
+            "stopped_by": kind or None,
+        }]
+    # A lineage can run long; keep the tail. 12 is the same visible-window size
+    # the exploit-library hint uses, for the same reason: past it the prompt
+    # grows without the reader gaining anything.
+    return history[-12:]
+
+
+def _technique_history_block(history: list[dict]) -> str:
+    """Render the history for the retry preamble, or "" when there is none.
+
+    The instruction attached to it is NOT "do not repeat". That rule is refuted
+    by this project's own corpus: r.0.0.mca was retried five times, every
+    attempt naming the same mechanism, and it went no_flag, no_flag, finished,
+    finished, finished. Repeating the mechanism is how it was solved.
+
+    What the agent is asked for is a DECLARATION: re-executing, or refuting.
+    The failure this addresses is the other lineage — instagram.exe, seven
+    attempts, six distinct technique strings that a reading of the artifacts
+    resolves to two mechanisms. Nothing there noticed it was circling.
+    """
+    if not history:
+        return ""
+    lines = ["[what this lineage has already named]"]
+    for h in history:
+        if h.get("looked"):
+            outcome = h.get("status") or "?"
+        else:
+            outcome = "NOT TESTED — cut off by %s" % (h.get("stopped_by") or "?")
+        # A truncated attempt can have named nothing at all — it died before it
+        # wrote findings.json. Say so rather than rendering "None", because the
+        # useful fact for the reader is that an attempt was spent, not that a
+        # field is empty.
+        lines.append("  - %s   (%s, %s)"
+                     % (h.get("technique") or "(no mechanism recorded)",
+                        h.get("job_id") or "?", outcome))
+    lines.append("")
+    lines.append(
+        "Naming the same mechanism again is ALLOWED and is sometimes right: a "
+        "prior attempt can have identified the mechanism correctly and failed "
+        "to execute it. What is not allowed is leaving it ambiguous. State "
+        "which you are doing:\n"
+        "  RE-EXECUTING <mechanism> — say what you will do DIFFERENTLY this "
+        "time, at the execution level.\n"
+        "  REFUTING <mechanism> — say what evidence rules it out, then name "
+        "the new one.\n"
+        "An entry marked NOT TESTED did not get to find out. It is not "
+        "evidence against that mechanism and must not be treated as a dead "
+        "end."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
-                    operator_text: bool = False) -> str:
+                    operator_text: bool = False,
+                    history: list[dict] | None = None) -> str:
     """Preamble for the standard retry path (failed / no_flag /
     finished). The new agent is launched with `resume=<prev_session>` +
     `fork_session=True`, so its conversation already holds the prior
@@ -1497,10 +1681,15 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
     # rewriting it is the same class of defect as the provenance mislabelling
     # fixed on 2026-08-24 — the reader is told something the author did not say.
     _hint_text = hint if operator_text else _sanitize_hint(hint)
+    # Rendered before the hint, not after: the agent should know what the
+    # lineage has already named BEFORE it reads an instruction that may
+    # push it toward one of those names again.
+    _hist_block = _technique_history_block(history or [])
 
     if fresh:
         return (
             _CTF_CONTEXT_HEADER
+            + _hist_block
             + f"\n[retry of job {prev_id} — FRESH CONTEXT, conversation NOT "
             "forked]\n"
             "You are starting with a CLEAN context. There is NO prior "
@@ -1524,6 +1713,7 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
         )
     return (
         _CTF_CONTEXT_HEADER
+        + _hist_block
         + f"\n[retry of job {prev_id} — prior-session fork requested]\n"
         + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
         + "\n\nYour current working directory IS the new job's work "
@@ -1544,11 +1734,20 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
 
 
 def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
-                     operator_text: bool = False) -> str:
+                     operator_text: bool = False,
+                     history: list[dict] | None = None) -> str:
     """Preamble for stop-and-resume. Same fork semantics as retry, but
     the prior session was halted MID-RUN by the user — so the agent
     should treat the work as in-flight ("pick up where you left off")
     rather than as a finished failure to revisit.
+
+    The lineage block belongs here too. The first pass at K1-a left it out on
+    the stated grounds that "a resume keeps the SAME job id, so there is no
+    child and no carry" — that describes `_continue_in_place` (":752-755",
+    which really does re-enqueue the same id), not `/resume`. `/resume` calls
+    `_resubmit`, which mints a `new_job_id()` and writes `technique_history`
+    into the child meta unconditionally. So resume children were accumulating a
+    history no reader ever saw, which is the carry without the point of it.
 
     Same stale-path concern as retry: the forked tool history
     references `/data/jobs/<prev_id>/work/...`, but the new cwd is
@@ -1565,10 +1764,15 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
     # rewriting it is the same class of defect as the provenance mislabelling
     # fixed on 2026-08-24 — the reader is told something the author did not say.
     _hint_text = hint if operator_text else _sanitize_hint(hint)
+    # Before the hint, for the same reason as in _retry_preamble: the agent
+    # should know what the lineage has already named before it reads an
+    # instruction that may push it back toward one of those names.
+    _hist_block = _technique_history_block(history or [])
 
     if fresh:
         return (
             _CTF_CONTEXT_HEADER
+            + _hist_block
             + f"\n[resume of job {prev_id} — FRESH CONTEXT, conversation NOT "
             "forked]\n"
             "You are starting with a CLEAN context. There is NO prior "
@@ -1588,6 +1792,7 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
         )
     return (
         _CTF_CONTEXT_HEADER
+        + _hist_block
         + f"\n[resume of job {prev_id} — interrupted, same session forked]\n"
         + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
         + "\n\nYour prior session was halted mid-run. Your current "
@@ -1703,8 +1908,10 @@ async def stop_and_resume_stream(job_id: str, request: Request):
         # Same shape as the streaming retry above: the reviewer branch is
         # guarded by `if manual_hint is None`, so a surviving manual_hint is
         # operator text and must not be sanitized.
-        augmented = _resume_preamble(safe, hint, fresh=fresh_session,
-                                     operator_text=manual_hint is not None)
+        augmented = _resume_preamble(
+            safe, hint, fresh=fresh_session,
+            operator_text=manual_hint is not None,
+            history=_carry_technique_history(prev_meta, jd))
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,

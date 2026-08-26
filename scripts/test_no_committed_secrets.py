@@ -37,11 +37,23 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # no other real credential -- the six other matches are digests and test
 # placeholders, listed below by exact value so a NEW one cannot hide behind a
 # path-level exemption.
-# Artefacts BUILT FROM LIVE JOB DATA and committed. Empty since the concept
-# benchmark was deleted with the ranker it scored — and that emptiness is
-# checked below, so this list going stale is visible rather than silent. Add a
-# file here the moment anything is generated from data/jobs and tracked.
-GENERATED: list[str] = []
+# Artefacts BUILT FROM LIVE JOB DATA and committed. Add a file here the moment
+# anything generated from data/jobs becomes tracked.
+#
+# THE SECOND INCIDENT, 2026-08-26. `fafa7a1` tracked the two files below. They
+# are written by reading every attempt of every retry lineage — findings,
+# solvers, reports, run.log — so they inherit whatever those artefacts say. The
+# labelled one carried three ACCEPTED flags (verified present in `meta.flags` of
+# finished jobs 90bd949f3c34 / d12c1e2f9a3e, f52c4049fec9, 9d2e4099d5ba) and one
+# rejected candidate of the same shape. The commit was made without running this
+# file; a read-only eyeball scan ran instead and searched only for `DH{`, so it
+# reported "no real flags" while two `pokactf2024{...}` captures sat in the same
+# artefact. That is the same lesson as the first incident in a new costume: the
+# sweep below is what catches it, and it only runs if someone runs it.
+GENERATED: list[str] = [
+    "scripts/lineage_equivalence_seed.json",
+    "scripts/lineage_equivalence_labelled.json",
+]
 
 # Known-benign, allowlisted by VALUE rather than by file. A commit SHA and a
 # hash of the empty string are credential-shaped and are not credentials.
