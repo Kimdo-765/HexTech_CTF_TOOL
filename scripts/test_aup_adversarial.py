@@ -58,7 +58,15 @@ def _load(calls: list, blow_up: bool = False, returns=None, use_sentinel=True):
     """Extract _aup_restart_session with run_main_agent_session stubbed."""
     src = (ROOT / "modules" / "_common.py").read_text()
     tree = _ast.parse(src)
-    want = {"_aup_restart_session", "_AUP_RESTART_FAILED"}
+    # `_aup_restart_session` grew a call to `job_turn_timeout_s` (the
+    # turn-timeout helper) inside the other_provider branch. This slice
+    # runs the function in a namespace of its own, so a dependency the
+    # slice does not carry raises NameError *inside* the branch, the
+    # backend is never invoked, and the suite dies at `calls[0]` having
+    # run 10 of its 47 checks. Production imports the whole module and
+    # was never affected; what broke was the harness.
+    want = {"_aup_restart_session", "_AUP_RESTART_FAILED",
+            "job_turn_timeout_s"}
     nodes = [n for n in tree.body
              if (isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
                  and n.name in want)
@@ -76,7 +84,13 @@ def _load(calls: list, blow_up: bool = False, returns=None, use_sentinel=True):
         # missed the sentinel-clobber defect.
         return {"verdict": "success"} if returns is None and use_sentinel else returns
 
-    ns: dict = {"Path": Path, "run_main_agent_session": _fake_session}
+    # `job_turn_timeout_s` (sliced in above) reads job meta to find a
+    # per-job budget. Its own try only catches TypeError/ValueError, so a
+    # missing name escapes as NameError rather than falling back to the
+    # 1800s floor. An empty meta exercises exactly that floor.
+    ns: dict = {"Path": Path, "run_main_agent_session": _fake_session,
+                "read_meta": lambda _job_id: {},
+                "write_meta": lambda *_a, **_k: None}
     # grok_acp lives behind a lazy import; give it a real dataclass
     gm = types.ModuleType("modules.grok_acp")
 
@@ -89,6 +103,12 @@ def _load(calls: list, blow_up: bool = False, returns=None, use_sentinel=True):
         env: dict | None = None
         resume: str | None = None
         add_dirs: list | None = None
+        # Mirrors the real dataclass. It has carried this field for a while,
+        # but nothing passed it until the turn-timeout work started handing a
+        # per-job budget to the AUP fallback; the stub then raised TypeError
+        # inside the branch's try, which returns _AUP_RESTART_FAILED, so the
+        # backend was never invoked and the suite died at `calls[0]`.
+        turn_timeout_s: float | None = None
 
     gm.GrokSessionOptions = GrokSessionOptions
     ap = types.ModuleType("modules.agent_provider")
