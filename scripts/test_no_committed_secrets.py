@@ -25,6 +25,9 @@ negative costs a credential, and this repository has a remote.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import pathlib
 import re
 import sys
@@ -88,6 +91,55 @@ def _tracked_text_files():
         except (UnicodeDecodeError, OSError):
             continue                               # binary
 
+
+def _live_jobs_dir():
+    """Find live metadata without assuming this checkout owns data/jobs."""
+    candidates = []
+    if os.environ.get("HEXTECH_LIVE_JOBS"):
+        candidates.append(pathlib.Path(os.environ["HEXTECH_LIVE_JOBS"]))
+    candidates.extend((pathlib.Path("/data/jobs"), ROOT / "data" / "jobs"))
+
+    common = ROOT / ".git"
+    if common.is_file():
+        try:
+            line = common.read_text().strip()
+            if line.startswith("gitdir:"):
+                git_dir = pathlib.Path(line.split(":", 1)[1].strip())
+                for ancestor in git_dir.parents:
+                    if ancestor.name == ".git":
+                        candidates.append(ancestor.parent / "data" / "jobs")
+                        break
+        except OSError:
+            pass
+
+    for candidate in candidates:
+        try:
+            if candidate.is_dir() and any(candidate.glob("*/meta.json")):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _accepted_flag_oracle(jobs_dir):
+    """Exact accepted values; no prefix or flag-shape assumption."""
+    accepted = set()
+    scanned = 0
+    for job_dir in sorted(jobs_dir.iterdir()):
+        meta_path = job_dir / "meta.json"
+        if not meta_path.is_file():
+            continue
+        scanned += 1
+        for path in (meta_path, job_dir / "result.json"):
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            for value in payload.get("flags") or []:
+                if isinstance(value, str) and value:
+                    accepted.add(value)
+    return accepted, scanned
+
 PATTERNS = [
     ("vendor token", re.compile(
         r"\b(?:ctfd|ghp|gho|ghu|ghs|ghr|glpat|xox[baprs])_[A-Za-z0-9_\-]{10,}")),
@@ -142,6 +194,27 @@ for rel, raw in _tracked_text_files():
 chk("scanned a plausible number of tracked files", scanned > 100, scanned)
 chk("no unrecognised credential-shaped string in any tracked file",
     not unknown, unknown[:5])
+
+print("")
+print("--- live accepted flags are an exact-value oracle " + "-" * 12)
+live_jobs = _live_jobs_dir()
+if live_jobs is None:
+    print("SKIP  live jobs corpus is unavailable")
+else:
+    accepted, live_scanned = _accepted_flag_oracle(live_jobs)
+    chk("the live flag oracle actually read job metadata (%d trees)"
+        % live_scanned, live_scanned > 0, live_scanned)
+    accepted_hits = []
+    for rel, raw in _tracked_text_files():
+        for value in accepted:
+            if value in raw:
+                accepted_hits.append((
+                    rel,
+                    "sha256:" + hashlib.sha256(value.encode()).hexdigest()[:16],
+                ))
+    chk("no exact accepted flag from meta.json or result.json is tracked — "
+        "this is prefix-agnostic and also covers brace-less flags",
+        not accepted_hits, accepted_hits[:8])
 
 print("")
 print("--- the generated-artefact list has not gone stale " + "-" * 6)

@@ -26,6 +26,7 @@ own `lineages` block, and the coverage line is asserted as an INVARIANT
 from __future__ import annotations
 
 import json
+import os
 import sys
 from itertools import combinations
 from pathlib import Path
@@ -51,6 +52,90 @@ def chk(label, got, want):
 seed = json.loads(SEED.read_text())
 lab = json.loads(LABELLED.read_text())
 totals = lab["totals"]
+
+
+def _live_jobs_dir() -> Path | None:
+    """Find the real corpus from either the main checkout or a worker."""
+    candidates = []
+    if os.environ.get("HEXTECH_LIVE_JOBS"):
+        candidates.append(Path(os.environ["HEXTECH_LIVE_JOBS"]))
+    candidates.extend((Path("/data/jobs"), ROOT / "data" / "jobs"))
+
+    common = ROOT / ".git"
+    if common.is_file():
+        try:
+            line = common.read_text().strip()
+            if line.startswith("gitdir:"):
+                git_dir = Path(line.split(":", 1)[1].strip())
+                for ancestor in git_dir.parents:
+                    if ancestor.name == ".git":
+                        candidates.append(ancestor.parent / "data" / "jobs")
+                        break
+        except OSError:
+            pass
+
+    for candidate in candidates:
+        try:
+            if candidate.is_dir() and any(candidate.glob("*/meta.json")):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _live_retry_graph(jobs_dir: Path, scope_date: str):
+    """Rebuild all multi-attempt lineages started on the seed's date."""
+    metas = {}
+    for meta_path in sorted(jobs_dir.glob("*/meta.json")):
+        try:
+            metas[meta_path.parent.name] = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+
+    def parent(job_id):
+        meta = metas.get(job_id) or {}
+        return meta.get("retry_of") or meta.get("resumed_from")
+
+    def root_of(job_id):
+        seen = set()
+        while parent(job_id) in metas and parent(job_id) not in seen:
+            seen.add(job_id)
+            job_id = parent(job_id)
+        return job_id
+
+    grouped = {}
+    for job_id, meta in metas.items():
+        if str(meta.get("started_at") or "")[:10] != scope_date:
+            continue
+        grouped.setdefault(root_of(job_id), []).append(job_id)
+
+    graph = {}
+    for root, job_ids in grouped.items():
+        if len(job_ids) < 2:
+            continue
+        graph[root] = sorted(
+            job_ids,
+            key=lambda job_id: (str(metas[job_id].get("started_at") or ""),
+                                job_id),
+        )
+    return graph, len(metas)
+
+
+print("--- the seed is bound to the live retry graph " + "-" * 12)
+live_jobs = _live_jobs_dir()
+if live_jobs is None:
+    print("SKIP  live jobs corpus is unavailable")
+else:
+    live_graph, live_meta_count = _live_retry_graph(live_jobs, seed["built"])
+    seed_graph = {
+        lineage["root"]: [attempt["job_id"] for attempt in lineage["attempts"]]
+        for lineage in seed["lineages"]
+    }
+    chk("the live corpus was actually read (%d job trees)" % live_meta_count,
+        live_meta_count > 0, True)
+    chk("REGRESSION: seed roots and ordered attempts equal every multi-attempt "
+        "lineage in the live corpus for %s" % seed["built"],
+        seed_graph, live_graph)
 
 print("--- the denominator is derived from the seed " + "-" * 13)
 lineages = seed["lineages"]
