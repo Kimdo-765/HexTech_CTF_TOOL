@@ -113,23 +113,52 @@ def _scalar_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, boo
         read_usage_path,
     )
 
-    # meta.cost_usd is the existing authoritative job scalar and main also has
-    # ledger rows that mirror it. Reviewer calls are separate API/worker
-    # invocations recorded only in usage.jsonl, so add that role alone; summing
-    # the whole ledger would double-count the main session.
-    reviewer_spent, reviewer_complete = dollar_cost_parts(
-        read_usage_path(JOBS_DIR / job_id / LEDGER_FILENAME), roles={"reviewer"}
+    # meta.cost_usd is the existing main/subagent job scalar and main also has
+    # ledger rows that mirror it. Judge and reviewer calls are separate
+    # API/worker invocations recorded only in usage.jsonl, so add those roles;
+    # summing the whole ledger would double-count a priced main session.
+    records = read_usage_path(JOBS_DIR / job_id / LEDGER_FILENAME)
+    auxiliary_spent, auxiliary_complete = dollar_cost_parts(
+        records, roles={"judge", "reviewer"}
     )
     cost = _job_cost(job_id, meta)
-    if cost != 0.0:
-        return cost + reviewer_spent, 0.0, reviewer_complete
-    if str(meta.get("status") or "") not in _USAGE_TERMINAL_STATUSES:
-        return reviewer_spent, 0.0, reviewer_complete
+
+    # Legacy analyzers promoted the token estimate into meta.cost_usd when a
+    # terminal ResultMessage carried total_cost_usd=None.  That makes the same
+    # estimate appear authoritative merely because it is positive (observed on
+    # Codex OAuth job f2a5b2c71ac8: 18.422439 vs estimate 18.4224).  A null main
+    # ledger row is the durable provenance signal: keep the value in the
+    # estimate unit and do not compare it with an operator dollar budget.
+    main_spent, main_complete = dollar_cost_parts(records, roles={"main"})
+    main_rows = [row for row in records if str(row.get("role") or "") == "main"]
     try:
-        estimate = max(0.0, float(meta.get("cost_usd_estimate") or 0.0))
+        parked_estimate = max(0.0, float(meta.get("cost_usd_estimate") or 0.0))
     except (TypeError, ValueError):
-        estimate = 0.0
-    return reviewer_spent, estimate, False
+        parked_estimate = 0.0
+    promoted_estimate = bool(
+        cost > 0.0
+        and parked_estimate > 0.0
+        and main_rows
+        and main_spent == 0.0
+        and not main_complete
+        # The heartbeat parks the same token estimate rounded to four decimal
+        # places, while the legacy finalizer copied the unrounded value into
+        # cost_usd.  Match only that quantization gap (at most half of $0.0001).
+        # A cent-wide floor demoted real small-dollar prices: $0.20 vs $0.195
+        # is 2.6% apart but still fell inside $0.01.
+        and abs(cost - parked_estimate) <= 0.00005 + 1e-12
+    )
+    if promoted_estimate:
+        return auxiliary_spent, parked_estimate, False
+    if cost != 0.0:
+        # The scalar is a session-total contract. A multi-model ledger may put
+        # that reported total on the primary row and null on secondary rows
+        # because it cannot invent a per-model split; that does not make the
+        # already-reported scalar incomplete.
+        return cost + auxiliary_spent, 0.0, auxiliary_complete
+    if str(meta.get("status") or "") not in _USAGE_TERMINAL_STATUSES:
+        return auxiliary_spent, 0.0, auxiliary_complete
+    return auxiliary_spent, parked_estimate, False
 
 
 def _job_usage_cost_parts(job_id: str, meta: dict) -> tuple[float, float, bool]:
@@ -425,8 +454,9 @@ def get_usage():
 
     Honest scope:
       * `remaining_usd` is `budget_usd - spent` against the OPERATOR'S
-        configured budget (0 = no budget → spent-only). Not the Claude
-        account limit.
+        configured budget only when `spent_usd_complete=true`; otherwise it
+        and `pct_used` are null. A zero budget means spent-only. This is not the
+        Claude account limit.
       * `rate_limit` is Claude's coarse subscription signal the Agent SDK
         emits (status + reset epoch; `utilization` is frequently absent
         for OAuth accounts).
@@ -446,8 +476,15 @@ def get_usage():
         budget = float(get_setting("budget_usd") or 0.0)
     except (TypeError, ValueError):
         budget = 0.0
-    remaining = round(budget - spent, 4) if budget > 0 else None
-    pct_used = round(min(spent / budget * 100.0, 999.9), 1) if budget > 0 else None
+    spent_complete = bool(stats.get("spent_usd_complete", True))
+    # A known-dollar subtotal is still useful evidence, but it is not a total.
+    # Returning a numeric "left" or percentage for an incomplete sum falsely
+    # claims the operator budget bounds the run.
+    remaining = round(budget - spent, 4) if budget > 0 and spent_complete else None
+    pct_used = (
+        round(min(spent / budget * 100.0, 999.9), 1)
+        if budget > 0 and spent_complete else None
+    )
     return {
         "spent_usd": round(spent, 4),
         # Token-estimated spend of jobs still RUNNING (no ResultMessage yet, so
@@ -462,7 +499,7 @@ def get_usage():
         "terminal_unpriced_estimate_usd": stats.get(
             "terminal_unpriced_estimate_usd", 0.0
         ),
-        "spent_usd_complete": bool(stats.get("spent_usd_complete", True)),
+        "spent_usd_complete": spent_complete,
         "budget_usd": round(budget, 4),
         "remaining_usd": remaining,
         "pct_used": pct_used,

@@ -280,6 +280,12 @@ def _exercise_finalizer(module: str, agent_summary: dict, scan_flags: list[str])
         "extract_cost": lambda _summary: 0.0,
         "prior_session_cost": lambda _job_id: 0.0,
         "scan_job_for_flags": _scan,
+        "classify_stop_reason": lambda reason, fallback="agent_error": {
+            "timeout": "timeout",
+            "process_error": "transport_error",
+            "unexpected_eof": "transport_error",
+            "cancelled": "killed",
+        }.get(str(reason or "").lower(), fallback),
         "emit_event": lambda *_args, **_kwargs: None,
         "_is_placeholder_flag": lambda _flag: False,
         "has_provider_auth": lambda: True,
@@ -909,7 +915,9 @@ def main() -> int:
             "sandbox_started=sandbox_started" in source
             and "agent_error=agent_err is not None" in source
             and 'result["agent_error"] = agent_err' in source
-            and 'error_kind="agent_error" if agent_err else None' in source,
+            and source.count('"stop_reason":') == 3
+            and "classify_stop_reason" in source
+            and "error_kind=agent_err_kind" in source,
         )
 
     section("I4 error occurrence is independent of message truthiness")
@@ -950,6 +958,11 @@ def main() -> int:
         _result, _terminal, error_call = _exercise_finalizer(
             module, {"result": {"is_error": True}}, []
         )
+        timeout_result, timeout_terminal, timeout_call = _exercise_finalizer(
+            module,
+            {"result": {"is_error": True, "stop_reason": "timeout"}},
+            [],
+        )
         _result, _terminal, control_call = _exercise_finalizer(
             module, {"result": {"is_error": False}}, []
         )
@@ -957,6 +970,14 @@ def main() -> int:
             f"I4 R2 {module}: explicit one-shot error occurrence is forwarded",
             error_call.get("agent_error") is True,
             error_call,
+        )
+        chk(
+            f"I4 R2 {module}: structured one-shot timeout keeps its category",
+            timeout_result.get("agent_error_kind") == "timeout"
+            and timeout_terminal.get("error_kind") == "timeout"
+            and timeout_terminal.get("status") == "failed"
+            and timeout_call.get("agent_error") is True,
+            (timeout_result, timeout_terminal, timeout_call),
         )
         chk(
             f"I4 R2 {module}: explicit one-shot success remains the no-error control",

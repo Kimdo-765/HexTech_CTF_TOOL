@@ -23,10 +23,12 @@ from claude_agent_sdk import (
 from modules._common import (
     capture_session_id,
     agent_heartbeat,
+    classify_stop_reason,
     extract_cost,
     no_flag_status,
     prior_session_cost,
     format_tool_result,
+    job_turn_timeout_s,
     kill_guard_hooks,
     log_thinking,
     read_meta,
@@ -221,7 +223,12 @@ async def _claude_summary(
             AssistantMessage as GptAM,
             ResultMessage as GptRM,
         )
-        _log(job_id, f"Launching {provider_display_name('gpt')} summary agent (model={model})")
+        turn_timeout_s = job_turn_timeout_s(job_id)
+        _log(
+            job_id,
+            f"Launching {provider_display_name('gpt')} summary agent "
+            f"(model={model}, turn_timeout={turn_timeout_s:.0f}s)",
+        )
         opts = GptSessionOptions(
             system_prompt=SYSTEM_PROMPT,
             model=model,
@@ -235,6 +242,7 @@ async def _claude_summary(
             },
             enable_tools=True,
             enable_subagents=True,
+            turn_timeout_s=turn_timeout_s,
         )
         async with GptAgentClient(opts) as client:
             await client.query(prompt)
@@ -255,6 +263,7 @@ async def _claude_summary(
                         "num_turns": getattr(msg, "num_turns", None),
                         "total_cost_usd": getattr(msg, "total_cost_usd", None),
                         "is_error": bool(getattr(msg, "is_error", False)),
+                        "stop_reason": getattr(msg, "stop_reason", None),
                     }
         return summary
 
@@ -268,7 +277,12 @@ async def _claude_summary(
             ToolUseBlock as GrokTUB,
         )
         from modules._prompts import adapt_system_prompt_for_grok
-        _log(job_id, f"Launching {provider_display_name('grok')} summary agent (model={model})")
+        turn_timeout_s = job_turn_timeout_s(job_id)
+        _log(
+            job_id,
+            f"Launching {provider_display_name('grok')} summary agent "
+            f"(model={model}, turn_timeout={turn_timeout_s:.0f}s)",
+        )
         opts = GrokSessionOptions(
             system_prompt=adapt_system_prompt_for_grok(SYSTEM_PROMPT),
             model=model,
@@ -280,6 +294,7 @@ async def _claude_summary(
                 "TMP": _tmp_str,
                 "TEMP": _tmp_str,
             },
+            turn_timeout_s=turn_timeout_s,
         )
         async with GrokACPClient(opts) as client:
             if client.session_id:
@@ -309,6 +324,7 @@ async def _claude_summary(
                         "num_turns": getattr(msg, "num_turns", None),
                         "total_cost_usd": getattr(msg, "total_cost_usd", None),
                         "is_error": bool(getattr(msg, "is_error", False)),
+                        "stop_reason": getattr(msg, "stop_reason", None),
                     }
         return summary
 
@@ -363,6 +379,7 @@ async def _claude_summary(
                 "num_turns": msg.num_turns,
                 "total_cost_usd": msg.total_cost_usd,
                 "is_error": msg.is_error,
+                "stop_reason": getattr(msg, "stop_reason", None),
             }
     return summary
 
@@ -416,6 +433,12 @@ def run_job(
         cost += prior_session_cost(job_id)
         result["cost_usd"] = cost
         sandbox_started, agent_err = _summary_agent_evidence(result.get("claude"))
+        agent_result = ((result.get("claude") or {}).get("result")
+                        if isinstance(result.get("claude"), dict) else {})
+        agent_err_kind = (
+            classify_stop_reason(agent_result.get("stop_reason"), "agent_error")
+            if agent_err else None
+        )
         flags = scan_job_for_flags(
             job_id,
             sandbox_started=sandbox_started,
@@ -423,7 +446,7 @@ def run_job(
         )
         result["flags"] = flags
         result["agent_error"] = agent_err
-        result["agent_error_kind"] = "agent_error" if agent_err else None
+        result["agent_error_kind"] = agent_err_kind
 
         # Surface log-miner stats so the UI can render counts without
         # re-reading log_findings.json.
@@ -460,7 +483,7 @@ def run_job(
             job_id, status=final_status, stage="done", cost_usd=cost,
             flags=flags,
             error=agent_err,
-            error_kind="agent_error" if agent_err else None,
+            error_kind=agent_err_kind,
             log_findings_counts=log_findings_counts,
             result={"kind": kind, "had_claude": bool(result.get("claude"))},
         )

@@ -394,17 +394,23 @@ write_usage_meta(
     {"status": "running", "cost_usd": 0, "cost_usd_estimate": 3.5},
 )
 (usage_jobs / "f00000000001" / "usage.jsonl").write_text(
-    json.dumps({
-        "role": "reviewer", "provider": "claude",
-        "cost_usd": 0.25, "cost_basis": "reported",
-    }) + "\n",
+    "\n".join([
+        json.dumps({
+            "role": "judge", "provider": "claude",
+            "cost_usd": 0.5, "cost_basis": "reported",
+        }),
+        json.dumps({
+            "role": "reviewer", "provider": "claude",
+            "cost_usd": 0.25, "cost_basis": "reported",
+        }),
+    ]) + "\n",
     encoding="utf-8",
 )
 
 original_jobs_dir = jobs_module.JOBS_DIR
 jobs_module.JOBS_DIR = usage_jobs
 usage_stats = jobs_module.get_stats()
-check("test_usage_authoritative_cost_includes_reviewer", usage_stats["total_cost_usd"], 2.75)
+check("test_usage_authoritative_cost_includes_judge_and_reviewer", usage_stats["total_cost_usd"], 3.25)
 check(
     "test_usage_terminal_unpriced_estimate_is_separate",
     usage_stats["terminal_unpriced_estimate_usd"],
@@ -436,11 +442,11 @@ finally:
         else:
             sys.modules[name] = previous
 
-check("test_usage_endpoint_spent_includes_reviewer_not_estimates", usage["spent_usd"], 2.75)
+check("test_usage_endpoint_spent_includes_auxiliary_not_estimates", usage["spent_usd"], 3.25)
 check("test_usage_endpoint_exposes_terminal_unpriced_estimate", usage["terminal_unpriced_estimate_usd"], 6.25)
 check("test_usage_endpoint_exposes_completeness", usage["spent_usd_complete"], False)
-check("test_usage_budget_remaining_uses_authoritative_spend", usage["remaining_usd"], 7.25)
-check("test_usage_budget_percent_uses_authoritative_spend", usage["pct_used"], 27.5)
+check("test_usage_incomplete_spend_has_no_false_remaining", usage["remaining_usd"], None)
+check("test_usage_incomplete_spend_has_no_false_percentage", usage["pct_used"], None)
 
 authoritative_only = DATA / "usage-authoritative-only"
 authoritative_only.mkdir()
@@ -463,6 +469,22 @@ authoritative_stats = jobs_module.get_stats()
 check("test_usage_authoritative_only_is_complete", authoritative_stats["spent_usd_complete"], True)
 check("test_usage_authoritative_job_estimate_is_not_reclassified", authoritative_stats["terminal_unpriced_estimate_usd"], 0.0)
 (only_dir / "usage.jsonl").write_text(
+    "\n".join([
+        json.dumps({
+            "role": "main", "provider": "claude", "model": "primary",
+            "cost_usd": 1.75, "cost_basis": "reported",
+        }),
+        json.dumps({
+            "role": "main", "provider": "claude", "model": "secondary",
+            "cost_usd": None, "cost_basis": "none",
+        }),
+    ]) + "\n",
+    encoding="utf-8",
+)
+multi_model_stats = jobs_module.get_stats()
+check("test_usage_reported_multimodel_scalar_is_complete", multi_model_stats["spent_usd_complete"], True)
+check("test_usage_reported_multimodel_scalar_is_not_doubled", multi_model_stats["total_cost_usd"], 1.75)
+(only_dir / "usage.jsonl").write_text(
     json.dumps({
         "role": "reviewer", "provider": "gpt",
         "cost_usd": None, "cost_basis": "none",
@@ -472,6 +494,96 @@ check("test_usage_authoritative_job_estimate_is_not_reclassified", authoritative
 reviewer_unpriced_stats = jobs_module.get_stats()
 check("test_usage_unpriced_reviewer_marks_spend_incomplete", reviewer_unpriced_stats["spent_usd_complete"], False)
 check("test_usage_unpriced_reviewer_does_not_invent_dollars", reviewer_unpriced_stats["total_cost_usd"], 1.75)
+
+promoted_dir = authoritative_only / "f00000000005"
+promoted_dir.mkdir()
+(promoted_dir / "meta.json").write_text(
+    json.dumps({
+        "id": promoted_dir.name,
+        "module": "rev",
+        "status": "no_flag",
+        "agent_provider": "gpt",
+        "gpt_runtime": "codex",
+        "cost_usd": 18.422439,
+        "cost_usd_estimate": 18.4224,
+    }),
+    encoding="utf-8",
+)
+(promoted_dir / "usage.jsonl").write_text(
+    "\n".join([
+        json.dumps({
+            "role": "main", "provider": "gpt", "runtime": "codex",
+            "cost_usd": None, "cost_basis": "none",
+        }),
+        json.dumps({
+            "role": "judge", "provider": "claude",
+            "cost_usd": 0.5, "cost_basis": "reported",
+        }),
+        json.dumps({
+            "role": "reviewer", "provider": "claude",
+            "cost_usd": 0.25, "cost_basis": "reported",
+        }),
+    ]) + "\n",
+    encoding="utf-8",
+)
+promoted_stats = jobs_module.get_stats()
+check("test_usage_promoted_estimate_is_not_reported_dollars", promoted_stats["total_cost_usd"], 2.5)
+check("test_usage_promoted_estimate_stays_in_estimate_unit", promoted_stats["terminal_unpriced_estimate_usd"], 18.4224)
+check("test_usage_promoted_estimate_marks_spend_incomplete", promoted_stats["spent_usd_complete"], False)
+
+# The legacy promotion fingerprint is a four-decimal quantization gap, not a
+# generic "close enough" price.  A former $0.01 absolute floor swallowed all
+# of these genuinely different small prices and moved them out of known spend.
+for index, (reported, estimate) in enumerate((
+    (0.20, 0.195),
+    (1.00, 0.995),
+    (0.012, 0.005),
+    (0.009, 0.001),
+), start=6):
+    job_id = f"f000000000{index:02d}"
+    job_dir = authoritative_only / job_id
+    job_dir.mkdir()
+    small_meta = {
+        "id": job_id,
+        "module": "rev",
+        "status": "finished",
+        "cost_usd": reported,
+        "cost_usd_estimate": estimate,
+    }
+    (job_dir / "meta.json").write_text(json.dumps(small_meta), encoding="utf-8")
+    (job_dir / "usage.jsonl").write_text(json.dumps({
+        "role": "main", "provider": "gpt", "runtime": "codex",
+        "cost_usd": None, "cost_basis": "none",
+    }) + "\n", encoding="utf-8")
+    parts = jobs_module._scalar_usage_cost_parts(job_id, small_meta)
+    check(
+        f"test_usage_small_reported_price_{index}_is_not_demoted",
+        parts[:2],
+        (reported, 0.0),
+    )
+
+# A true legacy promotion at a small amount still differs only by the rounding
+# applied when cost_usd_estimate was parked, so the narrowed test recognises it.
+rounding_id = "f00000000010"
+rounding_dir = authoritative_only / rounding_id
+rounding_dir.mkdir()
+rounding_meta = {
+    "id": rounding_id,
+    "module": "rev",
+    "status": "finished",
+    "cost_usd": 0.200039,
+    "cost_usd_estimate": 0.2,
+}
+(rounding_dir / "meta.json").write_text(json.dumps(rounding_meta), encoding="utf-8")
+(rounding_dir / "usage.jsonl").write_text(json.dumps({
+    "role": "main", "provider": "gpt", "runtime": "codex",
+    "cost_usd": None, "cost_basis": "none",
+}) + "\n", encoding="utf-8")
+check(
+    "test_usage_small_legacy_rounding_gap_is_still_promoted",
+    jobs_module._scalar_usage_cost_parts(rounding_id, rounding_meta),
+    (0.0, 0.2, False),
+)
 jobs_module.JOBS_DIR = original_jobs_dir
 
 detail = jobs_module.get_job(PARENT)

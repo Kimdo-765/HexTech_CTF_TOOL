@@ -123,10 +123,14 @@ x-worker-environment: &worker-environment
   # path guarantees the run never aborts. A soft eject + scaffold
   # nudge fire well before the cap; the fallback is the safety net.
   INVESTIGATION_BUDGET: ${INVESTIGATION_BUDGET:-150}
-  # Recoverable spend breaker. Reviewer calls are part of the meter too; $40
-  # leaves headroom above observed $30+ hard solves while bounding runaway
-  # lineages. Set <=0 only as an explicit operator override.
+  # Recoverable known-dollar breaker. Judge/reviewer calls are part of the
+  # meter too; providers that report no dollars make it a subtotal, not a
+  # complete bound. Set <=0 only as an explicit operator override.
   COST_CAP_USD: ${COST_CAP_USD:-40}
+  # Fallback limit for Codex turns without an explicit per-job budget. Main
+  # solver adapters pass max(job_timeout, 1800s); Settings can override this
+  # fallback for auxiliary/standalone turns through apply_to_env().
+  CODEX_TURN_TIMEOUT_S: ${CODEX_TURN_TIMEOUT_S:-3600}
   # Max postjudge-driven auto retries within a single job (in
   # addition to the first attempt). When auto_run is on and the
   # sandbox returns a non-success verdict with an actionable

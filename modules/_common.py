@@ -3505,6 +3505,8 @@ async def run_pre_recon(
         from modules.model_presets import resolve_role_model
         gpt_model = resolve_role_model("recon", gpt_model, "gpt")
         log_fn(f"[{tag}] backend={provider_display_name('gpt')} model={gpt_model}")
+        # Intentional exception: pre-recon is an auxiliary turn, so it uses the
+        # provider fallback instead of inheriting the main job's long budget.
         opts = GptSessionOptions(
             system_prompt=RECON_AGENT_PROMPT,
             model=gpt_model,
@@ -3561,6 +3563,7 @@ async def run_pre_recon(
         if not grok_model or grok_model.lower().startswith("claude"):
             grok_model = default_model_for("grok")
         log_fn(f"[{tag}] backend=Grok model={grok_model}")
+        # Same bounded-auxiliary policy as GPT pre-recon above.
         opts = GrokSessionOptions(
             system_prompt=recon_system,
             model=grok_model,
@@ -3893,6 +3896,26 @@ def resolve_reviewer_model(job_id: str | None) -> str:
     return coerce_model_for_provider(resolved, provider)
 
 
+def job_turn_timeout_s(job_id: str, minimum_s: float = 1800.0) -> float:
+    """Derive a main-agent turn budget from the job's timeout metadata.
+
+    Main CTF turns can legitimately spend longer than the provider client's
+    standalone fallback while native tools are still working. Keep every
+    main-session adapter on the same rule: at least ``minimum_s`` seconds, or
+    the per-job ``job_timeout`` when that is larger. Provider-specific env
+    settings remain fallbacks for auxiliary/standalone calls that deliberately
+    do not pass a per-job budget.
+    """
+    turn_timeout_s = float(minimum_s)
+    try:
+        job_timeout_s = int((read_meta(job_id) or {}).get("job_timeout") or 0)
+        if job_timeout_s > 0:
+            turn_timeout_s = float(max(job_timeout_s, minimum_s))
+    except (TypeError, ValueError):
+        pass
+    return turn_timeout_s
+
+
 def make_main_session_options(
     *,
     job_id: str,
@@ -3966,13 +3989,7 @@ def make_main_session_options(
     if provider == "gpt":
         from modules.gpt_agent import GptSessionOptions
         from modules.agent_provider import get_gpt_runtime
-        turn_timeout_s = 1800.0
-        try:
-            jt = int((read_meta(job_id) or {}).get("job_timeout") or 0)
-            if jt > 0:
-                turn_timeout_s = float(max(jt, 1800))
-        except Exception:
-            pass
+        turn_timeout_s = job_turn_timeout_s(job_id)
         log_fn_local(
             "[orchestrator] agent backend: "
             + (
@@ -4002,13 +4019,7 @@ def make_main_session_options(
         system_prompt = adapt_system_prompt_for_grok(system_prompt)
         # Per-turn budget: at least 30 min, or the job soft-timeout if larger.
         # Kernel/pwn CTF turns routinely need >10 min of tool use (3c0e0edb73db).
-        turn_timeout_s = 1800.0
-        try:
-            jt = int((read_meta(job_id) or {}).get("job_timeout") or 0)
-            if jt > 0:
-                turn_timeout_s = float(max(jt, 1800))
-        except Exception:
-            pass
+        turn_timeout_s = job_turn_timeout_s(job_id)
         log_fn_local(
             "[orchestrator] agent backend: Grok Build (ACP stdio); "
             "native spawn_subagent for delegation "
@@ -6248,6 +6259,21 @@ _STOP_REASON_KIND = {
 _AGENT_FAILURE_DETAIL_MAX_CHARS = 2000
 
 
+def classify_stop_reason(stop_reason: Any, fallback: str = "agent_error") -> str:
+    """Map an adapter's structured stop reason to the shared error vocabulary.
+
+    One-shot misc/forensic orchestrators persist a small result dict instead of
+    retaining the provider ResultMessage object. They used to throw away
+    ``stop_reason`` and flatten every timeout/process failure to ``agent_error``.
+    Keeping this mapper separate lets those paths preserve the same categories
+    as the full main-agent loop without inventing a new job status.
+    """
+    reason = str(stop_reason or "").strip().lower()
+    if reason in _STOP_REASON_KIND:
+        return _STOP_REASON_KIND[reason]
+    return classify_failure_kind(reason, fallback)
+
+
 def structured_failure_bits(msg: Any) -> list[str]:
     """Authoritative failure strings an adapter/SDK set on a result message.
 
@@ -6307,8 +6333,9 @@ def classify_result_failure(
             return kind, stored_detail
 
     stop_reason = str(getattr(msg, "stop_reason", "") or "").strip().lower()
-    if stop_reason in _STOP_REASON_KIND:
-        return _STOP_REASON_KIND[stop_reason], stored_detail
+    stop_kind = classify_stop_reason(stop_reason, "")
+    if stop_kind:
+        return stop_kind, stored_detail
 
     tail = next((part for part in reversed(parts) if part and part.strip()), "")
     kind = classify_failure_kind(tail, "")
@@ -8084,11 +8111,12 @@ def write_why_stopped(
             out += [
                 "Cumulative known spend from main's session total, the "
                 "subagent accumulator, and numeric `cost_usd` values on "
-                "`role=reviewer` rows in `usage.jsonl` reached the "
-                "`COST_CAP_USD` circuit breaker (default $40). "
-                "`role=judge` rows are not included, and reviewer rows without "
-                "a numeric dollar value contribute $0 to this breaker. Read "
-                "`usage.jsonl` by role/provider before attributing the spend. "
+                "`role=judge` and `role=reviewer` rows in `usage.jsonl` reached "
+                "the `COST_CAP_USD` circuit breaker (default $40). Rows without "
+                "a numeric dollar value contribute $0 to this breaker, so this "
+                "is a known subtotal rather than a complete billing bound when "
+                "any provider is unpriced. Read `usage.jsonl` by role/provider "
+                "before attributing the spend. "
                 "This fires when a run keeps "
                 "spending without capturing a flag — often an anchored frame "
                 "that won't converge (the anti-AI false-negative class, where "
@@ -8572,6 +8600,10 @@ async def _aup_restart_session(
                 env=dict(getattr(options, "env", None) or {}),
                 resume=None,
                 add_dirs=list(getattr(options, "add_dirs", None) or []),
+                turn_timeout_s=(
+                    getattr(options, "turn_timeout_s", None)
+                    or job_turn_timeout_s(job_id)
+                ),
             )
             summary["aup_provider_switch"] = "grok"
             # The cost estimator prices tokens from summary["model"], which the
@@ -8982,7 +9014,7 @@ async def run_main_agent_session(
 
     # ---- Cost-cap circuit breaker (Tooth 2) ----
     # Framing-INDEPENDENT backstop against runaway grinding. The known-dollar
-    # spend is main's cumulative cost PLUS the subagent sum PLUS reviewer
+    # spend is main's cumulative cost PLUS the subagent sum PLUS judge/reviewer
     # ledger rows. Main and subagents live in two disjoint places: main runs in
     # this SDK session (its cumulative total_cost_usd lands in summary["result"]
     # at each turn boundary — the
@@ -8996,12 +9028,12 @@ async def run_main_agent_session(
     # write_why_stopped so the operator can /retry (ideally fresh-start)
     # rather than pay for more of the same. Un-dismissible by the anchored
     # model — pure orchestrator arithmetic on the shared summary. NB the cap
-    # defaults to $40. _total_spend includes reviewer ledger rows because those
-    # calls run outside both the main SDK session and the subagent accumulator.
+    # defaults to $40. _total_spend includes judge/reviewer ledger rows because
+    # those calls run outside both the main SDK session and subagent accumulator.
     def _total_spend() -> float:
         sub = 0.0
         main = 0.0
-        reviewer = 0.0
+        auxiliary = 0.0
         try:
             sub = float(summary.get("cost_usd", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -9015,12 +9047,12 @@ async def run_main_agent_session(
         try:
             from modules.usage_ledger import dollar_cost_parts, read_usage
 
-            reviewer, _ = dollar_cost_parts(
-                read_usage(job_id), roles={"reviewer"}
+            auxiliary, _ = dollar_cost_parts(
+                read_usage(job_id), roles={"judge", "reviewer"}
             )
         except Exception:
-            reviewer = 0.0
-        return sub + main + reviewer
+            auxiliary = 0.0
+        return sub + main + auxiliary
 
     cost_cap_fired = {"value": False}
     cost_cap_pending = {"value": False}
@@ -9038,7 +9070,7 @@ async def run_main_agent_session(
         cost_cap_pending["value"] = True
         log_fn(
             f"COST_CAP: total spend ${spent:.2f} "
-            f"(main + subagents + reviewer) ≥ cap "
+            f"(main + subagents + judge/reviewer) ≥ cap "
             f"${cap:.2f} (COST_CAP_USD; 0=disable) — will halt after this "
             f"turn boundary (recoverable via /retry)."
         )
@@ -9132,6 +9164,10 @@ async def run_main_agent_session(
             env=dict(getattr(options, "env", None) or {}),
             resume=getattr(options, "resume", None),
             add_dirs=list(getattr(options, "add_dirs", None) or []),
+            turn_timeout_s=(
+                getattr(options, "turn_timeout_s", None)
+                or job_turn_timeout_s(job_id)
+            ),
         )
 
     if _use_gpt and not isinstance(options, GptSessionOptions):
@@ -9146,6 +9182,10 @@ async def run_main_agent_session(
             env=dict(getattr(options, "env", None) or {}),
             resume=getattr(options, "resume", None),
             add_dirs=list(getattr(options, "add_dirs", None) or []),
+            turn_timeout_s=(
+                getattr(options, "turn_timeout_s", None)
+                or job_turn_timeout_s(job_id)
+            ),
         )
 
     _client_kwargs = {"options": options}
@@ -9421,7 +9461,7 @@ async def run_main_agent_session(
                 spent = _total_spend()
                 log_fn(
                     f"[orchestrator] COST_CAP halt at ${spent:.2f} "
-                    f"(main + subagents + reviewer) — writing WHY_STOPPED and returning "
+                    f"(main + subagents + judge/reviewer) — writing WHY_STOPPED and returning "
                     f"(recoverable via /retry)"
                 )
                 summary["judge_stop_reason"] = (

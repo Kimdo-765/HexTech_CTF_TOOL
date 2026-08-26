@@ -1239,6 +1239,8 @@ async function loadSettings() {
     s.job_ttl_days != null ? s.job_ttl_days : "";
   f.querySelector("[name=job_timeout_seconds]").value =
     s.job_timeout_seconds != null ? s.job_timeout_seconds : "";
+  f.querySelector("[name=codex_turn_timeout_seconds]").value =
+    s.codex_turn_timeout_seconds != null ? s.codex_turn_timeout_seconds : "";
   // Show the LIVE slot count, not the stored `worker_concurrency`. That
   // setting is inert under the slot split (runner.py forces 1 process per slot
   // container) and /data/settings.json still holds its pre-split value, so
@@ -1403,7 +1405,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
     }
     if (k === "worker_slot_mem") {
       payload[k] = String(v).trim();
-    } else if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "worker_concurrency" || k === "budget_usd") {
+    } else if (k === "job_ttl_days" || k === "job_timeout_seconds" || k === "codex_turn_timeout_seconds" || k === "worker_concurrency" || k === "budget_usd") {
       payload[k] = Number(v);
     } else {
       payload[k] = v;
@@ -2292,7 +2294,26 @@ function renderUsage(u) {
   const pill = document.getElementById("usage-pill");
   if (pill) {
     const inflight0 = (u && u.in_flight_estimate_usd) || 0;
-    if (u && u.budget_usd <= 0 && (u.spent_usd > 0 || inflight0 > 0)) {
+    const spendIncomplete = !!(u && u.spent_usd_complete === false);
+    if (u && spendIncomplete) {
+      // A reported-dollar subtotal is a lower bound, not a budget position.
+      // Showing "$5.96 / $40" here falsely tells the operator the run is
+      // bounded when an OAuth-backed main turn has no dollar price at all.
+      const known = u.spent_usd || 0;
+      const terminalEstimate = u.terminal_unpriced_estimate_usd || 0;
+      pill.hidden = false;
+      pill.classList.remove("usage-pill--warn", "usage-pill--over");
+      pill.textContent = "spend unmeasurable";
+      pill.title = `Total dollar spend is unmeasurable: at least one call has no `
+        + `authoritative dollar price. Known reported subtotal $${known.toFixed(4)}`
+        + (terminalEstimate > 0
+            ? `; separate terminal token estimate ~${terminalEstimate.toFixed(4)} USD`
+            : "")
+        + (inflight0 > 0
+            ? `; separate running token estimate ~${inflight0.toFixed(4)} USD`
+            : "")
+        + ". No remaining-budget or percentage claim is available.";
+    } else if (u && u.budget_usd <= 0 && (u.spent_usd > 0 || inflight0 > 0)) {
       // No budget configured. The pill used to hide entirely here, which meant
       // the in-flight estimate shipped invisible on this deployment (no budget
       // is set by default). Show spend without the budget framing.

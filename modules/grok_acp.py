@@ -895,6 +895,8 @@ async def query_grok_once(
     """
     from modules.agent_provider import default_model_for, default_effort_for
 
+    # Intentional exception to per-job option budgets: this one-shot helper is
+    # bounded below by asyncio.wait_for(..., timeout=timeout_s).
     opts = GrokSessionOptions(
         system_prompt=system_prompt or "You are a careful assistant. Be concise.",
         model=model or default_model_for("grok"),

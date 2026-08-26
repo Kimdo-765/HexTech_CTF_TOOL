@@ -980,6 +980,15 @@
           <input type="number" name="job_timeout_seconds" min="60" placeholder="6000" />
         </label>
         <label>
+          Codex fallback turn timeout (seconds)
+          <input type="number" name="codex_turn_timeout_seconds" min="1" step="1" placeholder="3600" />
+          <small style="color:var(--fg-muted)">
+            Used when a Codex caller has no per-job budget. Main solver turns
+            use the larger of Job timeout and 1800 seconds. A saved fallback
+            applies to auxiliary turns in the next job without recreating workers.
+          </small>
+        </label>
+        <label>
           Worker concurrency (parallel jobs)
           <input type="number" name="worker_concurrency" min="1" max="32" placeholder="3" disabled />
           <small style="color:var(--fg-muted)">

@@ -790,13 +790,13 @@ async def main() -> int:
             log_fn=lambda *_a, **_k: None,
         )
         cost_why = (work / "WHY_STOPPED.md").read_text()
-        check("cost-cap document names the exact three included sources",
+        check("cost-cap document names every included source",
               all(term in cost_why for term in (
                   "main's session total", "subagent accumulator",
-                  "`role=reviewer`",
+                  "`role=judge`", "`role=reviewer`",
               )), True)
-        check("cost-cap document excludes judge and avoids provider guesses",
-              "`role=judge` rows are not included" in cost_why
+        check("cost-cap document marks unpriced rows and avoids provider guesses",
+              "known subtotal rather than a complete billing bound" in cost_why
               and "claude-pinned" not in cost_why
               and "gpt provider" not in cost_why, True)
 

@@ -982,6 +982,8 @@ async def _run_judge_turn(
             res.runtime = get_gpt_runtime()
         except Exception:
             pass
+        # Intentional exception: judge is an auxiliary turn and uses the
+        # provider fallback rather than the main solver's per-job budget.
         opts = GptSessionOptions(
             system_prompt=JUDGE_AGENT_PROMPT,
             model=_jm,
@@ -1038,6 +1040,7 @@ async def _run_judge_turn(
         if not _jm or str(_jm).lower().startswith("claude"):
             _jm = default_model_for("grok")
         res.model = _jm
+        # Same bounded-auxiliary policy as the GPT judge above.
         opts = GrokSessionOptions(
             system_prompt=JUDGE_AGENT_PROMPT,
             model=_jm,

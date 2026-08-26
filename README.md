@@ -715,7 +715,7 @@ a decoy echoed by a later run would look like a capture.
 | `retry_hint_ignored` | Main returned without editing the script after a postjudge hint (a re-run would be a guaranteed-fail repeat) | `/retry` with a manual hint, or read the script + diagnosis and edit by hand |
 | `unsolvable_by_analysis` | Artifacts self-admit no working chain and prejudge `flag_likelihood≈0` (confident true-negative, not a near-miss) | Read `report.md` / `chain.json` — any `verified=true` primitive is still real; `/retry` only with a demonstrably-missed primitive |
 | `policy_refusal` | Main's turn was blocked by the server-side Usage-Policy classifier (AUP) — retrying in place re-blocks | `/retry` — a fresh SDK session is force-started automatically and usually sheds the poison |
-| `cost_cap` | Total spend (main + subagents + reviewer calls) hit `COST_CAP_USD` — bounds a non-converging / anchored run | `/retry` (fresh start breaks an anchored frame), or raise `COST_CAP_USD` if the chal legitimately needs the spend |
+| `cost_cap` | Known reported spend (main + subagents + judge/reviewer calls) hit `COST_CAP_USD` — stops a non-converging / anchored run once that observable subtotal crosses the cap | `/retry` (fresh start breaks an anchored frame), or raise `COST_CAP_USD` if the chal legitimately needs the spend |
 
 Each `WHY_STOPPED.md` consolidates the judge's structured fields —
 `stop_reason`, `failure_code`, `specific_diagnosis`, `what_worked`,
@@ -732,7 +732,7 @@ grinding a frame that the evidence has already disconfirmed (e.g. an
 anti-AI chal that names a known challenge to bait the "intended"
 solution, then modifies one line so it no longer applies). Two mechanical
 teeth in `run_main_agent_session`, both operating on the shared running
-cost meter (main + every subagent + reviewer calls):
+cost meter (main + every subagent + judge/reviewer calls):
 
 - **Cost cap (framing-independent backstop) — $40 by default.**
   `DEFAULT_COST_CAP_USD`, `.env.example`, the deployed `.env`, and Compose's
@@ -752,10 +752,11 @@ cost meter (main + every subagent + reviewer calls):
   frame and points it at a genuinely independent subagent or a
   reframe/concede. One-shot per job.
 
-Both are env-overridable. The cost cap provides the stock deployment's hard
-bound; the contrarian reframe can still fire earlier and is advisory (one
-injected turn). Neither guarantees a solve; the value is
-*reframe-or-bound-the-loss*, not a fix.
+Both are env-overridable. The cost cap is a hard stop against the dollars it can
+observe, but is only a lower-bound breaker when any provider reports no dollar
+price (notably Codex ChatGPT OAuth). The contrarian reframe can still fire
+earlier and is advisory (one injected turn). Neither guarantees a solve; the
+value is *reframe-or-stop-the-observed-loss*, not a complete billing bound.
 
 ### Fallback artifact safety net
 
@@ -1172,6 +1173,7 @@ All knobs live in two places:
    | `WORKER_CONCURRENCY` | `3` | **legacy / ignored.** Parallel jobs is the number of `worker-N` services in `docker-compose.yml`; each slot runs exactly one. Kept only for a pre-split compose file. |
    | `JOB_TTL_DAYS` | `7` | auto-delete jobs older than N days (`0`=keep) |
    | `JOB_TIMEOUT` | `900` | **not a deadline** — only scales RQ's hard ceiling (`×4`, floor 24 h, cap 7 d). See [Timeouts](#timeouts) |
+   | `CODEX_TURN_TIMEOUT_S` | `3600` | fallback wall-clock ceiling for a Codex CLI turn whose caller does not supply a per-job budget (auxiliary/standalone turns). Main solver turns use `max(job_timeout, 1800 s)`. Also editable in Settings as `codex_turn_timeout_seconds`, effective for the next job without recreating workers. See [Timeouts](#timeouts) |
    | `WORKER_SLOT_MEM` | `4g` | cgroup cap on **each** worker slot container. `4g × 2 slots = 8g`, the same whole-worker budget the single container had. Also editable live from Settings (a change there applies to every slot via `docker update`, no restart) — where it is refused if `slots × value` exceeds 70 % of VM RAM, or if it would leave a running job no headroom. A 15 GB `python3` once froze the whole WSL VM with no cap. **Renamed from `WORKER_MEM_LIMIT`, deliberately**: that key meant "cap for the ONE worker" and held `8g`, so reusing it would have reinterpreted 8g as *per slot* and pushed 16 GiB of cap into a 15.99 GiB VM on the next settings save. **Since `5570961` this is the BASE, not the last word**: every job start re-applies it via `docker update` (idempotent — it heals a slot an earlier run left raised), and with `dynamic_worker_mem` ON the governor may raise it to `base × 2` for `rev`/`crypto`, or after a cgroup OOM (1.5× per kill, at most twice, never past `base × 4`). See [Concurrency](#concurrency). |
    | `AGENT_PROVIDER` | `claude` | which agent backend runs jobs: `claude`, `grok`, or `gpt`. See [Agent providers](#agent-providers) |
    | `GROK_MODEL` / `GROK_EFFORT` | `grok-build` / empty | model + reasoning effort used when `AGENT_PROVIDER=grok` |
@@ -1192,7 +1194,7 @@ All knobs live in two places:
    | `USE_ISOLATED_SUBAGENTS` | `1` | when `1` (default), main delegates via the MCP tool `mcp__team__spawn_subagent` — each subagent runs in its own `claude` CLI subprocess and only the final-text reply lands in main's history. Set to `0` for the legacy in-process `agents={}` path (kept as a fast rollback). See [Subagent isolation](#subagent-isolation-default-on). |
    | `SUBAGENT_SPAWN_CAP` | `0` | **inert — nothing reads it.** The name appears in `.env` and in prompt text shown to the model (`modules/_prompts.py`), but no code path consults it: the guard the comments name, `_maybe_subagent_cap()`, has no definition in the repo. Setting a positive int changes nothing. Delegation is unbounded in practice — see [Spawn cap — not implemented](#subagent-isolation-default-on). |
    | `ENABLE_EXPLOIT_LIBRARY_HINT` | `0` | when `1`, every job's user prompt is prepended with a short paragraph listing same-module entries from the operator-curated [Exploit Library](#exploit-library) at `/data/exploits/`. OFF by default — flip on once the library has curated entries you trust. |
-   | `COST_CAP_USD` | `40` | total-spend circuit breaker (main + subagents + reviewer calls). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). Set `0` or a negative value only to disable it explicitly. See [circuit breaker](#anti-anchoring-circuit-breaker). |
+   | `COST_CAP_USD` | `40` | reported-dollar circuit breaker (main + subagents + judge/reviewer calls). On breach the run halts recoverably (`stop_kind=cost_cap`, `/retry`-able). **Codex ChatGPT OAuth reports no dollars**, so this cannot bound a Codex-main-only run; in a hybrid run it sees only the priced-role subtotal, not a complete total. Token-derived `cost_usd_estimate` stays separate and does not silently stop a subscription job. Set `0` or a negative value only to disable it explicitly. See [circuit breaker](#anti-anchoring-circuit-breaker). |
    | `CONTRARIAN_MIN_COST_USD` | `6` | minimum total spend before a subagent dead-end signal can arm the one-shot contrarian-reframe user-turn (only on easy-/shortcut-framed jobs). See [circuit breaker](#anti-anchoring-circuit-breaker). |
    | `MONITOR_ENABLED` | `1` | live per-job [monitor](#monitor-modules_monitorpy) narration feed. `0` disables the always-on supervisor and all narration. |
    | `MONITOR_MODEL` | `claude-sonnet-4-6` | cheap model pinned for monitor narration — never the job's opus. |
@@ -1289,10 +1291,12 @@ The top bar shows a budget pill plus provider usage chips, all best-effort:
 - **Budget pill** — `budget_usd` from Settings vs summed job spend
   (`GET /api/jobs/usage`). Purely informational: **nothing enforces it**
   (the separately configured `$40` cost cap is the enforcement mechanism).
-  Reviewer ledger dollars are added as a role-only subtotal instead of summing
-  the entire ledger and duplicating main rows; `spent_usd_complete=false`
-  remains visible when a terminal main job or reviewer has no authoritative
-  dollar figure (for example Codex OAuth).
+  Judge/reviewer ledger dollars are added as a role-only subtotal instead of
+  summing the entire ledger and duplicating main rows. When a terminal main or
+  auxiliary call has no authoritative dollar figure (for example Codex OAuth),
+  `spent_usd_complete=false` makes the pill say **spend unmeasurable** and the
+  endpoint returns no remaining-dollar or percentage claim; its known reported
+  subtotal and token estimates remain available separately.
 - **Claude quota chip** — actively polls the mounted Claude Code OAuth
   account's five-hour / seven-day usage, showing the most constrained ordinary
   window and caching the sanitized result in `/data/rate_limit.json` for 15
@@ -2166,9 +2170,32 @@ only the input to RQ's hard ceiling (`api/queue.py:hard_timeout_for`):
 hard = min(max(JOB_TIMEOUT * 4, 24 h), 7 d)      # JOB_TIMEOUT <= 0  ->  7 d
 ```
 
-So the default 900 s buys a **24 h** hard kill. What actually bounds a run is
-the tool-call budget (`INVESTIGATION_BUDGET`), the spend cap (`COST_CAP_USD`),
-the judge / postjudge loop, and **■ Stop** — not the clock.
+So the default 900 s buys a **24 h** hard kill. Main GPT/Grok solver turns use
+`max(job_timeout, 1800 s)` as their per-turn budget. This includes the
+misc/forensic one-shot adapters; omitting the explicit value there once made
+three jobs with `job_timeout=9999999` fall through to Codex CLI's 3600-second
+default and die at exactly one hour.
+
+`CODEX_TURN_TIMEOUT_S` is that Codex CLI **fallback**, not an independent cap
+on main solver turns. It defaults to 3600 s and applies to callers such as
+auxiliary/standalone turns that deliberately provide no per-job budget. It is
+exposed in Settings as `codex_turn_timeout_seconds`; Settings overrides `.env`
+and is copied into the worker process for the next job.
+
+In the misc/forensic one-shot adapters, a Codex turn that reaches this boundary
+ends the job as `failed`, not `no_flag`, and records `error_kind=timeout`.
+The main pwn/rev/web/crypto/web3 loop instead preserves a timeout fallback
+artifact and can finish through its salvage path as `no_flag`/`partial` while
+retaining `error_kind=timeout`. A new top-level status is not needed: the
+status describes the path's terminal outcome and `error_kind` says why the
+agent execution was cut.
+
+Other bounds are the tool-call budget (`INVESTIGATION_BUDGET`), the judge /
+postjudge loop, and **■ Stop**. `COST_CAP_USD` only counts reported dollars;
+Codex ChatGPT OAuth intentionally reports no per-call dollar price, so the cap
+does not bound a Codex-main-only subscription run. The UI's `~$…`
+`cost_usd_estimate` remains an operational estimate, not billable spend and not
+a stop signal.
 
 > **The soft deadline was removed in `3a06349`.** A watchdog used to set
 > `meta.awaiting_decision` at `JOB_TIMEOUT` and the job panel showed

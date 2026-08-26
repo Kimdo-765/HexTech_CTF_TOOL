@@ -53,7 +53,7 @@ const NAMES = ["agent_provider", "topology_preset", "role_provider_judge",
   "anthropic_api_key", "claude_model", "claude_effort", "claude_model_custom",
   "xai_api_key", "grok_model", "grok_effort", "grok_model_custom",
   "gpt_runtime", "openai_api_key", "gpt_model", "gpt_effort", "gpt_model_custom",
-  "auth_token", "job_ttl_days", "job_timeout_seconds", "worker_concurrency",
+  "auth_token", "job_ttl_days", "job_timeout_seconds", "codex_turn_timeout_seconds", "worker_concurrency",
   "worker_slot_mem", "dynamic_worker_mem", "budget_usd", "callback_url",
   "judge_mode", "enable_exploit_library_hint"];
 

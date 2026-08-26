@@ -123,5 +123,12 @@ if probe.returncode == 0:
 else:
     print(probe.stderr)
 
+common_source = (ROOT / "modules" / "_common.py").read_text(encoding="utf-8")
+check(
+    "worker breaker counts both external billed roles",
+    'roles={"judge", "reviewer"}' in common_source,
+    True,
+)
+
 print(f"{PASSED} checks, {FAILED} failed")
 raise SystemExit(1 if FAILED else 0)

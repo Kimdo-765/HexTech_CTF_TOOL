@@ -51,6 +51,11 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     ("auth_token", "AUTH_TOKEN", str, ""),
     ("job_ttl_days", "JOB_TTL_DAYS", int, 7),
     ("job_timeout_seconds", "JOB_TIMEOUT", int, 900),
+    # Provider fallback for a Codex CLI turn whose caller does not pass an
+    # explicit per-job budget (for example, auxiliary/standalone turns). Main
+    # solver sessions derive their budget from job_timeout instead. Keep the
+    # fallback visible so the next job picks up a change via apply_to_env().
+    ("codex_turn_timeout_seconds", "CODEX_TURN_TIMEOUT_S", int, 3600),
     # Read-only in slot mode: concurrency is now the NUMBER OF worker-N
     # services in docker-compose.yml, and worker/runner.py forces 1 process per
     # slot container regardless of what is stored here. Kept in the schema so
@@ -577,6 +582,19 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(
                     f"agent_provider must be one of {AGENT_PROVIDERS}, got {val!r}"
                 )
+            cur[key] = v
+            continue
+        if key == "codex_turn_timeout_seconds":
+            if isinstance(val, bool) or (
+                isinstance(val, float) and not val.is_integer()
+            ):
+                raise ValueError("codex_turn_timeout_seconds must be a positive integer")
+            try:
+                v = int(val)
+            except (TypeError, ValueError):
+                raise ValueError("codex_turn_timeout_seconds must be a positive integer")
+            if v <= 0:
+                raise ValueError("codex_turn_timeout_seconds must be greater than zero")
             cur[key] = v
             continue
         if key == "gpt_runtime":
