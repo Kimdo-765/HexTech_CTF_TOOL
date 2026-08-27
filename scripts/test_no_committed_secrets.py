@@ -34,6 +34,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+_REFRESH = "--refresh-digests" in sys.argv
+
 # Scan EVERY tracked text file, not a list of the ones I happened to think of.
 # The leak was in a file built from live job data, and naming that file would
 # only protect the case already known. A sweep of all 237 tracked files found
@@ -57,6 +59,14 @@ GENERATED: list[str] = [
     "scripts/lineage_equivalence_seed.json",
     "scripts/lineage_equivalence_labelled.json",
 ]
+
+# Byte digests of the GENERATED artefacts, recorded the last time the live
+# accepted-flag oracle actually ran and passed. Refresh with
+#
+#     python3 scripts/test_no_committed_secrets.py --refresh-digests
+#
+# which only writes when the corpus is present AND the oracle passes.
+DIGESTS_PATH = "scripts/generated_artifact_digests.json"
 
 # Known-benign, allowlisted by VALUE rather than by file. A commit SHA and a
 # hash of the empty string are credential-shaped and are not credentials.
@@ -119,6 +129,47 @@ def _live_jobs_dir():
         except OSError:
             continue
     return None
+
+
+# 32 hex characters, not 64. The credential sweep in this same file flags any
+# `\b[A-Fa-f0-9]{40,}\b` as a "long hex blob", so a full sha256 in a TRACKED
+# file trips the guard against itself — which is what happened the first time
+# this pin was written. Exempting the pin by path was the other option and is
+# exactly what this file's header refuses ("listed below by exact value so a
+# NEW one cannot hide behind a path-level exemption"), and an exact-value
+# allowlist would need editing on every refresh. 128 bits is far more than a
+# content-change detector needs, and a truncated content digest genuinely is
+# not a credential, so the honest fix is to stop it looking like one.
+_DIGEST_HEX = 32
+
+
+def _sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()[:_DIGEST_HEX]
+
+
+def _read_pinned_digests() -> dict:
+    p = ROOT / DIGESTS_PATH
+    if not p.is_file():
+        return {}
+    try:
+        return dict((json.loads(p.read_text()) or {}).get("digests") or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_pinned_digests(digests: dict) -> None:
+    (ROOT / DIGESTS_PATH).write_text(json.dumps({
+        "why": (
+            "sha256 of each GENERATED artefact as it stood the last time the "
+            "live accepted-flag oracle ran and passed. A clone has no "
+            "data/jobs corpus, so it cannot run that oracle; matching these "
+            "digests is how a corpus-less run establishes that the artefacts "
+            "are the ones already verified. Refresh with "
+            "`python3 scripts/test_no_committed_secrets.py --refresh-digests` "
+            "on a host that has the corpus."
+        ),
+        "digests": dict(sorted(digests.items())),
+    }, indent=2) + "\n")
 
 
 def _accepted_flag_oracle(jobs_dir):
@@ -197,9 +248,43 @@ chk("no unrecognised credential-shaped string in any tracked file",
 
 print("")
 print("--- live accepted flags are an exact-value oracle " + "-" * 12)
+# `data/` is never tracked, so a clone has no corpus and this oracle cannot
+# run there. It used to print SKIP and let the run exit 0, which is where the
+# hole was: an adversarial audit planted each of the 28 distinct accepted flags
+# into a TRACKED artefact of a fresh clone one at a time, and 17 of them left
+# the guard green. The credential PATTERNS carry no flag shape — the only ones
+# caught were those whose payload happened to be >=40 hex characters — and a
+# shape is the wrong oracle anyway, since the same artefacts legitimately hold
+# REJECTED candidates that look identical to real flags.
+#
+# The values cannot be committed to give a clone an oracle; that would be the
+# leak. What can be committed is the digest of each artefact as it stood when
+# the oracle last ran and passed. Unchanged bytes carry that verification with
+# them; changed bytes do not, and are refused here rather than skipped.
+_gen_digests = {rel: _sha256_bytes((ROOT / rel).read_bytes())
+                for rel in GENERATED if (ROOT / rel).is_file()}
+_pinned = _read_pinned_digests()
+
 live_jobs = _live_jobs_dir()
 if live_jobs is None:
-    print("SKIP  live jobs corpus is unavailable")
+    print("NO CORPUS  the accepted-flag oracle cannot run here "
+          "(data/ is untracked, so no clone has one)")
+    if not _pinned:
+        chk("a digest pin exists so a corpus-less run can still be sound "
+            "(regenerate with --refresh-digests on the operator host)",
+            False, DIGESTS_PATH)
+    else:
+        _drift = sorted(
+            rel for rel in set(_gen_digests) | set(_pinned)
+            if _gen_digests.get(rel) != _pinned.get(rel)
+        )
+        chk("every generated artefact is byte-identical to the state the "
+            "oracle last verified — without the corpus that is the only thing "
+            "that can be established here",
+            not _drift, _drift)
+        chk("the pin covers every listed generated artefact",
+            sorted(_pinned) == sorted(GENERATED),
+            {"pinned": sorted(_pinned), "listed": sorted(GENERATED)})
 else:
     accepted, live_scanned = _accepted_flag_oracle(live_jobs)
     chk("the live flag oracle actually read job metadata (%d trees)"
@@ -212,9 +297,26 @@ else:
                     rel,
                     "sha256:" + hashlib.sha256(value.encode()).hexdigest()[:16],
                 ))
+    _oracle_clean = not accepted_hits
     chk("no exact accepted flag from meta.json or result.json is tracked — "
         "this is prefix-agnostic and also covers brace-less flags",
-        not accepted_hits, accepted_hits[:8])
+        _oracle_clean, accepted_hits[:8])
+    if _REFRESH:
+        if _oracle_clean:
+            _write_pinned_digests(_gen_digests)
+            print("      refreshed %s" % DIGESTS_PATH)
+        else:
+            print("      NOT refreshing the pin: the oracle did not pass")
+    else:
+        _drift = sorted(
+            rel for rel in set(_gen_digests) | set(_pinned)
+            if _gen_digests.get(rel) != _pinned.get(rel)
+        )
+        chk("the digest pin still matches — a generated artefact changed "
+            "without the pin being refreshed would let a corpus-less run "
+            "inherit a verification that no longer applies "
+            "(refresh: --refresh-digests)",
+            not _drift, _drift)
 
 print("")
 print("--- the generated-artefact list has not gone stale " + "-" * 6)

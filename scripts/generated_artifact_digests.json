@@ -1,0 +1,7 @@
+{
+  "why": "sha256 of each GENERATED artefact as it stood the last time the live accepted-flag oracle ran and passed. A clone has no data/jobs corpus, so it cannot run that oracle; matching these digests is how a corpus-less run establishes that the artefacts are the ones already verified. Refresh with `python3 scripts/test_no_committed_secrets.py --refresh-digests` on a host that has the corpus.",
+  "digests": {
+    "scripts/lineage_equivalence_labelled.json": "44af1c3060a404c4d27e506a698b2000",
+    "scripts/lineage_equivalence_seed.json": "29a11e6acf08b29b79de7829c00fa0af"
+  }
+}
