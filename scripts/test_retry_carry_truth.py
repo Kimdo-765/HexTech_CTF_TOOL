@@ -69,6 +69,7 @@ MUTATIONS = (
     "always-carried",     # builders ignore carried= and act as if True
     "hardcode-work-pwd",  # stale-path block asserts /work unconditionally
     "drop-callsite",      # one call site stops passing carried=
+    "invert-streaming",   # the UI's own retry route reports the opposite
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS, default="none")
@@ -78,14 +79,16 @@ passed = 0
 failed = 0
 
 
-def check(label: str, got, want=True) -> None:
+def check(label: str, got, want=True, *, detail=None) -> None:
+    """Compare got to want. Diagnostics go in `detail`, never in `want`."""
     global passed, failed
     if got == want:
         passed += 1
         print(f"PASS  {label}")
     else:
         failed += 1
-        print(f"FAIL  {label}\n      got  = {got!r}\n      want = {want!r}")
+        print(f"FAIL  {label}\n      got  = {got!r}\n      want = {want!r}"
+              + (f"\n      detail = {detail!r}" if detail is not None else ""))
 
 
 def replace_once(source: str, old: str, new: str) -> str:
@@ -272,9 +275,30 @@ elif args.mutate == "hardcode-work-pwd":
 if _mutated_src is not RETRY_SRC:
     exec(compile(_mutated_src, str(RETRY_SRC_PATH), "exec"), RT.__dict__)
 
-# The AST wiring check reads this text, so the drop-callsite mutation edits it.
+# The AST wiring check reads this text, so the call-site mutations edit it.
 _wiring_src = RETRY_SRC
-if args.mutate == "drop-callsite":
+if args.mutate == "invert-streaming":
+    # The streaming route, not the direct one: retry.py:1120 records that the
+    # UI's manual retry lands there. An audit inverted exactly this site and
+    # the suite stayed 45/0, which is why the wiring check now evaluates the
+    # expression instead of reading it.
+    # The anchor has to name _retry_preamble: the streaming retry and the
+    # streaming resume sites are otherwise byte-identical, and a two-match
+    # anchor aborts the run instead of testing the property.
+    _wiring_src = replace_once(
+        _wiring_src,
+        '        augmented = _retry_preamble(\n'
+        '            safe, hint, fresh=fresh_session,\n'
+        '            operator_text=manual_hint is not None,\n'
+        '            history=_carry_technique_history(prev_meta, jd),\n'
+        '            carried=(jd / "work").is_dir())',
+        '        augmented = _retry_preamble(\n'
+        '            safe, hint, fresh=fresh_session,\n'
+        '            operator_text=manual_hint is not None,\n'
+        '            history=_carry_technique_history(prev_meta, jd),\n'
+        '            carried=not (jd / "work").is_dir())  # MUTATION',
+    )
+elif args.mutate == "drop-callsite":
     _wiring_src = replace_once(
         _wiring_src,
         '        history=_carry_technique_history(prev_meta, jd),\n'
@@ -381,23 +405,47 @@ _with_carried = [c for c in _calls
                  if any(k.arg == "carried" for k in c.keywords)]
 check("every call site passes carried=", len(_with_carried), 4)
 
-_derived = 0
+# EVALUATE the expression, do not pattern-match it. The previous version of
+# this check asked whether ast.unparse(...) contained "is_dir()" and "work",
+# which `not (jd / "work").is_dir()` also satisfies - so an inverted call site
+# reproduced the exact bug this file guards and still scored 45/0. It also
+# slipped the literal check, because ast.UnaryOp is not ast.Constant.
+#
+# A truth table cannot be talked around: with a work/ present the expression
+# must say True, without one it must say False. Inversion fails the first,
+# constants fail one or the other, and anything reading a different path fails
+# both.
+_probe = Path(_TMP.name) / "wiring"
+_with_work = _probe / "haswork"
+(_with_work / "work").mkdir(parents=True, exist_ok=True)
+_no_work = _probe / "nowork"
+_no_work.mkdir(parents=True, exist_ok=True)
+
+_correct = 0
+_wrong = []
 for c in _with_carried:
     kw = next(k for k in c.keywords if k.arg == "carried")
     txt = ast.unparse(kw.value)
-    # Must be read off the filesystem, not a literal - a hardcoded True is
-    # exactly the state this file exists to prevent.
-    if "is_dir()" in txt and "work" in txt:
-        _derived += 1
-check("every carried= is derived from the prior job's work/ on disk",
-      _derived, 4)
+    try:
+        got_yes = bool(eval(txt, {"Path": Path}, {"jd": _with_work}))
+        got_no = bool(eval(txt, {"Path": Path}, {"jd": _no_work}))
+    except Exception as exc:  # noqa: BLE001
+        _wrong.append((c.lineno, txt, f"raised {type(exc).__name__}"))
+        continue
+    if got_yes is True and got_no is False:
+        _correct += 1
+    else:
+        _wrong.append((c.lineno, txt, f"work/->{got_yes} none->{got_no}"))
+
+check("every carried= actually reports whether the prior job has a work/ "
+      "- evaluated, not pattern-matched",
+      _correct, 4, detail=_wrong)
+check("no call site's expression has the wrong truth table", _wrong, [])
 
 _literal = [c for c in _with_carried
             if isinstance(next(k for k in c.keywords if k.arg == "carried").value,
                           ast.Constant)]
 check("no call site hardcodes carried=", len(_literal), 0)
-
-check("test_mutation_suite_reaches_final_named_check", True, True)
 
 print("")
 print(f"retry-carry-truth: {passed} passed, {failed} failed; mutation={args.mutate}")
