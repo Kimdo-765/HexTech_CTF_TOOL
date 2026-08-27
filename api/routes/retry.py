@@ -1122,7 +1122,8 @@ async def retry_with_hint_stream(job_id: str, request: Request):
         augmented = _retry_preamble(
             safe, hint, fresh=fresh_session,
             operator_text=manual_hint is not None,
-            history=_carry_technique_history(prev_meta, jd))
+            history=_carry_technique_history(prev_meta, jd),
+            carried=(jd / "work").is_dir())
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,
@@ -1206,7 +1207,8 @@ async def retry_with_hint(job_id: str, request: Request):
     augmented = _retry_preamble(
         safe, hint, fresh=fresh_session,
         operator_text=manual_hint is not None,
-        history=_carry_technique_history(prev_meta, jd))
+        history=_carry_technique_history(prev_meta, jd),
+        carried=(jd / "work").is_dir())
     new_id = _resubmit(
         prev_meta, augmented, jd,
         carry_work=True,
@@ -1314,7 +1316,8 @@ async def stop_and_resume(job_id: str, request: Request):
     # /resume refuses without a manual hint, so this is always operator text.
     augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session,
                                       operator_text=True,
-                                      history=_carry_technique_history(prev_meta, jd))
+                                      history=_carry_technique_history(prev_meta, jd),
+                                      carried=(jd / "work").is_dir())
 
     new_id = _resubmit(
         prev_meta, augmented_hint, jd,
@@ -1419,14 +1422,41 @@ _STALE_PATH_WARNING_TMPL = (
     "  • NEVER `cd /data/jobs/{prev_id}/...` — your cwd is already "
     "the new job's work tree; there is no reason to leave it.\n"
     "  • NEVER write to `/root/...` (empty home dir).\n"
-    "  • NEVER prefix with `./work/` (doubled path — your cwd IS the "
-    "work tree).\n"
+    "{work_rule}"
     "MANDATORY FIRST CALL — before ANY other tool, run exactly:\n"
     "  Bash(command=\"pwd && echo \\\"job_id=$JOB_ID\\\" && ls -la\", "
     "description=\"anchor cwd on retry\")\n"
-    "If pwd doesn't match `/data/jobs/$JOB_ID/work`, stop and "
+    "If pwd doesn't match `{pwd_expect}`, stop and "
     "re-orient before any further tool call."
 )
+
+
+# `work_rule` / `pwd_expect` exist because the cwd is NOT the same shape in
+# every module. web / pwn / rev / crypto / web3 run the agent in
+# `<job>/work/`; misc and forensic run it in the job root itself
+# (`work_dir = _job_dir(job_id)` in their orchestrators), so they have no
+# `work/` at all and `_resubmit`'s `if prev_work.is_dir()` carries NOTHING.
+#
+# Before this was parameterised the template asserted `/data/jobs/$JOB_ID/work`
+# unconditionally, so the MANDATORY FIRST CALL told every misc/forensic retry
+# child to "stop and re-orient before any further tool call" — an instruction
+# to halt, handed to the agent as its opening move. Observed lineage:
+# b7c25bb93d13 -> 56b4d47d5b4c (forensic), where neither job has a work/ dir.
+def _stale_path_warning(prev_id: str, *, carried: bool) -> str:
+    """The stale-path block, told truthfully for this module's cwd shape."""
+    if carried:
+        return _STALE_PATH_WARNING_TMPL.format(
+            prev_id=prev_id,
+            pwd_expect="/data/jobs/$JOB_ID/work",
+            work_rule=("  • NEVER prefix with `./work/` (doubled path — "
+                       "your cwd IS the work tree).\n"),
+        )
+    return _STALE_PATH_WARNING_TMPL.format(
+        prev_id=prev_id,
+        pwd_expect="/data/jobs/$JOB_ID",
+        work_rule=("  • There is NO `./work/` subdirectory in this module — "
+                   "your cwd IS the job directory. Do not look for one.\n"),
+    )
 
 
 # What the carry does NOT bring across, stated where the preamble already
@@ -1652,7 +1682,8 @@ def _technique_history_block(history: list[dict]) -> str:
 
 def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
                     operator_text: bool = False,
-                    history: list[dict] | None = None) -> str:
+                    history: list[dict] | None = None,
+                    carried: bool = True) -> str:
     """Preamble for the standard retry path (failed / no_flag /
     finished). The new agent is launched with `resume=<prev_session>` +
     `fork_session=True`, so its conversation already holds the prior
@@ -1685,6 +1716,26 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
     # lineage has already named BEFORE it reads an instruction that may
     # push it toward one of those names again.
     _hist_block = _technique_history_block(history or [])
+    # `carried` is False for modules whose agent cwd is the job root (misc,
+    # forensic): there is no `<job>/work/` for `_resubmit` to copy, so the
+    # carry silently did nothing. Saying "your predecessor's files are at ./"
+    # to an agent standing in an empty tree costs it the turns it spends
+    # looking, and the previous wording additionally told it to STOP.
+    _cwd_desc = "work tree" if carried else "job directory"
+    _carry_note = (
+        "The previous attempt's artifacts — exploit.py / solver.py / "
+        "report.md / findings.json / THREAT_MODEL.md / decomp/ / bin/ / "
+        "its scratch files — have been COPIED into your cwd at `./`. "
+        "START by reading the relevant ones (`ls -la`, then read "
+        "report.md / exploit.py / findings.json) so you reconstruct where "
+        "the prior attempt got to, THEN apply the hint below. "
+        if carried else
+        "NOTHING was carried from the previous attempt — this module keeps "
+        "no `work/` tree, so your cwd holds only this job's own inputs. Do "
+        "NOT hunt for the prior attempt's files; they are not here. "
+        "Reconstruct what it established from your conversation history "
+        "(if you have one) and the hint below, then start work. "
+    )
 
     if fresh:
         return (
@@ -1695,18 +1746,16 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
             "You are starting with a CLEAN context. There is NO prior "
             "conversation, reasoning, or tool history available to you — do "
             "NOT look for it or assume you remember earlier turns. Everything "
-            "you have is: (1) the carried work tree in your cwd, and (2) the "
-            "hint below.\n"
-            + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
-            + "\n\nYour current working directory IS the new job's work tree. "
-            "The previous attempt's artifacts — exploit.py / solver.py / "
-            "report.md / findings.json / THREAT_MODEL.md / decomp/ / bin/ / "
-            "its scratch files — have been COPIED into your cwd at `./`. "
-            "START by reading the relevant ones (`ls -la`, then read "
-            "report.md / exploit.py / findings.json) so you reconstruct where "
-            "the prior attempt got to, THEN apply the hint below. Every "
-            "Write/Edit MUST use bare or `./`-relative paths per the rules "
-            "above.\n\n"
+            "you have is: " + ("(1) the carried work tree in your cwd, and "
+                                "(2) the hint below.\n" if carried else
+                                "(1) this job's own inputs in your cwd — the "
+                                "prior attempt's files were NOT carried — and "
+                                "(2) the hint below.\n")
+            + _stale_path_warning(prev_id, carried=carried)
+            + f"\n\nYour current working directory IS the new job's {_cwd_desc}. "
+            + _carry_note
+            + "Every Write/Edit MUST use bare or `./`-relative paths per the "
+            "rules above.\n\n"
             + _CARRY_LIMITS_NOTE
             + _RETRY_ANTI_OVERFIT_NOTE
             + f"{_hint_text}"
@@ -1715,12 +1764,16 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
         _CTF_CONTEXT_HEADER
         + _hist_block
         + f"\n[retry of job {prev_id} — prior-session fork requested]\n"
-        + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
-        + "\n\nYour current working directory IS the new job's work "
-        f"tree. Everything the previous agent produced — partial "
-        f"exploit.py / solver.py / report.md / decomp/ / extracted/ "
-        f"/ bin/ / scratch — has been COPIED into your new cwd and "
-        f"sits directly at `./`. If your conversation context "
+        + _stale_path_warning(prev_id, carried=carried)
+        + f"\n\nYour current working directory IS the new job's {_cwd_desc}. "
+        + (("Everything the previous agent produced — partial "
+            "exploit.py / solver.py / report.md / decomp/ / extracted/ "
+            "/ bin/ / scratch — has been COPIED into your new cwd and "
+            "sits directly at `./`. ") if carried else
+           ("NOTHING was carried from the previous attempt — this module "
+            "keeps no `work/` tree, so your cwd holds only this job's own "
+            "inputs. Do NOT hunt for the prior attempt's files. "))
+        + f"If your conversation context "
         f"already shows the prior reasoning + tool history, continue "
         f"from where you left off in light of the hint below — but "
         f"every new Write/Edit MUST use bare or `./`-relative paths "
@@ -1735,7 +1788,8 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
 
 def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
                      operator_text: bool = False,
-                     history: list[dict] | None = None) -> str:
+                     history: list[dict] | None = None,
+                     carried: bool = True) -> str:
     """Preamble for stop-and-resume. Same fork semantics as retry, but
     the prior session was halted MID-RUN by the user — so the agent
     should treat the work as in-flight ("pick up where you left off")
@@ -1768,6 +1822,9 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
     # should know what the lineage has already named before it reads an
     # instruction that may push it back toward one of those names.
     _hist_block = _technique_history_block(history or [])
+    # See _retry_preamble: misc / forensic have no `<job>/work/`, so the carry
+    # copies nothing and the "everything you wrote is at ./" wording is false.
+    _cwd_desc = "work tree" if carried else "job directory"
 
     if fresh:
         return (
@@ -1777,15 +1834,22 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
             "forked]\n"
             "You are starting with a CLEAN context. There is NO prior "
             "conversation, reasoning, or tool history available — do NOT look "
-            "for it. The prior run was halted mid-work; everything it had "
-            "written has been COPIED into your cwd at `./`.\n"
-            + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
-            + "\n\nYour current working directory IS the NEW job's work tree. "
-            "START by reading the in-progress artifacts (`ls -la`, then "
-            "report.md / exploit.py / solver.py / findings.json / "
-            "THREAT_MODEL.md) to reconstruct where the work stood, THEN "
-            "continue it in light of the guidance below — do not restart the "
-            "analysis from scratch. Every Write/Edit MUST use bare or "
+            "for it. The prior run was halted mid-work; "
+            + ("everything it had written has been COPIED into your cwd at "
+               "`./`.\n" if carried else
+               "NOTHING it wrote was carried — this module keeps no `work/` "
+               "tree, so your cwd holds only this job's own inputs.\n")
+            + _stale_path_warning(prev_id, carried=carried)
+            + f"\n\nYour current working directory IS the NEW job's {_cwd_desc}. "
+            + (("START by reading the in-progress artifacts (`ls -la`, then "
+                "report.md / exploit.py / solver.py / findings.json / "
+                "THREAT_MODEL.md) to reconstruct where the work stood, THEN "
+                "continue it in light of the guidance below — do not restart "
+                "the analysis from scratch. ") if carried else
+               ("The halted run's files are NOT here. Do not hunt for them; "
+                "reconstruct what it established from the guidance below and "
+                "continue rather than restarting. "))
+            + "Every Write/Edit MUST use bare or "
             "`./`-relative paths per the rules above.\n\n"
             + _CARRY_LIMITS_NOTE
             + f"{_hint_text}"
@@ -1794,11 +1858,14 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
         _CTF_CONTEXT_HEADER
         + _hist_block
         + f"\n[resume of job {prev_id} — interrupted, same session forked]\n"
-        + _STALE_PATH_WARNING_TMPL.format(prev_id=prev_id)
+        + _stale_path_warning(prev_id, carried=carried)
         + "\n\nYour prior session was halted mid-run. Your current "
-        f"working directory IS the NEW job's work tree — whatever "
-        f"files you had already written have been COPIED into the "
-        f"new cwd and sit directly at `./`. If your conversation "
+        + f"working directory IS the NEW job's {_cwd_desc}"
+        + ((" — whatever files you had already written have been COPIED "
+            "into the new cwd and sit directly at `./`. ") if carried else
+           ", and the files you had already written were NOT carried — this "
+           "module keeps no `work/` tree. Do not hunt for them. ")
+        + f"If your conversation "
         f"context still has the prior reasoning + tool history, "
         f"continue exactly where you left off and apply the new "
         f"guidance below — do not restart the analysis, and remember "
@@ -1911,7 +1978,8 @@ async def stop_and_resume_stream(job_id: str, request: Request):
         augmented = _resume_preamble(
             safe, hint, fresh=fresh_session,
             operator_text=manual_hint is not None,
-            history=_carry_technique_history(prev_meta, jd))
+            history=_carry_technique_history(prev_meta, jd),
+            carried=(jd / "work").is_dir())
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,

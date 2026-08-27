@@ -730,13 +730,20 @@ def test_carry_limits_note() -> None:
         # this suite pass while the real preamble NameErrors, which is what
         # it did the moment the helper was added.
         "_technique_history_block",
+        # Same rule, second occurrence (2026-08-27): the builders stopped
+        # formatting _STALE_PATH_WARNING_TMPL directly and now go through
+        # _stale_path_warning(), which picks the pwd anchor for modules whose
+        # agent cwd is the job root (misc, forensic) rather than <job>/work.
+        # This suite caught the NameError the same day the helper landed.
+        "_stale_path_warning",
     }
     nodes = [n for n in tree.body
              if (isinstance(n, _ast.Assign)
                  and any(getattr(t, "id", "") in want for t in n.targets))
              or (isinstance(n, _ast.FunctionDef) and n.name in want)]
-    chk("both preamble builders, both notes and the history renderer were found",
-        len(nodes) == 5, len(nodes))
+    chk("both preamble builders, both notes, the history renderer and the "
+        "stale-path helper were found",
+        len(nodes) == 6, len(nodes))
     ns = {"_CTF_CONTEXT_HEADER": "[HDR]",
           "_STALE_PATH_WARNING_TMPL": "[STALE {prev_id}]",
           "_sanitize_hint": lambda h: f"[HINT:{h}]"}
