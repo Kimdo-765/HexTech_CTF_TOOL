@@ -61,6 +61,20 @@ MISC_TIMEOUT_S = 600
 MISC_MEM = "2g"
 
 
+
+def _resume_sid(job_id: str) -> Optional[str]:
+    """The prior agent session this job should continue, or None.
+
+    `/retry` and `/resume` mint a NEW job id and write the parent's session id
+    into the child's meta as `resume_session_id` (api/routes/retry.py). Every
+    analyzer module gets this for free through
+    `modules._common.make_main_session_options`, which passes it as `resume=`.
+    This module builds its session options inline and so has to read it here —
+    without this the field was written on every retry child and never read, and
+    the retry started a brand-new thread with no history.
+    """
+    return (read_meta(job_id) or {}).get("resume_session_id") or None
+
 def _job_dir(job_id: str) -> Path:
     p = JOBS_DIR / job_id
     p.mkdir(parents=True, exist_ok=True)
@@ -241,6 +255,7 @@ async def _claude_summary(
             enable_tools=True,
             enable_subagents=True,
             turn_timeout_s=turn_timeout_s,
+            resume=_resume_sid(job_id),
         )
         async with GptAgentClient(opts) as client:
             await client.query(prompt)
@@ -293,6 +308,7 @@ async def _claude_summary(
                 "TEMP": _tmp_str,
             },
             turn_timeout_s=turn_timeout_s,
+            resume=_resume_sid(job_id),
         )
         async with GrokACPClient(opts) as client:
             if client.session_id:
@@ -343,6 +359,8 @@ async def _claude_summary(
         # Bash kill-guard (the anti-writeup web-research block was removed
         # 2026-07-22 — kill_guard_hooks no longer denies WebSearch/WebFetch).
         hooks=kill_guard_hooks(job_id),
+        resume=_resume_sid(job_id),
+        fork_session=bool(_resume_sid(job_id)),
     )
     summary["agent_provider"] = "claude"
 
