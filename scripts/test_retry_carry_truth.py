@@ -120,6 +120,8 @@ MUTATIONS = (
     "jsonl-work-key",     # transcript keyed on a cwd the agent never had
     "name-filter-only",   # the rule is re-derived from names, not called
     "drop-carry-work",    # a resubmit stops asking for the carry at all
+    "shape-all-job-root", # every module is treated as running in the job root
+    "shape-follows-carried",  # the cwd anchor keys on delivery again
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS, default="none")
@@ -305,11 +307,11 @@ _mutated_src = RETRY_SRC
 if args.mutate == "always-carried":
     _mutated_src = replace_once(
         _mutated_src,
-        '    _cwd_desc = "work tree" if carried else "directory"\n'
-        '    _carry_note = (',
+        '    _cwd_desc = "work tree" if work_tree else "directory"\n'
+        '    # WHY nothing arrived',
         '    carried = True  # MUTATION\n'
-        '    _cwd_desc = "work tree" if carried else "directory"\n'
-        '    _carry_note = (',
+        '    _cwd_desc = "work tree" if work_tree else "directory"\n'
+        '    # WHY nothing arrived',
     )
 elif args.mutate == "hardcode-work-pwd":
     _mutated_src = replace_once(
@@ -339,6 +341,24 @@ elif args.mutate == "existence-only":
         '    dropped.add(_STALE_SENTINEL_NAME)\n'
         '    return any(n not in dropped for n in names)\n',
         '    return (prev_jd / "work").is_dir()  # MUTATION\n',
+    )
+elif args.mutate == "shape-all-job-root":
+    _mutated_src = replace_once(
+        _mutated_src,
+        '    return (prev_meta.get("module") or "") '
+        'not in _JOB_ROOT_CWD_MODULES\n',
+        '    return False  # MUTATION\n',
+    )
+elif args.mutate == "shape-follows-carried":
+    # The regression 0bd9c72 shipped: the cwd anchor keyed on whether the
+    # carry delivered files, so a pwn parent whose work/ held only tmp/ got
+    # the job-root text and a first instruction to stop.
+    _mutated_src = replace_once(
+        _mutated_src,
+        '    _cwd_desc = "work tree" if work_tree else "directory"\n'
+        '    # WHY nothing arrived',
+        '    _cwd_desc = "work tree" if carried else "directory"  # MUTATION\n'
+        '    # WHY nothing arrived',
     )
 elif args.mutate == "name-filter-only":
     # _carry_work_ignore also lstats and drops device nodes, FIFOs and
@@ -400,7 +420,7 @@ elif args.mutate == "false-carry-limits":
         '        what_came=("the prior conversation came with you (unless stated "\n'
         '                   "otherwise above); your cwd did NOT — no files were "\n'
         '                   "carried, as said above"),\n'
-        '        install_target="your cwd",\n'
+        '        install_target="the work tree" if work_tree else "your cwd",\n'
         '    )',
         '    return _CARRY_LIMITS_NOTE_TMPL.format(  # MUTATION\n'
         '        what_came=("your cwd and (unless stated otherwise above) the "\n'
@@ -428,12 +448,14 @@ if args.mutate == "invert-streaming":
         '            safe, hint, fresh=fresh_session,\n'
         '            operator_text=manual_hint is not None,\n'
         '            history=_carry_technique_history(prev_meta, jd),\n'
-        '            carried=_carry_will_deliver(jd))',
+        '            carried=_carry_will_deliver(jd),\n'
+        '            work_tree=_agent_cwd_is_work_tree(prev_meta))',
         '        augmented = _retry_preamble(\n'
         '            safe, hint, fresh=fresh_session,\n'
         '            operator_text=manual_hint is not None,\n'
         '            history=_carry_technique_history(prev_meta, jd),\n'
-        '            carried=not _carry_will_deliver(jd))  # MUTATION',
+        '            carried=not _carry_will_deliver(jd),  # MUTATION\n'
+        '            work_tree=_agent_cwd_is_work_tree(prev_meta))',
     )
 elif args.mutate == "drop-carry-work":
     # `carry_work` defaults to False. A call site that computes `carried`
@@ -452,8 +474,10 @@ elif args.mutate == "drop-callsite":
     _wiring_src = replace_once(
         _wiring_src,
         '        history=_carry_technique_history(prev_meta, jd),\n'
-        '        carried=_carry_will_deliver(jd))',
-        '        history=_carry_technique_history(prev_meta, jd))  # MUTATION',
+        '        carried=_carry_will_deliver(jd),\n'
+        '        work_tree=_agent_cwd_is_work_tree(prev_meta))',
+        '        history=_carry_technique_history(prev_meta, jd),\n'
+        '        work_tree=_agent_cwd_is_work_tree(prev_meta))  # MUTATION',
     )
 
 
@@ -610,16 +634,69 @@ _INSTALL_WORK = "prefer installing into the work tree"
 _CWD_CAME = "your cwd and (unless stated otherwise above)"
 _CONV_CAME = "the prior conversation came with you"
 _MARKER_PROMISE = "_STALE_DO_NOT_WRITE_HERE.md` marker if you `ls` it"
+_CWD_DECL = "working directory IS the "
+
+
+def _cwd_sentence(txt: str) -> str:
+    """Just the sentence that declares what the cwd is."""
+    i = txt.find(_CWD_DECL)
+    return "<absent>" if i < 0 else txt[i:i + 55]
 _WORK_PWD = "If pwd doesn't match `/data/jobs/$JOB_ID/work`"
 _ROOT_PWD = "If pwd doesn't match `/data/jobs/$JOB_ID`"
 
+# Two axes, not one. `carried` says whether the carry delivers files;
+# `work_tree` says whether the agent's cwd is `<job>/work` or the job root.
+# They used to be the same flag, and narrowing `carried` to delivery dragged
+# the cwd anchor along with it: a pwn parent whose work/ held only `tmp/`
+# started rendering the job-root text, so an agent whose cwd really was
+# `<job>/work` read "There is NO ./work/ subdirectory" and a MANDATORY FIRST
+# CALL telling it to stop and re-orient. That is the mirror image of the bug
+# this file was opened for, and no single-axis check could see it: the
+# combination is work_tree=True with carried=False.
+#
+# work_tree=False with carried=True is not reachable — no work/ means nothing
+# to copy — so three cells, not four.
 for builder_name in ("_retry_preamble", "_resume_preamble"):
     builder = getattr(RT, builder_name)
     for fresh in (False, True):
         tag = f"{builder_name}(fresh={fresh})"
 
-        carried_txt = builder("pppppppppppp", "HINT", fresh=fresh, carried=True)
-        bare_txt = builder("pppppppppppp", "HINT", fresh=fresh, carried=False)
+        carried_txt = builder("pppppppppppp", "HINT", fresh=fresh,
+                              carried=True, work_tree=True)
+        empty_work_txt = builder("pppppppppppp", "HINT", fresh=fresh,
+                                 carried=False, work_tree=True)
+        bare_txt = builder("pppppppppppp", "HINT", fresh=fresh,
+                           carried=False, work_tree=False)
+
+        # The regression cell. A work-tree module that carried nothing must
+        # still be told where it is standing.
+        check(f"{tag} empty work tree still anchors pwd on the work tree",
+              _WORK_PWD in empty_work_txt)
+        check(f"{tag} empty work tree is not told there is no ./work/",
+              "NO `./work/` subdirectory" in empty_work_txt, False)
+        # Slice the cwd DECLARATION, not the whole message: the stale-path
+        # block also contains "your cwd is already the new job's work tree",
+        # so a substring test over the full text is satisfied by a different
+        # sentence and a flipped _cwd_desc sails through. It did — the
+        # shape-follows-carried mutation scored 132/0 against this check.
+        check(f"{tag} empty work tree still calls its cwd a work tree",
+              "work tree" in _cwd_sentence(empty_work_txt),
+              detail=_cwd_sentence(empty_work_txt))
+        check(f"{tag} a job-root module calls its cwd a directory",
+              "work tree" in _cwd_sentence(bare_txt), False,
+              detail=_cwd_sentence(bare_txt))
+        check(f"{tag} a carried work tree still calls its cwd a work tree",
+              "work tree" in _cwd_sentence(carried_txt),
+              detail=_cwd_sentence(carried_txt))
+        check(f"{tag} empty work tree is still told nothing was carried",
+              "NOT carried" in empty_work_txt or "NOTHING" in empty_work_txt)
+        check(f"{tag} empty work tree does not claim files were copied",
+              _COPIED in empty_work_txt, False)
+        # ...and it must not be handed the job-root module's REASON either.
+        check(f"{tag} empty work tree is not told the module keeps no work/",
+              "keeps no `work/` tree" in empty_work_txt, False)
+        check(f"{tag} a job-root module still gets that reason",
+              "keeps no `work/` tree" in bare_txt)
 
         check(f"{tag} carried=True still says the tree was copied",
               _COPIED in carried_txt)
@@ -760,6 +837,28 @@ _literal = [c for c in _with_carried
             if isinstance(next(k for k in c.keywords if k.arg == "carried").value,
                           ast.Constant)]
 check("no call site hardcodes carried=", len(_literal), 0)
+
+# Module shape is a property of the MODULE, not of what the last run left on
+# disk. A pwn job whose parent died before writing anything is still a
+# work-tree module, and asking the filesystem would call it a job-root one.
+for _m in ("pwn", "rev", "web", "crypto", "web3"):
+    check(f"{_m} runs its agent in a work tree",
+          RT._agent_cwd_is_work_tree({"module": _m}))
+for _m in ("misc", "forensic"):
+    check(f"{_m} runs its agent in the job root",
+          RT._agent_cwd_is_work_tree({"module": _m}), False)
+check("an unknown module is assumed to have a work tree",
+      RT._agent_cwd_is_work_tree({"module": "brand-new"}))
+
+_shape = [c for c in _calls
+          if any(k.arg == "work_tree" for k in c.keywords)]
+check("every preamble call site passes work_tree=", len(_shape), 4)
+_shape_from_meta = [c for c in _shape
+                    if ast.unparse(next(k.value for k in c.keywords
+                                        if k.arg == "work_tree"))
+                    == "_agent_cwd_is_work_tree(prev_meta)"]
+check("every call site derives the shape from the module, not from disk",
+      len(_shape_from_meta), 4)
 
 # `carried` answers "will the carry deliver files IF it runs". Whether it runs
 # is a separate keyword on a separate call, and `carry_work` defaults to

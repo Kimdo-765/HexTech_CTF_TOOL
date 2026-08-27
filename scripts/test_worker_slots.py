@@ -741,14 +741,18 @@ def test_carry_limits_note() -> None:
         # the cwd did NOT come across and the note said it did — three lines
         # under the sentence saying nothing was carried.
         "_carry_limits_note",
+        # Fourth occurrence (2026-08-27): the cwd anchor stopped keying on
+        # `carried` and now keys on module shape, so the slice needs the
+        # shape helper and its module set too.
+        "_agent_cwd_is_work_tree", "_JOB_ROOT_CWD_MODULES",
     }
     nodes = [n for n in tree.body
              if (isinstance(n, _ast.Assign)
                  and any(getattr(t, "id", "") in want for t in n.targets))
              or (isinstance(n, _ast.FunctionDef) and n.name in want)]
     chk("both preamble builders, both notes, the history renderer and the "
-        "stale-path and carry-limits helpers were found",
-        len(nodes) == 7, len(nodes))
+        "stale-path, carry-limits and cwd-shape helpers were found",
+        len(nodes) == 9, len(nodes))
     ns = {"_CTF_CONTEXT_HEADER": "[HDR]",
           "_STALE_PATH_WARNING_TMPL": "[STALE {prev_id}]",
           "_sanitize_hint": lambda h: f"[HINT:{h}]"}
@@ -768,13 +772,24 @@ def test_carry_limits_note() -> None:
     # gets no work tree, so the note can no longer say the cwd came along or
     # tell the agent to install into a work tree. The global-install warning
     # is the part that must survive in both.
-    for _carried in (True, False):
-        note = ns["_carry_limits_note"](carried=_carried)
-        chk(f"the note names the global-install case (carried={_carried})",
-            "pip install" in note)
-        chk(f"the note keeps a path without the tool (carried={_carried})",
-            "without it" in note)
-    _bare = ns["_carry_limits_note"](carried=False)
+    # Three reachable cells: a work tree that carried, a work tree that
+    # carried nothing, and a job-root module. (No work tree + carried is not
+    # reachable — nothing to copy.)
+    for _carried, _wt in ((True, True), (False, True), (False, False)):
+        note = ns["_carry_limits_note"](carried=_carried, work_tree=_wt)
+        chk(f"the note names the global-install case "
+            f"(carried={_carried}, work_tree={_wt})", "pip install" in note)
+        chk(f"the note keeps a path without the tool "
+            f"(carried={_carried}, work_tree={_wt})", "without it" in note)
+    # A work tree that delivered nothing is still a work tree: the install
+    # advice follows the module's shape, the "came with you" clause follows
+    # what was delivered.
+    _empty_wt = ns["_carry_limits_note"](carried=False, work_tree=True)
+    chk("an empty work tree still points installs at the work tree",
+        "installing into the work tree" in _empty_wt)
+    chk("an empty work tree does not claim the cwd came along",
+        "your cwd and (unless stated otherwise above)" not in _empty_wt)
+    _bare = ns["_carry_limits_note"](carried=False, work_tree=False)
     chk("the carried=False note does not claim the cwd came along",
         "your cwd and (unless stated otherwise above)" not in _bare)
     chk("the carried=False note does not send installs to a work tree",
