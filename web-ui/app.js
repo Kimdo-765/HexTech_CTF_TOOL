@@ -2105,7 +2105,7 @@ async function loadExploits() {
       </div>
       <div class="exp-card-actions">
         <a class="file-preview-link" data-name="${escapeHtml(id)}/report.md" data-url="${API}/exploits/${id}/file/report.md" href="${API}/exploits/${id}/file/report.md">📄 report.md</a>
-        <a class="file-preview-link" data-name="${escapeHtml(id)}/${escapeHtml(m.script_filename || "exploit.py")}" data-url="${API}/exploits/${id}/file/${escapeHtml(m.script_filename || "exploit.py")}" href="${API}/exploits/${id}/file/${escapeHtml(m.script_filename || "exploit.py")}">🐍 ${escapeHtml(m.script_filename || "exploit.py")}</a>
+        ${m.script_filename ? `<a class="file-preview-link" data-name="${escapeHtml(id)}/${escapeHtml(m.script_filename)}" data-url="${API}/exploits/${id}/file/${escapeHtml(m.script_filename)}" href="${API}/exploits/${id}/file/${escapeHtml(m.script_filename)}">🐍 ${escapeHtml(m.script_filename)}</a>` : ""}
         ${m.source_job_id ? `<a href="#" class="exp-jump-job" data-job-id="${escapeHtml(m.source_job_id)}">↗ source job</a>` : ""}
         <button class="exp-del-btn" data-id="${id}">🗑 delete</button>
       </div>
