@@ -54,6 +54,7 @@ MUTATIONS = (
     "require-script",       # bring back the 400
     "copy-missing-script",  # bring back the unconditional copy2
     "ui-fallback",          # bring back `|| "exploit.py"` in app.js
+    "sweep-on-scriptless",  # bring back the sweep that ate a stored script
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS, default="none")
@@ -175,12 +176,37 @@ if args.mutate == "require-script":
         "    report_src = artifact_jd / \"report.md\"\n"
         "    if not report_src.is_file():",
     )
+elif args.mutate == "sweep-on-scriptless":
+    # Un-indent the sweep back out of the `if script_name:` branch, which is
+    # exactly the shape 9d7ced1 shipped: with script_name None every
+    # SCRIPT_CANDIDATES entry satisfies `stale != script_name` and is deleted.
+    _mut = replace_once(
+        _mut,
+        "        for stale in SCRIPT_CANDIDATES:\n"
+        "            if stale != script_name and (dest / stale).is_file():\n"
+        "                try:\n"
+        "                    (dest / stale).unlink()\n"
+        "                except OSError:\n"
+        "                    pass\n",
+        "    for stale in SCRIPT_CANDIDATES:  # MUTATION\n"
+        "        if stale != script_name and (dest / stale).is_file():\n"
+        "            try:\n"
+        "                (dest / stale).unlink()\n"
+        "            except OSError:\n"
+        "                pass\n",
+    )
 elif args.mutate == "copy-missing-script":
+    # Drops the guard entirely: the copy AND the sweep run unconditionally, so
+    # a script-less save raises on `artifact_jd / None`. The anchor spans both
+    # so the mutated source stays syntactically valid — a mutation that only
+    # un-indented the copy left the sweep dangling and died on
+    # IndentationError, which proves nothing about the property.
     _mut = replace_once(
         _mut,
         "    if script_name:\n"
         "        shutil.copy2(artifact_jd / script_name, dest / script_name)",
-        "    shutil.copy2(artifact_jd / script_name, dest / script_name)  # MUTATION",
+        "    if True:  # MUTATION\n"
+        "        shutil.copy2(artifact_jd / script_name, dest / script_name)",
     )
 
 if _mut is not SRC:
@@ -245,12 +271,20 @@ else:
 print("")
 print("--- a module that DOES write one still stores it " + "-" * 11)
 make_job("w0000000web0", "web", script="exploit.py")
-meta_w = save("w0000000web0")
+# Wrapped: an unguarded save() turns a regression into a traceback, and a
+# check that can only ever read True is not a check.
+meta_w = None
+try:
+    meta_w = save("w0000000web0")
+except Exception as exc:  # noqa: BLE001
+    print("      raised:", repr(exc))
 check("a web job still saves", isinstance(meta_w, dict))
+meta_w = meta_w or {}
 check("...with its script recorded", meta_w.get("script_filename"), "exploit.py")
-dest_w = Path(os.environ["DATA_DIR"]) / "exploits" / meta_w["id"]
+dest_w = (Path(os.environ["DATA_DIR"]) / "exploits" / meta_w["id"]
+          if meta_w.get("id") else None)
 check("...and the script really landed on disk",
-      (dest_w / "exploit.py").is_file())
+      bool(dest_w and (dest_w / "exploit.py").is_file()))
 
 # --------------------------------------------------------- report is required
 print("")
@@ -264,6 +298,63 @@ except Exception as exc:  # noqa: BLE001
 check("a job with no report.md is still refused", raised is not None)
 check("...for the stated reason",
       "report.md" in str(raised) if raised else False)
+
+# ------------------------------------------- a re-save must not eat the script
+print("")
+print("--- a script-less re-save must not delete a stored exploit " + "-" * 0)
+# The library entry is keyed on source_job_id, so a second save of the SAME job
+# updates it in place. The artefact source can legitimately move to a
+# script-less child (a flag verdict flips and the canonical child changes), and
+# when it does the stale-script sweep used to fire with script_name=None, for
+# which every SCRIPT_CANDIDATES entry satisfies `stale != script_name`. That
+# deleted the operator's curated exploit. Before the script requirement was
+# dropped the 400 fired ahead of dest.mkdir(), so the entry was untouched —
+# which is how making the save more permissive turned a refusal into data loss.
+def try_save(job_id):
+    """Save, turning a refusal into a value the checks can read.
+
+    Unguarded, a mutation that restores the old 400 kills the suite with a
+    traceback instead of reddening a named check — the run then proves nothing
+    about the property under test.
+    """
+    try:
+        return save(job_id), None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+make_job("r0000000resv", "pwn", script="solver.py")
+meta_r1, err_r1 = try_save("r0000000resv")
+check("the first save stores a script-bearing job", err_r1 is None)
+meta_r1 = meta_r1 or {}
+dest_r = (Path(os.environ["DATA_DIR"]) / "exploits" / meta_r1["id"]
+          if meta_r1.get("id") else Path(os.environ["DATA_DIR"]) / "exploits" / "_absent")
+check("the first save stores the script", (dest_r / "solver.py").is_file())
+
+# Same job id, script now gone — exactly what a moved artefact source looks like.
+(Path(os.environ["JOBS_DIR"]) / "r0000000resv" / "solver.py").unlink()
+meta_r2, err_r2 = try_save("r0000000resv")
+check("the script-less re-save is accepted", err_r2 is None)
+meta_r2 = meta_r2 or {}
+check("the re-save updates the SAME entry", meta_r2.get("id"), meta_r1.get("id"))
+check("...and the stored script SURVIVES", (dest_r / "solver.py").is_file())
+check("...and the metadata still points at it",
+      meta_r2.get("script_filename"), "solver.py")
+check("...and the entry was not emptied",
+      sorted(p.name for p in dest_r.iterdir()),
+      ["meta.json", "report.md", "solver.py"])
+
+# The sweep must still do its job when a script IS present: switching
+# solver.py -> exploit.py may not leave both behind.
+(Path(os.environ["JOBS_DIR"]) / "r0000000resv" / "exploit.py").write_text("print('y')\n")
+meta_r3, err_r3 = try_save("r0000000resv")
+check("the script-switching re-save is accepted", err_r3 is None)
+meta_r3 = meta_r3 or {}
+check("switching scripts records the new one",
+      meta_r3.get("script_filename"), "exploit.py")
+check("...and the old one is swept", (dest_r / "solver.py").is_file(), False)
+check("...leaving exactly one script", (dest_r / "exploit.py").is_file())
+
 
 # ------------------------------------------------------------------- the UI
 print("")
@@ -282,7 +373,9 @@ check("the script link is rendered conditionally",
 check("the exploit.py fallback that linked a missing file is gone",
       'm.script_filename || "exploit.py"' in _appjs, False)
 
-check("test_mutation_suite_reaches_final_named_check", True, True)
+# A literal check(True, True) used to sit here to prove the suite reached its
+# end. It cannot fail, so it only inflated the headline count. The final
+# named check above serves the same purpose and can actually go red.
 
 print("")
 print(f"scriptless-library-save: {passed} passed, {failed} failed; "
