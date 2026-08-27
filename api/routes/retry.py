@@ -255,6 +255,48 @@ def _resolve_targets(
     return primary, (prior if len(prior) >= 2 else None)
 
 
+def _carry_will_deliver(prev_jd: Path) -> bool:
+    """Whether `_resubmit`'s carry will actually put files in the child.
+
+    This is what the preamble's `carried` flag must mean. It used to be
+    `(jd / "work").is_dir()`, a pure existence test — but the carry filters
+    what it copies through `_carry_work_ignore`, so the two disagree. A work/
+    holding only `tmp/` and `__pycache__` exists and copies nothing, and
+    `work/tmp` is created eagerly when the agent environment is built, so that
+    state is reachable rather than hypothetical. The child then stood in an
+    empty tree while the preamble told it everything its predecessor produced
+    "has been COPIED into your new cwd and sits directly at `./`".
+
+    Top level only: a work/ whose sole entry is ignored delivers nothing
+    regardless of what is nested inside it, since copytree never descends
+    into a name the ignore filter removed.
+
+    It calls `_carry_work_ignore` rather than re-deriving the rule. That
+    filter drops more than `_CARRY_WORK_IGNORE_NAMES`: it lstats each entry
+    and also skips device nodes, FIFOs and sockets (the class that once
+    blocked copytree's `open()` and froze uvicorn). A name-set reimplementation
+    would call a work/ holding one FIFO a delivery and be wrong, and would go
+    on being wrong every time that filter grows.
+
+    The stale sentinel is excluded on top of it. It is not in the ignore set —
+    the copy does bring it across — but `_resubmit` deletes it from the child
+    immediately afterwards, so it is never a file the child ends up with.
+    Counting it broke the second retry of the same parent: the first retry
+    plants the sentinel in the parent's work/, and the second then saw a
+    "real" file there and promised a carry that arrived empty.
+    """
+    prev_work = prev_jd / "work"
+    if not prev_work.is_dir():
+        return False
+    try:
+        names = [p.name for p in prev_work.iterdir()]
+    except OSError:
+        return False
+    dropped = set(_carry_work_ignore(str(prev_work), names))
+    dropped.add(_STALE_SENTINEL_NAME)
+    return any(n not in dropped for n in names)
+
+
 def _carry_binary_name(bin_dir: Path, prev_meta: dict) -> str | None:
     """Which staged file is THIS challenge, on a retry.
 
@@ -432,7 +474,18 @@ def _resubmit(
             if prev_meta.get("agent_provider") == "claude" else None
         )
         if prev_sid:
-            _carry_session_jsonl(prev_sid, prev_work, new_jd / "work")
+            # Key on the directory the agent ACTUALLY ran in. misc and
+            # forensic set `work_dir = _job_dir(job_id)` — the job root — so
+            # their transcript is indexed under the key for `<job>`, not
+            # `<job>/work`. Passing the work-tree shape regardless made the
+            # lookup miss, `src.is_file()` return False, and the copy no-op
+            # in silence, leaving fork_session with nothing to find. Both key
+            # shapes exist side by side in ~/.claude/projects, so this is not
+            # a distinction the slug collapses.
+            if prev_work.is_dir():
+                _carry_session_jsonl(prev_sid, prev_work, new_jd / "work")
+            else:
+                _carry_session_jsonl(prev_sid, prev_jd, new_jd)
         # The sentinel was carried into the new work tree by copytree —
         # drop it from the new tree so the agent doesn't trip over it
         # when working in its own cwd.
@@ -1123,7 +1176,7 @@ async def retry_with_hint_stream(job_id: str, request: Request):
             safe, hint, fresh=fresh_session,
             operator_text=manual_hint is not None,
             history=_carry_technique_history(prev_meta, jd),
-            carried=(jd / "work").is_dir())
+            carried=_carry_will_deliver(jd))
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,
@@ -1208,7 +1261,7 @@ async def retry_with_hint(job_id: str, request: Request):
         safe, hint, fresh=fresh_session,
         operator_text=manual_hint is not None,
         history=_carry_technique_history(prev_meta, jd),
-        carried=(jd / "work").is_dir())
+        carried=_carry_will_deliver(jd))
     new_id = _resubmit(
         prev_meta, augmented, jd,
         carry_work=True,
@@ -1317,7 +1370,7 @@ async def stop_and_resume(job_id: str, request: Request):
     augmented_hint = _resume_preamble(safe, manual_hint, fresh=fresh_session,
                                       operator_text=True,
                                       history=_carry_technique_history(prev_meta, jd),
-                                      carried=(jd / "work").is_dir())
+                                      carried=_carry_will_deliver(jd))
 
     new_id = _resubmit(
         prev_meta, augmented_hint, jd,
@@ -1408,7 +1461,7 @@ _CTF_CONTEXT_HEADER = (
 _STALE_PATH_WARNING_TMPL = (
     "🚨 CRITICAL — your cwd has CHANGED since the prior session.\n"
     "The prior agent's tool history shows absolute writes like "
-    "`/data/jobs/{prev_id}/work/exploit.py`. THAT PATH IS NOW STALE — "
+    "`{stale_example}`. THAT PATH IS NOW STALE — "
     "the new job has a DIFFERENT id and the orchestrator collects "
     "artifacts ONLY from your CURRENT cwd. Writing to the old "
     "absolute path will silently leak edits into the dead prior "
@@ -1417,10 +1470,9 @@ _STALE_PATH_WARNING_TMPL = (
     "  • Use bare names (`exploit.py`, `report.md`) or `./`-relative "
     "paths (`./decomp/main.c`).\n"
     "  • NEVER write to `/data/jobs/{prev_id}/...` — that directory "
-    "is no longer yours; you'll find a `_STALE_DO_NOT_WRITE_HERE.md` "
-    "marker if you `ls` it.\n"
+    "is no longer yours{stale_marker_note}.\n"
     "  • NEVER `cd /data/jobs/{prev_id}/...` — your cwd is already "
-    "the new job's work tree; there is no reason to leave it.\n"
+    "{cwd_desc}; there is no reason to leave it.\n"
     "  • NEVER write to `/root/...` (empty home dir).\n"
     "{work_rule}"
     "MANDATORY FIRST CALL — before ANY other tool, run exactly:\n"
@@ -1448,12 +1500,30 @@ def _stale_path_warning(prev_id: str, *, carried: bool) -> str:
         return _STALE_PATH_WARNING_TMPL.format(
             prev_id=prev_id,
             pwd_expect="/data/jobs/$JOB_ID/work",
+            cwd_desc="the new job's work tree",
+            stale_example="/data/jobs/%s/work/exploit.py" % prev_id,
+            stale_marker_note=("; you'll find a "
+                               "`_STALE_DO_NOT_WRITE_HERE.md` marker if you "
+                               "`ls` it"),
             work_rule=("  • NEVER prefix with `./work/` (doubled path — "
                        "your cwd IS the work tree).\n"),
         )
+    # The example path and the cwd description have to move together with the
+    # rule below them. Left literal, the block told a job-root agent that its
+    # cwd "is already the new job's work tree" four lines above the bullet
+    # saying there is no work tree — and cited a predecessor write to
+    # `<prev>/work/exploit.py`, a path that module never used and a filename it
+    # never produces, since it writes no script at all.
     return _STALE_PATH_WARNING_TMPL.format(
         prev_id=prev_id,
         pwd_expect="/data/jobs/$JOB_ID",
+        cwd_desc="the new job's directory",
+        stale_example="/data/jobs/%s/report.md" % prev_id,
+        # No marker is promised here. `_drop_stale_sentinel` runs inside the
+        # copytree branch, so a prior job with no `work/` never gets one —
+        # and an agent told to expect a marker, that then `ls`es and finds
+        # none, reads the directory as still live. Exactly backwards.
+        stale_marker_note="",
         work_rule=("  • There is NO `./work/` subdirectory in this module — "
                    "your cwd IS the job directory. Do not look for one.\n"),
     )
@@ -1478,15 +1548,38 @@ def _stale_path_warning(prev_id: str, *, carried: bool) -> str:
 # correct on a fresh container for any other reason. It also matches what the
 # sandbox does — the runner image never had those packages either, so anything
 # silently depending on one would have failed at auto-run regardless.
-_CARRY_LIMITS_NOTE = (
-    "CARRIED vs NOT: your cwd and (unless stated otherwise above) the prior "
-    "conversation came with you. Anything the previous attempt installed "
+_CARRY_LIMITS_NOTE_TMPL = (
+    "CARRIED vs NOT: {what_came}. Anything the previous attempt installed "
     "GLOBALLY — `pip install`, `apt-get install` — did NOT, and neither did "
     "its /tmp files; you may be on a fresh container. Re-run the install if "
-    "you need the tool, prefer installing into the work tree, and keep a path "
-    "that works without it (the sandbox that auto-runs your exploit never had "
-    "those packages either).\n\n"
+    "you need the tool, prefer installing into {install_target}, and keep a "
+    "path that works without it (the sandbox that auto-runs your exploit "
+    "never had those packages either).\n\n"
 )
+
+
+def _carry_limits_note(*, carried: bool) -> str:
+    """What did and did not come across, told per module shape.
+
+    The note used to open with "your cwd and (unless stated otherwise above)
+    the prior conversation came with you" unconditionally. For a module whose
+    agent runs in the job root there is no work tree to copy, so the cwd did
+    NOT come with it — and the note sat three lines under the sentence saying
+    exactly that. The conversation half is true for every module since
+    760a011 wired resume/fork_session into misc and forensic.
+    """
+    if carried:
+        return _CARRY_LIMITS_NOTE_TMPL.format(
+            what_came=("your cwd and (unless stated otherwise above) the "
+                       "prior conversation came with you"),
+            install_target="the work tree",
+        )
+    return _CARRY_LIMITS_NOTE_TMPL.format(
+        what_came=("the prior conversation came with you (unless stated "
+                   "otherwise above); your cwd did NOT — no files were "
+                   "carried, as said above"),
+        install_target="your cwd",
+    )
 
 
 _RETRY_ANTI_OVERFIT_NOTE = (
@@ -1721,7 +1814,7 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
     # carry silently did nothing. Saying "your predecessor's files are at ./"
     # to an agent standing in an empty tree costs it the turns it spends
     # looking, and the previous wording additionally told it to STOP.
-    _cwd_desc = "work tree" if carried else "job directory"
+    _cwd_desc = "work tree" if carried else "directory"
     _carry_note = (
         "The previous attempt's artifacts — exploit.py / solver.py / "
         "report.md / findings.json / THREAT_MODEL.md / decomp/ / bin/ / "
@@ -1756,7 +1849,7 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
             + _carry_note
             + "Every Write/Edit MUST use bare or `./`-relative paths per the "
             "rules above.\n\n"
-            + _CARRY_LIMITS_NOTE
+            + _carry_limits_note(carried=carried)
             + _RETRY_ANTI_OVERFIT_NOTE
             + f"{_hint_text}"
         )
@@ -1780,7 +1873,7 @@ def _retry_preamble(prev_id: str, hint: str, *, fresh: bool = False,
         f"per the rules above. If the SDK couldn't locate the prior "
         f"session (rare), `ls` once and read whichever file matters "
         f"before applying the hint.\n\n"
-        + _CARRY_LIMITS_NOTE
+        + _carry_limits_note(carried=carried)
         + _RETRY_ANTI_OVERFIT_NOTE
         + f"{_hint_text}"
     )
@@ -1824,7 +1917,7 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
     _hist_block = _technique_history_block(history or [])
     # See _retry_preamble: misc / forensic have no `<job>/work/`, so the carry
     # copies nothing and the "everything you wrote is at ./" wording is false.
-    _cwd_desc = "work tree" if carried else "job directory"
+    _cwd_desc = "work tree" if carried else "directory"
 
     if fresh:
         return (
@@ -1851,7 +1944,7 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
                 "continue rather than restarting. "))
             + "Every Write/Edit MUST use bare or "
             "`./`-relative paths per the rules above.\n\n"
-            + _CARRY_LIMITS_NOTE
+            + _carry_limits_note(carried=carried)
             + f"{_hint_text}"
         )
     return (
@@ -1873,7 +1966,7 @@ def _resume_preamble(prev_id: str, hint: str, *, fresh: bool = False,
         f"If the SDK couldn't locate the prior session (rare), `ls` "
         f"once and read whichever file matters before applying the "
         f"hint.\n\n"
-        + _CARRY_LIMITS_NOTE
+        + _carry_limits_note(carried=carried)
             + f"{_hint_text}"
     )
 
@@ -1979,7 +2072,7 @@ async def stop_and_resume_stream(job_id: str, request: Request):
             safe, hint, fresh=fresh_session,
             operator_text=manual_hint is not None,
             history=_carry_technique_history(prev_meta, jd),
-            carried=(jd / "work").is_dir())
+            carried=_carry_will_deliver(jd))
         try:
             new_id = _resubmit(
                 prev_meta, augmented, jd,

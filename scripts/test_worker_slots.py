@@ -723,7 +723,7 @@ def test_carry_limits_note() -> None:
     src = (ROOT / "api" / "routes" / "retry.py").read_text()
     tree = _ast.parse(src)
     want = {
-        "_CARRY_LIMITS_NOTE", "_RETRY_ANTI_OVERFIT_NOTE",
+        "_CARRY_LIMITS_NOTE_TMPL", "_RETRY_ANTI_OVERFIT_NOTE",
         "_retry_preamble", "_resume_preamble",
         # _retry_preamble renders the lineage's technique history, so the
         # slice needs the renderer too. Stubbing it here instead would let
@@ -736,14 +736,19 @@ def test_carry_limits_note() -> None:
         # agent cwd is the job root (misc, forensic) rather than <job>/work.
         # This suite caught the NameError the same day the helper landed.
         "_stale_path_warning",
+        # Third occurrence, same day: the flat _CARRY_LIMITS_NOTE became a
+        # template plus _carry_limits_note(), because for a job-root module
+        # the cwd did NOT come across and the note said it did — three lines
+        # under the sentence saying nothing was carried.
+        "_carry_limits_note",
     }
     nodes = [n for n in tree.body
              if (isinstance(n, _ast.Assign)
                  and any(getattr(t, "id", "") in want for t in n.targets))
              or (isinstance(n, _ast.FunctionDef) and n.name in want)]
     chk("both preamble builders, both notes, the history renderer and the "
-        "stale-path helper were found",
-        len(nodes) == 6, len(nodes))
+        "stale-path and carry-limits helpers were found",
+        len(nodes) == 7, len(nodes))
     ns = {"_CTF_CONTEXT_HEADER": "[HDR]",
           "_STALE_PATH_WARNING_TMPL": "[STALE {prev_id}]",
           "_sanitize_hint": lambda h: f"[HINT:{h}]"}
@@ -759,10 +764,21 @@ def test_carry_limits_note() -> None:
             chk(f"{label} puts the note before the hint",
                 "CARRIED vs NOT" in out
                 and out.index("CARRIED vs NOT") < out.index("[HINT:"))
-    note = ns["_CARRY_LIMITS_NOTE"]
-    chk("the note names the global-install case", "pip install" in note)
-    chk("the note tells the agent to keep a path without the tool",
-        "without it" in note)
+    # Two branches now, not one constant: a job-root module (misc, forensic)
+    # gets no work tree, so the note can no longer say the cwd came along or
+    # tell the agent to install into a work tree. The global-install warning
+    # is the part that must survive in both.
+    for _carried in (True, False):
+        note = ns["_carry_limits_note"](carried=_carried)
+        chk(f"the note names the global-install case (carried={_carried})",
+            "pip install" in note)
+        chk(f"the note keeps a path without the tool (carried={_carried})",
+            "without it" in note)
+    _bare = ns["_carry_limits_note"](carried=False)
+    chk("the carried=False note does not claim the cwd came along",
+        "your cwd and (unless stated otherwise above)" not in _bare)
+    chk("the carried=False note does not send installs to a work tree",
+        "prefer installing into the work tree" not in _bare)
     anti = ns["_RETRY_ANTI_OVERFIT_NOTE"]
     chk("retry anti-overfit note requires failure classification",
         all(k in anti for k in ("IMPLEMENTATION", "STRATEGY", "UNKNOWN")))
