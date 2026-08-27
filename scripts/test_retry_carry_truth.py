@@ -72,8 +72,10 @@ names / no work/ at all), and the premise block additionally asserts that
 
 WHAT THE MUTATIONS COVER
 
-Twelve, each of which must produce a NAMED check failure rather than an
+Thirteen, each of which must produce a NAMED check failure rather than an
 aborted run: the four original wiring/wording reversals, plus
+`drop-carry-work` (a call site computes `carried` honestly and then forgets
+to ask for the carry, which defaults to off),
 `existence-only` (the helper reverts to `is_dir()`), `name-filter-only` (it
 re-derives the rule from names instead of calling `_carry_work_ignore`, and
 so misses the FIFO/device-node half), `count-sentinel` (the marker counts as
@@ -117,6 +119,7 @@ MUTATIONS = (
     "promise-marker",     # a marker is promised where none is ever written
     "jsonl-work-key",     # transcript keyed on a cwd the agent never had
     "name-filter-only",   # the rule is re-derived from names, not called
+    "drop-carry-work",    # a resubmit stops asking for the carry at all
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS, default="none")
@@ -432,6 +435,19 @@ if args.mutate == "invert-streaming":
         '            history=_carry_technique_history(prev_meta, jd),\n'
         '            carried=not _carry_will_deliver(jd))  # MUTATION',
     )
+elif args.mutate == "drop-carry-work":
+    # `carry_work` defaults to False. A call site that computes `carried`
+    # honestly and then forgets to ask for the carry promises files that were
+    # never copied - the same failure this file exists for, one level up from
+    # where the truth table looks.
+    _wiring_src = replace_once(
+        _wiring_src,
+        '    new_id = _resubmit(\n'
+        '        prev_meta, augmented, jd,\n'
+        '        carry_work=True,',
+        '    new_id = _resubmit(  # MUTATION\n'
+        '        prev_meta, augmented, jd,',
+    )
 elif args.mutate == "drop-callsite":
     _wiring_src = replace_once(
         _wiring_src,
@@ -744,6 +760,24 @@ _literal = [c for c in _with_carried
             if isinstance(next(k for k in c.keywords if k.arg == "carried").value,
                           ast.Constant)]
 check("no call site hardcodes carried=", len(_literal), 0)
+
+# `carried` answers "will the carry deliver files IF it runs". Whether it runs
+# is a separate keyword on a separate call, and `carry_work` defaults to
+# False - so an honest `carried` paired with a forgotten `carry_work` puts
+# the preamble right back to promising files that were never copied. Nothing
+# above can see that: the truth table evaluates the `carried=` expression and
+# never looks at the sibling call.
+_resubmits = [n for n in ast.walk(_tree)
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", "") == "_resubmit"]
+check("all four resubmit call sites are present", len(_resubmits), 4)
+_no_carry = [n.lineno for n in _resubmits
+             if not any(k.arg == "carry_work"
+                        and isinstance(k.value, ast.Constant)
+                        and k.value.value is True
+                        for k in n.keywords)]
+check("every resubmit that follows a preamble asks for the carry",
+      _no_carry, [])
 
 print("")
 print(f"retry-carry-truth: {passed} passed, {failed} failed; mutation={args.mutate}")
