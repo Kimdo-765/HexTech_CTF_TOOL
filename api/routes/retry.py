@@ -644,7 +644,13 @@ def _resubmit(
     # i.e. a retry deliberately follows the current Settings backend.
     from modules.agent_provider import enrich_job_meta
 
-    enrich_job_meta(meta)
+    # Preserve the parent's create-time language snapshot. Older jobs have no
+    # field, which explicitly means auto; do not let a later global Settings
+    # change switch their retry into another language.
+    enrich_job_meta(
+        meta,
+        output_language=prev_meta.get("output_language", "auto"),
+    )
 
     q = get_queue()
 

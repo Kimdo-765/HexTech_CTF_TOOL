@@ -336,7 +336,7 @@ storage_module.write_job_meta = lambda job_id, meta: METAS.__setitem__(
 sys.modules["api.storage"] = storage_module
 
 route_agent_provider = types.ModuleType("modules.agent_provider")
-route_agent_provider.enrich_job_meta = lambda meta: (
+route_agent_provider.enrich_job_meta = lambda meta, **kwargs: (
     meta.update(agent_provider="claude", agent_role_providers={}) or meta
 )
 sys.modules["modules.agent_provider"] = route_agent_provider

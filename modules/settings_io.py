@@ -27,6 +27,10 @@ SCHEMA: list[tuple[str, str | None, type, Any]] = [
     # Which coding-agent backend runs CTF jobs. "claude" = Claude Agent SDK
     # (current default). "grok" = Grok Build via ACP / headless (in progress).
     ("agent_provider", "AGENT_PROVIDER", str, "claude"),
+    # Human-facing prose emitted by every role. "auto" preserves the model's
+    # natural/default language; ko/en add a common system instruction. A job
+    # snapshots the effective value at create time.
+    ("agent_output_language", "AGENT_OUTPUT_LANGUAGE", str, "auto"),
     # OPTIONAL per-role backend override, e.g. {"judge": "claude"} while
     # agent_provider stays "gpt". Absent / empty means every role follows
     # agent_provider, which is byte-for-byte the pre-hybrid behaviour — the
@@ -550,6 +554,10 @@ def get_settings_view() -> dict[str, Any]:
             effective = str(effective or "codex").strip().lower()
             if effective not in {"codex", "responses"}:
                 effective = "codex"
+        if key == "agent_output_language":
+            from modules.output_language import normalize_output_language
+
+            effective = normalize_output_language(effective)
         if key in _SECRET_KEYS:
             out[f"{key}_set"] = bool(raw)
             out[f"{key}_env_set"] = bool(env_v)
@@ -575,6 +583,17 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
             continue
         if val is None or (isinstance(val, str) and val == ""):
             cur.pop(key, None)
+            continue
+        if key == "agent_output_language":
+            from modules.output_language import OUTPUT_LANGUAGES
+
+            v = str(val).strip().lower()
+            if v not in OUTPUT_LANGUAGES:
+                raise ValueError(
+                    "agent_output_language must be one of "
+                    f"{OUTPUT_LANGUAGES}, got {val!r}"
+                )
+            cur[key] = v
             continue
         if key == "agent_provider":
             v = str(val).strip().lower()

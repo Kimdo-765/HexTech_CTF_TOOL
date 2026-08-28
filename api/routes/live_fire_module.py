@@ -26,6 +26,7 @@ async def analyze_live_fire(
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    output_language: Optional[str] = Form(None),
 ):
     filename = Path(file.filename or "").name
     if not filename or Path(filename).suffix.lower() != ".zip":
@@ -65,7 +66,7 @@ async def analyze_live_fire(
         "ready_to_deploy": None,
         "evidence_tiers": [],
     }
-    enrich_job_meta(meta)
+    enrich_job_meta(meta, output_language=output_language)
     write_job_meta(job_id, meta)
 
     get_queue().enqueue(

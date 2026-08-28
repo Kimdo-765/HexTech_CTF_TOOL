@@ -947,6 +947,11 @@ async def _run_judge_turn(
     )
 
     job_id = Path(cwd).name
+    from modules.output_language import instruction_for_job
+
+    language_instruction = instruction_for_job(job_id)
+    if language_instruction:
+        user_prompt = language_instruction + "\n\n" + user_prompt
     # The judge is the first role to actually consult the per-role map that
     # stage 1 added; before this it followed the job provider like everything
     # else. `provider_override` is the failover path handing us the other
@@ -1088,7 +1093,7 @@ async def _run_judge_turn(
         cwd=str(cwd),
         allowed_tools=["Read", "Bash", "Glob", "Grep", "Agent"],
         permission_mode="bypassPermissions",
-        agents=build_judge_agents(_jm),
+        agents=build_judge_agents(_jm, job_id=job_id),
         resume=resume_sid,
         fork_session=False if resume_sid else None,
         # Bash kill-guard only (the anti-writeup web-research block was removed

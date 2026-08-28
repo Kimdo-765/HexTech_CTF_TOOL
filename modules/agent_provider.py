@@ -372,7 +372,10 @@ def provider_meta_fields(
 
 
 def enrich_job_meta(
-    meta: dict[str, Any], provider: str | None = None
+    meta: dict[str, Any],
+    provider: str | None = None,
+    *,
+    output_language: Any = None,
 ) -> dict[str, Any]:
     """In-place stamp of provider fields onto a newly-created job meta dict.
 
@@ -380,6 +383,15 @@ def enrich_job_meta(
     is the moment the routing is decided for the life of the job.
     """
     meta.update(provider_meta_fields(provider, include_routes=True))
+    from modules.output_language import resolve_output_language
+
+    language = resolve_output_language(output_language)
+    # Preserve byte-for-byte legacy metadata in the default/auto case. The
+    # absence of this field is defined as auto by output_language_for_job().
+    if language != "auto":
+        meta["output_language"] = language
+    else:
+        meta.pop("output_language", None)
     return meta
 
 

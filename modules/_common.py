@@ -2289,7 +2289,7 @@ REFUSAL_HINTS = (
 )
 
 
-def _recon_def(model: str | None):
+def _recon_def(model: str | None, prompt: str | None = None):
     """AgentDefinition for the recon subagent. Read-only tools; same
     model as the main agent so it shares cache prefixes.
     """
@@ -2304,7 +2304,7 @@ def _recon_def(model: str | None):
             "conversation context. Pass a single specific question; "
             "expect a ≤2KB summary."
         ),
-        prompt=RECON_AGENT_PROMPT,
+        prompt=prompt or RECON_AGENT_PROMPT,
         # Read-only — main keeps the only Write/Edit hand on
         # exploit.py / solver.py / report.md.
         tools=["Read", "Bash", "Glob", "Grep"],
@@ -2312,7 +2312,7 @@ def _recon_def(model: str | None):
     )
 
 
-def _judge_def(model: str | None = None):
+def _judge_def(model: str | None = None, prompt: str | None = None):
     """AgentDefinition for the judge subagent. Pinned to the latest
     Claude model (LATEST_JUDGE_MODEL) regardless of what the user
     selected for main, because the judge's job is a final-pass quality
@@ -2328,13 +2328,13 @@ def _judge_def(model: str | None = None):
             "delegate heavy investigation to the recon subagent. "
             "Cannot Write or Edit. Pinned to the latest Claude model."
         ),
-        prompt=JUDGE_AGENT_PROMPT,
+        prompt=prompt or JUDGE_AGENT_PROMPT,
         tools=["Read", "Bash", "Glob", "Grep", "Agent"],
         model=model or LATEST_JUDGE_MODEL,
     )
 
 
-def _triage_def(model: str | None):
+def _triage_def(model: str | None, prompt: str | None = None):
     """AgentDefinition for the triage subagent. Verdict-only; re-reads
     the cited file:lines and emits {real | duplicate | false_positive
     | out_of_scope} per candidate. Same model as main so cache prefixes
@@ -2351,13 +2351,13 @@ def _triage_def(model: str | None):
             "upstream guess). Read-only — no writes, no shell beyond "
             "trivial size checks."
         ),
-        prompt=TRIAGE_AGENT_PROMPT,
+        prompt=prompt or TRIAGE_AGENT_PROMPT,
         tools=["Read", "Bash", "Glob", "Grep"],
         model=model,
     )
 
 
-def _debugger_def(model: str | None):
+def _debugger_def(model: str | None, prompt: str | None = None):
     """AgentDefinition for the debugger subagent. Has Write because it
     needs to drop scratch gdb scripts / probe inputs under /tmp; it
     will NOT touch ./exploit.py / ./solver.py / ./report.md per the
@@ -2376,7 +2376,7 @@ def _debugger_def(model: str | None):
             "libc/ld first (via `chal-libc-fix`) so offsets match the "
             "remote. Same model as main for cache locality."
         ),
-        prompt=DEBUGGER_AGENT_PROMPT,
+        prompt=prompt or DEBUGGER_AGENT_PROMPT,
         # Write/Edit allowed for /tmp scratch (gdb command files,
         # probe inputs); the debugger's prompt forbids touching the
         # main artifacts. Agent tool so debugger can ask recon for
@@ -2386,7 +2386,7 @@ def _debugger_def(model: str | None):
     )
 
 
-def build_team_agents(model: str | None) -> dict:
+def build_team_agents(model: str | None, job_id: str | None = None) -> dict:
     """`agents` dict for the MAIN session. Registers all three peers
     main can delegate to:
 
@@ -2404,15 +2404,28 @@ def build_team_agents(model: str | None) -> dict:
     main for cache alignment; judge → LATEST_JUDGE_MODEL).
     """
     from modules.model_presets import resolve_role_model
+    from modules.output_language import with_output_language
     return {
-        "recon": _recon_def(resolve_role_model("recon", model)),
-        "judge": _judge_def(resolve_role_model("judge", LATEST_JUDGE_MODEL)),
-        "debugger": _debugger_def(resolve_role_model("debugger", model)),
-        "triage": _triage_def(resolve_role_model("triage", model)),
+        "recon": _recon_def(
+            resolve_role_model("recon", model),
+            with_output_language(RECON_AGENT_PROMPT, job_id),
+        ),
+        "judge": _judge_def(
+            resolve_role_model("judge", LATEST_JUDGE_MODEL),
+            with_output_language(JUDGE_AGENT_PROMPT, job_id),
+        ),
+        "debugger": _debugger_def(
+            resolve_role_model("debugger", model),
+            with_output_language(DEBUGGER_AGENT_PROMPT, job_id),
+        ),
+        "triage": _triage_def(
+            resolve_role_model("triage", model),
+            with_output_language(TRIAGE_AGENT_PROMPT, job_id),
+        ),
     }
 
 
-def build_judge_agents(model: str | None) -> dict:
+def build_judge_agents(model: str | None, job_id: str | None = None) -> dict:
     """`agents` dict for the JUDGE's own session (orchestrator-invoked).
 
     Registers only `recon` — the judge can delegate to recon for heavy
@@ -2423,7 +2436,13 @@ def build_judge_agents(model: str | None) -> dict:
     cache alignment).
     """
     from modules.model_presets import resolve_role_model
-    return {"recon": _recon_def(resolve_role_model("recon", model or LATEST_JUDGE_MODEL))}
+    from modules.output_language import with_output_language
+    return {
+        "recon": _recon_def(
+            resolve_role_model("recon", model or LATEST_JUDGE_MODEL),
+            with_output_language(RECON_AGENT_PROMPT, job_id),
+        )
+    }
 
 
 # Backward compatibility — the analyzers historically called
@@ -2655,6 +2674,11 @@ def agent_job_env(
     separate concern the CTF_PREAMBLE scratch-file rule owns.
     """
     env: dict[str, str] = {"JOB_ID": str(job_id)}
+    from modules.output_language import output_language_for_job
+
+    language = output_language_for_job(job_id)
+    if language != "auto":
+        env["AGENT_OUTPUT_LANGUAGE"] = language
     if role:
         env["AGENT_ROLE"] = str(role)
     tmp_dir = Path(work_dir) / "tmp"
@@ -2762,6 +2786,10 @@ def make_standalone_options(
         _wr = _web_research_addendum(module)
         if _wr:
             prompt = prompt + "\n\n" + _wr
+
+    from modules.output_language import with_output_language
+
+    prompt = with_output_language(prompt, job_id)
 
     tools = list(_AGENT_TOOLS_BY_TYPE[agent_type])
     # Base = existing behavior: judge pinned to LATEST_JUDGE_MODEL, everyone
@@ -3174,6 +3202,9 @@ async def run_report_phase(
         "You have no tools — write JSON as your final text only.",
         label="report-options", log_fn=log_fn,
     )
+    from modules.output_language import with_output_language
+
+    sys_prompt = with_output_language(sys_prompt, job_id)
 
     from modules.agent_provider import (
         coerce_model_for_provider, default_model_for, provider_for_job,
@@ -3524,8 +3555,10 @@ async def run_pre_recon(
         log_fn(f"[{tag}] backend={provider_display_name('gpt')} model={gpt_model}")
         # Intentional exception: pre-recon is an auxiliary turn, so it uses the
         # provider fallback instead of inheriting the main job's long budget.
+        from modules.output_language import with_output_language
+
         opts = GptSessionOptions(
-            system_prompt=RECON_AGENT_PROMPT,
+            system_prompt=with_output_language(RECON_AGENT_PROMPT, job_id),
             model=gpt_model,
             cwd=str(work_dir),
             effort=None,
@@ -3981,6 +4014,9 @@ def make_main_session_options(
     _wr_main = _web_research_addendum(_module)
     if _wr_main:
         system_prompt = system_prompt + "\n\n" + _wr_main
+    from modules.output_language import with_output_language
+
+    system_prompt = with_output_language(system_prompt, job_id)
     system_prompt = sanitize_for_argv(
         system_prompt, label="main-options", log_fn=log_fn_local,
     )
@@ -4131,7 +4167,7 @@ def make_main_session_options(
             env=env,
             resume=resume_sid,
             fork_session=bool(resume_sid),
-            agents=build_recon_agents(model),
+            agents=build_recon_agents(model, job_id=job_id),
             effort=effort,
             hooks=main_session_hooks(add_dirs, work_dir, job_id),
         )

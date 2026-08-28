@@ -299,7 +299,7 @@ storage_module.write_job_meta = lambda job, meta: saved_meta.update(meta)
 sys.modules["api.storage"] = storage_module
 
 agent_provider = types.ModuleType("modules.agent_provider")
-agent_provider.enrich_job_meta = lambda meta: (
+agent_provider.enrich_job_meta = lambda meta, **kwargs: (
     meta.update(agent_provider="claude") or meta
 )
 sys.modules["modules.agent_provider"] = agent_provider

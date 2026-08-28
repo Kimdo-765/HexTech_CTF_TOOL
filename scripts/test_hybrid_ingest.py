@@ -168,7 +168,7 @@ enriched = []
 agent_provider = types.ModuleType("modules.agent_provider")
 
 
-def enrich_job_meta(meta):
+def enrich_job_meta(meta, **kwargs):
     enriched.append(meta)
     meta["agent_provider"] = "fixture"
     return meta

@@ -28,6 +28,7 @@ async def analyze_crypto(
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    output_language: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
 ):
     targets = parse_targets(target)
@@ -71,7 +72,7 @@ async def analyze_crypto(
         "src_root": src_root,
         "remote_only": not has_file,
     }
-    enrich_job_meta(meta)
+    enrich_job_meta(meta, output_language=output_language)
     write_job_meta(job_id, meta)
 
     q = get_queue()

@@ -163,6 +163,7 @@ prev_meta = {
     "auto_run": True,
     "agent_provider": "gpt",
     "agent_role_providers": {"judge": "claude"},
+    "output_language": "ko",
 }
 (parent_dir / "meta.json").write_text(json.dumps(prev_meta))
 
@@ -174,6 +175,11 @@ check(
     "retry meta carries the create-time role snapshot",
     new_meta.get("agent_role_providers"),
     {"judge": "claude"},
+)
+check(
+    "retry carries the parent's output-language snapshot",
+    new_meta.get("output_language"),
+    "ko",
 )
 check(
     "the routed role resolves on the NEW job",

@@ -848,12 +848,20 @@ class GptResponsesClient:
             )
         except Exception:
             pass
+        from modules.output_language import output_language_instruction
+
+        child_language = output_language_instruction(
+            (self.options.env or {}).get("AGENT_OUTPUT_LANGUAGE")
+        )
+        child_system_prompt = (
+            f"You are HexTech's isolated {role} subagent. {role_rules[role]} "
+            "Use the available local tools as needed. Do not delegate again."
+        )
+        if child_language:
+            child_system_prompt += "\n\n" + child_language
         child = GptResponsesClient(
             GptSessionOptions(
-                system_prompt=(
-                    f"You are HexTech's isolated {role} subagent. {role_rules[role]} "
-                    "Use the available local tools as needed. Do not delegate again."
-                ),
+                system_prompt=child_system_prompt,
                 model=child_model,
                 cwd=self.options.cwd,
                 effort=self.options.effort,
@@ -950,7 +958,16 @@ def _normalize_effort(value: str | None) -> str | None:
     effort = str(value or "").strip().lower()
     return (
         effort
-        if effort in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        if effort in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        }
         else None
     )
 

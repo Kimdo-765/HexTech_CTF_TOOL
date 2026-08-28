@@ -48,7 +48,7 @@ const panelSettings = doc.getElementById("panel-settings");
 
 // The complete set of settings the form is responsible for. Spelled out so
 // that losing one during a re-nesting is a named failure, not a silent gap.
-const NAMES = ["agent_provider", "topology_preset", "role_provider_judge",
+const NAMES = ["agent_provider", "agent_output_language", "topology_preset", "role_provider_judge",
   "role_provider_reviewer", "role_provider_report", "role_provider_monitor",
   "anthropic_api_key", "claude_model", "claude_effort", "claude_model_custom",
   "xai_api_key", "grok_model", "grok_effort", "grok_model_custom",

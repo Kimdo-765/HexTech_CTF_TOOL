@@ -51,7 +51,7 @@ def hard_timeout_for(soft: int) -> int:
     return min(max(int(soft) * 4, 86400), _HARD_TIMEOUT_CEILING_S)
 
 
-_VALID_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
+_VALID_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max", "ultra"))
 
 
 def normalize_effort(raw: str | None) -> str | None:
@@ -59,10 +59,11 @@ def normalize_effort(raw: str | None) -> str | None:
 
     Empty / None → return None (caller will fall back to the global
     setting or the SDK default). A non-empty value not in the
-    SDK's accepted set is silently coerced to None as well; this
+    provider adapters' accepted set is silently coerced to None as well; this
     keeps a typo from blocking the job submit and instead pushes
-    the run onto the safe default. Accepted values mirror
-    ``ClaudeAgentOptions(effort=...)``: low / medium / high / xhigh / max.
+    the run onto the safe default. Accepted values are low / medium / high /
+    xhigh / max / ultra. The selected model ultimately decides which levels
+    are supported.
     """
     if raw is None:
         return None

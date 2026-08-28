@@ -84,6 +84,7 @@ async def analyze_hybrid(
     flag_format: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    output_language: Optional[str] = Form(None),
     job_timeout: Optional[int] = Form(None),
     rev_target: Optional[str] = Form(None, alias="inputs.rev.target"),
     rev_docker: bool = Form(False, alias="inputs.rev.docker_challenge"),
@@ -161,7 +162,7 @@ async def analyze_hybrid(
         "inputs": inputs,
     }
     try:
-        enrich_job_meta(meta)
+        enrich_job_meta(meta, output_language=output_language)
         parent = HybridCoordinator(JOBS_DIR).create_parent(job_id, canonical, meta=meta)
     except HybridCoordinatorError as exc:
         from modules.job_secrets import delete_job_secrets

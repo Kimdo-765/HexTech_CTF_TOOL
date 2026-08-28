@@ -40,6 +40,7 @@ async def collect_forensic(
     job_timeout: Optional[int] = Form(None),
     model: Optional[str] = Form(None),
     effort: Optional[str] = Form(None),
+    output_language: Optional[str] = Form(None),
     flag_format: Optional[str] = Form(None),
 ):
     # The image stays REQUIRED. A target is additive context — the artifact is
@@ -85,7 +86,7 @@ async def collect_forensic(
         "effort": chosen_effort,
         "flag_format": (flag_format or "").strip() or None,
     }
-    enrich_job_meta(meta)
+    enrich_job_meta(meta, output_language=output_language)
     write_job_meta(job_id, meta)
 
     q = get_queue()

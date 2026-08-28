@@ -1220,6 +1220,12 @@ async function loadSettings() {
   const gptRuntime = s.gpt_runtime === "responses" ? "responses" : "codex";
   const gptRuntimeSel = f.querySelector("[name=gpt_runtime]");
   if (gptRuntimeSel) gptRuntimeSel.value = gptRuntime;
+  const outputLanguageSel = f.querySelector("[name=agent_output_language]");
+  if (outputLanguageSel) {
+    const language = String(s.agent_output_language || "auto").toLowerCase();
+    outputLanguageSel.value = ["auto", "ko", "en"].includes(language)
+      ? language : "auto";
+  }
 
   // Claude effort (mirrors model: empty = SDK default; otherwise one
   // of low/medium/high/xhigh/max). Stored under `claude_effort` in the

@@ -133,7 +133,16 @@ def _normalize_effort(value: str | None) -> str | None:
     effort = str(value or "").strip().lower()
     return (
         effort
-        if effort in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        if effort in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        }
         else None
     )
 
@@ -147,6 +156,7 @@ def _write_codex_agent_configs(
     cwd: str | Path,
     parent_model: str,
     effort: str | None,
+    language_instruction: str = "",
 ) -> dict[str, Path]:
     """Write GPT-only role overlays and return absolute paths by role.
 
@@ -166,6 +176,14 @@ def _write_codex_agent_configs(
         if normalized_effort:
             lines.append(
                 "model_reasoning_effort = " + _toml_string(normalized_effort)
+            )
+        if language_instruction:
+            # Child agents do not automatically receive the main agent's
+            # developer prompt. Put the same immutable job-language policy in
+            # every role overlay so native Codex delegation cannot drift.
+            lines.append(
+                "developer_instructions = "
+                + _toml_string(language_instruction)
             )
         content = "\n".join(lines) + "\n"
         path = role_dir / f"{role}.toml"
@@ -410,7 +428,19 @@ class CodexCLIClient:
 
     def _instructions(self, prompt: str, *, resuming: bool) -> str:
         if resuming:
-            return prompt
+            # A resumed `codex exec` turn does not replay system_prompt. The
+            # session normally remembers it, but explicitly carrying this
+            # small immutable policy makes /continue and /retry deterministic.
+            from modules.output_language import output_language_instruction
+
+            language_instruction = output_language_instruction(
+                (self.options.env or {}).get("AGENT_OUTPUT_LANGUAGE")
+            )
+            return (
+                language_instruction + "\n\n" + prompt
+                if language_instruction
+                else prompt
+            )
         system = adapt_system_prompt_for_codex(self.options.system_prompt)
         if self.options.append_tool_addendum and self.options.enable_tools:
             system = system.rstrip() + "\n\n" + CODEX_TOOL_ADDENDUM
@@ -464,10 +494,15 @@ class CodexCLIClient:
                     'features.multi_agent_v2.tool_namespace="agents"',
                 )
             )
+            from modules.output_language import output_language_instruction
+
             role_configs = _write_codex_agent_configs(
                 self.options.cwd,
                 str(self.options.model),
                 effort,
+                output_language_instruction(
+                    (self.options.env or {}).get("AGENT_OUTPUT_LANGUAGE")
+                ),
             )
             for role, path in role_configs.items():
                 common.extend(

@@ -93,7 +93,7 @@ check("downloads wait for a finished job", pending.includes("patched.zip"), fals
 
 const formStart = html.indexOf('id="live-fire-form"');
 const form = html.slice(formStart, html.indexOf("</form>", formStart));
-for (const field of ["file", "verification", "description", "model", "effort", "job_timeout"]) {
+for (const field of ["file", "verification", "description", "model", "effort", "output_language", "job_timeout"]) {
   check(`live-fire form sends ${field}`, form.includes(`name="${field}"`));
 }
 check("live-fire submit uses its dedicated API route",

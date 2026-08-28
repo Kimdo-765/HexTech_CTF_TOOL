@@ -40,6 +40,7 @@ _PROVIDER_META_FIELDS = (
     "gpt_preset",
     "gpt_role_models",
     "gpt_preset_effort",
+    "output_language",
 )
 
 _ARCHIVE_EXTENSIONS = (

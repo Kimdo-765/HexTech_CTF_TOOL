@@ -774,6 +774,11 @@ async def _ask_reviewer(
     else:
         provider, model = _reviewer_provider_and_model(model, job_id)
     framed_context = _frame_reviewer_context(context)
+    from modules.output_language import instruction_for_job
+
+    language_instruction = instruction_for_job(job_id)
+    if language_instruction:
+        framed_context = language_instruction + "\n\n" + framed_context
     usage_out: dict = {}
 
     _err: dict = {}
@@ -908,6 +913,11 @@ async def _stream_reviewer_once(
     else:
         provider, model = _reviewer_provider_and_model(model, job_id)
     framed_context = _frame_reviewer_context(context)
+    from modules.output_language import instruction_for_job
+
+    language_instruction = instruction_for_job(job_id)
+    if language_instruction:
+        framed_context = language_instruction + "\n\n" + framed_context
     usage_out: dict = {}
     _err: dict = {}
 

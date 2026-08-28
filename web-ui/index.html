@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ogamdo — cross AI view</title>
   <meta name="description" content="여러 AI의 시선을 교차시켜 푸는 CTF 자동화 플랫폼." />
-  <link rel="stylesheet" href="/static/style.css?v=a76928a10" />
+  <link rel="stylesheet" href="/static/style.css?v=af1833875" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -48,6 +48,15 @@
     <section id="panel-web" class="panel active">
       <h2>Web — Source Vulnerability Analysis + Exploit</h2>
       <form id="web-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Source code (zip preferred, single file ok) — <em>or skip if remote-only</em>
           <input type="file" name="file" />
@@ -112,6 +121,15 @@
     <section id="panel-pwn" class="panel">
       <h2>Pwn — Ghidra Decompile + Exploit (pwntools)</h2>
       <form id="pwn-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Binary (ELF/PE) (zip preferred, single binary ok) — <em>or skip if remote-only</em>
           <input type="file" name="file" />
@@ -177,6 +195,15 @@
     <section id="panel-forensic" class="panel">
       <h2>Forensic — Disk / Memory Image Triage · Log analysis</h2>
       <form id="forensic-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Image / log file
           <input type="file" name="file" required />
@@ -262,6 +289,15 @@
     <section id="panel-misc" class="panel">
       <h2>Misc — File Format / Steganography Triage</h2>
       <form id="misc-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           File (image / audio / pdf / archive / unknown blob) — <em>optional</em>
           <input type="file" name="file" />
@@ -329,6 +365,15 @@
     <section id="panel-crypto" class="panel">
       <h2>Crypto — Source Analysis + Solver Generation</h2>
       <form id="crypto-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Challenge files (zip preferred — source + ciphertext + keys) — <em>or skip for remote oracle</em>
           <input type="file" name="file" />
@@ -393,6 +438,15 @@
     <section id="panel-web3" class="panel">
       <h2>Web3 — Smart-Contract Analysis + Exploit Generation</h2>
       <form id="web3-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Contract sources (zip preferred — Setup.sol + target contracts) — <em>or skip for a chain-only target</em>
           <input type="file" name="file" />
@@ -458,6 +512,15 @@
     <section id="panel-rev" class="panel">
       <h2>Reversing — Ghidra Decompile + Solver</h2>
       <form id="rev-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Binary / artifact (ELF/PE · .NET/Java/Python/WASM/… · zip) — <em>or skip if remote-only</em>
           <input type="file" name="file" />
@@ -527,6 +590,15 @@
         public parent during ingest; scalar child jobs are created by the coordinator.
       </p>
       <form id="hybrid-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Recipe
           <select name="recipe" id="hybrid-recipe">
@@ -621,6 +693,15 @@
         The result is always manual-download only; this tool never deploys it.
       </p>
       <form id="live-fire-form">
+        <label class="output-language-field">
+          Output language
+          <select name="output_language">
+            <option value="">(default — Settings value)</option>
+            <option value="ko">한국어 (Korean)</option>
+            <option value="en">English</option>
+          </select>
+          <small style="color:var(--fg-muted)">Applies to Main, Recon, subagents, Judge, Reviewer, and Report. Code, commands, paths, errors, and flags stay verbatim.</small>
+        </label>
         <label>
           Service source ZIP
           <input type="file" name="file" accept=".zip,application/zip" required />
@@ -824,6 +905,20 @@
             </label>
           </div>
           <small id="provider-status" style="color:var(--fg-muted)"></small>
+
+          <label style="max-width:22rem;margin-top:1rem">
+            Agent output language (global default)
+            <select name="agent_output_language">
+              <option value="auto">Automatic (model default)</option>
+              <option value="ko">한국어 (Korean)</option>
+              <option value="en">English</option>
+            </select>
+            <small style="color:var(--fg-muted)">
+              Snapshotted when a job is created and applied consistently to Main,
+              Recon, subagents, Judge, Reviewer, and Report. Machine-readable data,
+              code, commands, paths, errors, evidence, and flags are preserved verbatim.
+            </small>
+          </label>
 
           <h3 class="provider-block-title" style="margin-top:1rem">Per-role override (hybrid)</h3>
           <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.5rem">
@@ -1212,6 +1307,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=a76928a10"></script>
+  <script src="/static/app.js?v=af1833875"></script>
 </body>
 </html>
