@@ -53,7 +53,7 @@ CONFIGURABLE_ROLES: tuple[str, ...] = (
 # the useful subset; the backend accepts the union so saved future model
 # capabilities are not destroyed by an older server.
 VALID_EFFORTS: tuple[str, ...] = (
-    "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 )
 
 _lock = threading.Lock()

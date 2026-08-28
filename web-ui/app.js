@@ -86,15 +86,21 @@ const GROK_MODELS = [
 // one list). Empty = CLI/model default.
 const GROK_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-// OpenAI Codex / Responses model ids. `gpt-5.6` is the flagship alias; the
-// explicit family members let operators choose the quality/cost point.
+// OpenAI Codex / Responses model ids. Keep the visible Codex catalog here so
+// the same choices are available globally, per job, and in provider presets.
+// `gpt-5.6` remains the Responses API flagship alias.
 const GPT_MODELS = [
   "gpt-5.6",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
+  "gpt-daybreak-blue-latest",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
 ];
-const GPT_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const GPT_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 // Active provider from last Settings load — drives per-job model lists.
 let activeAgentProvider = "claude";

@@ -954,16 +954,16 @@
           <label>
             GPT model (global default)
             <select name="gpt_model" data-role="gpt-model-select-settings"></select>
-            <small style="color:var(--fg-muted)">add a custom model with the field below if it's missing</small>
+            <small style="color:var(--fg-muted)">Daybreak requires separate OpenAI approval; Codex Spark is Codex CLI-only. Add any missing model with the custom field below.</small>
           </label>
           <label>
             Reasoning effort (global default; Codex CLI or Responses API)
             <select name="gpt_effort" data-role="gpt-effort-select-settings"></select>
-            <small style="color:var(--fg-muted)">Codex accepts minimal through xhigh; none/max are for the Responses fallback.</small>
+            <small style="color:var(--fg-muted)">Available efforts vary by model; newer Codex models can support max or ultra.</small>
           </label>
           <label>
             ...or type a custom OpenAI model id
-            <input type="text" name="gpt_model_custom" placeholder="gpt-5.6 / gpt-5.6-terra / …" />
+            <input type="text" name="gpt_model_custom" placeholder="gpt-5.6 / gpt-daybreak-blue-latest / …" />
           </label>
         </div>
 

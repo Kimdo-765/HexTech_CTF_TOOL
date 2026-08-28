@@ -91,6 +91,7 @@ VALID_EFFORTS = frozenset(
         "high",
         "xhigh",
         "max",
+        "ultra",
     }
 )
 

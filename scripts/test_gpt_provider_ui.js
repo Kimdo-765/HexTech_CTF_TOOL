@@ -51,6 +51,12 @@ check("Codex minimal effort is offered", /GPT_EFFORTS\s*=\s*\[[^\]]*"minimal"/.t
 check("GPT model catalog includes Sol", /"gpt-5\.6-sol"/.test(js));
 check("GPT model catalog includes Terra", /"gpt-5\.6-terra"/.test(js));
 check("GPT model catalog includes Luna", /"gpt-5\.6-luna"/.test(js));
+check("GPT model catalog includes Daybreak Blue", /"gpt-daybreak-blue-latest"/.test(js));
+check("GPT model catalog includes GPT-5.5", /"gpt-5\.5"/.test(js));
+check("GPT model catalog includes GPT-5.4", /"gpt-5\.4"/.test(js));
+check("GPT model catalog includes GPT-5.4 Mini", /"gpt-5\.4-mini"/.test(js));
+check("GPT model catalog includes Codex Spark", /"gpt-5\.3-codex-spark"/.test(js));
+check("GPT effort catalog includes ultra", /GPT_EFFORTS\s*=\s*\[[^\]]*"ultra"/.test(js));
 check("provider normalization accepts GPT", /\["claude", "grok", "gpt"\]\.includes/.test(js));
 check("GPT block receives provider-active", /gptBlock\.classList\.toggle\("provider-active", p === "gpt"\)/.test(js));
 check("saved GPT model is loaded", /_setModelField\(f, "gpt_model"/.test(js));
