@@ -242,6 +242,39 @@ for m in MODULES:
 
 
 # --------------------------------------- 3. recon still receives it too
+# --------------------------------- 2b. the provider production actually uses
+print("")
+print("--- the gpt/codex path carries it too " + "-" * 24)
+# The checks above run the default (claude) branch. Job 890a39993137 and its
+# successor run on gpt/codex, so asserting the property only on the claude
+# path would be asserting it on a path production does not take. The append
+# happens before the provider branch, and this is what proves it.
+_settings = Path(os.environ["SETTINGS_PATH"])
+_saved = _settings.read_text()
+try:
+    _settings.write_text(json.dumps({"agent_provider": "gpt"}))
+    from modules.agent_provider import active_provider
+    check("settings select the gpt provider", active_provider(), "gpt")
+    jid = make_job("gptjob000000", "web")
+    gopts = C.make_main_session_options(
+        job_id=jid,
+        work_dir=str(Path(os.environ["JOBS_DIR"]) / jid / "work"),
+        model="gpt-test", system_prompt=BASE,
+        base_tools=["Read", "Bash"], summary={},
+    )
+    gsp = getattr(gopts, "system_prompt", "") or ""
+    check("gpt options are a different type than claude's",
+          type(gopts).__name__, "GptSessionOptions")
+    check("gpt: the prompt still contains the base body", BASE in gsp)
+    _w = C._web_research_addendum("web")
+    check("gpt: the prompt carries the web reframe", _w in gsp,
+          detail=gsp[-160:])
+    check("gpt: the reframe comes AFTER the base",
+          (_w in gsp and BASE in gsp and gsp.index(_w) > gsp.index(BASE)))
+finally:
+    _settings.write_text(_saved)
+
+
 print("")
 print("--- the recon subagent did not lose it " + "-" * 23)
 jid = make_job("reconjob0000", "web")
