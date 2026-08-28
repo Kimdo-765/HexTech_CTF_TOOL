@@ -1615,7 +1615,12 @@ def scan_job_for_flags(
          summary.json). If ANY non-placeholder flag
          appears here, return ONLY those — they prove the exploit
          really retrieved the flag from the target.
-      2. NARRATIVE tier — report.md, run.log, findings.json. Consulted
+      2. NARRATIVE tier — report.md, findings.json, log_findings.json.
+         (run.log was REMOVED from this tier on 2026-07-23 — see
+         _NARRATIVE_FLAG_SOURCES. This docstring kept listing it, which
+         reads as "the scanner consults run.log" and sends the next
+         reader looking for a false positive in the wrong code path.)
+         Consulted
          only when the trusted tier is empty. These regularly contain
          chal-author placeholders quoted from `chal/run.sh` (e.g. the
          job 9a240a221f1b incident: `DH{this_is_a_flag}` got pulled
@@ -2613,8 +2618,20 @@ _RECON_WEB_ADDENDUM = {
 }
 
 
-def _recon_web_research_addendum(module: str) -> str:
-    """Per-module RECON web-research reframe; '' for pwn/unknown (no change)."""
+def _web_research_addendum(module: str) -> str:
+    """Per-module web-research reframe; '' for pwn/unknown (no change).
+
+    Given to BOTH the recon subagent and the main session. It used to be
+    recon-only, which left main with the base prompt's web-research block —
+    whose three concrete bullets are all pwn/heap examples (FSOP/IO_FILE,
+    tcache_key, House-of-*, custom allocator wrappers). For a web or crypto
+    job that is guidance about a different game, so the only thing main
+    actually took from it was the permission line. Observed on job
+    890a39993137: main searched for the challenge's OWN writeup using strings
+    lifted from the source. The base block forbids COPYING a writeup, not
+    LOOKING for one; the sentence that scopes the search to stack/CVE lookups
+    lived here, addressed to recon.
+    """
     return _RECON_WEB_ADDENDUM.get((module or "").lower(), "")
 
 
@@ -2742,7 +2759,7 @@ def make_standalone_options(
     # byte-identical). Appended so it directly follows / overrides the
     # pwn-flavored "Web research — ENABLED" examples in the base prompt.
     if agent_type == "recon":
-        _wr = _recon_web_research_addendum(module)
+        _wr = _web_research_addendum(module)
         if _wr:
             prompt = prompt + "\n\n" + _wr
 
@@ -3952,6 +3969,18 @@ def make_main_session_options(
     # CLI argv (Claude) or ACP meta (Grok). A stray `\0` in any prompt
     # constant makes execve(2) reject the spawn with
     # `ValueError: embedded null byte`.
+    # Same per-module web-research reframe the recon subagent gets. Appended
+    # so it follows — and overrides — the pwn-flavored "Web research —
+    # ENABLED" examples in the base prompt. Every module routes through this
+    # builder, so scoping it here cannot be forgotten by one analyzer. pwn
+    # returns '' and stays byte-identical.
+    try:
+        _module = (read_meta(job_id) or {}).get("module") or ""
+    except Exception:  # noqa: BLE001
+        _module = ""
+    _wr_main = _web_research_addendum(_module)
+    if _wr_main:
+        system_prompt = system_prompt + "\n\n" + _wr_main
     system_prompt = sanitize_for_argv(
         system_prompt, label="main-options", log_fn=log_fn_local,
     )
