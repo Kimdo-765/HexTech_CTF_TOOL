@@ -1844,6 +1844,17 @@ function presetCatalog(provider = PRESET_PROVIDER) {
   return { models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS };
 }
 
+function renderPresetCatalogNote(provider = PRESET_PROVIDER) {
+  const note = document.getElementById("preset-catalog-note");
+  if (!note) return;
+  const isGpt = provider === "gpt";
+  note.hidden = !isGpt;
+  note.textContent = isGpt
+    ? `Current GPT catalog: ${GPT_MODELS.join(" · ")}. `
+      + "Daybreak requires separate OpenAI approval; Codex Spark is Codex CLI-only."
+    : "";
+}
+
 function presetRoles(provider = PRESET_PROVIDER) {
   const roles = Array.isArray(PRESET_STORE.configurable_roles)
     ? PRESET_STORE.configurable_roles : DEFAULT_PRESET_ROLES;
@@ -1871,6 +1882,7 @@ function renderPresetControls() {
   });
   const providerLabel = document.getElementById("preset-provider-label");
   if (providerLabel) providerLabel.textContent = PRESET_PROVIDER_LABELS[PRESET_PROVIDER];
+  renderPresetCatalogNote();
   const saveButton = document.getElementById("preset-save");
   if (saveButton) {
     saveButton.disabled = PRESET_API_VERSION < 2;

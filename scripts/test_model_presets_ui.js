@@ -25,6 +25,21 @@ check("provider tab selects its own bucket", /PRESET_STORE\.providers\[PRESET_PR
 check("Claude catalog is selectable", /models:\s*CLAUDE_MODELS/.test(js));
 check("Grok catalog is selectable", /models:\s*GROK_MODELS/.test(js));
 check("GPT catalog is selectable", /models:\s*GPT_MODELS/.test(js));
+for (const model of [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-daybreak-blue-latest",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
+]) {
+  check(`GPT preset catalog includes ${model}`, js.includes(`"${model}"`));
+}
+check("GPT preset effort catalog includes ultra", /GPT_EFFORTS\s*=\s*\[[^\]]*"ultra"/.test(js));
+check("GPT preset catalog note is rendered", html.includes('id="preset-catalog-note"')
+  && /renderPresetCatalogNote\(\)/.test(js));
 check("save sends version-2 provider store", /JSON\.stringify\(\{ version: 2, providers: PRESET_STORE\.providers \}\)/.test(js));
 check("v2 UI refuses save through a stale v1 API", /PRESET_API_VERSION < 2/.test(js));
 check("job provider change opens matching preset tab", /setPresetProvider\(p\)/.test(js));
