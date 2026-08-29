@@ -81,7 +81,32 @@ _STEP_REF_RE = re.compile(r"\bstep\s*(\d+)\b|\b(\d+)\b", re.IGNORECASE)
 #   (a) TESTED-AND-FAILED — local probing said NO (known-broken). Ship-blocking.
 #   (b) UNTESTABLE-LOCALLY — the worker physically cannot test it (env limit:
 #       no vsyscall page, CET/SHSTK enforced by the WSL2 host kernel, no
-#       matching-kernel VM, no /dev/kvm). The REMOTE is then the ONLY test.
+#       matching-kernel VM). The REMOTE is then the ONLY test.
+#
+#       "no /dev/kvm" was on that list and was REMOVED 2026-08-29. It is not
+#       an env limit: a launcher with no `-enable-kvm` and no `-accel` runs
+#       under TCG, which needs no /dev/kvm at all, so the correct local test
+#       was available the whole time and the phrase excused skipping it.
+#       /dev/kvm is in fact PRESENT on this worker, so the sentence could
+#       only ever have been written by an agent that misread its own
+#       environment — and the pwn prompt used to invite exactly that, naming
+#       "no /dev/kvm" as a legitimate reason to record verified=false.
+#
+#       MEASURED before removing: the string appears in ZERO of the corpus's
+#       findings.json and ZERO result.json files, so this closes a latent
+#       absolution rather than changing observed behaviour. It matters for
+#       what comes next — once challenge execution is relocated into the
+#       chal's own container, /dev/kvm is absent BY CONSTRUCTION, and the
+#       phrase would become a standing absolution for every kernel job.
+#
+#       Note the two consumers pull in OPPOSITE directions, which is why
+#       this was worth measuring rather than reasoning about: here it gates
+#       critical-vs-med, but modules/_common.py's concede-unsolvable gate
+#       reads the same regex as `not _untestable`, so a match SUPPRESSES a
+#       concession. If a chal's launcher genuinely asks for KVM and the host
+#       cannot supply it, that is a real limit — but it needs its own
+#       wording, not a substring that also matches the correct
+#       configuration.
 # Blocking (b) dead-ends a chain that's only verifiable on the target AND
 # penalizes the agent's honesty in marking it unverified (had it lied
 # verified=true, the run would have proceeded). So (b) downgrades to a `med`
@@ -94,7 +119,7 @@ _UNTESTABLE_LOCALLY_RE = re.compile(
     r"|cannot (?:be )?(?:test|verif)\w*\s+local|can.?t (?:be )?(?:test|verif)\w*\s+local"
     r"|not (?:testable|verifiable) local"
     r"|vsyscall\s*=?\s*none|no vsyscall|vsyscall (?:unmapped|not (?:present|mapped))"
-    r"|wsl2|host kernel|worker kernel|no /dev/kvm"
+    r"|wsl2|host kernel|worker kernel"
     r"|(?:will (?:be|only)|to be|can only be) (?:confirmed|verified|tested)"
     r"[\w\s]{0,20}?(?:by|on|via|against)\s+(?:the )?(?:sandbox|remote|deploy|target)"
     r"|only (?:testable|verifiable|confirmable)\s+(?:on|against|at)\s+"
