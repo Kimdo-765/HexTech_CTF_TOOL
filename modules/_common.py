@@ -10009,6 +10009,90 @@ async def run_main_agent_session(
                     _last_class = (
                         script_sha_at_last_inject.get("hint_class") or ""
                     ).upper()
+                    # ONE investigation pass, granted per (script, hint) pair.
+                    #
+                    # Measured on job 9229c835a48a, which ended exactly here:
+                    # the reviewer supplied a CLASS: STRATEGY plan, main did
+                    # what that plan asked — ran probes, wrote no new script —
+                    # and the run halted, while the judge's own WHY_STOPPED
+                    # named TWO paths it said were never tried. The evidence
+                    # budget was 3/3 with every iteration new. So the loop
+                    # ended on a turn that complied with its instructions.
+                    #
+                    # The gate is NOT the evidence budget. This exit sits
+                    # UPSTREAM of the sandbox run, so observe() has not fired
+                    # since the last decision and the budget cannot move
+                    # between two consecutive arrivals here — gating on it
+                    # would authorise the same re-prompt forever.
+                    #
+                    # The bound is the PAIR: one pass per (script sha, hint).
+                    # Investigate once and you get told to ship; come back
+                    # with the same script after the same hint and the halt
+                    # stands. That is a novelty test on the situation, not a
+                    # quota — the operator removed quotas, and a second pass
+                    # would be answering a question already asked.
+                    #
+                    # Free: no reviewer call, no judge call. The message is a
+                    # fixed sentence, and the run continues into a turn that
+                    # already has everything it needs.
+                    _inv_key = "%s:%s" % (
+                        (script_sha_at_last_inject.get("sha") or "")[:16],
+                        hashlib.sha256(
+                            (script_sha_at_last_inject.get("hint_class") or "")
+                            .encode() + (picked or "").encode()
+                        ).hexdigest()[:16],
+                    )
+                    _inv_seen = summary.setdefault("investigation_passes", [])
+                    if (
+                        _last_class in _INVESTIGATIVE_HINT_CLASSES
+                        and _inv_key not in _inv_seen
+                    ):
+                        # Recorded AFTER delivery, below — the
+                        # delivered-vs-recorded rule this file already applies
+                        # to prejudge_block_sigs. A pass the agent never
+                        # received is not a pass it has spent.
+                        log_fn(
+                            f"[orchestrator] {picked} unchanged, but the hint "
+                            f"it followed was {_last_class}-class — it asked "
+                            f"for probes, not an edit, so the turn complied. "
+                            f"Granting ONE pass to convert what was learned "
+                            f"into a shippable script; a second arrival with "
+                            f"this same script and hint class halts."
+                        )
+                        try:
+                            await client.query(
+                                "⚠️ ORCHESTRATOR — YOU INVESTIGATED, NOW SHIP.\n\n"
+                                f"The last hint was {_last_class}-class: it "
+                                "asked you to test materially different "
+                                "hypotheses, and you did. Nothing is wrong "
+                                "with that turn.\n\n"
+                                "But the loop ships SCRIPTS, and "
+                                f"./{picked} is byte-identical to what it was "
+                                "before that hint. Whatever your probes "
+                                "settled — a refuted premise, a confirmed "
+                                "primitive, a narrowed target — has to become "
+                                "a runnable chain now or it cannot be "
+                                "tested.\n\n"
+                                "THIS TURN: rewrite "
+                                f"./{picked} around what you just learned and "
+                                "end the turn. If your probes refuted the "
+                                "whole approach, ship the strongest remaining "
+                                "chain instead and say so in report.md — a "
+                                "weaker chain that RUNS beats a better one "
+                                "that does not exist.\n\n"
+                                "You get this message once for this script. "
+                                "Returning again without changing it ends the "
+                                "run."
+                            )
+                        except Exception as _iq:
+                            log_fn(
+                                f"[orchestrator] investigation-pass inject "
+                                f"failed ({type(_iq).__name__}) — halting as "
+                                f"before"
+                            )
+                        else:
+                            _inv_seen.append(_inv_key)
+                            continue
                     log_fn(
                         f"[orchestrator] {picked} unchanged after "
                         f"retry_hint inject (attempt {attempt}/"

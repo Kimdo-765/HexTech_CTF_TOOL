@@ -78,6 +78,9 @@ MUTATIONS = (
     "drop-delivered-hint-record",
     "drop-hint-core",
     "record-hint-at-producer",
+    "no-investigation-pass",
+    "renewable-investigation-pass",
+    "pass-for-any-hint",
     "class-blind",
     "class-anywhere",
     "revert-ignored-libel",
@@ -161,6 +164,36 @@ def _mutated_source() -> str:
             "            _delivered_hint = (\n"
             '                (summary.get("judge_hints") or [""])[-1]\n'
             "            ).strip()\n",
+        )
+    elif args.mutate == "no-investigation-pass":
+        # The historical behaviour: halt even when the hint the turn followed
+        # asked for probes rather than an edit.
+        common = _replace_once(
+            common,
+            "                    if (\n"
+            "                        _last_class in _INVESTIGATIVE_HINT_CLASSES\n"
+            "                        and _inv_key not in _inv_seen\n"
+            "                    ):\n",
+            "                    if False:\n",
+        )
+    elif args.mutate == "renewable-investigation-pass":
+        # Drop the pair check, so the pass renews on every arrival and the
+        # same re-prompt is authorised forever. This exit is upstream of the
+        # sandbox, so nothing else would ever stop it.
+        common = _replace_once(
+            common,
+            "                        _last_class in _INVESTIGATIVE_HINT_CLASSES\n"
+            "                        and _inv_key not in _inv_seen\n",
+            "                        _last_class in _INVESTIGATIVE_HINT_CLASSES\n",
+        )
+    elif args.mutate == "pass-for-any-hint":
+        # Grant the pass regardless of the hint's class, so an ordinary
+        # postjudge fix hint that main ignored also buys a turn.
+        common = _replace_once(
+            common,
+            "                        _last_class in _INVESTIGATIVE_HINT_CLASSES\n"
+            "                        and _inv_key not in _inv_seen\n",
+            "                        _inv_key not in _inv_seen\n",
         )
     elif args.mutate == "class-blind":
         common = _replace_once(
@@ -348,6 +381,7 @@ async def _run_case(
     sandbox_calls: list[str] = []
     index = {"value": 0}
     receives = {"value": 0}
+    looped = {"value": False}
 
     import modules.agent_provider as providers
 
@@ -392,6 +426,14 @@ async def _run_case(
 
         async def receive_response(self):
             receives["value"] += 1
+            # A re-prompt path that does NOT run the sandbox consumes no
+            # fixture, so an unbounded one spins here forever and the suite
+            # dies on the outer timeout — an abort, which is not a
+            # measurement. Cap the turns and record the overrun as DATA so a
+            # renewable pass fails by name instead of hanging.
+            if receives["value"] > 24:
+                looped["value"] = True
+                raise RuntimeError("turn cap reached — re-prompt did not settle")
             # Main applies the injected hint while producing the turn, not at
             # query submission time — the ordering the production
             # SHA-unchanged guard is written against.
@@ -433,6 +475,7 @@ async def _run_case(
     why = why_path.read_text() if why_path.is_file() else ""
     out = {
         "escaped": escaped,
+        "looped": looped["value"],
         "result": result,
         "summary": dict(summary),
         "meta": dict(meta),
@@ -640,6 +683,56 @@ def _ignored_hint_truthfulness_checks() -> None:
     check("T4c the two readings are actually different",
           inv_reason != ord_reason and bool(inv_reason) and bool(ord_reason),
           True)
+
+    # T5 — ONE investigation pass, and exactly one.
+    #
+    # Job 9229c835a48a ended here: the reviewer gave a CLASS: STRATEGY plan,
+    # main ran the probes that plan asked for and wrote no new script, and the
+    # run halted while the judge's own WHY_STOPPED named two untried paths.
+    # The turn had COMPLIED with its instructions.
+    #
+    # The gate is deliberately not the evidence budget: this exit sits
+    # upstream of the sandbox, so observe() has not fired since the last
+    # decision and the budget cannot move between two consecutive arrivals —
+    # gating on it would authorise the same re-prompt forever.
+    check("T5 an investigative hint buys one pass instead of halting",
+          any("YOU INVESTIGATED, NOW SHIP" in q for q in inv["queries"]), True)
+    check("T5 ...announced as a single pass, not a quota",
+          any("Granting ONE pass" in ln for ln in inv["logs"]), True)
+    check("T5 ...and the pass is recorded only after delivery",
+          len(inv["summary"].get("investigation_passes") or []), 1)
+
+    # The OTHER direction, which is what makes this a bound rather than a
+    # loophole: an unlabelled hint gets no pass at all.
+    check("T5 an unlabelled hint gets no pass",
+          any("YOU INVESTIGATED" in q for q in ordn["queries"]), False)
+    check("T5 ...and records none",
+          len(ordn["summary"].get("investigation_passes") or []), 0)
+    check("T5 the two directions genuinely differ",
+          (len(inv["summary"].get("investigation_passes") or []),
+           len(ordn["summary"].get("investigation_passes") or [])), (1, 0))
+
+    # And the pass must not renew.  Same script, same hint class, second
+    # arrival: the halt stands.  Driven with enough scripted results that the
+    # loop reaches the gate twice.
+    twice = asyncio.run(_run_case(
+        "twice",
+        [_fail("CLASS: STRATEGY\nNEXT: probe A"),
+         _fail("CLASS: STRATEGY\nNEXT: probe B"),
+         _fail("CLASS: STRATEGY\nNEXT: probe C")],
+        main_edits=False,
+    ))
+    check("T5 a second arrival with the same script halts",
+          "retry_hint_ignored" in twice["why"]
+          or "Script unchanged" in twice["why"], True)
+    check("T5 ...having granted the pass exactly once",
+          len(twice["summary"].get("investigation_passes") or []), 1)
+    # THE bound check.  This re-prompt path does not run the sandbox, so it
+    # consumes no scripted fixture — an unbounded one spins forever and would
+    # otherwise kill the suite on the outer timeout rather than by name.  The
+    # harness caps turns and reports the overrun as data.
+    check("T5 the re-prompt settles instead of spinning",
+          [inv["looped"], twice["looped"]], [False, False])
 
 
 def main() -> int:
