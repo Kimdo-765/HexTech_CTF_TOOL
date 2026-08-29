@@ -35,6 +35,7 @@ from modules._prompts import (  # noqa: E402,F401
 )
 from modules.storage import DATA_DIR, JOBS_DIR  # noqa: E402
 from modules._events import emit_event  # noqa: E402
+from modules import _evidence  # noqa: E402
 
 # Common CTF flag formats. The leading prefix can vary per event; cover the
 # usual suspects + a generic short-prefix fallback.
@@ -7413,6 +7414,17 @@ _STOP_KIND_HEADERS = {
         "Cumulative spend hit the cost-cap circuit breaker — halted to "
         "bound runaway grinding on a non-converging run; recoverable via /retry"
     ),
+    # The two ways the exploration itself runs out, as opposed to the judge
+    # simply ruling. Both are the operator's own rule — a run ends when nothing
+    # is new — made observable rather than inferred from a turn count.
+    "evidence_exhausted": (
+        "The run stopped reaching states it had not already been in — every "
+        "remaining attempt reproduced evidence already on the ledger"
+    ),
+    "plan_exhausted": (
+        "The reviewer kept proposing plans that named nothing the run had not "
+        "already been told — different words, same ground"
+    ),
     # The sandbox CALLBACK raised, which is not the same thing as a solver that
     # failed: no container verdict exists, so nothing downstream can say why the
     # run ended. Before this kind the handler logged one line and returned with
@@ -7968,6 +7980,26 @@ def write_why_stopped(
                 out += ["**stderr tail** (last 1500 B):", "", "```",
                          stderr_tail, "```", ""]
 
+        # The evidence ledger, rendered for EVERY kind rather than only the two
+        # it can terminate. It is the record of what the run learned, so it is
+        # just as informative on a capture or an agent_error — and rendering it
+        # unconditionally is what makes B and the interner capacities
+        # re-derivable from live jobs instead of from the corpus proxy they
+        # were guessed against.
+        #
+        # Contains no candidate strings and no volatile values: the interners
+        # store positional slot names, and the flag channel is a digest. That
+        # matters because WHY_STOPPED is carried into the next job and this
+        # repository is public.
+        try:
+            _ledger_block = _evidence.render_stop_block(
+                (summary or {}).get("evidence_ledger")
+            )
+        except Exception:
+            _ledger_block = []
+        if _ledger_block:
+            out += _ledger_block
+
         # Operator playbook — concrete next steps. Different per kind.
         out += ["## Recommended next steps", ""]
         if stop_kind == "judge_stop":
@@ -7996,6 +8028,40 @@ def write_why_stopped(
                 "4. **Manual review**: download artifacts, read decomp / "
                 "exploit.py / sandbox stdout yourself. The structured "
                 "primitives in `findings.json` may help.",
+            ]
+        elif stop_kind in ("evidence_exhausted", "plan_exhausted"):
+            if stop_kind == "evidence_exhausted":
+                out += [
+                    "This run did not hit a quota — it stopped LEARNING. "
+                    "Each sandbox-executing iteration is scored against a "
+                    "ledger of states already reached; genuinely new evidence "
+                    "restores the budget in full, a repeat spends one, and "
+                    "the run ends when the budget reaches zero. The table "
+                    "below shows exactly which iterations paid and which did "
+                    "not.",
+                ]
+            else:
+                out += [
+                    "The reviewer was consulted more than once and its later "
+                    "plans named nothing the run had not already been told — "
+                    "different wording, same ground. The EVIDENCE budget was "
+                    "still positive, so the world was arguably still moving; "
+                    "what stopped was the supply of distinct proposals.",
+                ]
+            out += [
+                "",
+                "Options:",
+                "",
+                "1. **`/retry` with a manual hint** naming a direction the "
+                "ledger has not seen. A human lead is exactly the input this "
+                "stop is missing — the automation is reporting that it has "
+                "none left, not that none exist.",
+                "2. **Read `report.md` and the table below together.** If the "
+                "iterations look genuinely different to you but scored as "
+                "repeats, the evidence lattice is too coarse for this "
+                "challenge and that is worth knowing.",
+                "3. **`/resume`** to keep the work tree + session and let "
+                "main re-think without a new direction injected.",
             ]
         elif stop_kind == "budget_exhausted":
             out += [
@@ -8949,6 +9015,17 @@ async def run_main_agent_session(
     # aggressively. summary["judge_hints"] is what the sandbox_runner
     # closure reads (analyzers wire it through attempt_sandbox_run).
     summary.setdefault("judge_hints", [])
+    # The evidence ledger — what decides that a run has stopped LEARNING, as
+    # opposed to having spent a counter. See modules/_evidence.py for the
+    # termination argument; the short version is that every field of an
+    # observation is drawn from a code-declared finite domain (or a bounded
+    # interner with an absorbing OTHER), so novelty is bounded by |E| and a
+    # budget that only novelty refunds must run out.
+    #
+    # Lives in `summary` so it round-trips as JSON and survives an in-job
+    # session restart, which shares the same dict by reference. It does NOT
+    # survive a SIGKILL: a resumed job re-explores from an empty ledger.
+    summary.setdefault("evidence_ledger", _evidence.new_ledger())
 
     # Soft-eject machinery: at 80% of INVESTIGATION_BUDGET with no
     # artifact yet, queue a user-turn injection so the agent SEES the
@@ -10029,6 +10106,48 @@ async def run_main_agent_session(
                 gate_reason = "weak_flag_evidence"
             else:
                 gate_reason = "no_capture_evidence"
+            # Score this iteration against the evidence ledger. THIS is the
+            # only place every input exists at once: `last_sandbox` (the run
+            # just returned), `_actual_sandbox_started`, `flags_now`,
+            # `judge_out`, `verdict` and `gate_reason` are all live here and
+            # nowhere earlier.
+            #
+            # Placed AFTER scan_job_for_flags on purpose: a capture on the
+            # final permitted iteration is still harvested, because the score
+            # is taken downstream of the scan rather than gating it.
+            #
+            # Recording only — nothing here decides anything. The two
+            # consumers read the ledger further down, and both of them treat a
+            # missing ledger as "keep going", so an exception in this block
+            # can cost observability but never a run.
+            try:
+                _ev_interners = _evidence._interners(summary["evidence_ledger"])
+                _ev_point = _evidence.evidence_point(
+                    last_sandbox,
+                    ran=bool(_actual_sandbox_started),
+                    verdict=verdict,
+                    gate_reason=gate_reason,
+                    flags=flags_now,
+                    interners=_ev_interners,
+                )
+                _evidence._save_interners(
+                    summary["evidence_ledger"], _ev_interners
+                )
+                _ev = _evidence.observe(summary["evidence_ledger"], _ev_point)
+                log_fn(
+                    f"[orchestrator] evidence budget: "
+                    f"{'NEW state' if _ev['novel'] else 'repeat'}"
+                    + (" (a channel has saturated)" if _ev["saturated"] else "")
+                    + f" — budget {_ev['budget']}/{_evidence.B}, "
+                    f"{len(summary['evidence_ledger'].get('seen') or [])} "
+                    f"distinct states so far"
+                )
+            except Exception as _ev_exc:
+                log_fn(
+                    f"[orchestrator] evidence ledger not updated this "
+                    f"iteration ({type(_ev_exc).__name__}) — the loop's "
+                    f"bounds read a missing ledger as 'keep going'"
+                )
             emit_event(
                 job_id,
                 "run",
@@ -10252,6 +10371,38 @@ async def run_main_agent_session(
             # judge explicitly sets retry_worthwhile=True on a STOP, this whole
             # branch is byte-identical to the historical terminal stop.
             _method_change_convert = False
+            def _judge_stop_halt(_kind: str) -> None:
+                """The historical judge-STOP halt, reachable from two places.
+
+                Factored out rather than duplicated because the reviewer
+                override below has to fall back to EXACTLY this when the
+                reviewer cannot answer — a second copy would drift, and the
+                thing that would drift is what /retry reads as ground truth.
+                """
+                summary["judge_stop_reason"] = (
+                    stop_reason or "judge requested stop"
+                )
+                write_meta(
+                    job_id,
+                    judge_next_action="stop",
+                    judge_stop_reason=summary["judge_stop_reason"],
+                )
+                log_fn(
+                    f"[orchestrator] judge requested STOP "
+                    f"(verdict={verdict}, reason={stop_reason or '(none)'}) — "
+                    f"halting auto-retry loop (stop_kind={_kind})"
+                )
+                write_why_stopped(
+                    work_dir,
+                    stop_kind=_kind,
+                    attempt_idx=attempt,
+                    max_attempts=max_retries,
+                    judge_out=judge_out,
+                    sandbox_result=last_sandbox,
+                    summary=summary,
+                    log_fn=log_fn,
+                )
+
             if next_action == "stop":
                 # When the judge STOPs the current approach as structurally
                 # doomed BUT flags a concrete DIFFERENT in-budget method
@@ -10266,11 +10417,27 @@ async def run_main_agent_session(
                 # true-negative never qualifies. Mirrors the prejudge-block
                 # redirect pattern (synthesize continue + retry_hint, fall
                 # through to the shared inject path). See [[concede_unsolvable_gate]].
+                #
+                # 2026-08-29: "Capped at ONE per job" is gone. It was the real
+                # budget cap on the path that actually runs — the operator
+                # removed COST_CAP_USD and the retry ceiling on the principle
+                # that "a run ends when nothing is new, not when a counter runs
+                # out", and this counter survived only because it sits on the
+                # judge-STOP branch rather than the redirect branch. It is now
+                # the evidence budget: a conversion is available for as long as
+                # the run is still reaching states it has not been in.
+                #
+                # Everything else about the gate is unchanged — the judge must
+                # still volunteer retry_worthwhile, still name something, and
+                # network_error still never qualifies.
                 _mc_n = summary.get("method_change_retries", 0)
                 _mc_hint = (judge_out.get("retry_hint") or "").strip()
                 _mc_alt = judge_out.get("alternative_paths") or []
+                _ev_ledger = summary.get("evidence_ledger")
+                _ev_ok = _evidence.evidence_progress(_ev_ledger)
+                _plan_ok = _evidence.plan_progress(_ev_ledger)
                 if (judge_out.get("retry_worthwhile")
-                        and _mc_n < 1 and (_mc_hint or _mc_alt)
+                        and _ev_ok and (_mc_hint or _mc_alt)
                         and verdict != "network_error"):
                     _body = _mc_hint or stop_reason
                     if _mc_alt:
@@ -10283,13 +10450,19 @@ async def run_main_agent_session(
                     # Mutate judge_out in place — it IS last_sandbox["judge"]
                     # (same object; the key exists because we're in the stop
                     # branch), so the downstream inject path reads the new hint.
+                    # The old text told main "this job gets exactly one of
+                    # these and you have spent it". That is no longer true and
+                    # the sentence went to the MODEL, so it has to change with
+                    # the gate: a threat the code will not carry out teaches
+                    # the agent to disbelieve the next one.
                     judge_out["retry_hint"] = (
-                        "METHOD CHANGE REQUIRED (one-time conversion — the "
-                        "orchestrator converts a judge STOP into a retry only "
-                        "ONCE per job, and this attempt has spent it. Ordinary "
-                        "auto-retries can still follow while postjudge keeps "
-                        "voting continue, but the next postjudge STOP is "
-                        "terminal: there is no second conversion). "
+                        "METHOD CHANGE REQUIRED (the orchestrator converted a "
+                        "judge STOP into a retry. What keeps that available is "
+                        "not a quota — it is whether this run is still reaching "
+                        "states it has not been in. Ship something that changes "
+                        "the observed outcome and the conversion stays "
+                        "available; ship another attempt that fails in exactly "
+                        "the same way and the run ends). "
                         "The judge ruled the CURRENT "
                         "approach structurally cannot succeed within budget, but a "
                         "DIFFERENT method is viable. REPLACE the decisive step; do "
@@ -10300,31 +10473,159 @@ async def run_main_agent_session(
                     _method_change_convert = True
                     log_fn(
                         f"[orchestrator] judge STOP but retry_worthwhile=True — "
-                        f"spending the ONE method-change retry (verdict={verdict}); "
+                        f"converting to a method-change retry (verdict={verdict}, "
+                        f"evidence budget "
+                        f"{(_ev_ledger or {}).get('budget')}/{_evidence.B}); "
                         f"injecting the alternative-method hint instead of halting"
                     )
+                elif (_mc_alt and _ev_ok and _plan_ok
+                        and verdict != "network_error"):
+                    # The judge STOPPED and simultaneously named paths it says
+                    # were NOT tried. Those two statements do not sit together:
+                    # `alternative_paths` is documented as "techniques NOT yet
+                    # tried that the observed state evidences could work"
+                    # (modules/_judge.py:231), so a non-empty list is the judge
+                    # reporting that the space is not exhausted while voting to
+                    # stop exploring it.
+                    #
+                    # Until now the list died with the STOP unless the judge
+                    # ALSO volunteered retry_worthwhile=True — i.e. the actor
+                    # that decided to stop also held the only veto on being
+                    # second-guessed. Measured across the corpus, four jobs
+                    # ended exactly here with a named untried technique in
+                    # WHY_STOPPED and the operator was told to go run /retry by
+                    # hand; three of them were the same challenge, retried
+                    # manually three times.
+                    #
+                    # So: ask the reviewer, which is the actor /retry would
+                    # have used anyway, and stay inside this job. The judge's
+                    # authority is preserved where it is actually an authority
+                    # — an EMPTY alternative_paths ("Empty list if exhaustively
+                    # tried") still halts, and so does an exhausted budget.
+                    #
+                    # Shape is deliberately the house pattern used three times
+                    # already (prejudge redirect, runner_crash, reviewer
+                    # redirect): synthesize continue + retry_hint on the judge
+                    # dict and fall through to the shared inject tail. Nothing
+                    # new is invented for delivery.
+                    _ovr_hint = ""
+                    try:
+                        from modules.reviewer import (
+                            ReviewerError,
+                            _ask_reviewer_with_failover,
+                            _gather_context,
+                            _sanitize_hint,
+                        )
+
+                        _ovr_ctx = _gather_context(
+                            roots=(job_dir(job_id), work_dir)
+                        )
+                        if not _ovr_ctx.strip():
+                            raise ReviewerError(
+                                "no job evidence was available to the reviewer",
+                                "no_context",
+                            )
+                        summary["reviewer_calls"] = (
+                            int(summary.get("reviewer_calls") or 0) + 1
+                        )
+                        _ovr_hint = _sanitize_hint(
+                            await _ask_reviewer_with_failover(
+                                _ovr_ctx, job_id=job_id
+                            )
+                        ).strip()
+                        if not _ovr_hint:
+                            raise ReviewerError(
+                                "reviewer hint became empty after sanitization",
+                                "empty",
+                            )
+                    except Exception as _ovr_exc:
+                        # Only the kind is persisted. Raw provider text can
+                        # carry secrets or policy payloads, and the failure
+                        # must land on today's behaviour: the judge's STOP
+                        # stands.
+                        summary["reviewer_error_kind"] = (
+                            getattr(_ovr_exc, "kind", None) or "unavailable"
+                        )
+                        log_fn(
+                            f"[orchestrator] judge STOP named untried paths but "
+                            f"the reviewer could not answer "
+                            f"(kind={summary['reviewer_error_kind']}) — the "
+                            f"STOP stands"
+                        )
+                        _ovr_hint = ""
+                    if _ovr_hint:
+                        # Charge the plan budget with what the reviewer just
+                        # proposed, grounded in the evidence bundle it was
+                        # given. This is the operator's "stop when the plan
+                        # overlaps what was already tried" clause; it does NOT
+                        # carry the termination guarantee, which rests on the
+                        # evidence budget alone.
+                        try:
+                            _plan_vocab = _evidence.extract_anchors(_ovr_ctx)
+                            _plan = _evidence.observe_plan(
+                                summary["evidence_ledger"],
+                                _evidence.plan_key(
+                                    _ovr_hint, hint_class(_ovr_hint),
+                                    _plan_vocab,
+                                ),
+                            )
+                            log_fn(
+                                f"[orchestrator] reviewer plan "
+                                f"{'REPEATS an earlier one' if _plan['covered'] else 'is new'}"
+                                f" — plan budget {_plan['plan_budget']}/"
+                                f"{_evidence.B1}"
+                            )
+                        except Exception:
+                            pass
+                        summary["reviewer_redirects"] = (
+                            int(summary.get("reviewer_redirects") or 0) + 1
+                        )
+                        summary["reviewer_hint_chars"] = len(_ovr_hint)
+                        summary["judge_stop_overrides"] = (
+                            int(summary.get("judge_stop_overrides") or 0) + 1
+                        )
+                        judge_out["retry_hint"] = (
+                            "THE JUDGE VOTED TO STOP, AND NAMED PATHS IT SAYS "
+                            "WERE NEVER TRIED. Both cannot be true, so a "
+                            "reviewer re-read the evidence and answered "
+                            "independently. Treat the plan below as the "
+                            "current direction and the judge's stop_reason as "
+                            "one opinion about the OLD approach, not a verdict "
+                            "on every approach.\n\n"
+                            f"Judge's stop reason: {stop_reason or '(none)'}\n"
+                            "Paths the judge itself listed as untried:\n- "
+                            + "\n- ".join(str(a) for a in _mc_alt[:3])
+                            + "\n\n--- reviewer's independent plan ---\n"
+                            + _ovr_hint
+                        )
+                        judge_out["next_action"] = "continue"
+                        next_action = "continue"
+                        log_fn(
+                            f"[orchestrator] judge STOP with "
+                            f"{len(_mc_alt)} untried path(s) named — reviewer "
+                            f"supplied an independent plan ({len(_ovr_hint)} "
+                            f"chars); continuing IN THIS JOB rather than "
+                            f"surfacing for a manual /retry (evidence budget "
+                            f"{(_ev_ledger or {}).get('budget')}/{_evidence.B})"
+                        )
+                    else:
+                        # The reviewer could not answer, so nothing contested
+                        # the judge. This is today's behaviour exactly, kind
+                        # included — a provider outage must not be recorded as
+                        # the exploration running out.
+                        _judge_stop_halt("judge_stop")
+                        return last_sandbox
                 else:
-                    summary["judge_stop_reason"] = stop_reason or "judge requested stop"
-                    write_meta(
-                        job_id,
-                        judge_next_action="stop",
-                        judge_stop_reason=summary["judge_stop_reason"],
-                    )
-                    log_fn(
-                        f"[orchestrator] judge requested STOP "
-                        f"(verdict={verdict}, reason={stop_reason or '(none)'}) — "
-                        f"halting auto-retry loop"
-                    )
-                    write_why_stopped(
-                        work_dir,
-                        stop_kind="judge_stop",
-                        attempt_idx=attempt,
-                        max_attempts=max_retries,
-                        judge_out=judge_out,
-                        sandbox_result=last_sandbox,
-                        summary=summary,
-                        log_fn=log_fn,
-                    )
+                    # Which kind is a statement about WHY, and the three
+                    # reasons are genuinely different things: the run stopped
+                    # reaching new states, it stopped proposing new plans, or
+                    # the judge simply ruled and nothing contested it.
+                    if not _ev_ok:
+                        _judge_stop_halt("evidence_exhausted")
+                    elif _mc_alt and not _plan_ok:
+                        _judge_stop_halt("plan_exhausted")
+                    else:
+                        _judge_stop_halt("judge_stop")
                     return last_sandbox
 
             # Out of retries? Stop. Negative max_retries means unlimited
