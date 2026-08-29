@@ -43,6 +43,8 @@ MUTATIONS = (
     "changed-since-last",
     "drop-gate-reason",
     "drop-flag-channel",
+    "channel-report-overclaims",
+    "hide-saturation",
     "plan-budget-unbounded",
     "plan-gate-not-budget",
     # ...and the integration half: a perfect instrument the loop never reads
@@ -126,6 +128,29 @@ def _mutated_source() -> str:
             src,
             '        interners["flag"].id(flag_candidate_key(flags)),\n',
             '        "",\n',
+        )
+    elif args.mutate == "channel-report-overclaims":
+        # Report the six non-interned fields as if their movement were
+        # readable. It is not — they leave no per-channel trace — so a table
+        # that lists them presents inference as measurement.
+        src = _replace_once(
+            src,
+            '    for name, cap in (("exc", K_EXC), ("pj", K_PJ), ("flag", K_FLAG)):\n',
+            '    for name, cap in (("exc", K_EXC), ("pj", K_PJ), ("flag", K_FLAG),\n'
+            '                      ("verdict", 9), ("exit_code", 257),\n'
+            '                      ("ran", 2)):\n',
+        )
+    elif args.mutate == "hide-saturation":
+        # Stop reporting saturation. It is the state in which no later
+        # evidence can ever be new, so an operator reading evidence_exhausted
+        # cannot tell a run that ran out of ideas from one whose channel
+        # filled.
+        src = _replace_once(
+            src,
+            '        out[name] = {"used": used, "capacity": cap, '
+            '"saturated": used >= cap}\n',
+            '        out[name] = {"used": used, "capacity": cap, '
+            '"saturated": False}\n',
         )
     elif args.mutate == "plan-budget-unbounded":
         src = _replace_once(
@@ -440,6 +465,58 @@ def _termination_checks() -> None:
 
 
 # ------------------------------------------------------------------ F: plans
+
+def _channel_report_checks() -> None:
+    """What the run actually used, as opposed to what the domains allow.
+
+    Exists because the declared |E| turned out to describe almost nothing.
+    Measured on the first three live jobs (8 observations, 3 pwn jobs): the
+    distinct-state count equalled the `pj` slot count EXACTLY in all three
+    (3/3, 3/3, 2/2), while `exc` and `flag` allocated zero slots. So the
+    operative ceiling on those runs was K_PJ, not B.
+    """
+    rep = E.channel_report(E.new_ledger())
+    check("H1 a fresh ledger reports every interned channel",
+          sorted(rep), ["exc", "flag", "pj"])
+    check("H1 ...all empty and none saturated",
+          [(rep[k]["used"], rep[k]["saturated"]) for k in ("exc", "pj", "flag")],
+          [(0, False)] * 3)
+    check("H1 ...at their declared capacities",
+          [rep[k]["capacity"] for k in ("exc", "pj", "flag")],
+          [E.K_EXC, E.K_PJ, E.K_FLAG])
+
+    # Saturation must be REPORTED, not just enforced — it is the state in
+    # which no later evidence can ever be new, and an operator reading
+    # `evidence_exhausted` needs to know whether a full channel caused it.
+    led = E.new_ledger()
+    for i in range(E.K_PJ + 2):
+        # observe(), not just _point(): render_stop_block returns nothing when
+        # the ledger has no log, so a test that only builds points renders an
+        # empty block and the table checks below pass on absence.
+        E.observe(led, _point(led, {"exit_code": 1,
+                                    "prejudge": {"issues": ["issue-%d" % i]}}))
+    rep2 = E.channel_report(led)
+    check("H2 a filled channel is reported saturated",
+          rep2["pj"]["saturated"], True)
+    check("H2 ...and the untouched ones are not",
+          [rep2[k]["saturated"] for k in ("exc", "flag")], [False, False])
+
+    # The report must not speak for channels it cannot see. Six of the nine
+    # fields are not interned and leave no per-channel trace.
+    check("H3 the report covers only the interned channels", len(rep2), 3)
+    block = "\n".join(E.render_stop_block(led))
+    check("H3 ...and the rendered block says so",
+          "does not speak for them" in block, True)
+    check("H3 the channel table reaches the operator",
+          "slots used" in block and "saturated" in block, True)
+
+    # A malformed or absent ledger must not raise — this renders into
+    # WHY_STOPPED on every stop kind.
+    check("H4 an absent ledger reports nothing rather than raising",
+          E.channel_report(None), {})
+    check("H4 ...and a ledger with no interner state is tolerated",
+          sorted(E.channel_report({"budget": 3})), ["exc", "flag", "pj"])
+
 
 def _plan_checks() -> None:
     vocab = {"tcache", "unsorted", "bin", "exploit.py", "main_arena"}
@@ -1024,6 +1101,7 @@ def main() -> int:
     _interner_checks()
     _volatility_checks()
     _termination_checks()
+    _channel_report_checks()
     _plan_checks()
     _integration_checks()
     print(f"\n{PASSED} passed, {FAILED} failed")

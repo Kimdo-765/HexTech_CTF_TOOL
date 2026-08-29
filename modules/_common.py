@@ -11342,9 +11342,32 @@ async def run_main_agent_session(
                 method_change=_method_change_convert,
                 record=_inject_record,
             )
+            # Name the PRODUCER, and read the verdict from the dict rather
+            # than the local.
+            #
+            # Observed live on job 9229c835a48a: an override injection logged
+            # "injecting postjudge feedback ... verdict=timeout", and BOTH
+            # halves were wrong for that path — the payload was a reviewer's
+            # plan, and the dict carried verdict=reviewer_override. The local
+            # `verdict` is deliberately not reassigned by the synthetic
+            # producers (see the injection record below, which re-reads it for
+            # exactly this reason), so a log line that trusts the local
+            # describes the last REAL judge verdict, not the injection in
+            # front of it.
+            #
+            # This is the run.log-teaches-the-wrong-thing class: the same
+            # defect that made "injecting one reviewer redirect before
+            # stopping" the source of a false premise about the loop's own
+            # control flow.
+            _log_verdict = (
+                ((last_sandbox or {}).get("judge") or {}).get("verdict")
+                or verdict
+            )
+            _log_source = _inject_record.get("hint_source") or "postjudge"
             log_fn(
-                f"[orchestrator] injecting postjudge feedback as new user "
-                f"turn (attempt {attempt}/{max_retries}, verdict={verdict})"
+                f"[orchestrator] injecting {_log_source} feedback as new user "
+                f"turn (attempt {attempt}/{max_retries}, "
+                f"verdict={_log_verdict})"
             )
             # Record the hint that is ACTUALLY being delivered, so the judge's
             # own anti-repeat machinery can see it.

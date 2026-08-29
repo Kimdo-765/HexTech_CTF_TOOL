@@ -65,6 +65,23 @@ B1 = 2
 
 # Interner capacities.  Small on purpose: a slot that never saturates is an
 # unbounded field wearing a bound's clothes.
+#
+# MEASURED ON THE FIRST THREE LIVE JOBS, and it changes which number matters.
+# Reading the ledgers back (8 observations across 3 pwn jobs), the count of
+# distinct evidence points equalled the `pj` interner's slot count EXACTLY in
+# every job — 3/3, 3/3, 2/2 — while `exc` and `flag` allocated ZERO slots.
+#
+# So in practice this instrument was a prejudge-issue-set novelty detector and
+# the other eight fields contributed nothing. That makes K_PJ, not B, the
+# operative ceiling on those runs: after 4 distinct issue sets the channel
+# saturates permanently, every later point reads as a repeat, and the budget
+# can never be refunded again. One job had already spent 3 of the 4.
+#
+# NOT changed on that evidence. Three jobs of one module is not a basis for
+# retuning, and raising K_PJ would trade the finiteness bound for depth
+# without knowing the exchange rate. What IS shipped is the measurement:
+# channel_report() below runs on every job and renders into WHY_STOPPED, so
+# the next revision of these numbers comes from many jobs rather than three.
 K_EXC = 6
 K_PJ = 4
 K_FLAG = 3
@@ -388,11 +405,27 @@ def plan_progress(ledger) -> bool:
 # ------------------------------------------------------------------ reporting
 
 def alphabet_size() -> int:
-    """|E| — printable, which is the point.
+    """|E| as DECLARED — the bound the termination proof rests on.
 
     2 (ran) x 257 (exit_code incl. None) x 8 (run flags) x 9 (verdict incl.
     None) x 14 (failure_code incl. None) x 5 (gate_reason incl. None)
     x (K+2) per interned slot (its K values, plus absent, plus OTHER).
+
+    READ THIS AS A FINITENESS CLAIM, NOT AS A DESCRIPTION OF THE INSTRUMENT.
+    It counts what the domains ALLOW, and measurement says most of them never
+    move:
+
+      * `failure_code` draws from _VALID_HEAP_FAILURE_CODES, i.e. pwn-heap
+        only — one module of the five that run this loop. It has never been
+        populated in the corpus, and it multiplies this number by 14.
+      * `run_flags` (timeout / container_disappeared / killed_by_supervise)
+        was all-False in every corpus job measured, and multiplies by 8.
+      * On the first three live jobs, ONLY the `pj` channel moved at all.
+
+    So this number is ~10^2 larger than anything an actual run explores.
+    Quoting it as the instrument's resolution would be false; the honest
+    statement is that the alphabet is finite and therefore the budget must
+    run out. Use channel_report() for what a given run actually used.
     """
     return (
         2 * 257 * 8
@@ -412,6 +445,30 @@ def max_iterations() -> int:
     repeats.  Do not quote this number as a practical limit.
     """
     return B * (alphabet_size() + 1)
+
+
+def channel_report(ledger) -> dict:
+    """Which interned channels this run actually used, and how close to full.
+
+    Exists because the first three live jobs answered a question the design
+    could not: the count of distinct evidence points equalled the `pj` slot
+    count exactly in all three, while `exc` and `flag` allocated none. If that
+    holds broadly, the operative bound is K_PJ rather than B, and the six
+    non-interned fields are carrying nothing.
+
+    Only the INTERNED channels can be reported from stored state — the other
+    six leave no per-channel trace in the ledger, so their movement is
+    inferred, not read. Said here rather than implied: a caller must not
+    report "only pj moved" as measured for those six.
+    """
+    out = {}
+    if not isinstance(ledger, dict):
+        return out
+    state = ledger.get("interners") or {}
+    for name, cap in (("exc", K_EXC), ("pj", K_PJ), ("flag", K_FLAG)):
+        used = len((state.get(name) or {}))
+        out[name] = {"used": used, "capacity": cap, "saturated": used >= cap}
+    return out
 
 
 def render_stop_block(ledger) -> list:
@@ -441,6 +498,37 @@ def render_stop_block(ledger) -> list:
             f"{row.get('budget')} | {row.get('distinct')} |"
         )
     out.append("")
+
+    # WHICH CHANNEL DID THE WORK. On the first three live jobs the distinct-
+    # state count equalled the `pj` slot count exactly, and the other two
+    # interned channels allocated nothing — so the practical ceiling was
+    # K_PJ, not the budget. Rendered on every job so that observation either
+    # generalises or is refuted by data rather than by argument.
+    chans = channel_report(ledger)
+    if chans:
+        out += [
+            "Interned channels used by this run (a channel that fills "
+            "SATURATES permanently, after which no later state can be new):",
+            "",
+            "| channel | slots used | capacity | saturated |",
+            "|---|---|---|---|",
+        ]
+        _label = {"exc": "exception class", "pj": "prejudge issues",
+                  "flag": "flag-candidate set"}
+        for name in ("exc", "pj", "flag"):
+            c = chans.get(name) or {}
+            out.append("| %s | %s | %s | %s |"
+                       % (_label.get(name, name), c.get("used"),
+                          c.get("capacity"),
+                          "YES" if c.get("saturated") else "no"))
+        out += [
+            "",
+            "The six non-interned fields (ran, exit_code, run flags, verdict, "
+            "heap failure_code, gate reason) leave no per-channel trace, so "
+            "this table does not speak for them.",
+            "",
+        ]
+
     plan_budget = ledger.get("plan_budget")
     if plan_budget is not None:
         out += [
