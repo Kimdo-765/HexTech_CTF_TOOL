@@ -328,8 +328,37 @@ def _install_checks() -> None:
     for absent in ("qemu-system-aarch64", "qemu-system-arm"):
         check(f"I2 no symlink for the absent {absent}",
               f"/usr/local/bin/{absent}" in df, False)
-    check("I3 the shim is made executable",
+    check("I3 the Dockerfile chmods the shim",
           "chmod +x /app/worker/chal_engine_shim.sh" in df, True)
+
+    # ...and that chmod is NOT sufficient, which is why the next check exists.
+    #
+    # /app/worker is a READ-ONLY BIND MOUNT (docker-compose.yml: ./worker ->
+    # /app/worker:ro), so the mode baked into the image layer is replaced at
+    # runtime by the HOST file's mode. A 644 script behind an executable-
+    # looking symlink is invisible to PATH lookup: the shell skips it and
+    # resolves straight to /usr/bin, and the shim silently never runs.
+    #
+    # This shipped. The rebuild deployed a correct shim that direct invocation
+    # relocated perfectly, while `command -v qemu-system-x86_64` still answered
+    # /usr/bin/qemu-system-x86_64 — the file was 100644 in git. The working
+    # memguard beside it is 100755, which is the whole difference.
+    #
+    # Checked in GIT's index rather than the working tree: a local chmod does
+    # not survive a clone, and the deployment checkout is a clone.
+    proc = subprocess.run(
+        ["git", "ls-files", "-s", "worker/chal_engine_shim.sh",
+         "worker/docker_memguard.sh"],
+        cwd=str(ROOT), capture_output=True, text=True,
+    )
+    modes = dict(
+        (line.split("\t")[-1], line.split()[0])
+        for line in proc.stdout.splitlines() if line.strip()
+    )
+    check("I4 the shim carries git's executable bit",
+          modes.get("worker/chal_engine_shim.sh"), "100755")
+    check("I4 ...matching the shim that already works",
+          modes.get("worker/docker_memguard.sh"), "100755")
 
 
 def main() -> int:
