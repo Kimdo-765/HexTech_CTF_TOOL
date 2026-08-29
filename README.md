@@ -564,10 +564,15 @@ NOT derivable** — a mode that changes what the operator believes is running
 should never be entered by inference.
 
 - **off** — plain runner, no judge calls.
-- **enforce** — the gate below, scoped to pwn and web (see
-  `settings_io.JUDGE_ENFORCE_MODULES`). A module outside that scope runs as
-  **shadow**, not off: only the GATING is scoped, so the modules with no
-  measurable negative class keep accumulating one.
+- **enforce** — the gate below, on every module the platform runs (see
+  `settings_io.JUDGE_ENFORCE_MODULES`). It was scoped to pwn and web from
+  2026-08-09 until 2026-08-29, when a re-measure over the jobs whose sandbox
+  actually ran gave rev 17 capture / 12 negative and crypto 1 / 6 — the missing
+  negative class that scoped them out had accumulated. A module taken back out
+  of that tuple runs as **shadow**, not off: only the GATING is scoped, so a
+  de-scoped module keeps recording what the judge would have said. A job whose
+  module cannot be determined always resolves to shadow — that is not part of
+  the scope, it is the defence against not knowing.
 - **shadow** — during the run the orchestrator only APPENDS the judge's
   *inputs* to `judge_shadow.jsonl`. No model call, no gating; a shadow run is
   byte-identical to the same run with the judge off, down to `run.log`.
@@ -1190,7 +1195,7 @@ All knobs live in two places:
    | `HOST_CLAUDE_HOME` | `${HOME}/.claude` | host path of Claude Code config |
    | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `999999` | per-turn SDK output cap (the model's own ceiling, ~64k for Sonnet/Opus, becomes the effective limit) |
    | `INVESTIGATION_BUDGET` | `150` | tool-call budget for the main agent. At 80% (`SOFT_EJECT`) the orchestrator injects a "finalize now" user-turn; at 100% it triggers `FINAL_DRAFT` last-chance, then falls back to a probe-only skeleton via `write_fallback_artifacts` so sandbox + postjudge still runs. `0` disables. |
-   | `ENABLE_JUDGE` | `1` | legacy boolean behind `judge_mode`. When the effective mode gates, wraps an `auto_run` execution with **two** judge stages (pre / post) — the stall-detection stage is excluded and never runs. Gating is per module: `enforce` covers pwn and web; everything else records instead. Set to `0` to skip judge calls entirely. See [judge](#judge-modules_judgepy). |
+   | `ENABLE_JUDGE` | `1` | legacy boolean behind `judge_mode`. When the effective mode gates, wraps an `auto_run` execution with **two** judge stages (pre / post) — the stall-detection stage is excluded and never runs. Gating is per module: `enforce` covers every module as of 2026-08-29; a module removed from `JUDGE_ENFORCE_MODULES` records instead of gating, and an undeterminable module always records. Set to `0` to skip judge calls entirely. See [judge](#judge-modules_judgepy). |
    | `AUTO_RETRY_MAX` | `-1` | postjudge-driven inline retries within a single job. `0` disables the loop (legacy fire-and-forget). Positive int caps at exactly N retries on top of the initial run. `-1` / `inf` / `unlimited` lets the loop run until natural exit (success, no actionable hint, error, user Stop, timeout). See [auto-retry triangle](#auto-retry-triangle). |
    | `USE_ISOLATED_SUBAGENTS` | `1` | when `1` (default), main delegates via the MCP tool `mcp__team__spawn_subagent` — each subagent runs in its own `claude` CLI subprocess and only the final-text reply lands in main's history. Set to `0` for the legacy in-process `agents={}` path (kept as a fast rollback). See [Subagent isolation](#subagent-isolation-default-on). |
    | `SUBAGENT_SPAWN_CAP` | `0` | **inert — nothing reads it.** The name appears in `.env` and in prompt text shown to the model (`modules/_prompts.py`), but no code path consults it: the guard the comments name, `_maybe_subagent_cap()`, has no definition in the repo. Setting a positive int changes nothing. Delegation is unbounded in practice — see [Spawn cap — not implemented](#subagent-isolation-default-on). |
@@ -1203,10 +1208,11 @@ All knobs live in two places:
    | `DYNAMIC_WORKER_MEM` | `0` | lets the memory governor raise a slot's cgroup cap to `base × 2` for `rev` / `crypto` jobs, and again after a real cgroup OOM (1.5×, at most twice, capped at `base × 4`). OFF by default; the per-job sampler runs either way. Normally set from Settings rather than here — the key ships in neither `.env` nor `.env.example`. See [Concurrency](#concurrency). |
 
 2. **Settings tab** in the UI — writes to `/data/settings.json`, overrides
-   `.env` without restart. Since `10e3208` it is **six sections behind a
-   vertical menu**, not one flat page: *Agent & routing* · *Providers &
-   models* · *Model presets* · *Judge & hints* · *Jobs, workers & spend* ·
-   *Access, callbacks & tunnel*. They are panes of ONE `<form>` with ONE Save,
+   `.env` without restart. Since `10e3208` it is **organized as sections behind
+   a vertical menu**, not one flat page: *Agent & routing* · *Output language* ·
+   *Providers & models* · *Model presets* · *Judge & hints* · *Jobs,
+   workers & spend* · *Access, callbacks & tunnel*. They are panes of ONE
+   `<form>` with ONE Save,
    shown and hidden by class — so a Save posts every section, including edits
    in a pane that is off-screen. Per-pane dirty dots show which hidden section
    holds unsaved edits; Reload asks for confirmation because it discards edits

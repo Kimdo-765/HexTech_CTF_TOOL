@@ -375,10 +375,11 @@ def _judge_enabled() -> bool:
 def _judge_mode_for_job(job_id: str) -> str:
     """The effective mode for THIS job — `enforce` is scoped by module.
 
-    Stage 8 (operator decision, 2026-08-09) enforces on pwn and web only; see
-    `settings_io.JUDGE_ENFORCE_MODULES` for why those two and nobody else. An
-    out-of-scope module under a global `enforce` runs as `shadow`: it still
-    records, it just does not gate.
+    The scope is every known module as of 2026-08-29 (operator decision); see
+    `settings_io.JUDGE_ENFORCE_MODULES` for the measurement that reopened it.
+    The scoping MECHANISM stays: a module taken back out of that tuple, under a
+    global `enforce`, runs as `shadow` — it still records, it just does not
+    gate.
 
     The module is read HERE, with the mode, and once. `meta` is the same place
     `agent_role_providers` is snapshotted at create time and for the same

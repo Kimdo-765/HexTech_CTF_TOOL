@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""`enforce` gates pwn and web. On every other module it must record, not gate.
+"""`enforce` gates every known module. Not knowing the module still does not.
 
-Stage 8, operator decision 2026-08-09. The stage-7 stratified table could only
-measure discriminating power where both outcome classes exist — pwn (8/8) and
-web (3/3). rev (13/1) and crypto (6/0) have effectively no negative class, so a
-judge answering "success" every time scores full marks there; that is a
-measurement nobody took, not a result worth gating on.
+Stage 8 (2026-08-09) scoped the gate to pwn and web, because the stage-7 table
+could only measure discriminating power where both outcome classes exist and
+rev (13/1) and crypto (6/0) had effectively no negative class. The operator
+widened it to every module on 2026-08-29, after a re-measure over the jobs
+whose sandbox actually ran gave rev 17/12 and crypto 1/6 — the objection those
+two carried is answered by the corpus that accumulated since. misc and forensic
+have no sandbox phase at all, so enforcing them changes nothing either way.
 
-The property this pins is not "the constant says pwn and web". It is that the
-SAME global `enforce` produces a different gate answer for a pwn job than for a
-rev job, and that every path which cannot determine the module lands on shadow
-rather than enforce. A suite that only asserted the constant would pass against
-an implementation that ignored the module entirely.
+THE PROPERTY THIS PINS
+
+Not "the constant lists seven modules" — a suite that only read the constant
+would pass against an implementation that ignored `module` entirely, and that
+is exactly the implementation the scoping mechanism exists to rule out. So the
+discriminating assertion is made against a module DELIBERATELY REMOVED from the
+tuple: one global `enforce`, two different gate answers, with the difference
+coming from the scope and nothing else. It used to be made with `rev`, which
+now gates like everything else.
+
+The second property is unchanged and is the one that matters most: every path
+that cannot determine the module lands on shadow rather than enforce. That is
+not part of the scope decision — it is the defence against not knowing.
 """
 
 from __future__ import annotations
@@ -112,16 +122,12 @@ def make_job(job_id: str, **meta) -> str:
 # ---------------------------------------------------------------------------
 # 1. The rule itself.
 # ---------------------------------------------------------------------------
-for module, want in (
-    ("pwn", "enforce"),
-    ("web", "enforce"),
-    ("rev", "shadow"),
-    ("crypto", "shadow"),
-    ("web3", "shadow"),
-    ("misc", "shadow"),
-    ("forensic", "shadow"),
-):
-    check(f"enforce x {module}", S.effective_judge_mode("enforce", module), want)
+for module in ("pwn", "web", "rev", "crypto", "web3", "misc", "forensic"):
+    check(f"enforce x {module}", S.effective_judge_mode("enforce", module),
+          "enforce")
+check("every module the platform runs is in scope",
+      sorted(S.JUDGE_ENFORCE_MODULES),
+      sorted(("pwn", "web", "rev", "crypto", "web3", "misc", "forensic")))
 
 check("an unknown module never reaches enforce",
       S.effective_judge_mode("enforce", "quantum"), "shadow")
@@ -133,9 +139,9 @@ check("case and padding do not decide a gate",
        S.effective_judge_mode("ENFORCE", "Web")),
       ("enforce", "enforce"))
 
-# Only the GATING is scoped. shadow and off are module-blind: an out-of-scope
-# module still records, which is how rev/crypto eventually grow the negative
-# class they are missing.
+# Only the GATING is scoped. shadow and off are module-blind, which is what
+# keeps a module that is taken back OUT of the tuple recording rather than
+# going dark.
 for module in ("pwn", "rev", "quantum", ""):
     check(f"shadow is module-blind ({module or 'empty'})",
           S.effective_judge_mode("shadow", module), "shadow")
@@ -155,20 +161,36 @@ bare_job = make_job("j-bare")
 
 check("a pwn job under global enforce gates",
       R._judge_mode_for_job(pwn_job), "enforce")
-check("a rev job under the SAME global enforce does not",
-      R._judge_mode_for_job(rev_job), "shadow")
+check("a rev job under the SAME global enforce now gates too",
+      R._judge_mode_for_job(rev_job), "enforce")
 check("a job whose meta has no module does not gate",
       R._judge_mode_for_job(bare_job), "shadow")
 check("a job with no meta at all does not gate",
       R._judge_mode_for_job("j-does-not-exist"), "shadow")
 
 # THE discriminating assertion. One global setting, two answers — an
-# implementation that ignored `module` would pass everything above this line
-# that only reads the constant, and fail here.
-check("one global enforce, two different gate answers",
-      (R._judge_gates(R._judge_mode_for_job(pwn_job)),
-       R._judge_gates(R._judge_mode_for_job(rev_job))),
-      (True, False))
+# implementation that ignored `module` passes everything above this line that
+# only reads the constant, and fails here.
+#
+# It can no longer be made with `rev`, because rev is in scope now. Narrowing
+# the tuple for the length of this block is what keeps the assertion about the
+# MECHANISM instead of about which names happen to be listed today: remove one
+# module, and that module alone must stop gating while pwn keeps gating.
+_real_scope = S.JUDGE_ENFORCE_MODULES
+try:
+    S.JUDGE_ENFORCE_MODULES = tuple(m for m in _real_scope if m != "rev")
+    check("a module removed from the scope stops gating",
+          R._judge_mode_for_job(rev_job), "shadow")
+    check("one global enforce, two different gate answers",
+          (R._judge_gates(R._judge_mode_for_job(pwn_job)),
+           R._judge_gates(R._judge_mode_for_job(rev_job))),
+          (True, False))
+    check("...and the de-scoped module still RECORDS rather than going dark",
+          R._judge_mode_for_job(rev_job), "shadow")
+finally:
+    S.JUDGE_ENFORCE_MODULES = _real_scope
+check("the scope is restored after the probe",
+      R._judge_mode_for_job(rev_job), "enforce")
 
 set_settings(judge_mode="shadow")
 check("global shadow gates nothing, pwn included",
@@ -276,7 +298,9 @@ check("the cycle id is derived from it too",
 check("the runner does not restate the enforce set",
       "JUDGE_ENFORCE_MODULES" in src.replace(
           "settings_io.JUDGE_ENFORCE_MODULES", ""), False)
-check("the scope is a documented constant", S.JUDGE_ENFORCE_MODULES, ("pwn", "web"))
+check("the scope is a documented constant",
+      (isinstance(S.JUDGE_ENFORCE_MODULES, tuple),
+       len(S.JUDGE_ENFORCE_MODULES)), (True, 7))
 
 # ---------------------------------------------------------------------------
 # 4. supervise is excluded from v1 enforce, and turning the gate on must not

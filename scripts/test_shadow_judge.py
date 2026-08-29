@@ -646,12 +646,14 @@ _HINTS = ["reuse the same failed idea", "and again"]
 def _drive_ctx(job_id: str, *, mode: str, timeout: bool, module: str = "pwn"):
     """Drive the runner and capture the extra_context each mode produces.
 
-    `module` defaults to an in-scope one on purpose. Since stage 8 the gate is
-    scoped (`settings_io.JUDGE_ENFORCE_MODULES`), so a fixture with no module
-    resolves to shadow no matter what `judge_mode` says — which silently turns
-    every "enforce does X" check below into a check of the shadow path. It did
-    exactly that when the scope landed; the enforce assertions failed loudly
-    rather than passing vacuously, which is the only reason this is a fixture
+    `module` is set on purpose and must stay set. The gate is scoped
+    (`settings_io.JUDGE_ENFORCE_MODULES` — every module since 2026-08-29, pwn
+    and web before that), and a fixture with NO module resolves to shadow no
+    matter what `judge_mode` says, because an undeterminable module never
+    reaches enforce. That silently turns every "enforce does X" check below
+    into a check of the shadow path. It did exactly that when the scope landed;
+    the enforce assertions failed loudly rather than passing vacuously, which
+    is the only reason this is a fixture
     change and not a regression.
     """
     jd = DATA / "jobs" / job_id
@@ -715,21 +717,30 @@ check("the evaluator forwards the recorded context to postjudge",
       _fwd, [_enf_ctx[0] if _enf_ctx else "<no enforce run>"])
 
 # ---------------------------------------------------------------------------
-# 8c. The stage-8 scope, proven by DRIVING the runner rather than by reading
-#     it. `test_judge_enforce_scope.py` pins the rule and the call sites; this
-#     pins the consequence — a global `enforce` on an out-of-scope module must
-#     come out of `attempt_sandbox_run` behaving like shadow: no judge call,
-#     and a recorded input carrying a real cycle id.
+# 8c. The scope, proven by DRIVING the runner rather than by reading it.
+#     `test_judge_enforce_scope.py` pins the rule and the call sites; this pins
+#     the consequence — a job that a global `enforce` does NOT gate must come
+#     out of `attempt_sandbox_run` behaving like shadow: no judge call, and a
+#     recorded input carrying a real cycle id.
 #
 #     The cycle id is the half a gate assertion cannot see. It is set only when
 #     the resolved mode is "shadow", so a runner that resolved against the raw
 #     setting would record with cycle_id="" — which `_cycle_state` folds into
 #     the legacy job-wide bucket, where one attempt's refusal silences the
 #     next attempt's healthy postjudge (D21).
+#
+#     The driver used to be `module="rev"`, which stopped producing this state
+#     when the scope widened to every module on 2026-08-29. An UNRECOGNISED
+#     module still produces it, and is the better driver besides: the operator
+#     moves the scope, but "a module we cannot name is never gated" is the
+#     defence against not knowing and does not move with it.
 # ---------------------------------------------------------------------------
-_oos_ctx = _drive_ctx("ctxrev", mode="enforce", timeout=True, module="rev")
-check("a global enforce does not judge an out-of-scope module", _oos_ctx, [])
-_oos_rec = [r for r in SH.read_shadow("ctxrev")
+check("the driver module is genuinely outside the scope",
+      "quantum" in SI.JUDGE_ENFORCE_MODULES, False)
+_oos_ctx = _drive_ctx("ctxoos", mode="enforce", timeout=True, module="quantum")
+check("a global enforce does not judge a module it cannot recognise",
+      _oos_ctx, [])
+_oos_rec = [r for r in SH.read_shadow("ctxoos")
             if r.get("kind") == "input" and r.get("stage") == "postjudge"]
 check("...it records instead", len(_oos_rec), 1)
 check("...with a real cycle id, not the legacy empty bucket",
@@ -737,6 +748,12 @@ check("...with a real cycle id, not the legacy empty bucket",
 check("...and the recorded context still matches what enforce would have judged",
       _oos_rec[0]["inputs"].get("extra_context") if _oos_rec else None,
       _enf_ctx[0] if _enf_ctx else "<no enforce run>")
+
+# ...and the module that used to drive this block now gates, which is the
+# change itself. Driven, not read.
+_rev_ctx = _drive_ctx("ctxrev", mode="enforce", timeout=True, module="rev")
+check("a rev job under global enforce is now judged, not recorded",
+      bool(_rev_ctx), True)
 
 # ---------------------------------------------------------------------------
 # 9. The default evaluator must not write judge prose into the run's log.
