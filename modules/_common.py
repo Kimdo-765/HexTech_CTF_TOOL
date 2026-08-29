@@ -6924,6 +6924,47 @@ HEAP_FIX_HINTS: dict[str, str] = {
 }
 
 
+# The reviewer's own failure classification, which until now nothing read.
+#
+# modules/reviewer.py:186 makes `CLASS:` the first line of the required output
+# shape, and the anti-overfitting rules under it bind its meaning: choose
+# IMPLEMENTATION "only when the exploit chain is evidenced and a concrete
+# code/runtime defect prevented it. Then name the exact correction", while
+# STRATEGY/UNKNOWN must "not prescribe another polish pass on the same chain"
+# and instead give hypotheses differing "in attack surface or primitive".
+#
+# That IS the edit-this-file versus go-measure-something split, already
+# adjudicated by the model that wrote the hint. Deriving it again from prose
+# would be a second, drifting copy of a policy that already exists.
+#
+# Scans the whole hint rather than requiring line 1: the method-change
+# conversion prepends a "METHOD CHANGE REQUIRED (...)" paragraph, so CLASS is
+# not always first. Bounded so a pathological hint cannot make this expensive.
+_HINT_CLASS_RE = re.compile(
+    r"^[ \t]*CLASS:[ \t]*(IMPLEMENTATION|STRATEGY|ENVIRONMENT|UNKNOWN)\b",
+    re.MULTILINE,
+)
+
+# Classes whose hint does NOT ask for an edit to the shipped script. Absence of
+# a CLASS line is deliberately NOT in this set: postjudge, prejudge and
+# runner_crash hints carry no CLASS at all and every one of them does mean
+# "fix the script", so an unlabelled hint must keep today's reading.
+_INVESTIGATIVE_HINT_CLASSES = frozenset({"STRATEGY", "ENVIRONMENT", "UNKNOWN"})
+
+
+def hint_class(hint: str | None) -> str:
+    """The `CLASS:` label a reviewer hint declared, or "" when it has none.
+
+    Fail-closed by construction: an unparseable or absent label returns "",
+    which every caller treats as today's behaviour (assume the hint asked for
+    a code change).
+    """
+    if not hint:
+        return ""
+    match = _HINT_CLASS_RE.search(str(hint)[:4000])
+    return match.group(1) if match else ""
+
+
 def _format_postjudge_user_turn(
     *,
     attempt_idx: int,
@@ -7371,6 +7412,15 @@ _STOP_KIND_HEADERS = {
     "cost_cap": (
         "Cumulative spend hit the cost-cap circuit breaker — halted to "
         "bound runaway grinding on a non-converging run; recoverable via /retry"
+    ),
+    # The sandbox CALLBACK raised, which is not the same thing as a solver that
+    # failed: no container verdict exists, so nothing downstream can say why the
+    # run ended. Before this kind the handler logged one line and returned with
+    # NO WHY_STOPPED at all, and the operator saw a job that simply stopped.
+    "sandbox_runner_error": (
+        "The sandbox runner itself raised before returning a result — no "
+        "container verdict exists; this is harness/infrastructure failure, "
+        "not evidence about the solver"
     ),
 }
 
@@ -8109,6 +8159,27 @@ def write_why_stopped(
                 # container per slot now, so a hard-coded `-worker-1` would
                 # point at the wrong container's logs for anything on slot 2+.
                 "2. **Check worker container health**: `docker logs "
+                f"hextech_ctf_tool-worker-"
+                f"{(os.environ.get('WORKER_SLOT') or '1').strip()} "
+                "--tail 100`.",
+            ]
+        elif stop_kind == "sandbox_runner_error":
+            out += [
+                "The sandbox runner callback raised an exception instead of "
+                "returning a result. NOTHING here is evidence about the "
+                "solver — the container never reported, so the last sandbox "
+                "block above (if any) belongs to an EARLIER attempt. Read it "
+                "as stale, not as the reason this run ended. Options:",
+                "",
+                "1. **`/retry`** — the work tree is carried; a transient "
+                "runner fault (docker socket, image pull, disk) usually "
+                "clears.",
+                "2. **Check the runner**: the orchestrator logged "
+                "`sandbox runner crashed: <exception>` in `run.log` — that "
+                "line names the actual fault.",
+                # Same slot-aware phrasing as agent_error: one container per
+                # slot, so a hard-coded -worker-1 points at the wrong logs.
+                "3. **Check worker container health**: `docker logs "
                 f"hextech_ctf_tool-worker-"
                 f"{(os.environ.get('WORKER_SLOT') or '1').strip()} "
                 "--tail 100`.",
@@ -8993,7 +9064,9 @@ async def run_main_agent_session(
     # inject WITHOUT editing exploit.py; orchestrator re-ran the
     # unchanged script → flag_likelihood=0.12 ship-block → job ended
     # ~2 minutes later than it should have.
-    script_sha_at_last_inject: dict = {"sha": None, "script": None}
+    script_sha_at_last_inject: dict = {
+        "sha": None, "script": None, "hint_class": "",
+    }
     # Last assistant text of the current turn — used to CLASSIFY a
     # ResultMessage is_error (the ResultMessage itself carries no message;
     # an AUP refusal / transport error shows up as the final AGENT text).
@@ -9777,16 +9850,49 @@ async def run_main_agent_session(
                             log_fn=log_fn,
                         )
                         return last_sandbox
+                    # Say what was OBSERVED, not what main intended.
+                    #
+                    # _STOP_KIND_HEADERS already learned this lesson for the
+                    # heading ("Script unchanged after the postjudge retry
+                    # hint") after job df7dd1b4a9e8, where "Main ignored
+                    # postjudge retry_hint" libelled a run that engaged with
+                    # the hint in detail and then conceded on purpose. The
+                    # stop_reason kept the old accusation, and it is the
+                    # WORSE place for it: write_meta persists it to
+                    # judge_stop_reason, which /retry carries into the next
+                    # job as ground truth for the next agent to read.
+                    #
+                    # The hint's own CLASS decides which reading is fair. An
+                    # IMPLEMENTATION hint named a concrete correction to this
+                    # file, so unchanged bytes really are a non-response. A
+                    # STRATEGY/ENVIRONMENT/UNKNOWN hint asked for materially
+                    # different hypotheses and a discriminating probe — the
+                    # formatter says so in the same breath — and a turn spent
+                    # measuring instead of editing is compliance, not refusal.
+                    # The halt itself is unchanged either way: with no new
+                    # artifact there is still nothing to ship.
+                    _last_class = (
+                        script_sha_at_last_inject.get("hint_class") or ""
+                    ).upper()
                     log_fn(
                         f"[orchestrator] {picked} unchanged after "
                         f"retry_hint inject (attempt {attempt}/"
-                        f"{cap_str}) — main returned without applying "
-                        f"the fix. Skipping guaranteed-fail re-run; "
-                        f"halting auto-retry loop."
+                        f"{cap_str}"
+                        + (f", hint CLASS={_last_class}" if _last_class else "")
+                        + f") — no new artifact to ship. Skipping "
+                        f"guaranteed-fail re-run; halting auto-retry loop."
                     )
                     summary["judge_stop_reason"] = (
-                        f"main ignored retry_hint — {picked} unchanged "
-                        f"after postjudge feedback"
+                        f"{picked} unchanged after a {_last_class}-class "
+                        f"retry hint. That hint asked for materially "
+                        f"different hypotheses and a discriminating probe "
+                        f"rather than an edit to this file, so identical "
+                        f"bytes are NOT evidence the hint was ignored — only "
+                        f"that no new artifact followed. Read report.md "
+                        f"before concluding the run circled."
+                        if _last_class in _INVESTIGATIVE_HINT_CLASSES else
+                        f"{picked} unchanged after postjudge feedback — main "
+                        f"returned without applying the named correction"
                     )
                     write_meta(
                         job_id,
@@ -9833,6 +9939,47 @@ async def run_main_agent_session(
                 last_sandbox = await anyio.to_thread.run_sync(sandbox_runner, picked)
             except Exception as e:
                 log_fn(f"[orchestrator] sandbox runner crashed: {e}")
+                # This used to return with NO WHY_STOPPED, which is the one
+                # thing the operator cannot recover from: the job simply
+                # stopped and the UI had nothing to show. Every OTHER exit in
+                # this loop records why. More loop iterations make this handler
+                # more reachable, so it has to say its piece.
+                #
+                # `last_sandbox` here is the PREVIOUS attempt's result (the
+                # assignment above never completed), so the renderer must not
+                # be handed it as if it described this failure — the ladder
+                # branch says so in prose, and judge_out is forced empty so no
+                # stale verdict is quoted as the stop reason.
+                summary["sandbox_runner_error"] = f"{type(e).__name__}: {e}"
+                try:
+                    # Deliberately NOT write_meta(judge_next_action="stop").
+                    # api/routes/retry.py:569 reads that field to SKIP the SDK
+                    # session fork, on the reasoning that a judge STOP means
+                    # the transcript is poisoned dead-end reasoning. A runner
+                    # callback that raised says nothing about the transcript —
+                    # main's conversation is intact and expensive, and this is
+                    # exactly the halt where /retry should inherit it. Stamping
+                    # `stop` here would throw away a good session over a docker
+                    # fault.
+                    write_meta(
+                        job_id,
+                        judge_stop_reason=summary["sandbox_runner_error"],
+                    )
+                    write_why_stopped(
+                        work_dir,
+                        stop_kind="sandbox_runner_error",
+                        attempt_idx=attempt,
+                        max_attempts=max_retries,
+                        judge_out={},
+                        sandbox_result=last_sandbox,
+                        summary=summary,
+                        log_fn=log_fn,
+                    )
+                except Exception as _we:  # never mask the original fault
+                    log_fn(
+                        f"[orchestrator] could not record the sandbox-runner "
+                        f"halt: {_we}"
+                    )
                 return last_sandbox
 
             # New runners state this fact explicitly.  The conservative legacy
@@ -10654,10 +10801,26 @@ async def run_main_agent_session(
                     retry_hint = _reviewer_hint
                     verdict = judge_out["verdict"]
                     next_action = judge_out["next_action"]
+                    # NOT "before stopping". Setting `retry_hint` above makes
+                    # the `if not retry_hint` block below unreachable, so
+                    # control falls to the shared inject tail and main gets a
+                    # WHOLE further turn — verified on 12 production jobs, each
+                    # of which shows one reviewer inject, one postjudge inject
+                    # and a SECOND sandbox run before ending. The run ends on
+                    # the NEXT pass, when this gate is closed by the
+                    # `reviewer_redirects == 0` conjunct and there is no hint
+                    # left to give (stop_kind=reviewer_redirect_no_run).
+                    #
+                    # The old wording said the opposite and was the only
+                    # run.log line naming this mechanism, so it is where a
+                    # reader learns the control flow. Say what actually
+                    # happens: a redirect BUYS a turn, it does not precede a
+                    # halt.
                     log_fn(
                         "[orchestrator] shadow judge supplied no live verdict — "
-                        "injecting one reviewer redirect before stopping "
-                        f"({len(_reviewer_hint)} chars)"
+                        "injecting a reviewer redirect and CONTINUING the loop "
+                        f"({len(_reviewer_hint)} chars); this buys main another "
+                        "turn, it does not end the run"
                     )
             if not retry_hint:
                 _shadow_no_verdict = (
@@ -10731,6 +10894,41 @@ async def run_main_agent_session(
                 f"[orchestrator] injecting postjudge feedback as new user "
                 f"turn (attempt {attempt}/{max_retries}, verdict={verdict})"
             )
+            # Record the hint that is ACTUALLY being delivered, so the judge's
+            # own anti-repeat machinery can see it.
+            #
+            # `summary["judge_hints"]` is rendered into the judge prompt by
+            # modules/_runner.py:337 as "your new hint MUST NOT rhyme with
+            # these — if it does, next_action=stop", and _judge.py:289 asks the
+            # judge to self-veto on it. It is the system's one prose-level
+            # anti-circling mechanism.
+            #
+            # Until now it only ever held POSTJUDGE hints. The append site sits
+            # right after `judge_out = last_sandbox["judge"]` following the
+            # sandbox call, while all THREE synthetic producers — the prejudge
+            # ship-block redirect, runner_crash_hint, and the reviewer redirect
+            # — write `last_sandbox["judge"]` further down the same iteration,
+            # and `last_sandbox` is reassigned wholesale by the next sandbox
+            # call. So their hints were created, delivered to main, and then
+            # destroyed without the judge ever learning they existed. A judge
+            # that cannot see the reviewer's hint can restate it and call it
+            # new — precisely the circling this field exists to stop, and
+            # precisely the case a repeatable reviewer makes common.
+            #
+            # Appended HERE (delivery), not at the producer, because the
+            # question the judge is answering is "has main already been told
+            # this?" — a hint synthesized and then discarded by a stop was
+            # never told to anyone. The last-element guard keeps the postjudge
+            # path single-counted: its hint was already appended upstream and
+            # nothing else can have been added in between.
+            _delivered_hint = (
+                ((last_sandbox or {}).get("judge") or {}).get("retry_hint") or ""
+            ).strip()
+            _hints_so_far = summary.setdefault("judge_hints", [])
+            if _delivered_hint and (
+                not _hints_so_far or _hints_so_far[-1] != _delivered_hint
+            ):
+                _hints_so_far.append(_delivered_hint)
             # Persist WHICH PRODUCER spoke and what label it rendered. The
             # counters beside this (reviewer_redirects, prejudge_block_redirects)
             # say that a producer fired; they do not say which wording main was
@@ -10771,6 +10969,11 @@ async def run_main_agent_session(
             # guaranteed-fail re-run (see SHA-unchanged ship gate above).
             script_sha_at_last_inject["sha"] = _script_sha(work_dir / picked)
             script_sha_at_last_inject["script"] = picked
+            # ...and WHICH KIND of hint it was, so the gate can describe what it
+            # observed instead of asserting an intent it cannot see. Stamped
+            # from the delivered text, beside the SHA it is compared against, so
+            # the two can never describe different injections.
+            script_sha_at_last_inject["hint_class"] = hint_class(_delivered_hint)
             # loop continues; receive_response on next iteration
 
     # unreachable; kept for type-checkers
