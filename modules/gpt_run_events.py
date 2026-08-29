@@ -272,7 +272,7 @@ def derive_gpt_events_from_run_log(
                 "status": "failed", "title": "오류", "summary": _compact(body, 500),
                 "source": "run.log",
             })
-        elif body.startswith(("SCAFFOLD_NUDGE", "COST_CAP", "BUDGET_ABORT", "⏰")):
+        elif body.startswith(("COST_CAP", "BUDGET_ABORT", "⏰")):
             events.append({
                 "ts": ts, "provider": "gpt", "kind": "warning", "role": role,
                 "status": "warning", "title": "주의", "summary": _compact(body, 500),

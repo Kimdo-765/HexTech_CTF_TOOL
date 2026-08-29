@@ -126,7 +126,6 @@ def _legacy_normal_source(source: str) -> str:
                         summary["fallback_artifact_used"] = True
                     final_draft_pending["value"] = False
                     soft_eject_pending["value"] = False
-                    scaffold_nudge_pending["value"] = False
                 else:
                     return last_sandbox
 '''

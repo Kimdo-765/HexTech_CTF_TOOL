@@ -991,7 +991,7 @@ def _looks_heap_advanced(description: str | None) -> bool:
 def looks_heap_advanced(description: str | None) -> bool:
     """Public alias of `_looks_heap_advanced` for analyzer.py — exposes
     the same heap-detection heuristic so the orchestrator can flag the
-    job as heap-shaped and gate trip-wires (SCAFFOLD_NUDGE) on it.
+    job as heap-shaped for the recon spawn.
     """
     return _looks_heap_advanced(description)
 

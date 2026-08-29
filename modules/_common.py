@@ -4900,39 +4900,6 @@ empty artifacts.
 """
 
 
-SCAFFOLD_MISSING_USER_TURN = """\
-🪜 SCAFFOLD NUDGE — this is a HEAP / FSOP / tcache / UAF challenge
-(detected from your description or recon's CANDIDATES) but you've
-made {n} tool calls without using any of the /opt/scaffold/ templates.
-The scaffolds encode invariants that judge has historically flagged
-as HIGH severity when written from scratch:
-
-  /opt/scaffold/heap_menu.py
-    — alloc / free / edit / show wrappers + libc_profile.json loader +
-      `safe_link(target, chunk)` + `assert_libc_base()`.
-      Just: `cp /opt/scaffold/heap_menu.py ./exploit.py` then fill
-      the prompt strings.
-
-  /opt/scaffold/fsop_wfile.py
-    — `_IO_FILE_plus` / `_IO_wide_data` / `_wide_vtable` builders
-      that ENFORCE the "vtable LAST" ordering (the documented #1
-      cause of FSOP SIGSEGVs). Use `build_full_chain(fake_file_addr=...,
-      doallocate_addr=...)` and flip vtable separately afterward.
-
-  /opt/scaffold/tcache_poison.py
-    — `safe_link()` auto-branches on libc_profile.json safe_linking.
-      `key_bypass_needed()` for glibc >= 2.29 and patched 2.28.
-
-  /opt/scaffold/aslr_retry.py
-    — `aslr_retry(exploit_one, max_attempts=64)` for nibble-race
-      chains; `expected_attempts_for(success_rate)` for sizing.
-
-If the chal is NOT menu-shaped (e.g. single-shot ROP, custom protocol),
-ignore this — but say so explicitly in report.md so the judge knows
-why you skipped them. This nudge fires once per job.
-"""
-
-
 CONTRARIAN_REFRAME_USER_TURN = """\
 ⚠️ ORCHESTRATOR INTERRUPT — POSSIBLE FRAME LOCK-IN.
 
@@ -8524,74 +8491,6 @@ def validate_findings(work_dir: Path) -> list[str]:
     return issues
 
 
-# Heap-allocation needles used by `_chal_source_has_heap_ops` to gate
-# SCAFFOLD_NUDGE. Kept narrow on purpose — TOCTOU race / format-string /
-# syscall-only pwn chals routinely score `heap_advanced=True` via the
-# work-tree classifier (custom .so + glibc 2.31) yet have zero heap
-# operations in source, in which case the heap scaffolds don't apply
-# and the nudge is pure noise. Adding more keywords (e.g. `chunk`,
-# `bin`) would over-trigger on disassembly artifacts.
-_HEAP_OP_NEEDLES = (
-    b"malloc(", b"calloc(", b"realloc(", b"free(",
-    b"tcache", b"fastbin", b"smallbin", b"largebin",
-    b"unsorted_chunks", b"main_arena",
-    b"_int_malloc", b"_int_free",
-)
-
-
-def _chal_source_has_heap_ops(
-    work_dir: Path,
-    *,
-    max_files: int = 40,
-    max_bytes: int = 50_000,
-) -> bool:
-    """Quick grep across `chal/` + `decomp*/` for heap-allocation
-    operations. Returns True when in doubt — caller treats False as a
-    strong signal to suppress SCAFFOLD_NUDGE.
-
-    Looks at .c / .cpp / .cc / .h / .hpp / .py in `chal/` (operator-
-    supplied source) and .c in any `decomp*/` directory (Ghidra
-    output). Reads the first `max_bytes` of each file and gives up
-    after `max_files` candidates. The cap exists because a glibc
-    source mirror would otherwise hit every needle trivially —
-    we want the OPERATOR's chal source, not transitive deps.
-
-    Concrete incident 2026-05-25 (job bfce7f3e0c11): uniqdb chal is
-    a TOCTOU race on plain .bss globals (no malloc/free anywhere).
-    SCAFFOLD_NUDGE fired anyway because `heap_advanced=True` came
-    from the custom-libuniqdb-detection branch of the classifier,
-    not from actual heap usage. Main had to spend ~30 seconds
-    writing a "Why no /opt/scaffold/ used" section to dispel it.
-    """
-    candidates: list[Path] = []
-    chal_dir = work_dir / "chal"
-    if chal_dir.is_dir():
-        for ext in ("*.c", "*.cpp", "*.cc", "*.h", "*.hpp", "*.py"):
-            try:
-                candidates.extend(chal_dir.rglob(ext))
-            except OSError:
-                pass
-    for d in work_dir.glob("decomp*"):
-        if d.is_dir():
-            try:
-                candidates.extend(d.rglob("*.c"))
-            except OSError:
-                pass
-    if not candidates:
-        return True  # no chal source visible -> don't suppress
-    for p in candidates[:max_files]:
-        try:
-            data = p.read_bytes()[:max_bytes]
-        except OSError:
-            continue
-        if any(n in data for n in _HEAP_OP_NEEDLES):
-            return True
-    return False
-
-
-# Sentinel: "the restart could not even be attempted" — distinct from a restart
-# that ran and returned None (no sandbox result), which is a legitimate outcome
-# the caller must not confuse with failure to start.
 _AUP_RESTART_FAILED = object()
 
 
@@ -9008,67 +8907,6 @@ async def run_main_agent_session(
             f"turn ends."
         )
 
-    # Scaffold-missing nudge: heap chals where main is making tool calls
-    # but hasn't `cp`'d any /opt/scaffold/ template into the work dir by
-    # SCAFFOLD_NUDGE_THRESHOLD calls. One-shot per job. Gated by the
-    # heap_keywords_match flag the analyzer can pass through `summary`
-    # so non-heap modules don't see this nudge.
-    scaffold_nudge_fired = {"value": False}
-    scaffold_nudge_pending = {"value": False}
-
-    def _maybe_scaffold_nudge(tool_calls: int) -> None:
-        if scaffold_nudge_fired["value"]:
-            return
-        if not summary.get("heap_chal"):
-            return
-        try:
-            threshold = int(os.environ.get("SCAFFOLD_NUDGE_THRESHOLD", "30"))
-        except ValueError:
-            threshold = 30
-        if threshold <= 0 or tool_calls < threshold:
-            return
-        # Already cp'd a scaffold? Look for the canonical fingerprint
-        # (the heap_menu.py docstring's first line lives at the top).
-        ex = work_dir / "exploit.py"
-        scaffold_in_use = False
-        if ex.is_file():
-            try:
-                head = ex.read_text(errors="replace")[:512]
-                if "Heap-menu chal scaffold" in head or "scaffold.fsop_wfile" in head \
-                        or "scaffold.tcache_poison" in head or "scaffold.aslr_retry" in head:
-                    scaffold_in_use = True
-            except Exception:
-                pass
-        if scaffold_in_use:
-            scaffold_nudge_fired["value"] = True  # never nudge if already in use
-            return
-        # Chal-aware gate: heap_advanced=True can flag a chal as heap
-        # just because it has a custom .so + glibc 2.31 — that branch
-        # of the classifier fires even on TOCTOU races / format
-        # strings / syscall-only pwn where /opt/scaffold/ heap
-        # templates don't apply. Confirmed regression 2026-05-25
-        # (job bfce7f3e0c11): uniqdb's `arr[0x800000]` aliases the
-        # `top` int via .bss, no allocator anywhere. Suppress the
-        # nudge when chal source has no heap-op needles. See
-        # `_chal_source_has_heap_ops` for what counts.
-        if not _chal_source_has_heap_ops(work_dir):
-            scaffold_nudge_fired["value"] = True  # one-shot suppress
-            log_fn(
-                f"SCAFFOLD_NUDGE: SKIPPED at {tool_calls} tool calls — "
-                f"heap_advanced=True but chal source has no "
-                f"malloc/free/tcache/fastbin patterns (likely non-menu "
-                f"pwn: TOCTOU race / FSOP-only / format-string)."
-            )
-            return
-        scaffold_nudge_fired["value"] = True
-        scaffold_nudge_pending["value"] = True
-        scaffold_nudge_pending["n"] = tool_calls
-        log_fn(
-            f"SCAFFOLD_NUDGE: {tool_calls} tool calls into a heap chal "
-            f"without /opt/scaffold/ in exploit.py. Will inject nudge "
-            f"user-turn after current turn ends."
-        )
-
     # Final-draft last-chance guard. When budget_exceeded fires WITHOUT
     # an artifact, we inject FINAL_DRAFT_USER_TURN and give main ONE
     # more turn to write the draft. Only after that turn also fails to
@@ -9286,7 +9124,6 @@ async def run_main_agent_session(
                     elif isinstance(msg, UserMessage):
                         log_user_blocks(job_id, msg)
                     _maybe_soft_eject(summary.get("tool_calls", 0))
-                    _maybe_scaffold_nudge(summary.get("tool_calls", 0))
                     # Cost-cap backstop (Tooth 2): checked every msg so a
                     # single runaway turn spawning many subagents can't blow
                     # past the ceiling before a turn boundary. On breach we
@@ -9411,7 +9248,6 @@ async def run_main_agent_session(
                             ):
                                 final_draft_pending["value"] = False
                                 soft_eject_pending["value"] = False
-                                scaffold_nudge_pending["value"] = False
                             if not _pick_present_artifact(
                                     work_dir, artifact_names):
                                 write_fallback_artifacts(work_dir, log_fn, _fallback_module)
@@ -9477,7 +9313,6 @@ async def run_main_agent_session(
                         )
                     final_draft_pending["value"] = False
                     soft_eject_pending["value"] = False
-                    scaffold_nudge_pending["value"] = False
                 else:
                     return last_sandbox
 
@@ -9712,21 +9547,6 @@ async def run_main_agent_session(
                 await client.query(SOFT_EJECT_USER_TURN)
                 continue
 
-            # ---- Scaffold-missing nudge ----
-            # Heap chal + N tool calls + no /opt/scaffold/ template in
-            # exploit.py → nudge main to use the canonical templates
-            # instead of reinventing the wheel from scratch.
-            if scaffold_nudge_pending["value"]:
-                scaffold_nudge_pending["value"] = False
-                log_fn("[orchestrator] injecting scaffold-missing nudge")
-                # The constant carried a literal `N` that nothing ever
-                # substituted, so the agent read "you've made N tool calls".
-                # The run.log line right above it was an f-string and did show
-                # the real number — only the text the MODEL sees was unfilled.
-                await client.query(SCAFFOLD_MISSING_USER_TURN.format(
-                    n=scaffold_nudge_pending.get("n", "several")))
-                continue
-
             # ---- Contrarian reframe injection (Tooth 1) ----
             # An isolated subagent returned a premise-refuted / dead-end
             # signal on an easy-framed job past the spend threshold (armed
@@ -9735,7 +9555,7 @@ async def run_main_agent_session(
             # its current frame and points it at a genuinely independent
             # spawn or a reframe/concede. One-shot (contrarian_fired guards
             # re-arming); does not halt — main keeps its turn budget.
-            # NOTE: unlike final_draft / soft_eject / scaffold_nudge, this
+            # NOTE: unlike final_draft / soft_eject, this
             # flag is NOT cleared by the killed/timeout/policy_refusal branches
             # above — so before this guard a dead-end signal arriving in the
             # same turn as a SIGKILL queried a terminated transport and threw

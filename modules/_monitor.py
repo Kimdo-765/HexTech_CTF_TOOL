@@ -182,7 +182,6 @@ _RE_JUDGE = re.compile(r"prejudge|postjudge|\bjudge\b|verdict|blocked ship", re.
 _RE_RETRY = re.compile(r"attempt [1-9]\d*/|auto-retry|retry_hint|contrarian|redirect|halting", re.I)
 # Pure bookkeeping — carries no information a narration could add to.
 _RE_TURN_MARKER = re.compile(r"^main session turn \(attempt \d+/", re.I)
-_RE_NUDGE = re.compile(r"scaffold_nudge|scaffold", re.I)
 _RE_SUBAGENT = re.compile(r"\[orchestrator\]|spawning|isolated ", re.I)
 _RE_AGENT = re.compile(r"\] AGENT:")
 _RE_PHASE = re.compile(r"\[(runner|report|sandbox|autoboot|pre-recon)\]", re.I)
@@ -242,8 +241,6 @@ def classify(body: str, module: str = "") -> tuple[str, str] | None:
         return ("judge", "warn")
     if _RE_RETRY.search(body):
         return ("retry", "warn")
-    if _RE_NUDGE.search(body):
-        return ("nudge", "warn")
     if _RE_SUBAGENT.search(body):
         return ("subagent", "info")
     if _RE_AGENT.search(body):

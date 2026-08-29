@@ -2113,9 +2113,9 @@ async def _run_agent(
 
     model = resolve_main_model(model_override)
     resume_sid = read_meta(job_id).get("resume_session_id")
-    # Heap detection up-front so the orchestrator's scaffold-missing
-    # trip-wire (SCAFFOLD_NUDGE in run_main_agent_session) can fire
-    # only when relevant.
+    # Heap detection up-front. It feeds `heap_advanced=` on the recon
+    # spawn and the recon-reply branch below; the scaffold-missing
+    # trip-wire it also used to gate was removed 2026-08-29.
     desc_match = looks_heap_advanced(description or "")
     work_match = _heap_signals_present(work_dir, custom_libs)
     heap_kw = desc_match or work_match
