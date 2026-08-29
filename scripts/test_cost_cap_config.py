@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""Executable contract for the COST_CAP_USD path into worker code."""
+"""Executable contract for the COST_CAP_USD path into worker code.
+
+WHAT THIS PINS — and what it deliberately stopped pinning
+
+It used to assert the deployed number was "40". That is a setting, not a
+property: when the operator disabled the cap on 2026-08-29 (COST_CAP_USD=0,
+part of removing the redirect/cost budgets so a run is bounded by having
+nothing new to try rather than by a counter) five checks went red without a
+single thing being broken. Worse, those failures were evidence the wiring was
+FINE — the 0 had travelled .env -> compose -> worker code intact, which is
+exactly what the suite exists to guarantee.
+
+So the assertions are now:
+
+  1. the value reaches worker code UNDISTORTED, whatever it is — the expected
+     value is read from .env/.env.example rather than written here, so
+     changing the deployment does not require editing this file;
+  2. 0 genuinely disables the breaker — `cost_cap_usd()` returns <= 0 and
+     `_maybe_cost_cap` returns before spending anything. A disable switch
+     nobody exercises is how you discover it never worked.
+"""
 from __future__ import annotations
 
 import json
@@ -66,12 +86,16 @@ def compose_config() -> dict:
 # there and reported as absent when it is not; the guarantee that survives
 # either way is Compose's own default, asserted below.
 env_path = ROOT / ".env"
-if env_path.is_file():
-    check("deployed env arms the cap", env_value(env_path, "COST_CAP_USD"), "40")
-else:
-    print("SKIP  deployed env arms the cap (.env is gitignored; not in this tree)")
 example = env_value(ROOT / ".env.example", "COST_CAP_USD")
-check("example env documents the same cap", example, "40")
+check("example env declares a cap value", example is not None, True)
+if env_path.is_file():
+    deployed = env_value(env_path, "COST_CAP_USD")
+    check("deployed env declares a cap value", deployed is not None, True)
+    check("deployed and example agree", deployed, example)
+    EXPECT = deployed
+else:
+    print("SKIP  deployed env (.env is gitignored; not in this tree)")
+    EXPECT = example
 
 # `docker-compose.yml` declares `env_file: .env` at the service level, and
 # `.env` is gitignored — so `compose config` cannot render in a fresh clone or
@@ -92,9 +116,9 @@ finally:
         _tmp_env.unlink(missing_ok=True)
 for service in ("worker-1", "worker-2"):
     check(
-        f"Compose passes the cap to {service}",
+        f"Compose passes the cap to {service} undistorted",
         config["services"][service]["environment"].get("COST_CAP_USD"),
-        "40",
+        EXPECT,
     )
 
 # Run the actual modules._common reader used by the worker-side circuit breaker
@@ -118,8 +142,33 @@ probe = subprocess.run(
 check("worker-side modules import succeeds", probe.returncode, 0)
 if probe.returncode == 0:
     observed = json.loads(probe.stdout)
-    check("worker-side code reads the resolved cap", observed["read"], 40.0)
-    check("worker-side fallback matches the deployment", observed["default"], 40.0)
+    check("worker-side code reads the resolved cap",
+          observed["read"], float(EXPECT))
+    check("the built-in fallback is a real number, not the deployment",
+          isinstance(observed["default"], float) and observed["default"] > 0,
+          True)
+    # The disable switch, exercised rather than assumed. `_maybe_cost_cap`
+    # returns as soon as `cost_cap_usd() <= 0`, so a 0 must resolve to 0.0 and
+    # nothing downstream may substitute the default back in.
+    zero_env = dict(worker_env)
+    zero_env["COST_CAP_USD"] = "0"
+    zprobe = subprocess.run(
+        [sys.executable, "-c",
+         "from modules._common import cost_cap_usd; print(cost_cap_usd())"],
+        cwd=ROOT, env=zero_env, text=True, capture_output=True,
+    )
+    check("COST_CAP_USD=0 resolves to 0 (the breaker's disable path)",
+          zprobe.returncode == 0 and float(zprobe.stdout.strip()) <= 0, True)
+    junk_env = dict(worker_env)
+    junk_env["COST_CAP_USD"] = "not-a-number"
+    jprobe = subprocess.run(
+        [sys.executable, "-c",
+         "from modules._common import cost_cap_usd, DEFAULT_COST_CAP_USD; "
+         "print(cost_cap_usd() == DEFAULT_COST_CAP_USD)"],
+        cwd=ROOT, env=junk_env, text=True, capture_output=True,
+    )
+    check("an unparseable value falls back rather than disabling silently",
+          jprobe.returncode == 0 and jprobe.stdout.strip() == "True", True)
 else:
     print(probe.stderr)
 

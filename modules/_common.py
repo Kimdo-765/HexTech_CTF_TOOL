@@ -7350,6 +7350,9 @@ _STOP_KIND_HEADERS = {
         "Prejudge verified the declared remote target is dead — operator "
         "re-provisioning is required, not another script rewrite"
     ),
+    # No longer emitted — the count-based stop that produced it was
+    # removed 2026-08-29. Kept so historical WHY_STOPPED files and the
+    # jobs that already carry this kind still render.
     "prejudge_blocked_no_run": (
         "Prejudge blocked twice before any sandbox execution — escalated "
         "instead of spending a third analysis turn"
@@ -10313,11 +10316,13 @@ async def run_main_agent_session(
                     _write_prejudge_escalation("prejudge_dead_target", _reason)
                     return last_sandbox
 
-                # ORDER IS LOAD-BEARING (A2 truth table): concede MUST be tested
-                # before the generic second-BLOCK/no-run escalation below.
-                # Otherwise every second qualifying self-defeat is swallowed by
-                # prejudge_blocked_no_run and `unsolvable_by_analysis` becomes
-                # unreachable.  A dead target remains the separate A8 case above.
+                # ORDER IS LOAD-BEARING (A2 truth table): concede is tested
+                # before the redirect path below, so a qualifying self-defeat
+                # surfaces as `unsolvable_by_analysis` rather than being
+                # swallowed. It used to be swallowed by the second-block/no-run
+                # escalation, which was removed 2026-08-29; the ordering still
+                # matters because the redirect path would otherwise consume the
+                # same signal. A dead target remains the separate A8 case above.
                 if _concede_unsolvable:
                     summary["conceded_unsolvable"] = True
                     log_fn(
@@ -10344,24 +10349,24 @@ async def run_main_agent_session(
                 # measured cost/turns AND the known historical uncertainty; the
                 # latter must survive into the operator-facing artifact rather
                 # than living only in this source comment.
-                if _n >= 1 and _sandbox_runs == 0:
-                    summary["prejudge_no_run_escalated"] = True
-                    _reason = (
-                        f"prejudge BLOCKED {_block_count} times with sandbox "
-                        f"runs=0; cumulative main turns={_turns}; estimated "
-                        f"cumulative cost=${_estimated_cost:.2f}. Automatic "
-                        "redirects stop at threshold 2. Unverified regression "
-                        "risk: redirect-saved jobs 6b8b78b702b1 and "
-                        "824412f1ada49 expired from TTL before their successful "
-                        "redirect ordinal could be checked; threshold 2 may have "
-                        "stopped either job early."
-                    )
-                    log_fn(f"[orchestrator] {_reason}")
-                    _write_prejudge_escalation(
-                        "prejudge_blocked_no_run", _reason
-                    )
-                    return last_sandbox
-                if _pj_issues and _pj_sig and _pj_sig not in _seen and _n < 3:
+                # The count-based stop that used to sit here — "two blocks
+                # with sandbox runs=0, escalate" — was removed 2026-08-29.
+                # It was evaluated BEFORE the signature check below, so a
+                # second block carrying genuinely NEW prejudge issues ended
+                # the run anyway (job 6b1edada5f41: the second block was the
+                # one that found the exhausted instance and the missing
+                # /reset path). Its direction was also backwards — a job whose
+                # sandbox never ran has explored LESS of the space, and got
+                # fewer redirects for it. The comment it carried already
+                # conceded the threshold was unverified: both jobs that would
+                # have justified it expired from TTL before their successful
+                # redirect ordinal could be read.
+                #
+                # What bounds the loop now is the signature check alone: a
+                # redirect fires only when this prejudge names something the
+                # run has not already been told. Same issues twice is
+                # circling; new issues are a new state in the space.
+                if _pj_issues and _pj_sig and _pj_sig not in _seen:
                     _seen.append(_pj_sig)
                     summary["prejudge_block_redirects"] = _n + 1
                     retry_hint = (
@@ -10390,16 +10395,23 @@ async def run_main_agent_session(
                         "ground truth from the target."
                     )
                     if _sandbox_runs == 0:
+                        # This used to threaten a redirect budget ("the LAST
+                        # automatic redirect"). That budget was removed
+                        # 2026-08-29 and the sentence went to the MODEL, so
+                        # leaving it would have the agent racing a deadline
+                        # that no longer exists. What actually ends the loop
+                        # is stated instead, because it is what the agent can
+                        # act on.
                         retry_hint += (
-                            "\n\nBUDGET: this is the LAST automatic redirect "
-                            "unless a real sandbox execution happens first. "
-                            "prejudge has blocked this job's ship once and no "
-                            "sandbox run has completed yet; if it blocks again "
-                            "before one real execution, the orchestrator ends "
-                            "the job (stop_kind=prejudge_blocked_no_run) "
-                            "instead of redirecting. End this turn with a "
-                            "shipped script that clears the gate, not with "
-                            "another analysis round."
+                            "\n\nWHAT ENDS THIS LOOP: not a redirect count. "
+                            "A redirect fires whenever prejudge names "
+                            "something you have not already been told. If the "
+                            "NEXT block repeats these same issues, that is "
+                            "read as circling and the job ends. So do not "
+                            "return another analysis round that leaves the "
+                            "same defects in place — either ship a script "
+                            "that clears them, or change the chain so the "
+                            "next block is about something else."
                         )
                     # Synthesize a judge dict so the existing inject path
                     # (_format_postjudge_user_turn) carries this hint verbatim.

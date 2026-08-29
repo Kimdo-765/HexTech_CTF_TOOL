@@ -60,7 +60,7 @@ MUTATIONS = (
     "drop-dead-target",
     "dead-target-from-prose",
     "skip-concede",
-    "third-no-run-block",
+    "ignore-issue-signature",
     "count-wrapper-as-sandbox",
     "collapse-shadow-no-hint",
     "drop-stop-metrics",
@@ -102,11 +102,14 @@ def _mutated_sources() -> tuple[str, str]:
             "if _concede_unsolvable:",
             "if False and _concede_unsolvable:",
         )
-    elif args.mutate == "third-no-run-block":
+    elif args.mutate == "ignore-issue-signature":
+        # The signature check is the whole boundary since the count-based stop
+        # was removed. Blind it and a run that keeps getting the SAME prejudge
+        # issues redirects forever instead of being read as circling.
         common = _replace_once(
             common,
-            "if _n >= 1 and _sandbox_runs == 0:",
-            "if _n >= 2 and _sandbox_runs == 0:",
+            "if _pj_issues and _pj_sig and _pj_sig not in _seen:",
+            "if _pj_issues and _pj_sig:  # mutant: signature ignored",
         )
     elif args.mutate == "count-wrapper-as-sandbox":
         common = _replace_once(
@@ -541,6 +544,14 @@ async def main() -> int:
     check("A8-a dead target does not redirect", len(dead["queries"]), 1)
     check("A8-a gets its own stop kind",
           "`prejudge_dead_target`" in dead["why"], True)
+    # The stop metrics live here now. They used to be asserted on the
+    # count-based no-run escalation, which was removed 2026-08-29 — and with
+    # that assertion gone the `drop-stop-metrics` mutation stopped catching
+    # anything (42/0). The metrics are still computed and still shipped to the
+    # operator on this path, so this is where they get pinned.
+    check("A8-a reports the run's real cost and turn count, not zeros",
+          all(t in dead["why"] for t in ("main turns=", "cumulative cost=$"))
+          and "cumulative cost=$0.00" not in dead["why"], True)
 
     live = await _run_case(
         "live-target",
@@ -623,25 +634,39 @@ async def main() -> int:
           and "pick ONE and REBUILD" in first_retry
           and "try if the patch keeps failing" not in first_retry, True)
 
-    no_run = await _run_case(
-        "two-blocks",
+    # A2-a. The count-based stop ("second block with sandbox runs=0") was
+    # removed 2026-08-29; the signature check is the whole boundary now. Two
+    # cases, because one alone is satisfiable by a degenerate implementation:
+    # "always continue" passes the first, "always stop" passes the second.
+    fresh = await _run_case(
+        "distinct-blocks",
         [
             _block("unknown", ["fix parser boundary"]),
             _block("unknown", ["fix a different parser boundary"]),
-            _block("unknown", ["third block must be unreachable"]),
+            _block("unknown", ["and a third, also different"]),
         ],
     )
-    check("A2-a stops on the second block", len(no_run["sandbox_calls"]), 2)
-    check("A2-a uses prejudge_blocked_no_run",
-          "`prejudge_blocked_no_run`" in no_run["why"], True)
-    check("A2-a records blocks, zero runs, turns, and estimated cost",
-          all(s in no_run["why"] for s in (
-              "BLOCKED 2 times", "sandbox runs=0", "main turns=1072",
-              "estimated cumulative cost=$",
-          )) and "estimated cumulative cost=$0.00" not in no_run["why"], True)
-    check("A2-a carries both TTL-expired negative-risk job ids",
-          all(s in no_run["why"] for s in ("6b8b78b702b1", "824412f1ada49")),
-          True)
+    check("A2-a keeps redirecting while prejudge names something new",
+          len(fresh["sandbox_calls"]) > 2, True)
+    check("A2-a no longer ends on the old two-block counter",
+          "`prejudge_blocked_no_run`" in fresh["why"], False)
+
+    repeated = await _run_case(
+        "repeated-blocks",
+        [
+            _block("unknown", ["fix parser boundary"]),
+            _block("unknown", ["fix parser boundary"]),
+            _block("unknown", ["fix parser boundary"]),
+        ],
+    )
+    check("A2-a stops once the same issues come back",
+          len(repeated["sandbox_calls"]), 2)
+    check("...and it stops for circling, not for a spent budget",
+          "`prejudge_blocked_no_run`" in repeated["why"], False)
+    # The discriminating pair. An implementation that ignored the signature
+    # would give these two the same number.
+    check("A2-a distinct issues go further than repeated ones",
+          len(fresh["sandbox_calls"]) > len(repeated["sandbox_calls"]), True)
 
     concede_issue = 'self-defeat in report: "no working chain" — agent admits no working chain'
     concede = await _run_case(
@@ -651,7 +676,7 @@ async def main() -> int:
             _block("unknown", [concede_issue], flag_likelihood=0.02),
         ],
     )
-    check("A2-b concede is evaluated before the second-block cap",
+    check("A2-b concede is evaluated before the redirect path",
           "`unsolvable_by_analysis`" in concede["why"], True)
     check("A2-b is not relabelled as generic no-run",
           "`prejudge_blocked_no_run`" in concede["why"], False)
