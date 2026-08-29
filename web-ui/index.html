@@ -1158,15 +1158,20 @@
           <select name="judge_mode">
             <option value="off">off — plain runner, no judge at all</option>
             <option value="shadow">shadow — record what the judge WOULD say, gate nothing</option>
-            <option value="enforce">enforce — pwn + web only; every other module stays shadow</option>
+            <option value="enforce">enforce — every module; a job whose module cannot be determined stays shadow</option>
           </select>
           <small style="color:var(--fg-muted)">
-            <b>enforce is scoped to pwn and web.</b> A rev, crypto, web3, misc or forensic job
-            picked up under <b>enforce</b> runs as <b>shadow</b> — it records, it does not gate.
-            Those modules had no meaningful negative class in the stage-7 table, so a judge that
-            always answers "success" scores full marks on them; that is a measurement we failed
-            to take, not a result to gate on. Selecting <b>enforce</b> therefore does NOT make
-            the gate live everywhere.<br />
+            <b>enforce covers every module</b> since 2026-08-29. It was limited to pwn and
+            web before that, because the stage-7 table found no meaningful negative class for
+            rev (13/1) or crypto (6/0) — a judge that always answers "success" scores full marks
+            against those, which is a measurement nobody took rather than a result worth gating
+            on. Re-measured over the jobs whose sandbox actually ran, rev is now 17 capture / 12
+            negative and crypto 1 / 6, so that objection is answered by the corpus.
+            <b>web3</b> (2 runs, no capture yet) is in scope without that evidence, and
+            <b>misc</b> / <b>forensic</b> have no sandbox phase at all, so enforcing them
+            changes nothing either way.<br />
+            A job whose module cannot be determined still runs as <b>shadow</b>, never enforce —
+            that is not part of the scope, it is the guard against not knowing.<br />
             <b>enforce</b> adds ~1 short judge turn per stage and can abort a run before the
             container starts. <b>shadow</b> costs nothing during the run — it appends the judge's
             INPUTS to <code>judge_shadow.jsonl</code> and the verdicts are produced afterwards,
