@@ -52,6 +52,7 @@ MUTATIONS = (
     "restore-mc-one-shot",
     "ignore-evidence-budget",
     "override-without-alternatives",
+    "override-keeps-judge-verdict",
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS)
@@ -528,6 +529,15 @@ def _mutated_common() -> str:
             "                _ev_ok = _evidence.evidence_progress(_ev_ledger)\n",
             "                _ev_ok = True\n",
         )
+    elif args.mutate == "override-keeps-judge-verdict":
+        # The defect this suite scored 59/0 against: the override leaves the
+        # judge's own verdict on the dict, so the provenance lookup falls to
+        # its default and main is told a reviewer's plan came from postjudge.
+        src = _replace_once(
+            src,
+            '                        judge_out["verdict"] = "reviewer_override"\n',
+            "                        pass\n",
+        )
     elif args.mutate == "override-without-alternatives":
         # Let the reviewer contest a STOP the judge said was exhaustive.
         # "Empty list if exhaustively tried" is the judge's one preserved
@@ -545,6 +555,7 @@ INTEGRATION_MUTATIONS = (
     "restore-mc-one-shot",
     "ignore-evidence-budget",
     "override-without-alternatives",
+    "override-keeps-judge-verdict",
 )
 
 REVIEWER_CALLS: list = []
@@ -786,6 +797,34 @@ def _integration_checks() -> None:
           any("continuing IN THIS JOB" in ln for ln in g2["logs"]), True)
     check("G2 the override is counted",
           g2["summary"].get("judge_stop_overrides"), 1)
+    # PROVENANCE.  main grades a hint's authority by who wrote it, and the only
+    # signal _format_postjudge_user_turn has is the verdict on the judge dict.
+    # Left at the judge's own verdict, the lookup falls to its default and
+    # tells main "postjudge — apply this" about a plan the judge voted
+    # AGAINST.  That mislabelling class is recorded in production as having
+    # corrupted 13 of 23 real injections, and this suite scored 59/0 while the
+    # defect was live — the checks above all pass on a mislabelled hint.
+    _inj = (g2["summary"].get("injected_turns") or [])
+    _ovr_inj = [t for t in _inj if t.get("verdict") == "reviewer_override"]
+    check("G2 the injection records the reviewer as the producer",
+          len(_ovr_inj), 1)
+    check("G2 ...and main is told it came from the reviewer, not postjudge",
+          (_ovr_inj[0].get("hint_source") if _ovr_inj else None), "reviewer")
+    check("G2 ...and is told WHY there are two opposed opinions",
+          "voted stop" in ((_ovr_inj[0].get("hint_origin") or "")
+                           if _ovr_inj else ""), True)
+    # Both provenance tables must carry the sentinel. They cannot be shared —
+    # the formatter's copy is function-local on purpose — so a new producer
+    # has been missed in the second one before.
+    _csrc = COMMON_SOURCE
+    check("G2 the sentinel is registered in the formatter's table",
+          '"reviewer_override": (' in _csrc, True)
+    check("G2 ...and in the WHY_STOPPED/RESUME_STATE table",
+          '"reviewer_override": "a reviewer overriding' in _csrc, True)
+    # ...and it must NOT be a real judge verdict, or the lookup stops
+    # identifying producers.
+    check("G2 the sentinel is not a real judge verdict",
+          "reviewer_override" in E.VALID_VERDICTS, False)
 
     # G3 — the judge's preserved authority.  "Empty list if exhaustively
     # tried" still ends the run, with no reviewer spend.

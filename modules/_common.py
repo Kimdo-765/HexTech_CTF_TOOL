@@ -7044,6 +7044,19 @@ def _format_postjudge_user_turn(
             "the one-shot auto-reviewer, not the judge; this job gets "
             "exactly one — apply this",
         ),
+        # A FIFTH producer as of 2026-08-29. Without an entry here the lookup
+        # below falls to its default and tells main "postjudge — apply this"
+        # about a plan the judge did not write and in fact voted against,
+        # which is the exact mislabelling the comment above says corrupted 13
+        # of 23 real injections. The authority note matters as much as the
+        # name: main is being handed two opposed opinions and needs to know
+        # which is which.
+        "reviewer_override": (
+            "reviewer",
+            "an independent reviewer, called BECAUSE the judge voted stop "
+            "while naming paths it said were never tried — the judge's "
+            "stop_reason is quoted inside for contrast, not as instruction",
+        ),
     }
     hint_source, hint_origin = _hint_provenance.get(
         verdict, ("postjudge", "postjudge — apply this")
@@ -7541,13 +7554,21 @@ def write_resume_state(
             f"— stdout/stderr are in the job dir")
     if judge_out and judge_out.get("retry_hint"):
         # NOT "the judge's" — same provenance lie the postjudge wrapper carried
-        # until 2026-08-24, in a second place the audit missed. Three of the
-        # four producers that fill retry_hint are not the judge: the prejudge
+        # until 2026-08-24, in a second place the audit missed. FOUR of the
+        # five producers that fill retry_hint are not the judge: the prejudge
         # ship-block redirect, runner_crash_hint (a stderr regex, no model),
-        # and the one-shot auto-reviewer. The verdict names which one.
+        # the one-shot auto-reviewer, and the reviewer that overrides a judge
+        # STOP. The verdict names which one.
+        #
+        # This table and the one in _format_postjudge_user_turn must be
+        # registered together. The other is deliberately function-local (the
+        # anti-overfit suite execs that function with almost nothing in
+        # scope), so they cannot be shared — which is exactly why a new
+        # producer has been missed here before.
         _src = {"prejudge_blocked": "prejudge ship-block",
                 "runner_crash": "the runner's own stderr",
-                "reviewer_redirect": "the one-shot reviewer"}.get(
+                "reviewer_redirect": "the one-shot reviewer",
+                "reviewer_override": "a reviewer overriding the judge's stop"}.get(
                     str(judge_out.get("verdict") or ""), "postjudge")
         # 3200, not 1200. The module-missing hint is ~2800 chars and its
         # actionable half — the runner's package inventory and the
@@ -10599,6 +10620,25 @@ async def run_main_agent_session(
                             + _ovr_hint
                         )
                         judge_out["next_action"] = "continue"
+                        # Stamp the PRODUCER on the dict, the way the other
+                        # three synthetic producers do. `verdict` is the only
+                        # thing _format_postjudge_user_turn has to identify who
+                        # wrote the hint; leaving the judge's own verdict here
+                        # makes it label a reviewer's plan "postjudge — apply
+                        # this", attributing to the judge a direction it voted
+                        # against.
+                        #
+                        # The LOCAL `verdict` is deliberately not reassigned —
+                        # same as the prejudge and runner_crash branches, whose
+                        # behaviour the inject record documents. The record
+                        # re-reads the verdict from this dict for exactly that
+                        # reason.
+                        #
+                        # `reviewer_override` is a sentinel and must stay OUT
+                        # of modules._judge._VALID_VERDICTS: the provenance
+                        # lookup identifies producers precisely because no real
+                        # judge verdict collides with these names.
+                        judge_out["verdict"] = "reviewer_override"
                         next_action = "continue"
                         log_fn(
                             f"[orchestrator] judge STOP with "
