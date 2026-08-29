@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ogamdo — cross AI view</title>
   <meta name="description" content="여러 AI의 시선을 교차시켜 푸는 CTF 자동화 플랫폼." />
-  <link rel="stylesheet" href="/static/style.css?v=af1833875" />
+  <link rel="stylesheet" href="/static/style.css?v=a71346a2c" />
   <!-- Syntax highlighting + Markdown rendering for the file preview modal.
        Loaded from jsDelivr CDN. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -850,6 +850,9 @@
           <button type="button" role="tab" id="settings-tab-agent"
                   data-settings-target="agent" aria-controls="settings-pane-agent"
                   aria-selected="true" tabindex="0">Agent &amp; routing</button>
+          <button type="button" role="tab" id="settings-tab-language"
+                  data-settings-target="language" aria-controls="settings-pane-language"
+                  aria-selected="false" tabindex="-1">Output language</button>
           <button type="button" role="tab" id="settings-tab-models"
                   data-settings-target="models" aria-controls="settings-pane-models"
                   aria-selected="false" tabindex="-1">Providers &amp; models</button>
@@ -905,20 +908,6 @@
             </label>
           </div>
           <small id="provider-status" style="color:var(--fg-muted)"></small>
-
-          <label style="max-width:22rem;margin-top:1rem">
-            Agent output language (global default)
-            <select name="agent_output_language">
-              <option value="auto">Automatic (model default)</option>
-              <option value="ko">한국어 (Korean)</option>
-              <option value="en">English</option>
-            </select>
-            <small style="color:var(--fg-muted)">
-              Snapshotted when a job is created and applied consistently to Main,
-              Recon, subagents, Judge, Reviewer, and Report. Machine-readable data,
-              code, commands, paths, errors, evidence, and flags are preserved verbatim.
-            </small>
-          </label>
 
           <h3 class="provider-block-title" style="margin-top:1rem">Per-role override (hybrid)</h3>
           <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.5rem">
@@ -980,6 +969,30 @@
             </label>
           </div>
           <small id="role-provider-status" style="color:var(--fg-muted)"></small>
+        </fieldset>
+        </div>
+
+        <div class="settings-pane" data-settings-pane="language"
+             id="settings-pane-language" role="tabpanel" aria-labelledby="settings-tab-language" tabindex="-1">
+        <fieldset class="provider-fieldset">
+          <legend>Output language</legend>
+          <p style="color:var(--fg-muted);font-size:0.85rem;margin:0 0 0.75rem">
+            Choose the default prose language for newly created jobs. Each job form can
+            override this default before submission.
+          </p>
+          <label style="max-width:22rem">
+            Default output language
+            <select name="agent_output_language">
+              <option value="auto">Automatic (model default)</option>
+              <option value="ko">한국어 (Korean)</option>
+              <option value="en">English</option>
+            </select>
+            <small style="color:var(--fg-muted)">
+              Snapshotted when a job is created and applied consistently to Main,
+              Recon, subagents, Judge, Reviewer, and Report. Machine-readable data,
+              code, commands, paths, errors, evidence, and flags are preserved verbatim.
+            </small>
+          </label>
         </fieldset>
         </div>
 
@@ -1312,6 +1325,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=af1833875"></script>
+  <script src="/static/app.js?v=a71346a2c"></script>
 </body>
 </html>

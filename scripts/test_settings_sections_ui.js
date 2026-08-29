@@ -69,6 +69,10 @@ t("no settings control escaped into the panel but outside the form",
     .filter((e) => !form.contains(e)).map((e) => e.name).join(","));
 const panes = Array.from(panelSettings.querySelectorAll("[data-settings-pane]"));
 t("the panel is split into sections", panes.length >= 2, panes.length);
+const outputLanguage = form.querySelector('[name="agent_output_language"]');
+const outputLanguagePane = outputLanguage && outputLanguage.closest("[data-settings-pane]");
+t("output language has a dedicated settings section",
+  !!outputLanguagePane && outputLanguagePane.dataset.settingsPane === "language");
 t("every named control sits inside a section",
   Array.from(form.querySelectorAll("[name]"))
     .every((e) => e.closest("[data-settings-pane]")),
@@ -88,6 +92,8 @@ t("every item points at a section that exists",
   items.every((b) => panes.some((p) => p.dataset.settingsPane === b.dataset.settingsTarget)));
 t("every section is reachable from the menu",
   panes.every((p) => items.some((b) => b.dataset.settingsTarget === p.dataset.settingsPane)));
+t("Output language is visible in the settings menu",
+  items.some((b) => b.dataset.settingsTarget === "language" && b.textContent.trim() === "Output language"));
 // A <button> in a form with no type is a SUBMIT button: every menu click would
 // save. The only typeless button in this form is Save itself.
 t("every menu item is type=button (a typeless one submits the form)",

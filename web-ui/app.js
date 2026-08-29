@@ -1537,7 +1537,7 @@ function renderWorkerMemLive(live) {
 }
 
 // --- Settings sections (click-into list) -----------------------------------
-// The one long Settings form is presented as six click-into sections. Panes are
+// The one long Settings form is presented as click-into sections. Panes are
 // hidden by CLASS ONLY: every named control stays in #settings-form, in the DOM,
 // enabled, and is filled by the single loadSettings() pass. That is what keeps
 // one Save covering all sections — a hidden field is still in FormData, so a
