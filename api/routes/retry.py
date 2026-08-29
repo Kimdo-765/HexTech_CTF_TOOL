@@ -182,7 +182,12 @@ def _carry_session_jsonl(sid: str, prev_work: Path, new_work: Path) -> None:
 #               manifests, so carrying it just bloats the retry tree by
 #               tens of MB (and re-pays the copytree cost) for nothing.
 _CARRY_WORK_IGNORE_NAMES = frozenset({
-    "tmp", "__pycache__", "libsrc", ".codex-stop-requested",
+    # `.chalbox` records one build's outcome (image tag, detected engines,
+    # status). Re-derived deterministically at the start of every attempt from
+    # the same bundle, exactly like `libsrc` above, so carrying it forward only
+    # bloats the tree — and worse, it would carry a PREVIOUS job's image tag,
+    # which the successor's shim would then look for and not find.
+    "tmp", "__pycache__", "libsrc", ".codex-stop-requested", ".chalbox",
 })
 
 

@@ -361,6 +361,25 @@ RUN ln -sf /app/worker/heap_probe.py /usr/local/bin/heap-probe \
 RUN ln -sf /app/worker/docker_memguard.sh /usr/local/bin/docker \
  && chmod +x /app/worker/docker_memguard.sh
 
+# `qemu-system-*` shim — relocates a challenge boot into the CHALLENGE'S OWN
+# container, so the emulator under test is the one the target runs. Same PATH
+# precedence and the same reason as the docker shim above: a challenge ships
+# its engine in its Dockerfile and its launcher invokes it BY NAME, so PATH
+# alone decided which build ran. Measured, the worker's qemu is 10.0.11 while
+# ubuntu:24.04 (a common chal base) installs 8.2.2, and the guest-visible
+# iPXE option-ROM base differs between them — the container's value matches the
+# REMOTE's exactly. Five jobs of one kernel lineage were developed on the wrong
+# build. Fixing the prompt first was not enough: the actor doing the booting is
+# usually a subagent, and modules/codex_cli.py records that child agents do not
+# inherit main's developer prompt. See the script header.
+#
+# ONLY the engines this image actually ships get a symlink. Linking an absent
+# one would turn "command not found" into "silently ran the x86 emulator",
+# which is worse than the bug being fixed.
+RUN ln -sf /app/worker/chal_engine_shim.sh /usr/local/bin/qemu-system-x86_64 \
+ && ln -sf /app/worker/chal_engine_shim.sh /usr/local/bin/qemu-system-i386 \
+ && chmod +x /app/worker/chal_engine_shim.sh
+
 RUN ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-clean \
  && ln -sf /app/worker/gdb_clean.sh /usr/local/bin/gdb-multiarch-clean \
  && chmod +x /app/worker/gdb_clean.sh \

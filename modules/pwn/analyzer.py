@@ -2063,6 +2063,28 @@ async def _run_agent(
     effective_binary_name = autoboot_elf_name or binary_name
     chal_unpacked = (work_dir / "chal").is_dir()
 
+    # Build the challenge's OWN image now, off the critical path, so the
+    # qemu-system shim has something to relocate into before the agent's first
+    # boot. Deliberately NOT lazy: a cold build is minutes and an agent's boot
+    # is routinely wrapped in `timeout 30`, so building on first use would eat
+    # the very call the shim exists to fix.
+    #
+    # Fires only when the bundle ships a Dockerfile AND its own launcher
+    # invokes a relocatable engine — measured, 37 corpus jobs carry
+    # docker_challenge=true but only 4 touch qemu-system. Gating on the
+    # checkbox would build 37 images to help 4, which is the cost objection
+    # every earlier design died to.
+    try:
+        from modules import _chalbox
+
+        _chalbox.build_in_background(
+            job_id, job_dir(job_id), work_dir,
+            log_fn=lambda s: log_line(job_id, s),
+        )
+    except Exception as _cb_exc:  # noqa: BLE001 — never fails a job
+        log_line(job_id, f"[chalbox] not started ({type(_cb_exc).__name__}) — "
+                         f"the run uses the worker's own engine")
+
     # JS-engine challenge → deterministic preflight before turn 1.
     js_engine = _staged_js_engine(staged_bin)
     if js_engine is not None:
@@ -2578,3 +2600,17 @@ def run_job(
             reap_chal_containers(
                 job_id, lambda s: log_line(job_id, s), reason="job complete",
             )
+        # ...and the IMAGE, which reap_chal_containers does not touch — it
+        # reaps containers, compose projects and networks only. Before this
+        # work there was no `docker rmi` anywhere in the repo, which was fine
+        # while images only appeared when an agent chose to build one. The
+        # chalbox builds automatically, so an unreclaimed tag is ~850 MB per
+        # job. Unconditional: a job that never built simply has nothing to
+        # remove, and this must run even when `_dc` is false, because the
+        # chalbox trigger is the challenge's own launcher, not the checkbox.
+        try:
+            from modules import _chalbox
+
+            _chalbox.remove_image(job_id, log_fn=lambda s: log_line(job_id, s))
+        except Exception:
+            pass
