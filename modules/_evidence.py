@@ -424,9 +424,12 @@ def render_stop_block(ledger) -> list:
     out = [
         "## Evidence budget (why the loop had, or had not, run out of road)",
         "",
-        "Each sandbox-executing iteration is scored: genuinely new evidence "
-        "restores the budget in full, a repeat spends one. The run ends when "
-        "it reaches zero — not on a turn count.",
+        "Each scored iteration: genuinely new evidence restores the budget in "
+        "full, a repeat spends one. SCOPE — the budget is consulted where the "
+        "judge votes to STOP: with it positive the run may continue past that "
+        "vote, and with it at zero the run ends there. A judge that keeps "
+        "voting continue is not bounded by this table, so a zero here does "
+        "not by itself mean the run was about to end.",
         "",
         "| iter | new evidence? | saturated | budget left | distinct states |",
         "|---|---|---|---|---|",

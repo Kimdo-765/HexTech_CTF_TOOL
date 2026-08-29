@@ -7115,7 +7115,18 @@ def _format_postjudge_user_turn(
         # instruction to pick one and rebuild.  Rendering them here as a
         # deferred "try if the patch keeps failing" list duplicates them and
         # gives the opposite urgency before the agent reaches that hint.
-        if alternative_paths and not method_change:
+        #
+        # The reviewer override quotes the same three strings for the same
+        # reason, and on that path `method_change` is False — so this fired on
+        # 100% of overrides (the branch cannot be entered with an empty
+        # alternative_paths). Keyed on the VERDICT rather than by threading a
+        # second flag: passing method_change=True would also select the
+        # "converted that into the ONE method-change retry" narration below,
+        # which is not what happened.
+        _alts_already_framed = (
+            method_change or verdict == "reviewer_override"
+        )
+        if alternative_paths and not _alts_already_framed:
             diagnosis_parts.append(
                 "ALTERNATIVE PATHS (try if the patch keeps failing — "
                 "these were NOT exhausted by this run):"
@@ -7150,9 +7161,14 @@ def _format_postjudge_user_turn(
         f"  · {hint_source} summary: {summary or '(empty)'}\n"
         f"  · judge next_action: {next_action} "
         + (
-            "(the judge voted STOP on this approach; the orchestrator "
-            "converted that into the ONE method-change retry — rebuild "
-            "the decisive step, do NOT keep iterating on this method)\n"
+            # "the ONE method-change retry" stopped being true on 2026-08-29:
+            # the per-job cap became the evidence budget, so a second
+            # conversion is reachable. This line goes to the MODEL and sits in
+            # the same turn as a hint that describes the new rule, so leaving
+            # it made the message contradict itself.
+            "(the judge voted STOP on this approach and the orchestrator "
+            "converted that into a retry — rebuild the decisive step, do NOT "
+            "keep iterating on this method)\n"
             if method_change
             else "(judge endorses this retry — keep iterating)\n"
             if hint_source == "postjudge" and next_action == "continue"
@@ -8053,13 +8069,21 @@ def write_why_stopped(
         elif stop_kind in ("evidence_exhausted", "plan_exhausted"):
             if stop_kind == "evidence_exhausted":
                 out += [
-                    "This run did not hit a quota — it stopped LEARNING. "
-                    "Each sandbox-executing iteration is scored against a "
-                    "ledger of states already reached; genuinely new evidence "
-                    "restores the budget in full, a repeat spends one, and "
-                    "the run ends when the budget reaches zero. The table "
-                    "below shows exactly which iterations paid and which did "
-                    "not.",
+                    "This run did not hit a quota — the judge voted to stop "
+                    "and the ledger had no budget left to contest it with. "
+                    "Iterations are scored against a record of states already "
+                    "reached; genuinely new evidence restores the budget in "
+                    "full, a repeat spends one. The table below shows which "
+                    "iterations paid and which did not.",
+                    "",
+                    "One caveat worth knowing before you read the table as a "
+                    "verdict on the run: a state can also be scored as a "
+                    "repeat because a channel SATURATED — once a field has "
+                    "seen more distinct values than it has slots, it collapses "
+                    "permanently and every later point containing it counts as "
+                    "old. That bound is what makes the run finite at all, but "
+                    "it means a genuinely varied run can end here. The "
+                    "'saturated' column says whether that happened.",
                 ]
             else:
                 out += [
@@ -8813,9 +8837,22 @@ async def _aup_restart_session(
     #                           of, and its FIRST block would satisfy the
     #                           concede-unsolvable gate's `n >= 1`.
     #
-    # Deliberately KEPT: `method_change_retries` (capped once per JOB by
-    # design) and `judge_hints` (they describe the carried ARTIFACT, which the
-    # successor inherits, not the dead transcript).
+    # Deliberately KEPT: `method_change_retries` (a per-JOB tally — it stopped
+    # being a cap on 2026-08-29 and is now only reported, but the number the
+    # operator wants is still the job's total, not the last session's) and
+    # `judge_hints` (they describe the carried ARTIFACT, which the successor
+    # inherits, not the dead transcript).
+    #
+    # Also deliberately kept, and load-bearing: `evidence_ledger`. Clearing it
+    # would hand the successor a full budget and an empty record of states
+    # already reached, so a restart would reset the novelty test and the run
+    # could re-explore the same ground indefinitely. It belongs with
+    # `judge_hints` for exactly the same reason — it is about the artifact and
+    # the world, not about the transcript that died. Contrast
+    # `prejudge_block_sigs` above, which IS cleared, and correctly: those
+    # signatures were recorded before delivery, and the ladder fires before
+    # `client.query(feedback)`, so the successor genuinely never heard them.
+    # The distinction is delivered-vs-recorded, not per-session-vs-per-job.
     _SESSION_SCOPED = (
         "agent_error", "agent_error_kind", "agent_error_type",
         "agent_error_traceback", "fallback_artifact_used",
@@ -10451,6 +10488,9 @@ async def run_main_agent_session(
                 # Everything else about the gate is unchanged — the judge must
                 # still volunteer retry_worthwhile, still name something, and
                 # network_error still never qualifies.
+                # Read for the log line and for the `restore-mc-one-shot`
+                # mutation anchor, NOT to gate: the one-per-job cap this used
+                # to enforce is now the evidence budget.
                 _mc_n = summary.get("method_change_retries", 0)
                 _mc_hint = (judge_out.get("retry_hint") or "").strip()
                 _mc_alt = judge_out.get("alternative_paths") or []
@@ -10476,14 +10516,32 @@ async def run_main_agent_session(
                     # the sentence went to the MODEL, so it has to change with
                     # the gate: a threat the code will not carry out teaches
                     # the agent to disbelieve the next one.
+                    # MEASURED against the shipped instrument before writing,
+                    # because the comment above sets that standard and the
+                    # first draft failed it twice in one sentence. "Ship
+                    # another attempt that fails the same way and the run ends"
+                    # was false — it takes three such attempts, not one. "Ship
+                    # something that changes the observed outcome and the
+                    # conversion stays available" was also false: it states
+                    # changed-since-last, and an A,B,A,B alternation between
+                    # two dead branches changes the outcome every single round
+                    # and still reaches zero on the fifth.
+                    #
+                    # The true rule is never-before-seen, with a few repeats of
+                    # slack. Both halves are stated here without numbers: the
+                    # budget is re-derivable from live jobs and a hardcoded 3
+                    # would go stale in the model's copy first.
                     judge_out["retry_hint"] = (
                         "METHOD CHANGE REQUIRED (the orchestrator converted a "
                         "judge STOP into a retry. What keeps that available is "
-                        "not a quota — it is whether this run is still reaching "
-                        "states it has not been in. Ship something that changes "
-                        "the observed outcome and the conversion stays "
-                        "available; ship another attempt that fails in exactly "
-                        "the same way and the run ends). "
+                        "not a quota — it is whether this run keeps reaching "
+                        "states it has NOT BEEN IN BEFORE. Returning to a state "
+                        "the run has already been in spends from a small "
+                        "reserve, and revisiting one you left earlier counts as "
+                        "returning, not as progress: alternating between two "
+                        "dead approaches drains it just as surely as repeating "
+                        "one. A few such attempts are survivable; a run made of "
+                        "them ends). "
                         "The judge ruled the CURRENT "
                         "approach structurally cannot succeed within budget, but a "
                         "DIFFERENT method is viable. REPLACE the decisive step; do "
@@ -10491,15 +10549,38 @@ async def run_main_agent_session(
                     )
                     judge_out["next_action"] = "continue"
                     next_action = "continue"  # keep local in sync (logs + gates)
+                    # Same reason as the override below: this hint's standing
+                    # preamble measures 525 chars against a 300-char render
+                    # cap, so the judge's anti-repeat record would hold nothing
+                    # but boilerplate.
+                    judge_out["hint_core"] = _body
                     _method_change_convert = True
                     log_fn(
                         f"[orchestrator] judge STOP but retry_worthwhile=True — "
-                        f"converting to a method-change retry (verdict={verdict}, "
-                        f"evidence budget "
+                        f"converting to a method-change retry #{_mc_n + 1} "
+                        f"(verdict={verdict}, evidence budget "
                         f"{(_ev_ledger or {}).get('budget')}/{_evidence.B}); "
                         f"injecting the alternative-method hint instead of halting"
                     )
                 elif (_mc_alt and _ev_ok and _plan_ok
+                        # Do not BUY a plan the loop is about to discard. This
+                        # branch sits ABOVE the retry-cap gate below, and its
+                        # success body has no return, so with a configured cap
+                        # already reached the reviewer is billed and control
+                        # falls straight through to that gate and exits. The
+                        # `== 0` sub-case is worse still: `if max_retries > 0`
+                        # is False there, so not even a WHY_STOPPED is written
+                        # and the paid-for hint reaches nothing at all.
+                        #
+                        # Latent as shipped — AUTO_RETRY_MAX is unset, so
+                        # docker-compose.yml:146 yields -1 and the gate is
+                        # unreachable. It is not hypothetical: this file's own
+                        # operator playbook tells the reader to raise that very
+                        # variable. Every reviewer call before this change sat
+                        # BELOW the gate; this branch is the first one above
+                        # it, and the free counter beside it is already
+                        # deferred past the gate for exactly this reason.
+                        and not (max_retries >= 0 and attempt >= max_retries)
                         and verdict != "network_error"):
                     # The judge STOPPED and simultaneously named paths it says
                     # were NOT tried. Those two statements do not sit together:
@@ -10639,6 +10720,25 @@ async def run_main_agent_session(
                         # lookup identifies producers precisely because no real
                         # judge verdict collides with these names.
                         judge_out["verdict"] = "reviewer_override"
+                        # The part of the hint that is about THIS iteration.
+                        # The judge's anti-repeat record renders only the first
+                        # 300 chars and this hint's standing preamble is 319,
+                        # so without this the judge sees the same bytes every
+                        # override and can tell nothing apart. See the append
+                        # site for the measurement.
+                        judge_out["hint_core"] = _ovr_hint
+                        # ...and replace the JUDGE's own summary. Every other
+                        # synthetic producer does (10909 / 10944 / 11135); this
+                        # one did not, so `hint_source` resolved to "reviewer"
+                        # while `summary` still held the judge's verdict on its
+                        # own failed run — the injected turn rendered
+                        # "reviewer summary: <the judge's words>" in the same
+                        # message that tells main to treat the judge as one
+                        # opinion about the OLD approach.
+                        judge_out["summary"] = (
+                            "reviewer supplied an independent plan after the "
+                            "judge voted stop while naming untried paths"
+                        )
                         next_action = "continue"
                         log_fn(
                             f"[orchestrator] judge STOP with "
@@ -10907,6 +11007,13 @@ async def run_main_agent_session(
                         "verdict": "prejudge_blocked",
                         "next_action": "continue",
                         "retry_hint": retry_hint,
+                        # The issues ARE this hint's content; everything around
+                        # them is standing instruction repeated verbatim on
+                        # every block. At 702 chars of preamble against the
+                        # judge record's 300-char render cap, appending the
+                        # whole hint would store pure boilerplate — see the
+                        # append site for the measurement.
+                        "hint_core": "\n- ".join(_pj_issues[:6]),
                         "summary": (
                             "prejudge ship-block — classify the failure, "
                             "reassess the chain, then retry"
@@ -11213,10 +11320,14 @@ async def run_main_agent_session(
 
             # Inject postjudge feedback as next user turn and loop.
             attempt += 1
-            # Charge the ONE method-change retry only now that every stop/cap
-            # gate above has been cleared and we are definitely re-querying —
-            # so a budget_exhausted return never silently burns the allowance
-            # without an actual retry.
+            # Count the method-change conversion only now that every stop/cap
+            # gate above has been cleared and we are definitely re-querying, so
+            # a budget_exhausted return never records one that did not happen.
+            #
+            # It is now a COUNTER, not an allowance: the one-per-job cap it used
+            # to enforce became the evidence budget on 2026-08-29. Nothing reads
+            # it to gate any more — it is kept because the WHY_STOPPED and usage
+            # views report how many conversions a run actually spent.
             if _method_change_convert:
                 summary["method_change_retries"] = (
                     summary.get("method_change_retries", 0) + 1
@@ -11262,8 +11373,32 @@ async def run_main_agent_session(
             # never told to anyone. The last-element guard keeps the postjudge
             # path single-counted: its hint was already appended upstream and
             # nothing else can have been added in between.
+            # Record the SUBSTANCE, not the wrapper.
+            #
+            # modules/_runner.py:349 renders each entry as `h[:300]`. Measured
+            # from the source by AST rather than by eye, the constant preamble
+            # on the synthetic producers runs 319 chars (reviewer override),
+            # 525 (method change) and 702 (prejudge redirect) — so under the
+            # render cap NOT ONE variable byte survives, and two hints that
+            # differ in every meaningful way arrive at the judge byte-
+            # identical. Appending the full text satisfies the letter of "the
+            # judge can see the reviewer's hint" while defeating its purpose.
+            #
+            # Each producer therefore publishes `hint_core`: the part that is
+            # actually about THIS iteration, without the standing instructions
+            # every one of its hints repeats. Read from the judge dict rather
+            # than from a local, because a local assigned in an earlier
+            # iteration survives into later ones — the branch that set
+            # `_ovr_hint` on attempt 1 has not run on attempt 3, but the name
+            # is still bound.
+            #
+            # Shortening a preamble instead would work exactly until someone
+            # adds a sentence.
+            _judge_now = ((last_sandbox or {}).get("judge") or {})
             _delivered_hint = (
-                ((last_sandbox or {}).get("judge") or {}).get("retry_hint") or ""
+                _judge_now.get("hint_core")
+                or _judge_now.get("retry_hint")
+                or ""
             ).strip()
             _hints_so_far = summary.setdefault("judge_hints", [])
             if _delivered_hint and (

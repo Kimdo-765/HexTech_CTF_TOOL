@@ -76,6 +76,7 @@ MUTATIONS = (
     "drop-runner-why-stopped",
     "stamp-stop-on-runner-error",
     "drop-delivered-hint-record",
+    "drop-hint-core",
     "record-hint-at-producer",
     "class-blind",
     "class-anywhere",
@@ -121,6 +122,19 @@ def _mutated_source() -> str:
             '                        judge_next_action="stop",\n'
             '                        judge_stop_reason=summary["sandbox_runner_error"],\n',
         )
+    elif args.mutate == "drop-hint-core":
+        # Record the whole wrapper instead of the substance.  Under
+        # modules/_runner.py's `h[:300]` render, the synthetic producers'
+        # 319/525/702-char preambles then fill the judge's anti-repeat record
+        # with bytes identical on every hint.  Replace the whole expression:
+        # deleting just the hint_core line leaves a leading `or` and aborts,
+        # and an aborted run is not a measurement.
+        common = _replace_once(
+            common,
+            '                _judge_now.get("hint_core")\n'
+            '                or _judge_now.get("retry_hint")\n',
+            '                _judge_now.get("retry_hint")\n',
+        )
     elif args.mutate == "drop-delivered-hint-record":
         common = _replace_once(
             common,
@@ -137,9 +151,13 @@ def _mutated_source() -> str:
         # appending something, so a test that only counts entries stays green.
         common = _replace_once(
             common,
+            "            _judge_now = ((last_sandbox or {}).get(\"judge\") or {})\n"
             "            _delivered_hint = (\n"
-            '                ((last_sandbox or {}).get("judge") or {}).get("retry_hint") or ""\n'
+            '                _judge_now.get("hint_core")\n'
+            '                or _judge_now.get("retry_hint")\n'
+            '                or ""\n'
             "            ).strip()\n",
+            "            _judge_now = ((last_sandbox or {}).get(\"judge\") or {})\n"
             "            _delivered_hint = (\n"
             '                (summary.get("judge_hints") or [""])[-1]\n'
             "            ).strip()\n",
@@ -544,10 +562,20 @@ def _judge_hints_checks() -> None:
         "synthetic", [_block(["recvuntil has no timeout="]), _fail("later")],
     ))
     b_hints = blocked["summary"].get("judge_hints") or []
+    # The SUBSTANCE, not the wrapper. modules/_runner.py renders each entry as
+    # `h[:300]`, and this producer's standing preamble measures 702 chars — so
+    # recording the whole hint would fill the judge's anti-repeat record with
+    # boilerplate identical on every block, which is the opposite of the point.
+    # An earlier draft of this check asserted the preamble reached the record
+    # and passed while the mechanism was useless.
     check("T3a a synthetic producer's hint reaches the anti-repeat record",
-          any("prejudge BLOCKED ship" in h for h in b_hints), True)
+          any("recvuntil has no timeout=" in h for h in b_hints), True)
     check("T3a ...exactly once",
-          sum("prejudge BLOCKED ship" in h for h in b_hints), 1)
+          sum("recvuntil has no timeout=" in h for h in b_hints), 1)
+    check("T3a ...and survives the judge's 300-char render cap",
+          any("recvuntil has no timeout=" in h[:300] for h in b_hints), True)
+    check("T3a ...carrying the issue, not the standing instructions",
+          any(h.startswith("prejudge BLOCKED ship") for h in b_hints), False)
 
     # Case B — the ORDINARY postjudge path, which the upstream site already
     # covers.  The delivery-side record must not double-count it.  Together

@@ -53,6 +53,10 @@ MUTATIONS = (
     "ignore-evidence-budget",
     "override-without-alternatives",
     "override-keeps-judge-verdict",
+    "record-the-wrapper",
+    "keep-judge-summary",
+    "render-alts-twice",
+    "bill-reviewer-past-cap",
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--mutate", choices=MUTATIONS)
@@ -458,14 +462,26 @@ def _plan_checks() -> None:
           E.evidence_progress(led), True)
 
     # A genuinely different mechanism refunds.
+    #
+    # The budget must be SPENT before the restore is asserted, or the check
+    # reads back the value new_ledger() wrote and passes with the refund line
+    # deleted.  That is what the first draft did: deleting
+    # `ledger["plan_budget"] = B1` left the suite at 69/0, while deleting the
+    # analogous evidence refund killed D4 by name.  The latent consequence is
+    # severe — without the refund plan_budget is monotone-decreasing, so two
+    # covered plans disable the whole override feature for the rest of the job
+    # while halting as plan_exhausted.
     led2 = E.new_ledger()
     E.observe_plan(led2, ka)
+    E.observe_plan(led2, ka)          # covered -> spends one
+    check("F2 a repeat really did spend the budget first",
+          led2["plan_budget"], E.B1 - 1)
     other = E.plan_key("CLASS: STRATEGY\nNEXT: try the unsorted bin instead",
                        "STRATEGY", vocab)
-    check("F2 a different mechanism is not covered",
-          E.observe_plan(led2, other)["covered"], False)
+    _restored = E.observe_plan(led2, other)
+    check("F2 a different mechanism is not covered", _restored["covered"], False)
     check("F2 ...and restores the plan budget in full",
-          led2["plan_budget"], E.B1)
+          _restored["plan_budget"], E.B1)
 
     # A class change alone is enough to be a different plan.
     led3 = E.new_ledger()
@@ -529,6 +545,40 @@ def _mutated_common() -> str:
             "                _ev_ok = _evidence.evidence_progress(_ev_ledger)\n",
             "                _ev_ok = True\n",
         )
+    elif args.mutate == "record-the-wrapper":
+        # Append the full hint instead of its substance. _runner.py renders
+        # h[:300] and the preamble is 319 chars, so the judge's anti-repeat
+        # record fills with boilerplate and two different plans arrive
+        # byte-identical.
+        src = _replace_once(
+            src,
+            '                _judge_now.get("hint_core")\n'
+            '                or _judge_now.get("retry_hint")\n',
+            '                _judge_now.get("retry_hint")\n',
+        )
+    elif args.mutate == "keep-judge-summary":
+        src = _replace_once(
+            src,
+            '                        judge_out["summary"] = (\n'
+            '                            "reviewer supplied an independent plan after the "\n'
+            '                            "judge voted stop while naming untried paths"\n'
+            "                        )\n",
+            "                        pass\n",
+        )
+    elif args.mutate == "render-alts-twice":
+        src = _replace_once(
+            src,
+            "        _alts_already_framed = (\n"
+            '            method_change or verdict == "reviewer_override"\n'
+            "        )\n",
+            "        _alts_already_framed = method_change\n",
+        )
+    elif args.mutate == "bill-reviewer-past-cap":
+        src = _replace_once(
+            src,
+            "                        and not (max_retries >= 0 and attempt >= max_retries)\n",
+            "",
+        )
     elif args.mutate == "override-keeps-judge-verdict":
         # The defect this suite scored 59/0 against: the override leaves the
         # judge's own verdict on the dict, so the provenance lookup falls to
@@ -556,6 +606,10 @@ INTEGRATION_MUTATIONS = (
     "ignore-evidence-budget",
     "override-without-alternatives",
     "override-keeps-judge-verdict",
+    "record-the-wrapper",
+    "keep-judge-summary",
+    "render-alts-twice",
+    "bill-reviewer-past-cap",
 )
 
 REVIEWER_CALLS: list = []
@@ -654,7 +708,7 @@ def _judged(hint, *, action="continue", verdict="partial", alts=None,
     return out
 
 
-def _run_loop(name: str, results: list, *, reviewer=None):
+def _run_loop(name: str, results: list, *, reviewer=None, retry_max=-1):
     import asyncio  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
 
@@ -704,8 +758,10 @@ def _run_loop(name: str, results: list, *, reviewer=None):
     C.emit_event = lambda *a, **k: None
     # THE TRAP the design named: leaving this at a positive N proves the
     # COUNTER terminated, not the budget.  -1 is the shipped default
-    # (AUTO_RETRY_MAX, modules/_common.py) and it means unlimited.
-    C.auto_retry_max = lambda: -1
+    # (AUTO_RETRY_MAX unset -> docker-compose yields -1) and means unlimited,
+    # so it is what every termination case must use.  ONE case overrides it on
+    # purpose, to prove the reviewer is not billed past a configured cap.
+    C.auto_retry_max = lambda: retry_max
     C.budget_exceeded = lambda *a, **k: False
     C.capture_session_id = lambda *a, **k: None
     C.agent_heartbeat = lambda *a, **k: None
@@ -736,10 +792,24 @@ def _run_loop(name: str, results: list, *, reviewer=None):
 
     sdk.ClaudeSDKClient = _Client
 
+    overrun = {"v": False}
+
     def _sandbox(_script):
         i = idx["v"]
         idx["v"] += 1
         if i >= len(results):
+            # Record it as DATA, not as an exception.  The loop's
+            # sandbox-runner handler catches Exception, logs, writes a
+            # sandbox_runner_error WHY_STOPPED and returns cleanly — so
+            # `raise` here was swallowed by production and `escaped` stayed
+            # None.  The G1 case silently consumed 9 of its 8 scripted results
+            # and still reported "the loop escapes cleanly".
+            #
+            # Deliberately NOT asserting sandbox_calls == len(results): a case
+            # may legitimately stop before consuming every result, and pinning
+            # equality would fail for reasons that have nothing to do with the
+            # property under test.
+            overrun["v"] = True
             raise AssertionError(f"unexpected sandbox call {i + 1}")
         return dict(results[i])
 
@@ -756,6 +826,7 @@ def _run_loop(name: str, results: list, *, reviewer=None):
     why = (work / "WHY_STOPPED.md")
     out = {
         "escaped": escaped,
+        "overran": overrun["v"],
         "summary": dict(summary),
         "meta": dict(meta),
         "logs": list(logs),
@@ -770,11 +841,23 @@ def _run_loop(name: str, results: list, *, reviewer=None):
 
 def _integration_checks() -> None:
     # G1 — the loop actually scores each executing iteration.  Identical
-    # evidence every round, judge votes continue, no counter in play.
-    same = [_judged("fix it") for _ in range(8)]
+    # evidence every round, no counter in play.
+    #
+    # The run is ended by a terminal judge STOP, NOT by the budget, and that is
+    # a fact about the shipped code rather than a convenience: evidence_progress
+    # has exactly one call site, inside the `next_action == "stop"` branch, so a
+    # postjudge that keeps voting continue is not bounded by the budget at all.
+    # The first draft of this case scripted eight continues and expected the run
+    # to stop; it ran off the end of its own fixture and still reported "the
+    # loop escapes cleanly", because the loop's sandbox-runner handler swallowed
+    # the harness's AssertionError.
+    same = [_judged("fix it") for _ in range(5)]
+    same.append(_judged("", action="stop", alts=[]))
     g1 = _run_loop("drain", same)
     ledger = g1["summary"].get("evidence_ledger") or {}
     check("G1 the loop escapes cleanly", g1["escaped"], None)
+    check("G1 ...without silently running past its scripted fixture",
+          g1["overran"], False)
     check("G1 every executing iteration is scored",
           len(ledger.get("log") or []) >= 2, True)
     check("G1 repeated evidence drains the budget",
@@ -825,6 +908,33 @@ def _integration_checks() -> None:
     # identifying producers.
     check("G2 the sentinel is not a real judge verdict",
           "reviewer_override" in E.VALID_VERDICTS, False)
+    # The judge's SUMMARY must be replaced too.  Every other synthetic producer
+    # replaces it; this one did not, so with hint_source correctly resolving to
+    # "reviewer" the turn rendered "reviewer summary: <the judge's verdict on
+    # its own failed run>" — in the same message telling main to treat the
+    # judge as one opinion about the OLD approach.  Fixing the verdict label
+    # alone created this, one field over.
+    _q2 = "\n".join(g2["queries"])
+    check("G2 the summary line is the reviewer's, not the judge's",
+          "reviewer supplied an independent plan" in _q2, True)
+    check("G2 ...so the judge's own stop verdict is not attributed to it",
+          "reviewer summary: the chain cannot work" in _q2, False)
+    # ...and alternative_paths must appear ONCE.  The formatter renders them as
+    # a DEFERRED "try if the patch keeps failing" list unless suppressed, and
+    # the override quotes the same strings as the CURRENT direction — so
+    # without the guard main met the same three paths twice, weaker framing
+    # first.  Fires on 100% of overrides: the branch cannot be entered with an
+    # empty list.
+    check("G2 the judge's untried paths are not also rendered as deferred",
+          "ALTERNATIVE PATHS (try if the patch keeps failing" in _q2, False)
+    # The judge's anti-repeat record must hold the SUBSTANCE.  _runner.py
+    # renders each entry as h[:300] and this hint's constant preamble is 319
+    # chars, so storing the whole thing stores nothing that varies.
+    _hints = g2["summary"].get("judge_hints") or []
+    check("G2 the anti-repeat record holds the reviewer's plan, not its wrapper",
+          any("tcache" in h for h in _hints), True)
+    check("G2 ...and the plan survives the 300-char render cap",
+          any("tcache" in h[:300] for h in _hints), True)
 
     # G3 — the judge's preserved authority.  "Empty list if exhaustively
     # tried" still ends the run, with no reviewer spend.
@@ -888,6 +998,25 @@ def _integration_checks() -> None:
     # satisfiable by always-continue or always-stop.
     check("G7 the gated and ungated cases genuinely differ",
           (g2["reviewer_calls"], g7["reviewer_calls"]), (1, 0))
+
+    # G8 — do not BUY a plan the loop is about to discard.  This branch sits
+    # ABOVE the retry-cap gate and its success body has no return, so with a
+    # configured cap already reached the reviewer is billed and control falls
+    # straight through to that gate and exits.  Latent as shipped
+    # (AUTO_RETRY_MAX is unset), but this file's own operator playbook tells
+    # the reader to raise exactly that variable.
+    #
+    # retry_max=1: attempt reaches 1 after one injected turn, so the judge STOP
+    # on the second result is evaluated with the cap already met.
+    g8 = _run_loop("pastcap", [
+        _judged("fix it"),
+        _judged("", action="stop", alts=["a path never tried"]),
+        _judged("fix it"),
+    ], retry_max=1)
+    check("G8 the reviewer is not billed once the retry cap is reached",
+          g8["reviewer_calls"], 0)
+    check("G8 ...and the cap case differs from the uncapped one",
+          (g2["reviewer_calls"], g8["reviewer_calls"]), (1, 0))
 
 
 def main() -> int:
