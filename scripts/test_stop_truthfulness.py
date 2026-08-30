@@ -81,6 +81,7 @@ MUTATIONS = (
     "no-investigation-pass",
     "renewable-investigation-pass",
     "pass-for-any-hint",
+    "recap-prejudge-issues",
     "class-blind",
     "class-anywhere",
     "revert-ignored-libel",
@@ -195,6 +196,15 @@ def _mutated_source() -> str:
             "                        and _inv_key not in _inv_seen\n",
             "                        _inv_key not in _inv_seen\n",
         )
+    elif args.mutate == "recap-prejudge-issues":
+        # Restore the second cut. The judge allocates its 12 slots round-robin
+        # by cause; taking the first N drops whatever that allocation placed
+        # last, which is the exact failure the allocation exists to prevent.
+        common = _replace_once(
+            common,
+            '                        + "\\n- ".join(_pj_issues)\n',
+            '                        + "\\n- ".join(_pj_issues[:6])\n',
+        )
     elif args.mutate == "class-blind":
         common = _replace_once(
             common,
@@ -238,8 +248,14 @@ def _load(source: str, name: str, filename: str):
     return module
 
 
+# Held so the source-level checks read the MUTATED text. Reading
+# COMMON_SOURCE there made them unfalsifiable: the first draft of
+# _no_truncation_checks inspected the original file, so `recap-prejudge-issues`
+# restored the cut and the suite still reported 62/0.
+COMMON_MUT = _mutated_source()
+
 C = _load(
-    _mutated_source(),
+    COMMON_MUT,
     "_stop_truthfulness_common",
     str(ROOT / "modules" / "_common.py"),
 )
@@ -542,7 +558,7 @@ def _hint_class_checks() -> None:
 # ------------------------------------------------------- structural: registry
 
 def _registration_checks() -> None:
-    src = COMMON_SOURCE
+    src = COMMON_MUT
     # A stop kind is only fully alive when all THREE registrations exist: the
     # headline table, a body branch in the WHY_STOPPED ladder, and a call site.
     # `retry_hint_ignored` is the standing precedent for the omission — it has
@@ -588,6 +604,50 @@ def _runner_crash_checks() -> None:
 
 
 # --------------------------------------------------------------- behaviour: T3
+
+def _no_truncation_checks() -> None:
+    """Every judge finding reaches main — the orchestrator adds no second cut.
+
+    modules/_judge.py already bounds these: _merge_prejudge_issues allocates a
+    12-slot budget ROUND-ROBIN BY CAUSE (its docstring records why — twelve
+    self-defeat matches once ate the budget and `chain.critical`, an
+    independently blocking cause, vanished), each entry capped at 200 chars;
+    what_worked / what_failed / alternative_paths are _coerce_list(max_items=3).
+
+    The orchestrator then took the first 6 issues. That second cut had no
+    allocation logic, so it dropped whatever the round-robin had placed last —
+    reproducing one layer down the exact failure the round-robin exists to
+    prevent. Measured: opus-5 emitted 7 issues per call on three consecutive
+    jobs, so one was discarded every time and nothing recorded it.
+
+    The bound belongs where the allocation is. Here there is none.
+    """
+    src = COMMON_MUT
+    # The prejudge redirect and the record it feeds the judge.
+    check("N1 the prejudge issues reach main uncut",
+          '"\\n- ".join(_pj_issues)' in src, True)
+    check("N1 ...and the judge's anti-repeat record carries them all too",
+          '"hint_core": "\\n- ".join(_pj_issues),' in src, True)
+    check("N1 no residual slice on the issue list",
+          "_pj_issues[:" in src, False)
+
+    # The structured-diagnosis block in the injected turn.
+    for field in ("what_worked", "what_failed", "alternative_paths"):
+        check(f"N2 {field} is rendered in full", f"{field}[:" in src, False)
+    # ...and the alternatives quoted by the two synthetic producers.
+    check("N2 the method-change and override alternatives are uncut",
+          "_mc_alt[:" in src, False)
+
+    # The upstream bound must still EXIST — uncapping here is only safe
+    # because the judge caps by cause. If that goes, this becomes unbounded.
+    judge = (ROOT / "modules" / "_judge.py").read_text()
+    check("N3 the judge still bounds the issue list by cause",
+          "_PREJUDGE_ISSUE_CAP" in judge, True)
+    check("N3 ...and still caps each entry's length",
+          "[:200]" in judge, True)
+    check("N3 ...and still bounds the structured lists",
+          judge.count("_coerce_list(") >= 4, True)
+
 
 def _judge_hints_checks() -> None:
     # Case A — a genuinely SYNTHETIC producer.  A prejudge ship-block leaves
@@ -739,6 +799,7 @@ def main() -> int:
     _hint_class_checks()
     _registration_checks()
     _runner_crash_checks()
+    _no_truncation_checks()
     _judge_hints_checks()
     _ignored_hint_truthfulness_checks()
     print(f"\n{PASSED} passed, {FAILED} failed")

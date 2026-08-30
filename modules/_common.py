@@ -7102,10 +7102,10 @@ def _format_postjudge_user_turn(
         diagnosis_parts: list[str] = ["\n=== structured diagnosis ==="]
         if what_worked:
             diagnosis_parts.append("WHAT WORKED (preserve these on the patch):")
-            diagnosis_parts.extend(f"  ✓ {s}" for s in what_worked[:3])
+            diagnosis_parts.extend(f"  ✓ {s}" for s in what_worked)
         if what_failed:
             diagnosis_parts.append("WHAT FAILED (these are the bugs to fix):")
-            diagnosis_parts.extend(f"  ✗ {s}" for s in what_failed[:3])
+            diagnosis_parts.extend(f"  ✗ {s}" for s in what_failed)
         if specific_diagnosis:
             diagnosis_parts.append(
                 f"PINPOINT: {specific_diagnosis}"
@@ -7131,7 +7131,7 @@ def _format_postjudge_user_turn(
                 "ALTERNATIVE PATHS (try if the patch keeps failing — "
                 "these were NOT exhausted by this run):"
             )
-            diagnosis_parts.extend(f"  → {s}" for s in alternative_paths[:3])
+            diagnosis_parts.extend(f"  → {s}" for s in alternative_paths)
         diagnosis_block = "\n".join(diagnosis_parts) + "\n"
 
     return (
@@ -7971,15 +7971,15 @@ def write_why_stopped(
         if what_worked or what_failed:
             out += ["## What worked vs. what failed", ""]
             if what_worked:
-                out += ["**Worked:**"] + [f"- {x}" for x in what_worked[:5]] + [""]
+                out += ["**Worked:**"] + [f"- {x}" for x in what_worked] + [""]
             if what_failed:
-                out += ["**Failed:**"] + [f"- {x}" for x in what_failed[:5]] + [""]
+                out += ["**Failed:**"] + [f"- {x}" for x in what_failed] + [""]
 
         if alternatives:
             out += [
                 "## Alternative paths not yet tried (judge's suggestions)",
                 "",
-            ] + [f"- {x}" for x in alternatives[:5]] + [""]
+            ] + [f"- {x}" for x in alternatives] + [""]
 
         if retry_hint:
             out += [
@@ -10590,7 +10590,7 @@ async def run_main_agent_session(
                             "\n\nAlternative methods the judge flagged — pick ONE "
                             "and REBUILD the decisive step around it (do NOT merely "
                             "add a timeout / alarm / offset tweak to the SAME "
-                            "method):\n- " + "\n- ".join(str(a) for a in _mc_alt[:3])
+                            "method):\n- " + "\n- ".join(str(a) for a in _mc_alt)
                         )
                     # Mutate judge_out in place — it IS last_sandbox["judge"]
                     # (same object; the key exists because we're in the stop
@@ -10780,7 +10780,7 @@ async def run_main_agent_session(
                             "on every approach.\n\n"
                             f"Judge's stop reason: {stop_reason or '(none)'}\n"
                             "Paths the judge itself listed as untried:\n- "
-                            + "\n- ".join(str(a) for a in _mc_alt[:3])
+                            + "\n- ".join(str(a) for a in _mc_alt)
                             + "\n\n--- reviewer's independent plan ---\n"
                             + _ovr_hint
                         )
@@ -11056,8 +11056,32 @@ async def run_main_agent_session(
                         "discriminating probe, and replace the script with "
                         "the strongest evidence-backed chain. Do not repeat "
                         "a refuted branch without new evidence.\n\n"
+                        # ALL of them. This used to take the first 6, and that
+                        # second cut undid the first one's whole purpose.
+                        #
+                        # modules/_judge.py's _merge_prejudge_issues allocates
+                        # its 12-slot budget ROUND-ROBIN BY CAUSE precisely so
+                        # no gate's finding is lost to another's volume — its
+                        # docstring records the incident: twelve self-defeat
+                        # matches ate the budget and `chain.critical`, an
+                        # independently blocking cause, vanished from the
+                        # verdict. Taking the first 6 of that carefully
+                        # ordered list (self-defeat, chain.critical, llm,
+                        # chain.high, chain.note) dropped the tail causes and
+                        # reproduced exactly that failure one layer down.
+                        #
+                        # Measured before removing: opus-5 prejudge emitted 7
+                        # issues per call on three consecutive jobs, so one
+                        # was silently discarded every single time, and
+                        # nothing recorded that it had been.
+                        #
+                        # Safe to send in full: the upstream cap is already 12
+                        # entries of at most 200 chars each, so this block is
+                        # bounded at ~2.4 KB. The bound lives where the
+                        # allocation logic is, which is the only place it can
+                        # be applied without silencing a cause.
                         "CURRENT CHAIN ISSUES:\n- "
-                        + "\n- ".join(_pj_issues[:6])
+                        + "\n- ".join(_pj_issues)
                         + "\n\nIf an issue says a primitive is 'untestable "
                         "locally' (vsyscall / CET / kernel — the worker "
                         "physically cannot test it), do NOT abandon it: the run "
@@ -11097,7 +11121,7 @@ async def run_main_agent_session(
                         # judge record's 300-char render cap, appending the
                         # whole hint would store pure boilerplate — see the
                         # append site for the measurement.
-                        "hint_core": "\n- ".join(_pj_issues[:6]),
+                        "hint_core": "\n- ".join(_pj_issues),
                         "summary": (
                             "prejudge ship-block — classify the failure, "
                             "reassess the chain, then retry"
