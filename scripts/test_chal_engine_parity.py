@@ -57,6 +57,8 @@ MUTATIONS = (
     "relocate-outside-paths",
     "no-cwd-fallback",
     "build-without-image-check",
+    "silent-shim",
+    "log-to-stderr",
     "drop-image-reclaim",
     "relocatable-includes-python",
 )
@@ -88,7 +90,7 @@ def _mutated() -> tuple[str, str]:
         shim = _replace_once(
             shim,
             "            if [ -e \"$_arg\" ]; then\n"
-            "                _passthrough \"$@\"\n"
+            "                _passthrough \"argument $_arg is outside the job mount and exists on this worker\" \"$@\"\n"
             "            fi\n",
             "            : \n",
         )
@@ -104,8 +106,25 @@ def _mutated() -> tuple[str, str]:
     elif args.mutate == "build-without-image-check":
         shim = _replace_once(
             shim,
-            'docker image inspect "$IMAGE" >/dev/null 2>&1 || _passthrough "$@"\n',
+            'docker image inspect "$IMAGE" >/dev/null 2>&1 \\\n'
+            '    || _passthrough "no image $IMAGE (chalbox did not build, '
+            'or docker is unreachable)" "$@"\n',
             ": \n",
+        )
+    elif args.mutate == "silent-shim":
+        # Ship it silent again — the state it was in when job 1da7e690ddcd
+        # bypassed it on 14 of 20 boots and left nothing to diagnose with.
+        shim = _replace_once(
+            shim,
+            '    _log_shim "PASS-THROUGH: $_why" "$@"\n',
+            "    : \n",
+        )
+    elif args.mutate == "log-to-stderr":
+        # Write the note into qemu's own output, which the agent parses.
+        shim = _replace_once(
+            shim,
+            "        } >> \"$_dir/shim.log\" 2>/dev/null\n",
+            "        } >&2\n",
         )
     elif args.mutate == "drop-image-reclaim":
         box = _replace_once(
@@ -242,7 +261,9 @@ def _detector_checks() -> None:
 def _shim_checks() -> None:
     # The whole design rule: a precondition failure leaves the caller exactly
     # as it was. Count the exits into the real binary.
-    n_pass = len(re.findall(r"_passthrough \"\$@\"", SHIM_TEXT))
+    # Counted at the CALL sites, which now carry a reason argument ahead of
+    # "$@" — the definition itself is excluded by requiring the trailing args.
+    n_pass = len(re.findall(r'_passthrough "[^"]+" "\$@"', SHIM_TEXT))
     check("S1 every precondition exits into the real binary",
           n_pass >= 4, True)
 
@@ -293,6 +314,41 @@ def _shim_checks() -> None:
     proc = subprocess.run(["bash", "-n", str(SHIM)], capture_output=True,
                           text=True)
     check("S7 the shipped shim parses as bash", proc.returncode, 0)
+
+    # S8 — THE SHIM IS ITS OWN WITNESS.
+    #
+    # It shipped silent, and job 1da7e690ddcd then booted 20 times: 14 on the
+    # worker's qemu, 6 relocated, split cleanly by time. Four hypotheses were
+    # eliminated by test (symlink installed, exec bit set, login-shell PATH
+    # still resolves to it, both eras used relative paths). The fifth needs
+    # the invocation — and the invocation is not recorded anywhere, because
+    # BOTH agent models delegate the booting and delegated tool calls never
+    # reach gpt-events.jsonl. Nothing else can answer this question.
+    check("S8 every pass-through names its own reason",
+          len(re.findall(r'_passthrough "(?!\$)', SHIM_TEXT)), 4)
+    # ...and the reason is WRITTEN, not merely passed. The first draft of this
+    # check counted the call sites and passed against a shim whose logging
+    # call had been deleted — measuring that the argument exists, not that
+    # anything records it.
+    _pt = re.search(r"_passthrough\(\) \{(.*?)\n\}", SHIM_TEXT, re.S)
+    check("S8 ...and the pass-through actually writes it",
+          bool(_pt and "_log_shim" in _pt.group(1)), True)
+    check("S8 ...and the relocation is logged too, so the record is complete",
+          '_log_shim "RELOCATED' in SHIM_TEXT, True)
+    # A log of failures alone cannot distinguish a shim that fired twenty
+    # times from one that never ran.
+    check("S8 the four reasons are distinct",
+          len({m for m in re.findall(r'_passthrough "([^"$]+)', SHIM_TEXT)}), 4)
+
+    # Written to a FILE, not stderr: the agent parses qemu's output. The one
+    # exception is a call with no identifiable job, where there is no
+    # job-scoped place to write and the case matters most.
+    check("S9 the log goes to the job's own scratch, not qemu's output",
+          '.chalbox' in SHIM_TEXT and 'shim.log' in SHIM_TEXT, True)
+    check("S9 ...with stderr reserved for the unidentifiable-job case",
+          SHIM_TEXT.count(">&2"), 1)
+    check("S9 ...and logging never blocks the call",
+          SHIM_TEXT.count("2>/dev/null") >= 2, True)
 
 
 # --------------------------------------------------------------- reclamation

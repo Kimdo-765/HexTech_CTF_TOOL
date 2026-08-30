@@ -54,7 +54,50 @@ REAL="${CHAL_ENGINE_REAL:-/usr/bin/$(basename "$0")}"
 # one shim serves every qemu-system-* symlink pointed at it.
 ENGINE="$(basename "$0")"
 
-_passthrough() { exec "$REAL" "$@"; }
+# WHY THIS SHIM LOGS AT ALL
+#
+# It shipped silent, and job 1da7e690ddcd then booted 20 times: 14 on the
+# worker's qemu, 6 relocated, split cleanly by time. Four hypotheses for the
+# bypass were eliminated by test — the symlink is installed, the exec bit is
+# set, a login shell still resolves to it, and both eras used relative paths.
+# The fifth needs the invocation, and the invocation is not recorded: BOTH
+# agent models delegate the booting, and delegated tool calls never reach
+# gpt-events.jsonl (13 `wait` events, zero subagent Bash rows).
+#
+# So the shim is the only witness to its own decisions. Without this it can
+# fail on half a job's boots and leave nothing to read.
+#
+# Written to a FILE, not stderr: the agent parses qemu's output, and a line
+# injected there is a line it may try to interpret. The one exception is the
+# case where no job can be identified — there is no job-scoped place to write,
+# and that is precisely the case most worth seeing, so it goes to stderr with
+# a prefix the way worker/docker_memguard.sh already does.
+_log_shim() {
+    _reason="$1"
+    shift
+    if [ -n "${JOB:-}" ] && [ -d "/data/jobs/${JOB}/work" ]; then
+        _dir="/data/jobs/${JOB}/work/.chalbox"
+        mkdir -p "$_dir" 2>/dev/null || return 0
+        {
+            printf '%s engine=%s %s\n' \
+                "$(date -u +%H:%M:%S 2>/dev/null || echo '??:??:??')" \
+                "$ENGINE" "$_reason"
+            printf '    cwd=%s\n    argv=%s\n' "$PWD" "$*"
+        } >> "$_dir/shim.log" 2>/dev/null
+    else
+        printf '[chal-engine] %s (no job identified; cwd=%s)\n' \
+            "$_reason" "$PWD" >&2
+    fi
+}
+
+# Every precondition exits through here, and each names ITSELF — a log that
+# only says "passed through" answers the question one step too late.
+_passthrough() {
+    _why="$1"
+    shift
+    _log_shim "PASS-THROUGH: $_why" "$@"
+    exec "$REAL" "$@"
+}
 
 # ---------------------------------------------------------------- preconditions
 
@@ -71,11 +114,11 @@ if [ -z "$JOB" ]; then
             ;;
     esac
 fi
-[ -n "$JOB" ] || _passthrough "$@"
+[ -n "$JOB" ] || _passthrough "no JOB_ID and cwd is not under /data/jobs" "$@"
 
 # 2. HOST_DATA_DIR is needed because the bind source is a HOST path — the
 #    docker daemon resolves it, not this container.
-[ -n "${HOST_DATA_DIR:-}" ] || _passthrough "$@"
+[ -n "${HOST_DATA_DIR:-}" ] || _passthrough "HOST_DATA_DIR unset — the bind source is a HOST path" "$@"
 
 # 3. The image must already exist. modules/_chalbox.py builds it at job start,
 #    off the critical path, precisely so this check passes before the agent's
@@ -83,7 +126,8 @@ fi
 #    boot is routinely wrapped in `timeout 30`, and a cold build is minutes —
 #    it would eat the very call it exists to fix.
 IMAGE="chal_${JOB}"
-docker image inspect "$IMAGE" >/dev/null 2>&1 || _passthrough "$@"
+docker image inspect "$IMAGE" >/dev/null 2>&1 \
+    || _passthrough "no image $IMAGE (chalbox did not build, or docker is unreachable)" "$@"
 
 # 4. Every path the caller named must be REACHABLE after relocation. The
 #    container mounts /data/jobs/<id> and nothing else, so an absolute path
@@ -108,7 +152,7 @@ for _arg in "$@"; do
             # actually exists on the worker — otherwise a string that merely
             # starts with / (a -append value, say) would disable the shim.
             if [ -e "$_arg" ]; then
-                _passthrough "$@"
+                _passthrough "argument $_arg is outside the job mount and exists on this worker" "$@"
             fi
             ;;
     esac
@@ -147,6 +191,12 @@ esac
 # `docker` resolves to worker/docker_memguard.sh, which injects --memory and
 # --cpus. That is wanted: a challenge VM started this way is a sibling cgroup
 # that nothing else bounds.
+# Log the relocation too, so the file is a COMPLETE record rather than a list
+# of failures. "Six boots relocated and fourteen did not" is only readable if
+# both halves are written; a log of pass-throughs alone cannot distinguish a
+# shim that fired twenty times from one that never ran at all.
+_log_shim "RELOCATED into ${IMAGE}${KVM_ARGS:+ (+kvm device)}" "$@"
+
 exec docker run --rm -i \
     --label "hextech_job=${JOB}" \
     ${KVM_ARGS} \
